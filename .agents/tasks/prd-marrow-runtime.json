@@ -1,0 +1,592 @@
+{
+  "version": 1,
+  "project": "marrow-full-roadmap",
+  "overview": "Implement the Marrow toolchain described in docs/discription.md, following the documented order of renderer and runtime validation first, then the standalone editor and export pipeline.",
+  "qualityGates": [
+    "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
+    "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
+    "When a story changes file formats, update checked-in sample assets and any matching operational docs in the same iteration.",
+    "Every completed story must leave the repository in a clean git state with build, test, or inspection commands recorded in AGENTS.md and the Ralph progress log.",
+    "Prefer runtime-verifiable slices over placeholder scaffolding; if a feature cannot be fully validated yet, add the smallest executable test harness that proves the implemented slice."
+  ],
+  "stories": [
+    {
+      "id": "MAR-001",
+      "title": "Bootstrap the Marrow C++ workspace",
+      "description": "Create the initial repository layout, CMake entrypoint, source and include directories, and one compilable placeholder target so the project can evolve into a runtime and editor codebase.",
+      "acceptanceCriteria": [
+        "A top-level CMakeLists.txt exists and configures successfully.",
+        "Runtime and editor-oriented source/include directories exist with at least one compilable translation unit.",
+        "AGENTS.md documents the configure and build commands."
+      ],
+      "dependsOn": [],
+      "status": "open",
+      "startedAt": null,
+      "completedAt": null,
+      "updatedAt": "2026-03-24T13:16:59.262383+00:00"
+    },
+    {
+      "id": "MAR-002",
+      "title": "Create renderer and sample-app scaffolding",
+      "description": "Add a minimal render-facing module and demo application shell that can host atlas rendering and dynamic mesh work before the full runtime is implemented.",
+      "acceptanceCriteria": [
+        "A renderer module target exists in the build.",
+        "A small sample or demo executable can be built and launched.",
+        "The sample executable is the documented validation target for rendering-related stories."
+      ],
+      "dependsOn": [
+        "MAR-001"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-003",
+      "title": "Check in canonical .mskl and .matl fixtures",
+      "description": "Convert the format examples in docs/discription.md into checked-in fixture assets that cover skeleton metadata, bones, slots, animations, and atlas metadata for repeatable tests.",
+      "acceptanceCriteria": [
+        "A sample .mskl file exists under an examples or assets directory.",
+        "A sample .matl file exists and references plausible atlas regions used by the sample skeleton.",
+        "The repository documents how the fixtures map back to docs/discription.md."
+      ],
+      "dependsOn": [
+        "MAR-001"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-004",
+      "title": "Implement JSON parsing infrastructure",
+      "description": "Add the JSON loading layer used by Marrow runtime data so fixture assets can be loaded from disk with validation and clear errors.",
+      "acceptanceCriteria": [
+        "Runtime code can read the sample .mskl and .matl files from disk.",
+        "Parse failures produce actionable error output instead of silent failure.",
+        "A smoke-test command proves both fixture files parse successfully."
+      ],
+      "dependsOn": [
+        "MAR-003"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-005",
+      "title": "Model SkeletonData and Skeleton core types",
+      "description": "Implement the runtime-side static and instance data containers from the architecture section, separating immutable imported data from per-instance animation state.",
+      "acceptanceCriteria": [
+        "SkeletonData and Skeleton types exist with clear ownership boundaries.",
+        "Parsed fixture data can populate SkeletonData and spawn a Skeleton instance.",
+        "The code distinguishes setup data from mutable instance pose state."
+      ],
+      "dependsOn": [
+        "MAR-004"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-006",
+      "title": "Implement setup pose and bone hierarchy evaluation",
+      "description": "Add the first world-transform pass so the runtime can resolve parent-child bone transforms and reset a skeleton to setup pose.",
+      "acceptanceCriteria": [
+        "Skeleton can reset to setup pose without reparsing assets.",
+        "Parent-child world transforms are computed for the sample bone chain.",
+        "A verification command or test asserts at least one expected world transform result."
+      ],
+      "dependsOn": [
+        "MAR-005"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-007",
+      "title": "Implement AtlasLoader and region lookup",
+      "description": "Create the atlas metadata loader and lookup API described in the architecture so runtime attachments can resolve named regions through .matl data.",
+      "acceptanceCriteria": [
+        "AtlasLoader parses the sample .matl metadata into typed structures.",
+        "Region lookup by attachment or region name works for the fixture atlas.",
+        "The atlas loader is wired into the runtime sample or tests."
+      ],
+      "dependsOn": [
+        "MAR-004"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-008",
+      "title": "Render setup-pose region attachments",
+      "description": "Connect the renderer scaffold, atlas metadata, and skeleton world transforms so the sample skeleton can render static region attachments in setup pose.",
+      "acceptanceCriteria": [
+        "The sample app can render region attachments using atlas lookups.",
+        "Rendered attachment placement follows computed world transforms.",
+        "The validation path for rendering is documented in AGENTS.md."
+      ],
+      "dependsOn": [
+        "MAR-002",
+        "MAR-006",
+        "MAR-007"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-009",
+      "title": "Implement interpolation primitives",
+      "description": "Add runtime support for linear, stepped, and cubic bezier interpolation as described in the format spec so animation timelines can evaluate correctly.",
+      "acceptanceCriteria": [
+        "Linear, stepped, and bezier interpolation evaluators exist in runtime code.",
+        "Fixture-driven tests cover the documented curve encodings.",
+        "Timeline code can consume the interpolation helpers without ad hoc branching."
+      ],
+      "dependsOn": [
+        "MAR-004"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-010",
+      "title": "Implement bone transform timelines",
+      "description": "Add runtime evaluation for rotate, translate, scale, and shear timelines so animations can change bone transforms over time.",
+      "acceptanceCriteria": [
+        "Animation data can drive bone rotation and translation from fixture data.",
+        "Scale and shear timeline support is represented in runtime structures and evaluation code.",
+        "A verification command or test confirms timeline sampling changes the sample pose over time."
+      ],
+      "dependsOn": [
+        "MAR-006",
+        "MAR-009"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-011",
+      "title": "Implement slot timelines",
+      "description": "Add attachment swap, slot color or alpha, and draw-order timeline support so runtime playback can affect slot-driven presentation.",
+      "acceptanceCriteria": [
+        "Slot attachment changes over time are supported by the runtime.",
+        "Slot color or alpha timelines are represented and evaluated.",
+        "Draw-order changes can reorder sample slots during playback."
+      ],
+      "dependsOn": [
+        "MAR-010"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-012",
+      "title": "Implement event timelines and callbacks",
+      "description": "Add named animation events and runtime callback plumbing so gameplay hooks like footsteps and hit effects can be triggered from animation playback.",
+      "acceptanceCriteria": [
+        "Event definitions and per-animation event keys can be parsed from fixture data.",
+        "Runtime playback emits callbacks when event keys are reached.",
+        "A smoke test or sample output proves event data values are surfaced correctly."
+      ],
+      "dependsOn": [
+        "MAR-010"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-013",
+      "title": "Implement AnimationState tracks and mixing",
+      "description": "Build the track-based AnimationState layer from the architecture section, including queueing, crossfade mixing, empty animations, and loop completion callbacks.",
+      "acceptanceCriteria": [
+        "Multiple tracks can play or queue animations independently.",
+        "Mix durations and empty-animation fade-out behavior are supported.",
+        "Start, interrupt, complete, end, dispose, and event-style callbacks are wired through the animation state API."
+      ],
+      "dependsOn": [
+        "MAR-010",
+        "MAR-011",
+        "MAR-012"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-014",
+      "title": "Implement skin system and linked meshes",
+      "description": "Add runtime support for named skins, skin composition, linked mesh inheritance, and skin-specific attachments so character variants can share skeleton structure.",
+      "acceptanceCriteria": [
+        "Skins can be switched at runtime on the sample skeleton.",
+        "Linked mesh metadata can reference parent mesh data without duplication.",
+        "The runtime exposes a small API for whole-skin swap and partial skin composition."
+      ],
+      "dependsOn": [
+        "MAR-005"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-015",
+      "title": "Implement weighted mesh attachments",
+      "description": "Add mesh attachment support with per-vertex bone weights so joints can deform smoothly beyond rigid region attachments.",
+      "acceptanceCriteria": [
+        "Mesh attachment structures store vertices, triangles, UVs, and weights.",
+        "The runtime can evaluate weighted vertex transforms for a sample mesh.",
+        "A sample or test demonstrates that a multi-bone weighted mesh updates with pose changes."
+      ],
+      "dependsOn": [
+        "MAR-006",
+        "MAR-014"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-016",
+      "title": "Implement GPU skinning and dynamic mesh rendering",
+      "description": "Extend the renderer with dynamic vertex buffers and a GPU skinning shader path so weighted meshes can render efficiently.",
+      "acceptanceCriteria": [
+        "The renderer uploads dynamic mesh data for weighted attachments.",
+        "A GPU skinning shader path exists and is exercised by the sample app.",
+        "The sample weighted mesh renders without falling back to a rigid-only path."
+      ],
+      "dependsOn": [
+        "MAR-008",
+        "MAR-015"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-017",
+      "title": "Implement blend modes and two-color tinting",
+      "description": "Add slot-level blend mode handling and dual light or dark tint support in the renderer so the runtime matches the documented presentation model.",
+      "acceptanceCriteria": [
+        "Normal, additive, multiply, and screen blend modes are supported for slots.",
+        "Two-color tint uniforms or equivalents are wired into the render path.",
+        "A sample scene or test demonstrates at least one non-default blend mode and tint combination."
+      ],
+      "dependsOn": [
+        "MAR-016"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-018",
+      "title": "Implement FFD deform timelines",
+      "description": "Add free-form deformation support so mesh vertices can be keyed directly over time for face and soft-body style animation.",
+      "acceptanceCriteria": [
+        "FFD timeline data can be parsed and stored for mesh attachments.",
+        "Runtime playback applies deform offsets on top of weighted mesh evaluation.",
+        "A sample animation or test demonstrates mesh deformation over time."
+      ],
+      "dependsOn": [
+        "MAR-015",
+        "MAR-016",
+        "MAR-010"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-019",
+      "title": "Implement point and bounding-box attachments",
+      "description": "Add point attachments for spawn anchors and bounding-box attachments for hit detection data in runtime structures and loading code.",
+      "acceptanceCriteria": [
+        "Point attachments expose world position and rotation from the active pose.",
+        "Bounding-box attachment polygons can be parsed and transformed into world space.",
+        "Sample data includes at least one point and one bounding-box attachment."
+      ],
+      "dependsOn": [
+        "MAR-006"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-020",
+      "title": "Implement SkeletonBounds queries",
+      "description": "Build the SkeletonBounds utility from the architecture section so hit tests and segment intersections can be queried against transformed bounding boxes.",
+      "acceptanceCriteria": [
+        "SkeletonBounds can update transformed polygons from current pose data.",
+        "Point containment and segment intersection queries are supported.",
+        "A test or sample command demonstrates at least one positive hit result."
+      ],
+      "dependsOn": [
+        "MAR-019"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-021",
+      "title": "Implement clipping and sequence attachments",
+      "description": "Add clipping polygons for render masking and sequence attachments for frame-based effects so the runtime covers the documented attachment variants.",
+      "acceptanceCriteria": [
+        "Clipping attachment metadata can be loaded and applied in the renderer.",
+        "Sequence attachments can advance frames according to fps and playback mode.",
+        "A sample scene demonstrates either clipping or sequence playback end to end."
+      ],
+      "dependsOn": [
+        "MAR-016"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-022",
+      "title": "Implement IK constraints",
+      "description": "Add one-bone and two-bone IK solving with bend direction and mix control so limbs can target positions without manual keying.",
+      "acceptanceCriteria": [
+        "IK constraint data can be parsed from fixture content.",
+        "Runtime solving supports target, bones, mix, and bend direction behavior.",
+        "A sample or test shows an IK chain reaching toward a target."
+      ],
+      "dependsOn": [
+        "MAR-006"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-023",
+      "title": "Implement path and transform constraints",
+      "description": "Add path-following and transform-copy constraints so the runtime can drive chains along curves and mirror transforms between bones.",
+      "acceptanceCriteria": [
+        "Path constraint data can be parsed and evaluated for a sample chain.",
+        "Transform constraints can copy rotate, translate, scale, or shear with mix values.",
+        "Verification output demonstrates at least one path or transform constraint affecting the pose."
+      ],
+      "dependsOn": [
+        "MAR-006"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-024",
+      "title": "Implement physics constraints",
+      "description": "Add spring-style secondary motion with inertia, damping, strength, gravity, and wind so runtime chains can react dynamically.",
+      "acceptanceCriteria": [
+        "Physics constraint metadata is represented in runtime data structures.",
+        "A simulation step updates constrained bones using damping and restoring forces.",
+        "A sample or test demonstrates visible or numeric secondary motion."
+      ],
+      "dependsOn": [
+        "MAR-006"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-025",
+      "title": "Implement inherit timelines and skin-scoped constraints",
+      "description": "Add timeline-driven inheritance toggles and skin-specific constraint activation so pose behavior can change at runtime based on animation and active skin.",
+      "acceptanceCriteria": [
+        "Bone inheritance flags can be changed by timeline evaluation.",
+        "Constraints and extra bones can be activated conditionally based on the current skin.",
+        "A sample or test shows a skin or timeline switching constraint behavior."
+      ],
+      "dependsOn": [
+        "MAR-014",
+        "MAR-022",
+        "MAR-023",
+        "MAR-024"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-026",
+      "title": "Implement reverse playback and root motion extraction",
+      "description": "Add reverse playback flags and root-bone delta extraction so gameplay systems can consume animation-driven movement.",
+      "acceptanceCriteria": [
+        "Animation playback can be reversed without duplicating timeline data.",
+        "Runtime code can extract root motion deltas from playback.",
+        "A sample or test demonstrates root motion values changing over time."
+      ],
+      "dependsOn": [
+        "MAR-013"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-027",
+      "title": "Add runtime inspection and demo CLI",
+      "description": "Create a terminal-facing inspection command that loads Marrow assets and prints or previews a useful summary for verification in future loop runs.",
+      "acceptanceCriteria": [
+        "A documented command can inspect an .mskl file from the terminal.",
+        "The command prints skeleton name, counts, available animations, and active skins.",
+        "The command or sample app is usable as a smoke test in later stories."
+      ],
+      "dependsOn": [
+        "MAR-013",
+        "MAR-014"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-028",
+      "title": "Implement binary export and import groundwork",
+      "description": "Add a binary serialization path for production assets using the documented compact encoding strategy while keeping JSON fixtures for debugging.",
+      "acceptanceCriteria": [
+        "A binary asset format and file extension are documented in code or docs.",
+        "The runtime can load a binary form of at least one sample skeleton.",
+        "JSON and binary sample outputs can be compared through a validation command or test."
+      ],
+      "dependsOn": [
+        "MAR-027"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-029",
+      "title": "Implement .marrow project model",
+      "description": "Define and load the editor-side project file model that references skeleton data, atlas assets, and authoring metadata for the standalone Marrow editor.",
+      "acceptanceCriteria": [
+        "A .marrow project structure is represented in code.",
+        "The editor can create or load a minimal project that points at sample assets.",
+        "The project model clearly separates editor metadata from exported runtime data."
+      ],
+      "dependsOn": [
+        "MAR-003",
+        "MAR-005"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-030",
+      "title": "Bootstrap the Dear ImGui editor shell",
+      "description": "Create the standalone editor application using C++, Dear ImGui, GLFW, and OpenGL so authoring tools have a running host UI.",
+      "acceptanceCriteria": [
+        "A desktop editor executable builds and opens a window.",
+        "The editor integrates Dear ImGui, GLFW, and OpenGL according to the documented stack.",
+        "AGENTS.md documents how to launch the editor."
+      ],
+      "dependsOn": [
+        "MAR-001",
+        "MAR-029"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-031",
+      "title": "Build the editor viewport and skeleton inspector",
+      "description": "Add a viewport and inspector panels so users can load a project, inspect bones, and view the current setup pose inside the editor shell.",
+      "acceptanceCriteria": [
+        "The editor can open the sample project and display the skeleton in a viewport.",
+        "An inspector can list bones and show key setup data for the selected item.",
+        "Selection in the viewport or hierarchy updates the inspector state."
+      ],
+      "dependsOn": [
+        "MAR-030",
+        "MAR-008"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-032",
+      "title": "Build slot, attachment, and skin inspectors",
+      "description": "Add editor panels for slots, attachments, skins, and linked meshes so presentation data can be browsed and edited in the standalone app.",
+      "acceptanceCriteria": [
+        "The editor can inspect slots and attachments from the sample project.",
+        "Skin selection and preview are available in the editor.",
+        "Linked mesh relationships are visible or editable in the UI."
+      ],
+      "dependsOn": [
+        "MAR-031",
+        "MAR-014"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-033",
+      "title": "Build the animation timeline shell",
+      "description": "Implement the core timeline UI needed to scrub time, select animations, and manage keyed tracks inside the editor.",
+      "acceptanceCriteria": [
+        "The editor can select an animation and scrub playback time.",
+        "A timeline panel shows keyed tracks for at least one animation.",
+        "Timeline state stays in sync with the viewport pose."
+      ],
+      "dependsOn": [
+        "MAR-031",
+        "MAR-013"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-034",
+      "title": "Implement keyframe and curve editing",
+      "description": "Add authoring tools for transform keys with linear, stepped, and bezier interpolation editing so the editor matches the documented keyframe model.",
+      "acceptanceCriteria": [
+        "Users can add or edit transform keys in the timeline.",
+        "Interpolation mode can be switched between linear, stepped, and bezier.",
+        "Edited curves round-trip through exported asset data."
+      ],
+      "dependsOn": [
+        "MAR-033",
+        "MAR-009",
+        "MAR-010"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-035",
+      "title": "Implement mesh weighting and FFD authoring tools",
+      "description": "Add editor workflows for weighted mesh assignment and free-form deformation key authoring so advanced mesh animation can be created in-app.",
+      "acceptanceCriteria": [
+        "The editor provides a workflow for assigning or visualizing mesh weights.",
+        "FFD key data can be authored or edited in the editor.",
+        "Runtime playback can verify the exported weighted mesh and FFD data."
+      ],
+      "dependsOn": [
+        "MAR-032",
+        "MAR-018"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-036",
+      "title": "Implement constraint authoring panels",
+      "description": "Add editor workflows for IK, path, transform, and physics constraints so the documented runtime features can be authored visually.",
+      "acceptanceCriteria": [
+        "The editor can create or edit IK constraints.",
+        "The editor can create or edit path, transform, and physics constraints.",
+        "Edited constraints round-trip into exported runtime data and preview correctly."
+      ],
+      "dependsOn": [
+        "MAR-033",
+        "MAR-022",
+        "MAR-023",
+        "MAR-024"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-037",
+      "title": "Implement event, draw-order, and state-preview authoring",
+      "description": "Add editor tools for event keys, draw-order editing, track mixing preview, and root-motion-aware playback so users can author the higher-level animation state behaviors.",
+      "acceptanceCriteria": [
+        "The editor can place event keys and draw-order changes on the timeline.",
+        "Track mixing or queued playback can be previewed in the editor.",
+        "Root motion or reverse playback behavior can be previewed from the editor."
+      ],
+      "dependsOn": [
+        "MAR-033",
+        "MAR-011",
+        "MAR-012",
+        "MAR-026"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-038",
+      "title": "Implement export pipeline from editor to runtime assets",
+      "description": "Wire the editor to export .mskl, .matl, texture atlas assets, and optional binary output so authored content can be consumed directly by the runtime.",
+      "acceptanceCriteria": [
+        "The editor can export runtime assets from a .marrow project.",
+        "Exported assets load successfully through the runtime inspection or sample app path.",
+        "The export flow supports JSON output and optional binary output."
+      ],
+      "dependsOn": [
+        "MAR-028",
+        "MAR-034",
+        "MAR-035",
+        "MAR-036",
+        "MAR-037"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-039",
+      "title": "Ship an end-to-end Marrow sample project",
+      "description": "Create a representative sample project and validation checklist that proves the runtime and editor can author, export, load, and render a non-trivial animated asset end to end.",
+      "acceptanceCriteria": [
+        "A sample .marrow project is checked into the repository.",
+        "The sample can be exported and loaded by the runtime without manual patching.",
+        "Repository docs explain the end-to-end validation flow for new contributors."
+      ],
+      "dependsOn": [
+        "MAR-038"
+      ],
+      "status": "open"
+    }
+  ]
+}
