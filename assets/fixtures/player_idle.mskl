@@ -1,0 +1,67 @@
+{
+  "marrow": "1.0",
+  "skeleton": {
+    "name": "player",
+    "width": 256,
+    "height": 256
+  },
+  "bones": [
+    {
+      "name": "root"
+    },
+    {
+      "name": "spine",
+      "parent": "root",
+      "x": 0,
+      "y": 50
+    },
+    {
+      "name": "arm_l",
+      "parent": "spine",
+      "x": -30,
+      "y": 10
+    }
+  ],
+  "slots": [
+    {
+      "name": "body",
+      "bone": "spine",
+      "attachment": "body"
+    },
+    {
+      "name": "arm_l",
+      "bone": "arm_l",
+      "attachment": "arm_l"
+    }
+  ],
+  "animations": {
+    "idle": {
+      "bones": {
+        "spine": {
+          "rotate": [
+            {
+              "time": 0.0,
+              "angle": 0,
+              "curve": "linear"
+            },
+            {
+              "time": 0.5,
+              "angle": 5,
+              "curve": [
+                0.25,
+                0.1,
+                0.75,
+                0.9
+              ]
+            },
+            {
+              "time": 1.0,
+              "angle": 0,
+              "curve": "stepped"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

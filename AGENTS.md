@@ -22,6 +22,13 @@
 
 ## Current Validation
 
-- No build system existed before Ralph setup.
-- After build tooling is added, record the configure/build/test commands here so Ralph can reuse them.
+- Configure: `cmake -S . -B build`
+- Build: `cmake --build build`
+- Bootstrap smoke test: `./build/marrow_bootstrap`
+- Runtime fixture smoke test: `./build/marrow_fixture_smoke`
+- Rendering validation target: `./build/marrow_renderer_sample`
+- Setup-pose region attachment validation: `./build/marrow_renderer_sample assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl`
+- Fixture skeleton inspection: `python3 -m json.tool assets/fixtures/player_idle.mskl > /dev/null`
+- Fixture atlas inspection: `python3 -m json.tool assets/fixtures/player_idle.matl > /dev/null`
+- Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation from the checked-in fixtures
 - To run the full autonomous loop with Codex against the expanded plan: `ralph build 100`

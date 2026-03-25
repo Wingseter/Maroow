@@ -18,4 +18,4 @@ PRD_AGENT_CMD="codex exec --full-auto {prompt}"
 
 NO_COMMIT=false
 MAX_ITERATIONS=25
-STALE_SECONDS=1800
+STALE_SECONDS=120

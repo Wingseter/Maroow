@@ -20,10 +20,10 @@
         "AGENTS.md documents the configure and build commands."
       ],
       "dependsOn": [],
-      "status": "open",
-      "startedAt": null,
-      "completedAt": null,
-      "updatedAt": "2026-03-24T13:16:59.262383+00:00"
+      "status": "done",
+      "startedAt": "2026-03-24T13:21:08.279369+00:00",
+      "completedAt": "2026-03-24T13:28:04.618910+00:00",
+      "updatedAt": "2026-03-24T13:28:04.618748+00:00"
     },
     {
       "id": "MAR-002",
@@ -37,7 +37,10 @@
       "dependsOn": [
         "MAR-001"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T13:28:06.713071+00:00",
+      "completedAt": "2026-03-24T13:33:35.588374+00:00",
+      "updatedAt": "2026-03-24T13:33:35.588229+00:00"
     },
     {
       "id": "MAR-003",
@@ -51,7 +54,10 @@
       "dependsOn": [
         "MAR-001"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T13:33:37.690408+00:00",
+      "completedAt": "2026-03-24T13:38:43.706200+00:00",
+      "updatedAt": "2026-03-24T13:38:43.706019+00:00"
     },
     {
       "id": "MAR-004",
@@ -65,7 +71,10 @@
       "dependsOn": [
         "MAR-003"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T13:38:45.808285+00:00",
+      "completedAt": "2026-03-24T14:02:13.278050+00:00",
+      "updatedAt": "2026-03-24T14:02:13.277878+00:00"
     },
     {
       "id": "MAR-005",
@@ -79,7 +88,10 @@
       "dependsOn": [
         "MAR-004"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T14:02:15.378842+00:00",
+      "completedAt": "2026-03-24T14:14:29.977413+00:00",
+      "updatedAt": "2026-03-24T14:14:29.977247+00:00"
     },
     {
       "id": "MAR-006",
@@ -93,7 +105,10 @@
       "dependsOn": [
         "MAR-005"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T14:14:32.082551+00:00",
+      "completedAt": "2026-03-24T14:22:22.283811+00:00",
+      "updatedAt": "2026-03-24T14:22:22.283656+00:00"
     },
     {
       "id": "MAR-007",
@@ -107,7 +122,10 @@
       "dependsOn": [
         "MAR-004"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T14:22:24.393153+00:00",
+      "completedAt": "2026-03-24T14:32:26.467003+00:00",
+      "updatedAt": "2026-03-24T14:32:26.466833+00:00"
     },
     {
       "id": "MAR-008",
@@ -123,7 +141,10 @@
         "MAR-006",
         "MAR-007"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T14:32:28.568900+00:00",
+      "completedAt": "2026-03-24T14:41:34.018064+00:00",
+      "updatedAt": "2026-03-24T14:41:34.017927+00:00"
     },
     {
       "id": "MAR-009",
@@ -137,7 +158,10 @@
       "dependsOn": [
         "MAR-004"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-24T14:41:36.126565+00:00",
+      "completedAt": "2026-03-24T14:52:11.481754+00:00",
+      "updatedAt": "2026-03-24T14:52:11.481586+00:00"
     },
     {
       "id": "MAR-010",
@@ -152,7 +176,10 @@
         "MAR-006",
         "MAR-009"
       ],
-      "status": "open"
+      "status": "open",
+      "startedAt": null,
+      "completedAt": null,
+      "updatedAt": "2026-03-24T15:35:11Z"
     },
     {
       "id": "MAR-011",
