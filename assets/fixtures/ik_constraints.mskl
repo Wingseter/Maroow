@@ -1,0 +1,59 @@
+{
+  "marrow": "1.0",
+  "skeleton": {
+    "name": "ik_constraints",
+    "width": 480,
+    "height": 320
+  },
+  "bones": [
+    { "name": "root" },
+    { "name": "upper_arm_pos", "parent": "root", "x": 0, "y": 0 },
+    { "name": "lower_arm_pos", "parent": "upper_arm_pos", "x": 100, "y": 0 },
+    { "name": "hand_pos", "parent": "lower_arm_pos", "x": 80, "y": 0 },
+    { "name": "target_pos", "parent": "root", "x": 120, "y": 60 },
+    { "name": "upper_arm_neg", "parent": "root", "x": 0, "y": 220 },
+    { "name": "lower_arm_neg", "parent": "upper_arm_neg", "x": 100, "y": 0 },
+    { "name": "hand_neg", "parent": "lower_arm_neg", "x": 80, "y": 0 },
+    { "name": "target_neg", "parent": "root", "x": 120, "y": 280 },
+    { "name": "turret_full", "parent": "root", "x": 220, "y": 0 },
+    { "name": "muzzle_full", "parent": "turret_full", "x": 60, "y": 0 },
+    { "name": "target_full", "parent": "root", "x": 220, "y": 60 },
+    { "name": "turret_half", "parent": "root", "x": 340, "y": 0 },
+    { "name": "muzzle_half", "parent": "turret_half", "x": 60, "y": 0 },
+    { "name": "target_half", "parent": "root", "x": 340, "y": 60 }
+  ],
+  "slots": [
+    { "name": "debug", "bone": "root", "attachment": "debug" }
+  ],
+  "animations": {
+    "idle": {}
+  },
+  "ik": [
+    {
+      "name": "arm_positive",
+      "bones": ["upper_arm_pos", "lower_arm_pos"],
+      "target": "target_pos",
+      "mix": 1.0,
+      "bendPositive": true
+    },
+    {
+      "name": "arm_negative",
+      "bones": ["upper_arm_neg", "lower_arm_neg"],
+      "target": "target_neg",
+      "mix": 1.0,
+      "bendPositive": false
+    },
+    {
+      "name": "turret_reach",
+      "bones": ["turret_full"],
+      "target": "target_full",
+      "mix": 1.0
+    },
+    {
+      "name": "turret_half_mix",
+      "bones": ["turret_half"],
+      "target": "target_half",
+      "mix": 0.5
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "marrow": "1.0",
+  "skeleton": {
+    "name": "physics_constraints",
+    "width": 256,
+    "height": 256
+  },
+  "bones": [
+    {
+      "name": "root"
+    },
+    {
+      "name": "pivot",
+      "parent": "root"
+    },
+    {
+      "name": "ribbon_01",
+      "parent": "pivot",
+      "x": 80
+    },
+    {
+      "name": "ribbon_02",
+      "parent": "ribbon_01",
+      "x": 70
+    },
+    {
+      "name": "ribbon_tip",
+      "parent": "ribbon_02",
+      "x": 60
+    }
+  ],
+  "physics": [
+    {
+      "name": "ribbon_secondary",
+      "bones": [
+        "ribbon_01",
+        "ribbon_02"
+      ],
+      "inertia": 0.85,
+      "damping": 4.0,
+      "strength": 18.0,
+      "gravity": {
+        "x": 0,
+        "y": -24
+      },
+      "wind": {
+        "x": 12,
+        "y": 0
+      },
+      "mix": 1.0
+    }
+  ],
+  "slots": [
+    {
+      "name": "marker",
+      "bone": "ribbon_tip",
+      "attachment": "marker"
+    }
+  ],
+  "animations": {
+    "idle": {}
+  }
+}

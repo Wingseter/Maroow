@@ -1,0 +1,235 @@
+{
+  "marrow": "1.0",
+  "runtime": {
+    "skeleton": "player_idle.mskl",
+    "atlases": [
+      "player_idle.matl"
+    ]
+  },
+  "editor": {
+    "name": "player_idle_fixture",
+    "active_animation": "idle",
+    "preview_skins": [
+      "default"
+    ],
+    "export_directory": "exports",
+    "notes": "Minimal Marrow editor project referencing the canonical runtime fixture pair.",
+    "viewport": {
+      "pan_x": 0,
+      "pan_y": 0,
+      "zoom": 1
+    }
+  },
+    "timeline_edits": {
+        "animations": {
+            "idle": {
+                "bones": {
+          "spine": {
+            "rotate": [
+              {
+                "time": 0,
+                "angle": 0,
+                "curve": [
+                  0.33,
+                  0,
+                  0.67,
+                  1
+                ]
+              },
+              {
+                "time": 0.5,
+                "angle": 8,
+                "curve": "stepped"
+              },
+              {
+                "time": 1,
+                "angle": -2,
+                "curve": "linear"
+              }
+            ]
+          }
+        },
+        "deform": {
+          "body": {
+            "body_mesh": [
+              {
+                "time": 0,
+                "vertices": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "curve": "linear"
+              },
+              {
+                "time": 0.5,
+                "vertices": [
+                  0,
+                  0,
+                  12,
+                  -8,
+                  16,
+                  20,
+                  -4,
+                  10
+                ],
+                "curve": "linear"
+              },
+              {
+                "time": 1,
+                "vertices": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "curve": "stepped"
+              }
+            ]
+                }
+            },
+        "drawOrder": [
+          {
+            "time": 0,
+            "slots": [
+              "body",
+              "arm_l",
+              "fx_mask",
+              "spark_fx",
+              "spawn_anchor",
+              "hurtbox",
+              "guide"
+            ]
+          },
+          {
+            "time": 0.5,
+            "slots": [
+              "body",
+              "fx_mask",
+              "spark_fx",
+              "arm_l",
+              "spawn_anchor",
+              "hurtbox",
+              "guide"
+            ]
+          },
+          {
+            "time": 1,
+            "slots": [
+              "body",
+              "arm_l",
+              "fx_mask",
+              "spark_fx",
+              "spawn_anchor",
+              "hurtbox",
+              "guide"
+            ]
+          }
+        ],
+        "events": [
+          {
+            "time": 0.25,
+            "name": "footstep",
+            "int": 7,
+            "string": "editor_left"
+          },
+          {
+            "time": 0.25,
+            "name": "dust_vfx",
+            "float": 0.9,
+            "string": "editor_dust"
+          },
+          {
+            "time": 0.8,
+            "name": "footstep",
+            "int": 8,
+            "string": "editor_right",
+            "balance": -0.2
+          }
+        ]
+        }
+    }
+  },
+  "constraint_edits": {
+        "ik": [
+            {
+                "name": "editor_arm_reach",
+                "bones": [
+                    "ik_upper",
+                    "ik_lower"
+                ],
+                "target": "ik_target",
+                "mix": 1.0,
+                "bendPositive": true
+            }
+        ],
+        "path": [
+            {
+                "name": "editor_guide_follow",
+                "slot": "guide",
+                "bones": [
+                    "path_a",
+                    "path_b",
+                    "path_c"
+                ],
+                "position": 0.1,
+                "spacing": 0.3,
+                "spacingMode": "percent",
+                "rotateMix": 1.0,
+                "translateMix": 1.0
+            }
+        ],
+        "transform": [
+            {
+                "name": "editor_transform_follow",
+                "source": "transform_source",
+                "bones": [
+                    "transform_target"
+                ],
+                "rotateMix": 0.5,
+                "translateMix": 0.25,
+                "scaleMix": 1.0,
+                "shearMix": 0.75,
+                "offset": {
+                    "rotation": 15,
+                    "x": -10,
+                    "y": 20,
+                    "scaleX": 0.2,
+                    "scaleY": -0.1,
+                    "shearX": 5,
+                    "shearY": -2
+                }
+            }
+        ],
+        "physics": [
+            {
+                "name": "editor_ribbon_secondary",
+                "bones": [
+                    "ribbon_01",
+                    "ribbon_02"
+                ],
+                "inertia": 0.85,
+                "damping": 4.0,
+                "strength": 18.0,
+                "gravity": {
+                    "x": 0,
+                    "y": -24
+                },
+                "wind": {
+                    "x": 12,
+                    "y": 0
+                },
+                "mix": 1.0
+            }
+        ]
+  }
+}

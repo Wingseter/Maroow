@@ -1,0 +1,103 @@
+{
+  "marrow": "1.0",
+  "skeleton": {
+    "name": "skin_inherit_constraints",
+    "width": 256,
+    "height": 256
+  },
+  "bones": [
+    {
+      "name": "root"
+    },
+    {
+      "name": "controller",
+      "parent": "root",
+      "rotation": 90,
+      "scaleX": 2.0,
+      "scaleY": -0.5
+    },
+    {
+      "name": "child",
+      "parent": "controller",
+      "x": 10
+    },
+    {
+      "name": "constrained",
+      "parent": "root",
+      "x": 50
+    },
+    {
+      "name": "cape_target",
+      "parent": "root",
+      "x": 200
+    }
+  ],
+  "slots": [
+    {
+      "name": "dummy",
+      "bone": "root",
+      "attachment": "dummy"
+    }
+  ],
+  "skins": {
+    "default": {
+      "dummy": {
+        "attachment": "dummy",
+        "type": "region",
+        "region": "dummy"
+      }
+    },
+    "cape": {
+      "bones": [
+        "cape_target"
+      ],
+      "transform": [
+        "cape_pull"
+      ]
+    }
+  },
+  "transform": [
+    {
+      "name": "cape_pull",
+      "source": "cape_target",
+      "bones": [
+        "constrained"
+      ],
+      "translateMix": 1.0
+    }
+  ],
+  "animations": {
+    "toggle_inherit": {
+      "bones": {
+        "child": {
+          "inherit": [
+            {
+              "time": 0.0,
+              "inheritRotation": true,
+              "inheritScale": true,
+              "inheritReflection": true
+            },
+            {
+              "time": 0.25,
+              "inheritRotation": true,
+              "inheritScale": true,
+              "inheritReflection": false
+            },
+            {
+              "time": 0.5,
+              "inheritRotation": false,
+              "inheritScale": false,
+              "inheritReflection": false
+            },
+            {
+              "time": 1.0,
+              "inheritRotation": true,
+              "inheritScale": true,
+              "inheritReflection": true
+            }
+          ]
+        }
+      }
+    }
+  }
+}
