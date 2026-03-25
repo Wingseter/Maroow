@@ -54,8 +54,11 @@ public:
     bool as_boolean() const;
     double as_number() const;
     const std::string& as_string() const;
+    std::string& as_string();
     const Array& as_array() const;
+    Array& as_array();
     const Object& as_object() const;
+    Object& as_object();
 
 private:
     SourceLocation location_{};
@@ -92,6 +95,8 @@ LoadResult load_document(const std::filesystem::path& path);
 
 std::string_view type_name(Value::Type type);
 const Value* find_member(const Value& object, std::string_view key);
+Value* find_member(Value& object, std::string_view key);
+std::string serialize_pretty(const Value& value, int indent_size = 2);
 
 LoadError make_validation_error(
     const Document& document,

@@ -518,6 +518,112 @@ std::string source_label(const std::filesystem::path& path) {
     return path.empty() ? "<memory>" : path.string();
 }
 
+std::string escape_json_string(std::string_view text) {
+    std::ostringstream escaped;
+    for (const unsigned char character : text) {
+        switch (character) {
+        case '\"':
+            escaped << "\\\"";
+            break;
+        case '\\':
+            escaped << "\\\\";
+            break;
+        case '\b':
+            escaped << "\\b";
+            break;
+        case '\f':
+            escaped << "\\f";
+            break;
+        case '\n':
+            escaped << "\\n";
+            break;
+        case '\r':
+            escaped << "\\r";
+            break;
+        case '\t':
+            escaped << "\\t";
+            break;
+        default:
+            if (character < 0x20U) {
+                escaped << "\\u00";
+                constexpr char kHexDigits[] = "0123456789abcdef";
+                escaped << kHexDigits[(character >> 4U) & 0x0FU];
+                escaped << kHexDigits[character & 0x0FU];
+            } else {
+                escaped << static_cast<char>(character);
+            }
+            break;
+        }
+    }
+
+    return escaped.str();
+}
+
+void serialize_value(
+    const Value& value,
+    int indent_size,
+    int indent_level,
+    std::ostringstream* output) {
+    switch (value.type()) {
+    case Value::Type::Null:
+        *output << "null";
+        return;
+    case Value::Type::Boolean:
+        *output << (value.as_boolean() ? "true" : "false");
+        return;
+    case Value::Type::Number: {
+        std::ostringstream number_stream;
+        number_stream << std::setprecision(15) << value.as_number();
+        *output << number_stream.str();
+        return;
+    }
+    case Value::Type::String:
+        *output << '\"' << escape_json_string(value.as_string()) << '\"';
+        return;
+    case Value::Type::Array: {
+        const Value::Array& array = value.as_array();
+        if (array.empty()) {
+            *output << "[]";
+            return;
+        }
+
+        *output << "[\n";
+        for (std::size_t index = 0; index < array.size(); ++index) {
+            *output << std::string((indent_level + 1) * indent_size, ' ');
+            serialize_value(array[index], indent_size, indent_level + 1, output);
+            if (index + 1 < array.size()) {
+                *output << ',';
+            }
+            *output << '\n';
+        }
+        *output << std::string(indent_level * indent_size, ' ') << ']';
+        return;
+    }
+    case Value::Type::Object: {
+        const Value::Object& object = value.as_object();
+        if (object.empty()) {
+            *output << "{}";
+            return;
+        }
+
+        *output << "{\n";
+        std::size_t index = 0;
+        for (const auto& [key, member_value] : object) {
+            *output << std::string((indent_level + 1) * indent_size, ' ')
+                    << '\"' << escape_json_string(key) << "\": ";
+            serialize_value(member_value, indent_size, indent_level + 1, output);
+            if (index + 1 < object.size()) {
+                *output << ',';
+            }
+            *output << '\n';
+            ++index;
+        }
+        *output << std::string(indent_level * indent_size, ' ') << '}';
+        return;
+    }
+    }
+}
+
 } // namespace
 
 Value::Value()
@@ -609,11 +715,23 @@ const std::string& Value::as_string() const {
     return std::get<std::string>(storage_);
 }
 
+std::string& Value::as_string() {
+    return std::get<std::string>(storage_);
+}
+
 const Value::Array& Value::as_array() const {
     return std::get<Array>(storage_);
 }
 
+Value::Array& Value::as_array() {
+    return std::get<Array>(storage_);
+}
+
 const Value::Object& Value::as_object() const {
+    return std::get<Object>(storage_);
+}
+
+Value::Object& Value::as_object() {
     return std::get<Object>(storage_);
 }
 
@@ -702,6 +820,26 @@ const Value* find_member(const Value& object, std::string_view key) {
     }
 
     return &iterator->second;
+}
+
+Value* find_member(Value& object, std::string_view key) {
+    if (!object.is_object()) {
+        return nullptr;
+    }
+
+    auto iterator = object.as_object().find(key);
+    if (iterator == object.as_object().end()) {
+        return nullptr;
+    }
+
+    return &iterator->second;
+}
+
+std::string serialize_pretty(const Value& value, int indent_size) {
+    std::ostringstream output;
+    serialize_value(value, std::max(indent_size, 0), 0, &output);
+    output << '\n';
+    return output.str();
 }
 
 LoadError make_validation_error(

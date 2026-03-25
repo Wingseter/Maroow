@@ -6,6 +6,8 @@
 namespace marrow::runtime {
 namespace {
 
+constexpr double kTimelineKeyEpsilon = 1e-6;
+
 double clamp_unit(double value) {
     return std::clamp(value, 0.0, 1.0);
 }
@@ -119,6 +121,59 @@ double interpolate_value(
     return from_value + (to_value - from_value) * eased_alpha;
 }
 
+template <typename Timeline>
+std::optional<VectorSample> sample_vector_timeline_impl(
+    const Timeline& timeline,
+    double time) {
+    if (timeline.keyframes.empty()) {
+        return std::nullopt;
+    }
+
+    if (timeline.keyframes.size() == 1 || time <= timeline.keyframes.front().time) {
+        const VectorKeyframe& first = timeline.keyframes.front();
+        return VectorSample{first.x, first.y};
+    }
+
+    for (std::size_t index = 1; index < timeline.keyframes.size(); ++index) {
+        const VectorKeyframe& previous = timeline.keyframes[index - 1];
+        const VectorKeyframe& current = timeline.keyframes[index];
+        if (time < current.time) {
+            const double range = current.time - previous.time;
+            const double alpha = range > 0.0 ? (time - previous.time) / range : 0.0;
+            return VectorSample{
+                interpolate_value(previous.x, current.x, previous.interpolation, alpha),
+                interpolate_value(previous.y, current.y, previous.interpolation, alpha)};
+        }
+    }
+
+    const VectorKeyframe& last = timeline.keyframes.back();
+    return VectorSample{last.x, last.y};
+}
+
+template <typename Keyframe>
+const Keyframe* sample_stepped_keyframe(
+    const std::vector<Keyframe>& keyframes,
+    double time) {
+    if (keyframes.empty()) {
+        return nullptr;
+    }
+
+    if (keyframes.size() == 1 || time <= keyframes.front().time + kTimelineKeyEpsilon) {
+        return &keyframes.front();
+    }
+
+    for (std::size_t index = 1; index < keyframes.size(); ++index) {
+        if (std::abs(time - keyframes[index].time) <= kTimelineKeyEpsilon) {
+            return &keyframes[index];
+        }
+        if (time < keyframes[index].time - kTimelineKeyEpsilon) {
+            return &keyframes[index - 1];
+        }
+    }
+
+    return &keyframes.back();
+}
+
 std::optional<double> sample_rotate_timeline(
     const BoneRotateTimeline& timeline,
     double time) {
@@ -145,6 +200,109 @@ std::optional<double> sample_rotate_timeline(
     }
 
     return timeline.keyframes.back().angle;
+}
+
+const InheritKeyframe* sample_inherit_timeline(
+    const BoneInheritTimeline& timeline,
+    double time) {
+    return sample_stepped_keyframe(timeline.keyframes, time);
+}
+
+std::optional<VectorSample> sample_translate_timeline(
+    const BoneTranslateTimeline& timeline,
+    double time) {
+    return sample_vector_timeline_impl(timeline, time);
+}
+
+std::optional<VectorSample> sample_scale_timeline(
+    const BoneScaleTimeline& timeline,
+    double time) {
+    return sample_vector_timeline_impl(timeline, time);
+}
+
+std::optional<VectorSample> sample_shear_timeline(
+    const BoneShearTimeline& timeline,
+    double time) {
+    return sample_vector_timeline_impl(timeline, time);
+}
+
+const AttachmentKeyframe* sample_attachment_timeline(
+    const SlotAttachmentTimeline& timeline,
+    double time) {
+    return sample_stepped_keyframe(timeline.keyframes, time);
+}
+
+std::optional<SlotColor> sample_color_timeline(
+    const SlotColorTimeline& timeline,
+    double time) {
+    if (timeline.keyframes.empty()) {
+        return std::nullopt;
+    }
+
+    if (timeline.keyframes.size() == 1 || time <= timeline.keyframes.front().time) {
+        return timeline.keyframes.front().color;
+    }
+
+    for (std::size_t index = 1; index < timeline.keyframes.size(); ++index) {
+        const ColorKeyframe& previous = timeline.keyframes[index - 1];
+        const ColorKeyframe& current = timeline.keyframes[index];
+        if (time < current.time) {
+            const double range = current.time - previous.time;
+            const double alpha = range > 0.0 ? (time - previous.time) / range : 0.0;
+            return SlotColor{
+                interpolate_value(previous.color.r, current.color.r, previous.interpolation, alpha),
+                interpolate_value(previous.color.g, current.color.g, previous.interpolation, alpha),
+                interpolate_value(previous.color.b, current.color.b, previous.interpolation, alpha),
+                interpolate_value(previous.color.a, current.color.a, previous.interpolation, alpha)};
+        }
+    }
+
+    return timeline.keyframes.back().color;
+}
+
+std::optional<std::vector<double>> sample_deform_timeline(
+    const MeshDeformTimeline& timeline,
+    double time) {
+    if (timeline.keyframes.empty()) {
+        return std::nullopt;
+    }
+
+    if (timeline.keyframes.size() == 1 || time <= timeline.keyframes.front().time) {
+        return timeline.keyframes.front().vertex_offsets;
+    }
+
+    for (std::size_t index = 1; index < timeline.keyframes.size(); ++index) {
+        const DeformKeyframe& previous = timeline.keyframes[index - 1];
+        const DeformKeyframe& current = timeline.keyframes[index];
+        if (time < current.time) {
+            if (previous.vertex_offsets.size() != current.vertex_offsets.size()) {
+                return std::nullopt;
+            }
+
+            const double range = current.time - previous.time;
+            const double alpha = range > 0.0 ? (time - previous.time) / range : 0.0;
+            std::vector<double> vertex_offsets;
+            vertex_offsets.reserve(previous.vertex_offsets.size());
+            for (std::size_t component_index = 0;
+                 component_index < previous.vertex_offsets.size();
+                 ++component_index) {
+                vertex_offsets.push_back(interpolate_value(
+                    previous.vertex_offsets[component_index],
+                    current.vertex_offsets[component_index],
+                    previous.interpolation,
+                    alpha));
+            }
+            return vertex_offsets;
+        }
+    }
+
+    return timeline.keyframes.back().vertex_offsets;
+}
+
+const DrawOrderKeyframe* sample_draw_order_timeline(
+    const DrawOrderTimeline& timeline,
+    double time) {
+    return sample_stepped_keyframe(timeline.keyframes, time);
 }
 
 Interpolation::Interpolation(
