@@ -61,6 +61,14 @@ struct VectorSample {
     double y{0.0};
 };
 
+enum class BoneInherit {
+    Normal,
+    OnlyTranslation,
+    NoRotationOrReflection,
+    NoScale,
+    NoScaleOrReflection,
+};
+
 struct SlotColor {
     double r{1.0};
     double g{1.0};
@@ -85,19 +93,14 @@ struct DeformKeyframe {
     Interpolation interpolation{};
 };
 
-struct BoneInheritFlags {
-    bool inherit_rotation{true};
-    bool inherit_scale{true};
-    bool inherit_reflection{true};
-};
-
 struct InheritKeyframe {
     double time{0.0};
-    BoneInheritFlags flags{};
+    BoneInherit inherit{BoneInherit::Normal};
 };
 
 struct BoneRotateTimeline {
     std::size_t bone_index{0};
+    double setup_rotation{0.0};
     std::vector<RotateKeyframe> keyframes;
 };
 

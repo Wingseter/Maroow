@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -13,6 +14,8 @@
 #include "marrow/runtime/json.hpp"
 
 namespace marrow::runtime {
+
+class AnimationState;
 
 struct SkeletonInfo {
     std::string name;
@@ -34,7 +37,7 @@ struct BoneData {
     std::string name;
     std::optional<std::size_t> parent_index;
     BoneTransform setup_pose;
-    BoneInheritFlags setup_inherit{};
+    BoneInherit inherit{BoneInherit::Normal};
 };
 
 struct IkConstraintData {
@@ -42,7 +45,10 @@ struct IkConstraintData {
     std::vector<std::size_t> bone_indices;
     std::size_t target_bone_index{0};
     double mix{1.0};
+    double softness{0.0};
     bool bend_positive{true};
+    bool compress{false};
+    bool stretch{false};
 };
 
 enum class PathConstraintSpacingMode {
@@ -126,12 +132,27 @@ struct AttachmentVertex {
 struct PhysicsConstraintData {
     std::string name;
     std::vector<std::size_t> bone_indices;
+    double step{1.0 / 60.0};
+    double x{1.0};
+    double y{1.0};
+    double rotate{1.0};
+    double scale_x{1.0};
+    double shear_x{0.0};
+    double limit{500.0};
     double inertia{0.0};
     double damping{0.0};
     double strength{0.0};
+    double mass_inverse{1.0};
     AttachmentVertex gravity{};
     AttachmentVertex wind{};
     double mix{1.0};
+};
+
+enum class PhysicsMode {
+    None,
+    Reset,
+    Update,
+    Pose,
 };
 
 struct MeshGeometry {
@@ -291,6 +312,7 @@ public:
     const std::vector<AnimationData>& animations() const;
     const std::vector<SkinData>& skins() const;
     const std::vector<AnimationMixDefinition>& mix_definitions() const;
+    const std::vector<std::size_t>& bone_evaluation_order() const;
     std::optional<std::size_t> default_skin_index() const;
     double default_mix_duration() const;
 
@@ -310,6 +332,7 @@ public:
 private:
     SkeletonInfo info_;
     std::vector<BoneData> bones_;
+    std::vector<std::size_t> bone_evaluation_order_;
     std::vector<IkConstraintData> ik_constraints_;
     std::vector<PathConstraintData> path_constraints_;
     std::vector<TransformConstraintData> transform_constraints_;
@@ -325,7 +348,7 @@ private:
 
 struct BonePose {
     BoneTransform local_pose;
-    BoneInheritFlags inherit{};
+    BoneInherit inherit{BoneInherit::Normal};
 };
 
 struct BoneWorldTransform {
@@ -425,6 +448,7 @@ private:
 };
 
 using AnimationEventCallback = std::function<void(const AnimationEvent& event)>;
+using SkeletonErrorCallback = std::function<void(std::string_view message)>;
 
 std::optional<std::size_t> sample_sequence_frame(
     const AttachmentSequenceData& sequence,
@@ -435,8 +459,15 @@ public:
     explicit Skeleton(std::shared_ptr<const SkeletonData> data);
 
     const std::shared_ptr<const SkeletonData>& data() const;
+    void set_error_callback(SkeletonErrorCallback callback);
+    const std::optional<std::string>& last_error() const;
+    void clear_last_error();
+    void set_scale(double scale_x, double scale_y);
+    double scale_x() const;
+    double scale_y() const;
     void prepare_animation_pose();
     void set_to_setup_pose();
+    void reset_physics();
     void apply_animation(const AnimationData& animation, double time);
     void apply_animation(
         const AnimationData& animation,
@@ -447,7 +478,7 @@ public:
     void set_attachment_playback_time(double time_seconds);
     void advance_attachment_playback(double delta_seconds);
     double attachment_playback_time() const;
-    void update_world_transforms();
+    void update_world_transforms(PhysicsMode physics = PhysicsMode::Pose);
     const std::vector<BonePose>& bone_poses() const;
     std::vector<BonePose>& bone_poses();
     const std::vector<BoneWorldTransform>& bone_world_transforms() const;
@@ -472,20 +503,42 @@ public:
     std::optional<MeshAttachmentPose> evaluate_current_mesh_attachment(std::size_t slot_index) const;
 
 private:
+    friend class AnimationState;
+
     struct PhysicsBoneState {
-        AttachmentVertex tip_position{};
-        AttachmentVertex tip_velocity{};
-        bool initialized{false};
+        double ux{0.0};
+        double uy{0.0};
+        double cx{0.0};
+        double cy{0.0};
+        double tx{0.0};
+        double ty{0.0};
+        double x_offset{0.0};
+        double x_velocity{0.0};
+        double y_offset{0.0};
+        double y_velocity{0.0};
+        double rotate_offset{0.0};
+        double rotate_velocity{0.0};
+        double scale_offset{0.0};
+        double scale_velocity{0.0};
     };
 
     struct PhysicsConstraintState {
         std::vector<PhysicsBoneState> bones;
+        double remaining{0.0};
+        bool reset{true};
     };
 
     void apply_setup_attachments();
     void apply_active_skin_attachments();
+    bool apply_slot_attachment_keyframe(
+        std::size_t slot_index,
+        const std::optional<std::string>& attachment_name);
     bool apply_skin_indices(const std::vector<std::size_t>& skin_indices);
     void update_active_skin_scopes(const std::vector<std::size_t>& skin_indices);
+    const AttachmentData* resolve_current_attachment(
+        std::size_t slot_index,
+        bool report_errors) const;
+    void report_error(std::string message) const;
     void reset_physics_state();
 
     std::shared_ptr<const SkeletonData> data_;
@@ -501,8 +554,12 @@ private:
     std::vector<bool> active_transform_constraints_;
     std::vector<bool> active_physics_constraints_;
     std::vector<PhysicsConstraintState> physics_constraint_states_;
+    double scale_x_{1.0};
+    double scale_y_{1.0};
     double pending_physics_delta_seconds_{0.0};
     double attachment_playback_time_{0.0};
+    mutable SkeletonErrorCallback error_callback_;
+    mutable std::optional<std::string> last_error_;
 
     void reset_to_setup_pose_state(bool reset_slots_and_draw_order);
 };
@@ -516,13 +573,32 @@ struct SkeletonDataResult {
     }
 };
 
-// `.mbin` is the compact runtime skeleton encoding: varint counts and indices,
-// float32 numbers, a shared string table, and packed boolean payloads.
+struct BinaryAnimationOptimizationOptions {
+    double rotation_error_tolerance_degrees{0.05};
+    double translation_error_tolerance{0.25};
+};
+
+struct SkeletonBinaryInspection {
+    std::uint64_t binary_version{0};
+    bool has_optimized_animation_section{false};
+    std::size_t animation_count{0};
+    std::size_t rotate_channel_count{0};
+    std::size_t translate_channel_count{0};
+    std::size_t optimized_keyframe_count{0};
+    bool keyframes_sorted_by_time_and_bone{false};
+};
+
+// `.mbin` stores the exact validated runtime document plus a versioned packed
+// animation payload for quantized rotate/translate playback data.
 std::string_view skeleton_binary_extension();
 json::LoadResult load_skeleton_document(const std::filesystem::path& path);
 std::optional<json::LoadError> write_skeleton_binary_document(
     const json::Document& document,
-    const std::filesystem::path& path);
+    const std::filesystem::path& path,
+    const BinaryAnimationOptimizationOptions& options = {});
+std::optional<json::LoadError> inspect_skeleton_binary(
+    const std::filesystem::path& path,
+    SkeletonBinaryInspection* inspection_out);
 
 SkeletonDataResult load_skeleton_data(const json::Document& document);
 SkeletonDataResult load_skeleton_data(const std::filesystem::path& path);

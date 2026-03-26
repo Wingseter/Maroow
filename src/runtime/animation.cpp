@@ -182,7 +182,7 @@ std::optional<double> sample_rotate_timeline(
     }
 
     if (timeline.keyframes.size() == 1 || time <= timeline.keyframes.front().time) {
-        return timeline.keyframes.front().angle;
+        return timeline.setup_rotation + timeline.keyframes.front().angle;
     }
 
     for (std::size_t index = 1; index < timeline.keyframes.size(); ++index) {
@@ -191,7 +191,7 @@ std::optional<double> sample_rotate_timeline(
         if (time < current.time) {
             const double range = current.time - previous.time;
             const double alpha = range > 0.0 ? (time - previous.time) / range : 0.0;
-            return interpolate_value(
+            return timeline.setup_rotation + interpolate_value(
                 previous.angle,
                 current.angle,
                 previous.interpolation,
@@ -199,7 +199,7 @@ std::optional<double> sample_rotate_timeline(
         }
     }
 
-    return timeline.keyframes.back().angle;
+    return timeline.setup_rotation + timeline.keyframes.back().angle;
 }
 
 const InheritKeyframe* sample_inherit_timeline(
