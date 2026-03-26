@@ -80,6 +80,9 @@ struct IkConstraintEdit {
     std::string target_bone_name;
     double mix{1.0};
     bool bend_positive{true};
+    double softness{0.0};
+    bool compress{false};
+    bool stretch{false};
 };
 
 struct PathConstraintEdit {
@@ -108,9 +111,17 @@ struct TransformConstraintEdit {
 struct PhysicsConstraintEdit {
     std::string name;
     std::vector<std::string> bone_names;
+    double step{1.0 / 60.0};
+    double x{1.0};
+    double y{1.0};
+    double rotate{1.0};
+    double scale_x{1.0};
+    double shear_x{0.0};
+    double limit{500.0};
     double inertia{0.0};
     double damping{0.0};
     double strength{0.0};
+    double mass_inverse{1.0};
     runtime::AttachmentVertex gravity{};
     runtime::AttachmentVertex wind{};
     double mix{1.0};
@@ -248,6 +259,32 @@ struct ProjectExportResult {
     }
 };
 
+struct ProjectCommand {
+    std::string label;
+    ProjectData before_project;
+    ProjectData after_project;
+    std::string before_serialized;
+    std::string after_serialized;
+};
+
+class ProjectCommandStack {
+public:
+    bool can_undo() const;
+    bool can_redo() const;
+    std::size_t undo_count() const;
+    std::size_t redo_count() const;
+    void clear();
+    const ProjectCommand* peek_undo() const;
+    const ProjectCommand* peek_redo() const;
+    void push(ProjectCommand command);
+    void commit_undo();
+    void commit_redo();
+
+private:
+    std::vector<ProjectCommand> undo_commands_;
+    std::vector<ProjectCommand> redo_commands_;
+};
+
 struct ProjectExportOptions {
     std::filesystem::path skeleton_output_path;
     std::optional<std::filesystem::path> binary_output_path;
@@ -270,6 +307,11 @@ ProjectLoadResult load_project(const std::filesystem::path& path);
 ProjectRuntimeResult build_project_runtime(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document);
+std::string serialize_project(const ProjectData& project);
+std::optional<ProjectCommand> make_project_command(
+    std::string label,
+    const ProjectData& before_project,
+    const ProjectData& after_project);
 ProjectSaveResult save_project(const ProjectData& project, const std::filesystem::path& path);
 ProjectExportResult export_runtime_assets(
     const ProjectData& project,

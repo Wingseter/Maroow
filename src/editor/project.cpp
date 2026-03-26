@@ -108,6 +108,27 @@ std::optional<LoadError> read_optional_number(
     return std::nullopt;
 }
 
+std::optional<LoadError> read_optional_boolean(
+    const Document& document,
+    const Value& object,
+    std::string_view key,
+    std::string_view json_path,
+    bool* value_out) {
+    const Value* member = find_optional_member(object, key);
+    if (member == nullptr) {
+        return std::nullopt;
+    }
+
+    const std::string member_path = std::string(json_path) + "." + std::string(key);
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *member, Value::Type::Boolean, member_path)) {
+        return error;
+    }
+
+    *value_out = member->as_boolean();
+    return std::nullopt;
+}
+
 std::optional<LoadError> read_optional_integer(
     const Document& document,
     const Value& object,
@@ -1359,6 +1380,10 @@ std::optional<LoadError> parse_ik_constraint_edits(
                 path + ".mix",
                 "ik constraint edit mix must stay within [0, 1]");
         }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "softness", path, &edit.softness)) {
+            return error;
+        }
         const Value* bend_positive = find_optional_member(constraint_value, "bendPositive");
         if (bend_positive != nullptr) {
             if (const auto error = marrow::runtime::json::require_type(
@@ -1369,6 +1394,14 @@ std::optional<LoadError> parse_ik_constraint_edits(
                 return error;
             }
             edit.bend_positive = bend_positive->as_boolean();
+        }
+        if (const auto error = read_optional_boolean(
+                document, constraint_value, "compress", path, &edit.compress)) {
+            return error;
+        }
+        if (const auto error = read_optional_boolean(
+                document, constraint_value, "stretch", path, &edit.stretch)) {
+            return error;
         }
 
         edits.push_back(std::move(edit));
@@ -1837,6 +1870,83 @@ std::optional<LoadError> parse_physics_constraint_edits(
         }
 
         if (const auto error = read_optional_number(
+                document, constraint_value, "step", json_path, &edit.step)) {
+            return error;
+        }
+        if (edit.step <= 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".step",
+                "physics constraint edit step must be greater than zero");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "x", json_path, &edit.x)) {
+            return error;
+        }
+        if (edit.x < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".x",
+                "physics constraint edit x must be non-negative");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "y", json_path, &edit.y)) {
+            return error;
+        }
+        if (edit.y < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".y",
+                "physics constraint edit y must be non-negative");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "rotate", json_path, &edit.rotate)) {
+            return error;
+        }
+        if (edit.rotate < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".rotate",
+                "physics constraint edit rotate must be non-negative");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "scaleX", json_path, &edit.scale_x)) {
+            return error;
+        }
+        if (edit.scale_x < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".scaleX",
+                "physics constraint edit scaleX must be non-negative");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "shearX", json_path, &edit.shear_x)) {
+            return error;
+        }
+        if (edit.shear_x < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".shearX",
+                "physics constraint edit shearX must be non-negative");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "limit", json_path, &edit.limit)) {
+            return error;
+        }
+        if (edit.limit < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".limit",
+                "physics constraint edit limit must be non-negative");
+        }
+        if (const auto error = read_optional_number(
                 document, constraint_value, "inertia", json_path, &edit.inertia)) {
             return error;
         }
@@ -1868,6 +1978,17 @@ std::optional<LoadError> parse_physics_constraint_edits(
                 constraint_value.location(),
                 json_path + ".strength",
                 "physics constraint edit strength must be non-negative");
+        }
+        if (const auto error = read_optional_number(
+                document, constraint_value, "massInverse", json_path, &edit.mass_inverse)) {
+            return error;
+        }
+        if (edit.mass_inverse < 0.0) {
+            return validation_error(
+                document,
+                constraint_value.location(),
+                json_path + ".massInverse",
+                "physics constraint edit massInverse must be non-negative");
         }
         if (const auto error = parse_optional_xy_vector(
                 document, constraint_value, "gravity", json_path, &edit.gravity)) {
@@ -2001,6 +2122,9 @@ Value build_ik_constraint_edits_value(const std::vector<IkConstraintEdit>& edits
         constraint_object.emplace("target", make_string_value(edit.target_bone_name));
         constraint_object.emplace("mix", make_number_value(edit.mix));
         constraint_object.emplace("bendPositive", make_boolean_value(edit.bend_positive));
+        constraint_object.emplace("softness", make_number_value(edit.softness));
+        constraint_object.emplace("compress", make_boolean_value(edit.compress));
+        constraint_object.emplace("stretch", make_boolean_value(edit.stretch));
         constraints.push_back(make_object_value(std::move(constraint_object)));
     }
 
@@ -2077,9 +2201,17 @@ Value build_physics_constraint_edits_value(const std::vector<PhysicsConstraintEd
             bones.push_back(make_string_value(bone_name));
         }
         constraint_object.emplace("bones", make_array_value(std::move(bones)));
+        constraint_object.emplace("step", make_number_value(edit.step));
+        constraint_object.emplace("x", make_number_value(edit.x));
+        constraint_object.emplace("y", make_number_value(edit.y));
+        constraint_object.emplace("rotate", make_number_value(edit.rotate));
+        constraint_object.emplace("scaleX", make_number_value(edit.scale_x));
+        constraint_object.emplace("shearX", make_number_value(edit.shear_x));
+        constraint_object.emplace("limit", make_number_value(edit.limit));
         constraint_object.emplace("inertia", make_number_value(edit.inertia));
         constraint_object.emplace("damping", make_number_value(edit.damping));
         constraint_object.emplace("strength", make_number_value(edit.strength));
+        constraint_object.emplace("massInverse", make_number_value(edit.mass_inverse));
         Value::Object gravity_object;
         gravity_object.emplace("x", make_number_value(edit.gravity.x));
         gravity_object.emplace("y", make_number_value(edit.gravity.y));
@@ -2365,7 +2497,7 @@ Document build_runtime_document(
     return document;
 }
 
-std::string serialize_project(const ProjectData& project) {
+std::string serialize_project_snapshot(const ProjectData& project) {
     return marrow::runtime::json::serialize_pretty(build_project_value(project));
 }
 
@@ -2671,8 +2803,13 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
             error_out->message = "physics constraint edits require a name and bone chain";
             return false;
         }
-        if (edit.inertia < 0.0 || edit.inertia > 1.0 ||
+        if (edit.step <= 0.0 ||
+            edit.x < 0.0 || edit.y < 0.0 ||
+            edit.rotate < 0.0 || edit.scale_x < 0.0 ||
+            edit.shear_x < 0.0 || edit.limit < 0.0 ||
+            edit.inertia < 0.0 || edit.inertia > 1.0 ||
             edit.damping < 0.0 || edit.strength < 0.0 ||
+            edit.mass_inverse < 0.0 ||
             edit.mix < 0.0 || edit.mix > 1.0) {
             error_out->message =
                 "physics constraint edit numeric values must stay within their valid ranges";
@@ -2864,6 +3001,81 @@ bool export_atlas_asset(
 }
 
 } // namespace
+
+std::string serialize_project(const ProjectData& project) {
+    return serialize_project_snapshot(project);
+}
+
+std::optional<ProjectCommand> make_project_command(
+    std::string label,
+    const ProjectData& before_project,
+    const ProjectData& after_project) {
+    const std::string before_serialized = serialize_project_snapshot(before_project);
+    const std::string after_serialized = serialize_project_snapshot(after_project);
+    if (before_serialized == after_serialized) {
+        return std::nullopt;
+    }
+
+    ProjectCommand command;
+    command.label = std::move(label);
+    command.before_project = before_project;
+    command.after_project = after_project;
+    command.before_serialized = before_serialized;
+    command.after_serialized = after_serialized;
+    return command;
+}
+
+bool ProjectCommandStack::can_undo() const {
+    return !undo_commands_.empty();
+}
+
+bool ProjectCommandStack::can_redo() const {
+    return !redo_commands_.empty();
+}
+
+std::size_t ProjectCommandStack::undo_count() const {
+    return undo_commands_.size();
+}
+
+std::size_t ProjectCommandStack::redo_count() const {
+    return redo_commands_.size();
+}
+
+void ProjectCommandStack::clear() {
+    undo_commands_.clear();
+    redo_commands_.clear();
+}
+
+const ProjectCommand* ProjectCommandStack::peek_undo() const {
+    return undo_commands_.empty() ? nullptr : &undo_commands_.back();
+}
+
+const ProjectCommand* ProjectCommandStack::peek_redo() const {
+    return redo_commands_.empty() ? nullptr : &redo_commands_.back();
+}
+
+void ProjectCommandStack::push(ProjectCommand command) {
+    undo_commands_.push_back(std::move(command));
+    redo_commands_.clear();
+}
+
+void ProjectCommandStack::commit_undo() {
+    if (undo_commands_.empty()) {
+        return;
+    }
+
+    redo_commands_.push_back(std::move(undo_commands_.back()));
+    undo_commands_.pop_back();
+}
+
+void ProjectCommandStack::commit_redo() {
+    if (redo_commands_.empty()) {
+        return;
+    }
+
+    undo_commands_.push_back(std::move(redo_commands_.back()));
+    redo_commands_.pop_back();
+}
 
 std::filesystem::path ProjectData::resolve_path(const std::filesystem::path& referenced_path) const {
     if (referenced_path.empty()) {

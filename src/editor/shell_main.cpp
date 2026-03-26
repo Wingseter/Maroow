@@ -15,11 +15,19 @@
 #include <system_error>
 #include <vector>
 
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+
+#if defined(__APPLE__)
+#include <OpenGL/gl3.h>
+#else
+#include <GL/glcorearb.h>
+#endif
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "imgui_internal.h"
 
 #include "marrow/editor/module.hpp"
 #include "marrow/editor/project.hpp"
@@ -59,8 +67,46 @@ struct ViewportLayout {
     double world_center_x{0.0};
     double world_center_y{0.0};
     float pixels_per_unit{1.0f};
-    float joint_radius{6.0f};
+    float render_joint_radius{6.0f};
     std::vector<BoneCanvasNode> bones;
+};
+
+struct ViewportRenderVertex {
+    float position_x{0.0f};
+    float position_y{0.0f};
+    float color_r{0.0f};
+    float color_g{0.0f};
+    float color_b{0.0f};
+    float color_a{0.0f};
+};
+
+struct ViewportFramebufferSize {
+    int width{0};
+    int height{0};
+};
+
+struct ViewportRenderResources {
+    bool available{false};
+    bool initialization_attempted{false};
+    GLuint framebuffer{0};
+    GLuint color_texture{0};
+    GLuint program{0};
+    GLuint vertex_shader{0};
+    GLuint fragment_shader{0};
+    GLuint vao{0};
+    GLuint vbo{0};
+    GLint view_size_location{-1};
+    int framebuffer_width{0};
+    int framebuffer_height{0};
+    std::string error_message;
+};
+
+struct DockLayoutState {
+    ImGuiID dockspace_id{0};
+    ImGuiID viewport_node_id{0};
+    ImGuiID timeline_node_id{0};
+    ImGuiID hierarchy_node_id{0};
+    ImGuiID properties_node_id{0};
 };
 
 struct AttachmentSelection {
@@ -112,10 +158,125 @@ struct ConstraintSelection {
     std::string name;
 };
 
+struct ShellState;
+
+struct EditorHistorySnapshot {
+    marrow::editor::ProjectData project;
+    std::string serialized_project;
+    std::vector<std::string> preview_skin_names;
+    std::vector<std::optional<AttachmentSelection>> preview_slot_overrides;
+};
+
+enum class EditActionKind {
+    MoveBone,
+    AddKeyframe,
+    RemoveKeyframe,
+    EditProperty,
+};
+
+class EditAction {
+public:
+    EditAction(
+        EditActionKind kind,
+        std::string label,
+        std::string group,
+        bool allow_merge);
+    virtual ~EditAction() = default;
+
+    EditActionKind kind() const;
+    const std::string& label() const;
+    const std::string& group() const;
+    bool allow_merge() const;
+
+    virtual bool undo(ShellState* state) const = 0;
+    virtual bool redo(ShellState* state) const = 0;
+    virtual bool merge_from(const EditAction& action) = 0;
+
+protected:
+    EditActionKind kind_;
+    std::string label_;
+    std::string group_;
+    bool allow_merge_{false};
+};
+
+bool apply_history_snapshot(ShellState* state, const EditorHistorySnapshot& snapshot);
+
+class SnapshotEditAction : public EditAction {
+public:
+    SnapshotEditAction(
+        EditActionKind kind,
+        std::string label,
+        std::string group,
+        bool allow_merge,
+        EditorHistorySnapshot before,
+        EditorHistorySnapshot after);
+
+    bool undo(ShellState* state) const override;
+    bool redo(ShellState* state) const override;
+    bool merge_from(const EditAction& action) override;
+
+private:
+    EditorHistorySnapshot before_;
+    EditorHistorySnapshot after_;
+};
+
+class MoveBoneAction final : public SnapshotEditAction {
+public:
+    using SnapshotEditAction::SnapshotEditAction;
+};
+
+class AddKeyframeAction final : public SnapshotEditAction {
+public:
+    using SnapshotEditAction::SnapshotEditAction;
+};
+
+class RemoveKeyframeAction final : public SnapshotEditAction {
+public:
+    using SnapshotEditAction::SnapshotEditAction;
+};
+
+class EditPropertyAction final : public SnapshotEditAction {
+public:
+    using SnapshotEditAction::SnapshotEditAction;
+};
+
+class UndoStack {
+public:
+    bool can_undo() const;
+    bool can_redo() const;
+    std::size_t undo_count() const;
+    std::size_t redo_count() const;
+    void clear();
+    const EditAction* peek_undo() const;
+    const EditAction* peek_redo() const;
+    void push(std::unique_ptr<EditAction> action);
+    bool undo(ShellState* state, std::string* label_out);
+    bool redo(ShellState* state, std::string* label_out);
+
+private:
+    static constexpr std::size_t kMaxDepth = 100U;
+
+    std::vector<std::unique_ptr<EditAction>> undo_actions_;
+    std::vector<std::unique_ptr<EditAction>> redo_actions_;
+};
+
+struct PendingEditAction {
+    ImGuiID item_id{0};
+    EditActionKind kind{EditActionKind::EditProperty};
+    std::string label;
+    std::string group;
+    bool allow_merge{false};
+    EditorHistorySnapshot before_snapshot;
+};
+
 struct ShellState {
     std::filesystem::path project_path;
     marrow::editor::ViewportState viewport{};
     marrow::editor::ProjectLoadResult load_result{};
+    UndoStack command_stack;
+    std::optional<PendingEditAction> pending_edit_action;
+    ViewportRenderResources viewport_renderer{};
+    DockLayoutState dock_layout{};
     std::unique_ptr<marrow::runtime::Skeleton> preview_skeleton;
     std::unique_ptr<marrow::runtime::AnimationState> animation_state;
     std::optional<std::size_t> selected_bone_index;
@@ -140,9 +301,50 @@ struct ShellState {
     std::vector<marrow::runtime::AnimationEvent> preview_events;
     bool export_binary_output{false};
     bool project_dirty{false};
+    bool default_dock_layout_initialized{false};
+    std::string saved_project_snapshot;
     std::string status_message;
     std::string error_message;
 };
+
+constexpr char kProjectWindowTitle[] = "Project";
+constexpr char kRuntimeAssetsWindowTitle[] = "Runtime Assets";
+constexpr char kConstraintsWindowTitle[] = "Constraints";
+constexpr char kHierarchyWindowTitle[] = "Hierarchy";
+constexpr char kTimelineWindowTitle[] = "Timeline";
+constexpr char kViewportWindowTitle[] = "Viewport";
+constexpr char kPropertiesWindowTitle[] = "Properties";
+constexpr float kBoneJointHitRadiusPixels = 6.0f;
+constexpr float kBoneBodyHitThresholdPixels = 8.0f;
+constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};
+constexpr ImVec2 kViewportImageUv1{1.0f, 0.0f};
+constexpr float kPi = 3.14159265358979323846f;
+constexpr const char* kViewportVertexShaderSource = R"(#version 150
+in vec2 a_position;
+in vec4 a_color;
+
+uniform vec2 u_view_size;
+
+out vec4 v_color;
+
+void main() {
+    vec2 normalized_position = vec2(
+        (a_position.x / u_view_size.x) * 2.0 - 1.0,
+        1.0 - ((a_position.y / u_view_size.y) * 2.0));
+    v_color = a_color;
+    gl_Position = vec4(normalized_position, 0.0, 1.0);
+}
+)";
+
+constexpr const char* kViewportFragmentShaderSource = R"(#version 150
+in vec4 v_color;
+
+out vec4 frag_color;
+
+void main() {
+    frag_color = v_color;
+}
+)";
 
 const char* yes_no(bool value);
 std::optional<std::string_view> default_skin_name(
@@ -209,7 +411,71 @@ bool timeline_track_matches_selection(
     const TimelineTrackRow& track);
 const char* constraint_kind_label(ConstraintEditKind kind);
 void draw_constraints_window(ShellState* state);
+EditorHistorySnapshot capture_history_snapshot(
+    const ShellState& state,
+    bool include_serialized_project = true);
+bool history_snapshots_equal(
+    const EditorHistorySnapshot& left,
+    const EditorHistorySnapshot& right);
+void restore_history_snapshot(
+    ShellState* state,
+    const EditorHistorySnapshot& snapshot);
+std::unique_ptr<EditAction> make_edit_action(
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    const EditorHistorySnapshot& before,
+    const EditorHistorySnapshot& after);
+bool record_action_from_snapshots(
+    ShellState* state,
+    const EditorHistorySnapshot& before,
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge);
 bool rebuild_project_runtime(ShellState* state);
+std::optional<std::string> initialize_viewport_renderer(
+    ViewportRenderResources* resources);
+void destroy_viewport_renderer(ViewportRenderResources* resources);
+ViewportFramebufferSize viewport_framebuffer_size(
+    const ImVec2& canvas_size,
+    const ImVec2& framebuffer_scale);
+std::optional<std::string> ensure_viewport_framebuffer(
+    ViewportRenderResources* resources,
+    int width,
+    int height);
+std::optional<std::string> render_viewport_framebuffer(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    ViewportRenderResources* resources);
+void draw_viewport_fallback_scene(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    ImDrawList* draw_list);
+void draw_viewport_annotations(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    ImDrawList* draw_list);
+void ensure_default_dock_layout(
+    ShellState* state,
+    ImGuiID dockspace_id,
+    const ImGuiViewport* viewport);
+void update_project_dirty_state(ShellState* state);
+bool apply_project_command_change(
+    ShellState* state,
+    const marrow::editor::ProjectData& previous_project,
+    EditActionKind kind,
+    std::string command_label,
+    std::string group,
+    bool allow_merge,
+    std::string failure_status);
+bool undo_project_change(ShellState* state);
+bool redo_project_change(ShellState* state);
+void handle_project_history_shortcuts(ShellState* state);
 bool save_project_file(ShellState* state, bool update_status_message);
 bool export_runtime_assets_file(ShellState* state, bool update_status_message);
 bool refresh_preview_pose(ShellState* state);
@@ -448,6 +714,355 @@ void apply_editor_theme() {
     style.ItemSpacing = ImVec2(8.0f, 6.0f);
 }
 
+std::optional<std::string> shader_log(GLuint shader) {
+    GLint log_length = 0;
+    glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
+    if (log_length <= 1) {
+        return std::nullopt;
+    }
+
+    std::string log(static_cast<std::size_t>(log_length), '\0');
+    glGetShaderInfoLog(shader, log_length, nullptr, log.data());
+    if (!log.empty() && log.back() == '\0') {
+        log.pop_back();
+    }
+    return log;
+}
+
+std::optional<std::string> program_log(GLuint program) {
+    GLint log_length = 0;
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_length);
+    if (log_length <= 1) {
+        return std::nullopt;
+    }
+
+    std::string log(static_cast<std::size_t>(log_length), '\0');
+    glGetProgramInfoLog(program, log_length, nullptr, log.data());
+    if (!log.empty() && log.back() == '\0') {
+        log.pop_back();
+    }
+    return log;
+}
+
+void destroy_viewport_framebuffer(ViewportRenderResources* resources) {
+    if (resources->color_texture != 0) {
+        glDeleteTextures(1, &resources->color_texture);
+        resources->color_texture = 0;
+    }
+    if (resources->framebuffer != 0) {
+        glDeleteFramebuffers(1, &resources->framebuffer);
+        resources->framebuffer = 0;
+    }
+    resources->framebuffer_width = 0;
+    resources->framebuffer_height = 0;
+}
+
+std::optional<std::string> compile_viewport_shader(
+    GLenum shader_type,
+    const char* source,
+    GLuint* shader_out) {
+    GLuint shader = glCreateShader(shader_type);
+    if (shader == 0) {
+        return "Failed to allocate a viewport shader object.";
+    }
+
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint compile_status = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compile_status);
+    if (compile_status == GL_TRUE) {
+        *shader_out = shader;
+        return std::nullopt;
+    }
+
+    std::string error = "Viewport shader compilation failed.";
+    if (const auto log = shader_log(shader)) {
+        error += " ";
+        error += *log;
+    }
+    glDeleteShader(shader);
+    return error;
+}
+
+std::optional<std::string> link_viewport_program(ViewportRenderResources* resources) {
+    resources->program = glCreateProgram();
+    if (resources->program == 0) {
+        return "Failed to allocate the viewport shader program.";
+    }
+
+    glAttachShader(resources->program, resources->vertex_shader);
+    glAttachShader(resources->program, resources->fragment_shader);
+    glBindAttribLocation(resources->program, 0, "a_position");
+    glBindAttribLocation(resources->program, 1, "a_color");
+    glBindFragDataLocation(resources->program, 0, "frag_color");
+    glLinkProgram(resources->program);
+
+    GLint link_status = GL_FALSE;
+    glGetProgramiv(resources->program, GL_LINK_STATUS, &link_status);
+    if (link_status != GL_TRUE) {
+        std::string error = "Viewport shader program link failed.";
+        if (const auto log = program_log(resources->program)) {
+            error += " ";
+            error += *log;
+        }
+        return error;
+    }
+
+    resources->view_size_location =
+        glGetUniformLocation(resources->program, "u_view_size");
+    if (resources->view_size_location < 0) {
+        return "Viewport shader program did not expose u_view_size.";
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string> initialize_viewport_renderer(
+    ViewportRenderResources* resources) {
+    if (resources == nullptr) {
+        return "Viewport renderer state is unavailable.";
+    }
+
+    resources->initialization_attempted = true;
+    resources->error_message.clear();
+    if (resources->available) {
+        return std::nullopt;
+    }
+
+    if (const auto error = compile_viewport_shader(
+            GL_VERTEX_SHADER,
+            kViewportVertexShaderSource,
+            &resources->vertex_shader)) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+    if (const auto error = compile_viewport_shader(
+            GL_FRAGMENT_SHADER,
+            kViewportFragmentShaderSource,
+            &resources->fragment_shader)) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+    if (const auto error = link_viewport_program(resources)) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+
+    glGenVertexArrays(1, &resources->vao);
+    glGenBuffers(1, &resources->vbo);
+    if (resources->vao == 0 || resources->vbo == 0) {
+        resources->error_message = "Failed to allocate viewport mesh buffers.";
+        destroy_viewport_renderer(resources);
+        return resources->error_message;
+    }
+
+    glBindVertexArray(resources->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(
+        0,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(ViewportRenderVertex),
+        reinterpret_cast<const void*>(offsetof(ViewportRenderVertex, position_x)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1,
+        4,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(ViewportRenderVertex),
+        reinterpret_cast<const void*>(offsetof(ViewportRenderVertex, color_r)));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    resources->available = true;
+    return std::nullopt;
+}
+
+void destroy_viewport_renderer(ViewportRenderResources* resources) {
+    if (resources == nullptr) {
+        return;
+    }
+
+    destroy_viewport_framebuffer(resources);
+    if (resources->vbo != 0) {
+        glDeleteBuffers(1, &resources->vbo);
+        resources->vbo = 0;
+    }
+    if (resources->vao != 0) {
+        glDeleteVertexArrays(1, &resources->vao);
+        resources->vao = 0;
+    }
+    if (resources->program != 0) {
+        glDeleteProgram(resources->program);
+        resources->program = 0;
+    }
+    if (resources->vertex_shader != 0) {
+        glDeleteShader(resources->vertex_shader);
+        resources->vertex_shader = 0;
+    }
+    if (resources->fragment_shader != 0) {
+        glDeleteShader(resources->fragment_shader);
+        resources->fragment_shader = 0;
+    }
+    resources->view_size_location = -1;
+    resources->available = false;
+}
+
+ViewportFramebufferSize viewport_framebuffer_size(
+    const ImVec2& canvas_size,
+    const ImVec2& framebuffer_scale) {
+    const float scale_x = framebuffer_scale.x > 0.0f ? framebuffer_scale.x : 1.0f;
+    const float scale_y = framebuffer_scale.y > 0.0f ? framebuffer_scale.y : 1.0f;
+
+    return ViewportFramebufferSize{
+        std::max(1, static_cast<int>(std::lround(std::max(canvas_size.x, 1.0f) * scale_x))),
+        std::max(1, static_cast<int>(std::lround(std::max(canvas_size.y, 1.0f) * scale_y)))};
+}
+
+std::optional<std::string> ensure_viewport_framebuffer(
+    ViewportRenderResources* resources,
+    int width,
+    int height) {
+    if (resources == nullptr) {
+        return "Viewport renderer state is unavailable.";
+    }
+    if (!resources->available) {
+        return resources->error_message.empty()
+            ? std::optional<std::string>("Viewport renderer is unavailable.")
+            : std::optional<std::string>(resources->error_message);
+    }
+    if (width <= 0 || height <= 0) {
+        return "Viewport framebuffer dimensions must be greater than zero.";
+    }
+    if (resources->framebuffer != 0 &&
+        resources->framebuffer_width == width &&
+        resources->framebuffer_height == height) {
+        return std::nullopt;
+    }
+
+    destroy_viewport_framebuffer(resources);
+
+    glGenFramebuffers(1, &resources->framebuffer);
+    glGenTextures(1, &resources->color_texture);
+    if (resources->framebuffer == 0 || resources->color_texture == 0) {
+        resources->error_message = "Failed to allocate viewport framebuffer resources.";
+        destroy_viewport_framebuffer(resources);
+        return resources->error_message;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, resources->framebuffer);
+    glBindTexture(GL_TEXTURE_2D, resources->color_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        width,
+        height,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        nullptr);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER,
+        GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D,
+        resources->color_texture,
+        0);
+
+    const GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
+        resources->error_message =
+            "Viewport framebuffer is incomplete (status " +
+            std::to_string(static_cast<unsigned int>(framebuffer_status)) + ").";
+        destroy_viewport_framebuffer(resources);
+        return resources->error_message;
+    }
+
+    resources->framebuffer_width = width;
+    resources->framebuffer_height = height;
+    resources->error_message.clear();
+    return std::nullopt;
+}
+
+void ensure_default_dock_layout(
+    ShellState* state,
+    ImGuiID dockspace_id,
+    const ImGuiViewport* viewport) {
+    if (state == nullptr || viewport == nullptr) {
+        return;
+    }
+
+    if (state->default_dock_layout_initialized &&
+        state->dock_layout.dockspace_id == dockspace_id &&
+        ImGui::DockBuilderGetNode(dockspace_id) != nullptr) {
+        return;
+    }
+
+    state->dock_layout = {};
+    state->dock_layout.dockspace_id = dockspace_id;
+
+    ImGui::DockBuilderRemoveNode(dockspace_id);
+    ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodePos(dockspace_id, viewport->WorkPos);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+    ImGuiID dock_center_id = dockspace_id;
+    ImGuiID dock_left_id = 0;
+    ImGuiID dock_bottom_id = 0;
+    ImGuiID dock_left_bottom_id = 0;
+    ImGui::DockBuilderSplitNode(
+        dock_center_id,
+        ImGuiDir_Left,
+        0.28f,
+        &dock_left_id,
+        &dock_center_id);
+    ImGui::DockBuilderSplitNode(
+        dock_center_id,
+        ImGuiDir_Down,
+        0.30f,
+        &dock_bottom_id,
+        &dock_center_id);
+    ImGui::DockBuilderSplitNode(
+        dock_left_id,
+        ImGuiDir_Down,
+        0.48f,
+        &dock_left_bottom_id,
+        &dock_left_id);
+
+    state->dock_layout.viewport_node_id = dock_center_id;
+    state->dock_layout.timeline_node_id = dock_bottom_id;
+    state->dock_layout.hierarchy_node_id = dock_left_id;
+    state->dock_layout.properties_node_id = dock_left_bottom_id;
+
+    ImGui::DockBuilderDockWindow(kViewportWindowTitle, state->dock_layout.viewport_node_id);
+    ImGui::DockBuilderDockWindow(kTimelineWindowTitle, state->dock_layout.timeline_node_id);
+    ImGui::DockBuilderDockWindow(kProjectWindowTitle, state->dock_layout.hierarchy_node_id);
+    ImGui::DockBuilderDockWindow(kHierarchyWindowTitle, state->dock_layout.hierarchy_node_id);
+    ImGui::DockBuilderDockWindow(
+        kRuntimeAssetsWindowTitle,
+        state->dock_layout.properties_node_id);
+    ImGui::DockBuilderDockWindow(
+        kConstraintsWindowTitle,
+        state->dock_layout.properties_node_id);
+    ImGui::DockBuilderDockWindow(kPropertiesWindowTitle, state->dock_layout.properties_node_id);
+    ImGui::DockBuilderFinish(dockspace_id);
+
+    state->default_dock_layout_initialized = true;
+}
+
 float clamp_zoom(float zoom) {
     return std::max(0.2f, std::min(zoom, 6.0f));
 }
@@ -609,6 +1224,412 @@ bool apply_preview_skin_selection(
             stream << " via " << source;
         }
         state->status_message = stream.str();
+    }
+
+    return true;
+}
+
+EditAction::EditAction(
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge)
+    : kind_(kind),
+      label_(std::move(label)),
+      group_(std::move(group)),
+      allow_merge_(allow_merge) {}
+
+EditActionKind EditAction::kind() const {
+    return kind_;
+}
+
+const std::string& EditAction::label() const {
+    return label_;
+}
+
+const std::string& EditAction::group() const {
+    return group_;
+}
+
+bool EditAction::allow_merge() const {
+    return allow_merge_;
+}
+
+SnapshotEditAction::SnapshotEditAction(
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    EditorHistorySnapshot before,
+    EditorHistorySnapshot after)
+    : EditAction(kind, std::move(label), std::move(group), allow_merge),
+      before_(std::move(before)),
+      after_(std::move(after)) {}
+
+bool SnapshotEditAction::undo(ShellState* state) const {
+    return apply_history_snapshot(state, before_);
+}
+
+bool SnapshotEditAction::redo(ShellState* state) const {
+    return apply_history_snapshot(state, after_);
+}
+
+bool SnapshotEditAction::merge_from(const EditAction& action) {
+    if (!allow_merge_ || group_.empty() || !action.allow_merge() ||
+        action.kind() != kind_ || action.group() != group_) {
+        return false;
+    }
+
+    const auto* snapshot_action = dynamic_cast<const SnapshotEditAction*>(&action);
+    if (snapshot_action == nullptr) {
+        return false;
+    }
+
+    after_ = snapshot_action->after_;
+    label_ = snapshot_action->label();
+    return true;
+}
+
+bool UndoStack::can_undo() const {
+    return !undo_actions_.empty();
+}
+
+bool UndoStack::can_redo() const {
+    return !redo_actions_.empty();
+}
+
+std::size_t UndoStack::undo_count() const {
+    return undo_actions_.size();
+}
+
+std::size_t UndoStack::redo_count() const {
+    return redo_actions_.size();
+}
+
+void UndoStack::clear() {
+    undo_actions_.clear();
+    redo_actions_.clear();
+}
+
+const EditAction* UndoStack::peek_undo() const {
+    return undo_actions_.empty() ? nullptr : undo_actions_.back().get();
+}
+
+const EditAction* UndoStack::peek_redo() const {
+    return redo_actions_.empty() ? nullptr : redo_actions_.back().get();
+}
+
+void UndoStack::push(std::unique_ptr<EditAction> action) {
+    if (!action) {
+        return;
+    }
+
+    redo_actions_.clear();
+    if (!undo_actions_.empty() && undo_actions_.back()->merge_from(*action)) {
+        return;
+    }
+
+    if (undo_actions_.size() >= kMaxDepth) {
+        undo_actions_.erase(undo_actions_.begin());
+    }
+    undo_actions_.push_back(std::move(action));
+}
+
+bool UndoStack::undo(ShellState* state, std::string* label_out) {
+    if (undo_actions_.empty()) {
+        return false;
+    }
+
+    std::unique_ptr<EditAction> action = std::move(undo_actions_.back());
+    undo_actions_.pop_back();
+    if (!action->undo(state)) {
+        undo_actions_.push_back(std::move(action));
+        return false;
+    }
+
+    if (label_out != nullptr) {
+        *label_out = action->label();
+    }
+    redo_actions_.push_back(std::move(action));
+    return true;
+}
+
+bool UndoStack::redo(ShellState* state, std::string* label_out) {
+    if (redo_actions_.empty()) {
+        return false;
+    }
+
+    std::unique_ptr<EditAction> action = std::move(redo_actions_.back());
+    redo_actions_.pop_back();
+    if (!action->redo(state)) {
+        redo_actions_.push_back(std::move(action));
+        return false;
+    }
+
+    if (label_out != nullptr) {
+        *label_out = action->label();
+    }
+    undo_actions_.push_back(std::move(action));
+    return true;
+}
+
+bool attachment_selection_equal(
+    const std::optional<AttachmentSelection>& left,
+    const std::optional<AttachmentSelection>& right) {
+    if (left.has_value() != right.has_value()) {
+        return false;
+    }
+    if (!left.has_value()) {
+        return true;
+    }
+
+    return left->slot_index == right->slot_index &&
+        left->skin_index == right->skin_index &&
+        left->attachment_name == right->attachment_name;
+}
+
+EditorHistorySnapshot capture_history_snapshot(
+    const ShellState& state,
+    bool include_serialized_project) {
+    EditorHistorySnapshot snapshot;
+    if (state.load_result.project != nullptr) {
+        snapshot.project = *state.load_result.project;
+        if (include_serialized_project) {
+            snapshot.serialized_project =
+                marrow::editor::serialize_project(*state.load_result.project);
+        }
+    }
+    snapshot.preview_skin_names = state.preview_skin_names;
+    snapshot.preview_slot_overrides = state.preview_slot_overrides;
+    return snapshot;
+}
+
+bool history_snapshots_equal(
+    const EditorHistorySnapshot& left,
+    const EditorHistorySnapshot& right) {
+    if (left.serialized_project != right.serialized_project ||
+        left.preview_skin_names != right.preview_skin_names ||
+        left.preview_slot_overrides.size() != right.preview_slot_overrides.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < left.preview_slot_overrides.size(); ++index) {
+        if (!attachment_selection_equal(
+                left.preview_slot_overrides[index],
+                right.preview_slot_overrides[index])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void assign_history_snapshot(
+    ShellState* state,
+    const EditorHistorySnapshot& snapshot) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return;
+    }
+
+    *state->load_result.project = snapshot.project;
+    state->preview_skin_names = snapshot.preview_skin_names;
+    state->preview_slot_overrides = snapshot.preview_slot_overrides;
+}
+
+void restore_history_snapshot(
+    ShellState* state,
+    const EditorHistorySnapshot& snapshot) {
+    if (state == nullptr) {
+        return;
+    }
+
+    assign_history_snapshot(state, snapshot);
+    rebuild_project_runtime(state);
+}
+
+bool apply_history_snapshot(ShellState* state, const EditorHistorySnapshot& snapshot) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    const EditorHistorySnapshot current = capture_history_snapshot(*state, false);
+    assign_history_snapshot(state, snapshot);
+    if (!rebuild_project_runtime(state)) {
+        const std::string rebuild_error = state->error_message;
+        restore_history_snapshot(state, current);
+        state->error_message = rebuild_error;
+        return false;
+    }
+
+    return true;
+}
+
+std::unique_ptr<EditAction> make_edit_action(
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    const EditorHistorySnapshot& before,
+    const EditorHistorySnapshot& after) {
+    if (history_snapshots_equal(before, after)) {
+        return nullptr;
+    }
+
+    switch (kind) {
+    case EditActionKind::MoveBone:
+        return std::make_unique<MoveBoneAction>(
+            kind,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            before,
+            after);
+    case EditActionKind::AddKeyframe:
+        return std::make_unique<AddKeyframeAction>(
+            kind,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            before,
+            after);
+    case EditActionKind::RemoveKeyframe:
+        return std::make_unique<RemoveKeyframeAction>(
+            kind,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            before,
+            after);
+    case EditActionKind::EditProperty:
+        return std::make_unique<EditPropertyAction>(
+            kind,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            before,
+            after);
+    }
+
+    return nullptr;
+}
+
+bool record_action_from_snapshots(
+    ShellState* state,
+    const EditorHistorySnapshot& before,
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    const EditorHistorySnapshot after = capture_history_snapshot(*state);
+    state->command_stack.push(
+        make_edit_action(
+            kind,
+            label,
+            std::move(group),
+            allow_merge,
+            before,
+            after));
+    update_project_dirty_state(state);
+    state->error_message.clear();
+    state->status_message = std::move(label);
+    return true;
+}
+
+template <typename MutateFn>
+bool execute_preview_edit_action(
+    ShellState* state,
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    std::string failure_status,
+    MutateFn mutate) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    const EditorHistorySnapshot before = capture_history_snapshot(*state);
+    mutate();
+    if (!refresh_preview_pose(state)) {
+        const std::string rebuild_error = state->error_message;
+        restore_history_snapshot(state, before);
+        state->error_message = rebuild_error;
+        state->status_message = std::move(failure_status);
+        return false;
+    }
+
+    if (state->selected_slot_index.has_value()) {
+        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
+    }
+    return record_action_from_snapshots(
+        state,
+        before,
+        kind,
+        std::move(label),
+        std::move(group),
+        allow_merge);
+}
+
+template <typename MutateFn>
+bool apply_coalesced_project_drag(
+    ShellState* state,
+    bool changed,
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    std::string failure_status,
+    MutateFn mutate) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    const ImGuiID item_id = ImGui::GetItemID();
+    if (ImGui::IsItemActivated()) {
+        state->pending_edit_action = PendingEditAction{
+            item_id,
+            kind,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            capture_history_snapshot(*state)};
+    }
+
+    if (changed) {
+        const EditorHistorySnapshot rollback = capture_history_snapshot(*state, false);
+        mutate();
+        if (!rebuild_project_runtime(state)) {
+            const std::string rebuild_error = state->error_message;
+            restore_history_snapshot(state, rollback);
+            state->pending_edit_action.reset();
+            state->error_message = rebuild_error;
+            state->status_message = std::move(failure_status);
+            return false;
+        }
+    }
+
+    if (ImGui::IsItemDeactivatedAfterEdit() &&
+        state->pending_edit_action.has_value() &&
+        state->pending_edit_action->item_id == item_id) {
+        PendingEditAction pending = std::move(*state->pending_edit_action);
+        state->pending_edit_action.reset();
+        return record_action_from_snapshots(
+            state,
+            pending.before_snapshot,
+            pending.kind,
+            std::move(pending.label),
+            std::move(pending.group),
+            pending.allow_merge);
+    }
+
+    if (ImGui::IsItemDeactivated() &&
+        state->pending_edit_action.has_value() &&
+        state->pending_edit_action->item_id == item_id) {
+        state->pending_edit_action.reset();
     }
 
     return true;
@@ -853,6 +1874,9 @@ std::optional<marrow::editor::IkConstraintEdit> make_ik_constraint_edit_from_run
         state.load_result.skeleton_data->bones()[constraint->target_bone_index].name;
     edit.mix = constraint->mix;
     edit.bend_positive = constraint->bend_positive;
+    edit.softness = constraint->softness;
+    edit.compress = constraint->compress;
+    edit.stretch = constraint->stretch;
     return edit;
 }
 
@@ -941,9 +1965,17 @@ std::optional<marrow::editor::PhysicsConstraintEdit> make_physics_constraint_edi
         }
         edit.bone_names.push_back(state.load_result.skeleton_data->bones()[bone_index].name);
     }
+    edit.step = constraint->step;
+    edit.x = constraint->x;
+    edit.y = constraint->y;
+    edit.rotate = constraint->rotate;
+    edit.scale_x = constraint->scale_x;
+    edit.shear_x = constraint->shear_x;
+    edit.limit = constraint->limit;
     edit.inertia = constraint->inertia;
     edit.damping = constraint->damping;
     edit.strength = constraint->strength;
+    edit.mass_inverse = constraint->mass_inverse;
     edit.gravity = constraint->gravity;
     edit.wind = constraint->wind;
     edit.mix = constraint->mix;
@@ -1155,9 +2187,17 @@ std::optional<marrow::editor::PhysicsConstraintEdit> make_default_physics_constr
     if (edit.bone_names.empty()) {
         return std::nullopt;
     }
+    edit.step = 1.0 / 60.0;
+    edit.x = 1.0;
+    edit.y = 1.0;
+    edit.rotate = 1.0;
+    edit.scale_x = 1.0;
+    edit.shear_x = 0.0;
+    edit.limit = 30.0;
     edit.inertia = 0.85;
     edit.damping = 4.0;
     edit.strength = 18.0;
+    edit.mass_inverse = 1.0;
     edit.gravity = {0.0, -24.0};
     edit.wind = {12.0, 0.0};
     edit.mix = 1.0;
@@ -1190,7 +2230,8 @@ bool set_preview_skin_enabled(
     ShellState* state,
     std::size_t skin_index,
     bool enabled,
-    bool update_status_message) {
+    bool update_status_message,
+    bool record_history = true) {
     if (!state->load_result || skin_index >= state->load_result.skeleton_data->skins().size()) {
         return false;
     }
@@ -1206,22 +2247,41 @@ bool set_preview_skin_enabled(
         state->preview_skin_names.end(),
         skin_name);
 
-    if (enabled) {
-        if (existing == state->preview_skin_names.end()) {
-            state->preview_skin_names.push_back(skin_name);
+    if (!record_history) {
+        if (enabled) {
+            if (existing == state->preview_skin_names.end()) {
+                state->preview_skin_names.push_back(skin_name);
+            }
+        } else if (existing != state->preview_skin_names.end()) {
+            state->preview_skin_names.erase(existing);
         }
-    } else if (existing != state->preview_skin_names.end()) {
-        state->preview_skin_names.erase(existing);
+        return apply_preview_skin_selection(state, "Skin Preview", update_status_message);
     }
 
-    return apply_preview_skin_selection(state, "Skin Preview", update_status_message);
+    return execute_preview_edit_action(
+        state,
+        EditActionKind::EditProperty,
+        std::string(enabled ? "Enabled preview skin " : "Disabled preview skin ") + skin_name,
+        "preview-skins",
+        true,
+        "Preview skin change failed",
+        [&]() {
+            if (enabled) {
+                if (existing == state->preview_skin_names.end()) {
+                    state->preview_skin_names.push_back(skin_name);
+                }
+            } else if (existing != state->preview_skin_names.end()) {
+                state->preview_skin_names.erase(existing);
+            }
+        });
 }
 
 bool apply_attachment_selection_to_preview_slot(
     ShellState* state,
     const AttachmentSelection& selection,
     std::string_view source,
-    bool update_status_message) {
+    bool update_status_message,
+    bool record_history = true) {
     if (!state->load_result || !state->preview_skeleton ||
         selection.slot_index >= state->preview_skeleton->slot_states().size()) {
         return false;
@@ -1231,65 +2291,98 @@ bool apply_attachment_selection_to_preview_slot(
         return false;
     }
 
-    if (selection.slot_index >= state->preview_slot_overrides.size()) {
-        state->preview_slot_overrides.resize(state->preview_skeleton->slot_states().size());
-    }
-    state->preview_slot_overrides[selection.slot_index] = selection;
-    select_attachment(state, selection, source, false);
-    if (!refresh_preview_pose(state)) {
-        return false;
-    }
-
-    if (update_status_message) {
-        std::ostringstream stream;
-        stream << "Preview slot "
-               << state->load_result.skeleton_data->slots()[selection.slot_index].name
-               << " set to " << selection.attachment_name;
-        if (!source.empty()) {
-            stream << " via " << source;
+    const auto apply_selection = [&]() {
+        if (selection.slot_index >= state->preview_slot_overrides.size()) {
+            state->preview_slot_overrides.resize(state->preview_skeleton->slot_states().size());
         }
-        state->status_message = stream.str();
+        state->preview_slot_overrides[selection.slot_index] = selection;
+        select_attachment(state, selection, source, false);
+    };
+
+    if (!record_history) {
+        apply_selection();
+        if (!refresh_preview_pose(state)) {
+            return false;
+        }
+
+        if (update_status_message) {
+            std::ostringstream stream;
+            stream << "Preview slot "
+                   << state->load_result.skeleton_data->slots()[selection.slot_index].name
+                   << " set to " << selection.attachment_name;
+            if (!source.empty()) {
+                stream << " via " << source;
+            }
+            state->status_message = stream.str();
+        }
+
+        return true;
     }
 
-    return true;
+    const std::string slot_name =
+        state->load_result.skeleton_data->slots()[selection.slot_index].name;
+    return execute_preview_edit_action(
+        state,
+        EditActionKind::EditProperty,
+        "Swapped preview attachment on " + slot_name + " to " + selection.attachment_name,
+        "preview-slot:" + slot_name,
+        true,
+        "Preview attachment swap failed",
+        apply_selection);
 }
 
 bool reset_preview_slot_to_skin_selection(
     ShellState* state,
     std::size_t slot_index,
     std::string_view source,
-    bool update_status_message) {
+    bool update_status_message,
+    bool record_history = true) {
     if (!state->load_result || !state->preview_skeleton ||
         slot_index >= state->preview_skeleton->slot_states().size()) {
         return false;
     }
 
-    if (slot_index >= state->preview_slot_overrides.size()) {
-        state->preview_slot_overrides.resize(state->preview_skeleton->slot_states().size());
-    }
-    state->preview_slot_overrides[slot_index].reset();
-    if (!refresh_preview_pose(state)) {
-        return false;
-    }
-
-    if (const auto preview_selection = current_attachment_selection(*state, slot_index)) {
-        select_attachment(state, preview_selection, source, false);
-    } else {
-        state->selected_attachment.reset();
-    }
-
-    if (update_status_message) {
-        std::ostringstream stream;
-        stream << "Reset preview slot "
-               << state->load_result.skeleton_data->slots()[slot_index].name
-               << " to the active skin composition";
-        if (!source.empty()) {
-            stream << " via " << source;
+    const auto reset_selection = [&]() {
+        if (slot_index >= state->preview_slot_overrides.size()) {
+            state->preview_slot_overrides.resize(state->preview_skeleton->slot_states().size());
         }
-        state->status_message = stream.str();
+        state->preview_slot_overrides[slot_index].reset();
+        if (const auto preview_selection = current_attachment_selection(*state, slot_index)) {
+            select_attachment(state, preview_selection, source, false);
+        } else {
+            state->selected_attachment.reset();
+        }
+    };
+
+    if (!record_history) {
+        reset_selection();
+        if (!refresh_preview_pose(state)) {
+            return false;
+        }
+
+        if (update_status_message) {
+            std::ostringstream stream;
+            stream << "Reset preview slot "
+                   << state->load_result.skeleton_data->slots()[slot_index].name
+                   << " to the active skin composition";
+            if (!source.empty()) {
+                stream << " via " << source;
+            }
+            state->status_message = stream.str();
+        }
+
+        return true;
     }
 
-    return true;
+    const std::string slot_name = state->load_result.skeleton_data->slots()[slot_index].name;
+    return execute_preview_edit_action(
+        state,
+        EditActionKind::EditProperty,
+        "Reset preview slot " + slot_name + " to the active skin composition",
+        "preview-slot:" + slot_name,
+        true,
+        "Preview attachment reset failed",
+        reset_selection);
 }
 
 void draw_attachment_details(
@@ -2721,6 +3814,105 @@ bool rebuild_project_runtime(ShellState* state) {
     return true;
 }
 
+void update_project_dirty_state(ShellState* state) {
+    if (!state->load_result || state->load_result.project == nullptr) {
+        state->project_dirty = false;
+        return;
+    }
+
+    state->project_dirty =
+        marrow::editor::serialize_project(*state->load_result.project) !=
+        state->saved_project_snapshot;
+}
+
+bool apply_project_command_change(
+    ShellState* state,
+    const marrow::editor::ProjectData& previous_project,
+    EditActionKind kind,
+    std::string command_label,
+    std::string group,
+    bool allow_merge,
+    std::string failure_status) {
+    EditorHistorySnapshot before = capture_history_snapshot(*state);
+    before.project = previous_project;
+    before.serialized_project = marrow::editor::serialize_project(previous_project);
+
+    if (!rebuild_project_runtime(state)) {
+        const std::string rebuild_error = state->error_message;
+        restore_history_snapshot(state, before);
+        state->error_message = rebuild_error;
+        state->status_message = std::move(failure_status);
+        return false;
+    }
+
+    return record_action_from_snapshots(
+        state,
+        before,
+        kind,
+        std::move(command_label),
+        std::move(group),
+        allow_merge);
+}
+
+bool undo_project_change(ShellState* state) {
+    if (!state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    std::string label;
+    if (!state->command_stack.undo(state, &label)) {
+        state->status_message =
+            state->command_stack.can_undo() ? "Undo failed" : "Nothing to undo";
+        update_project_dirty_state(state);
+        return false;
+    }
+
+    update_project_dirty_state(state);
+    state->status_message = "Undid " + label;
+    return true;
+}
+
+bool redo_project_change(ShellState* state) {
+    if (!state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    std::string label;
+    if (!state->command_stack.redo(state, &label)) {
+        state->status_message =
+            state->command_stack.can_redo() ? "Redo failed" : "Nothing to redo";
+        update_project_dirty_state(state);
+        return false;
+    }
+
+    update_project_dirty_state(state);
+    state->status_message = "Redid " + label;
+    return true;
+}
+
+void handle_project_history_shortcuts(ShellState* state) {
+    if (!state->load_result || state->load_result.project == nullptr) {
+        return;
+    }
+
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) {
+        return;
+    }
+
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal)) {
+        undo_project_change(state);
+        return;
+    }
+
+    if (ImGui::Shortcut(
+            ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z,
+            ImGuiInputFlags_RouteGlobal) ||
+        ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, ImGuiInputFlags_RouteGlobal)) {
+        redo_project_change(state);
+    }
+}
+
 bool save_project_file(ShellState* state, bool update_status_message) {
     if (!state->load_result || state->load_result.project == nullptr) {
         return false;
@@ -2735,6 +3927,8 @@ bool save_project_file(ShellState* state, bool update_status_message) {
     }
 
     state->load_result.project = save_result.project;
+    state->saved_project_snapshot =
+        marrow::editor::serialize_project(*state->load_result.project);
     state->project_dirty = false;
     state->error_message.clear();
     if (update_status_message) {
@@ -3147,7 +4341,8 @@ std::optional<ViewportLayout> build_viewport_layout(
             fit_width / static_cast<float>(extent_x),
             fit_height / static_cast<float>(extent_y))) *
         static_cast<float>(state.viewport.zoom);
-    layout.joint_radius = std::clamp(4.0f + (layout.pixels_per_unit * 0.05f), 4.0f, 10.0f);
+    layout.render_joint_radius =
+        std::clamp(4.0f + (layout.pixels_per_unit * 0.05f), 4.0f, 10.0f);
     layout.world_origin_screen = screen_from_world(layout, 0.0, 0.0);
     layout.bones.reserve(skeleton.bones().size());
 
@@ -3165,13 +4360,201 @@ std::optional<ViewportLayout> build_viewport_layout(
     return layout;
 }
 
+ImVec2 local_viewport_position(const ViewportLayout& layout, const ImVec2& screen_position) {
+    return ImVec2(
+        screen_position.x - layout.canvas_origin.x,
+        screen_position.y - layout.canvas_origin.y);
+}
+
+ViewportRenderVertex viewport_vertex(const ImVec2& position, const ImVec4& color) {
+    return ViewportRenderVertex{
+        position.x,
+        position.y,
+        color.x,
+        color.y,
+        color.z,
+        color.w};
+}
+
+void append_colored_line(
+    std::vector<ViewportRenderVertex>* vertices,
+    const ImVec2& start,
+    const ImVec2& end,
+    ImU32 color) {
+    const ImVec4 float_color = ImGui::ColorConvertU32ToFloat4(color);
+    vertices->push_back(viewport_vertex(start, float_color));
+    vertices->push_back(viewport_vertex(end, float_color));
+}
+
+void append_filled_circle(
+    std::vector<ViewportRenderVertex>* vertices,
+    const ImVec2& center,
+    float radius,
+    ImU32 color,
+    int segment_count = 18) {
+    const ImVec4 float_color = ImGui::ColorConvertU32ToFloat4(color);
+    for (int segment_index = 0; segment_index < segment_count; ++segment_index) {
+        const float angle0 =
+            (2.0f * kPi * static_cast<float>(segment_index)) /
+            static_cast<float>(segment_count);
+        const float angle1 =
+            (2.0f * kPi * static_cast<float>(segment_index + 1)) /
+            static_cast<float>(segment_count);
+        const ImVec2 point0(
+            center.x + (std::cos(angle0) * radius),
+            center.y + (std::sin(angle0) * radius));
+        const ImVec2 point1(
+            center.x + (std::cos(angle1) * radius),
+            center.y + (std::sin(angle1) * radius));
+        vertices->push_back(viewport_vertex(center, float_color));
+        vertices->push_back(viewport_vertex(point0, float_color));
+        vertices->push_back(viewport_vertex(point1, float_color));
+    }
+}
+
+void build_viewport_render_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    std::vector<ViewportRenderVertex>* line_vertices,
+    std::vector<ViewportRenderVertex>* triangle_vertices) {
+    const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state.viewport.zoom));
+    for (float x = first_grid_line(layout.world_origin_screen.x, layout.canvas_origin.x, grid_spacing);
+         x < layout.canvas_end.x;
+         x += grid_spacing) {
+        append_colored_line(
+            line_vertices,
+            ImVec2(x - layout.canvas_origin.x, 0.0f),
+            ImVec2(x - layout.canvas_origin.x, layout.canvas_size.y),
+            IM_COL32(31, 35, 41, 255));
+    }
+    for (float y = first_grid_line(layout.world_origin_screen.y, layout.canvas_origin.y, grid_spacing);
+         y < layout.canvas_end.y;
+         y += grid_spacing) {
+        append_colored_line(
+            line_vertices,
+            ImVec2(0.0f, y - layout.canvas_origin.y),
+            ImVec2(layout.canvas_size.x, y - layout.canvas_origin.y),
+            IM_COL32(31, 35, 41, 255));
+    }
+
+    append_colored_line(
+        line_vertices,
+        ImVec2(0.0f, layout.world_origin_screen.y - layout.canvas_origin.y),
+        ImVec2(layout.canvas_size.x, layout.world_origin_screen.y - layout.canvas_origin.y),
+        IM_COL32(189, 86, 37, 255));
+    append_colored_line(
+        line_vertices,
+        ImVec2(layout.world_origin_screen.x - layout.canvas_origin.x, 0.0f),
+        ImVec2(layout.world_origin_screen.x - layout.canvas_origin.x, layout.canvas_size.y),
+        IM_COL32(204, 177, 110, 255));
+
+    for (const BoneCanvasNode& node : layout.bones) {
+        if (!node.parent_index.has_value() || *node.parent_index >= layout.bones.size()) {
+            continue;
+        }
+
+        const BoneCanvasNode& parent = layout.bones[*node.parent_index];
+        const bool selected =
+            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+        const ImU32 line_color = selected
+            ? IM_COL32(247, 204, 114, 255)
+            : node.active ? IM_COL32(214, 163, 76, 220) : IM_COL32(111, 117, 125, 180);
+        append_colored_line(
+            line_vertices,
+            local_viewport_position(layout, parent.screen_position),
+            local_viewport_position(layout, node.screen_position),
+            line_color);
+    }
+
+    for (const BoneCanvasNode& node : layout.bones) {
+        const bool selected =
+            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+        const bool hovered_selection =
+            hovered_bone.has_value() && *hovered_bone == node.bone_index;
+        const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
+        const ImU32 fill_color = selected
+            ? IM_COL32(247, 204, 114, 255)
+            : hovered_selection ? IM_COL32(226, 186, 97, 240)
+                                : node.active ? IM_COL32(208, 134, 57, 230)
+                                              : IM_COL32(98, 103, 110, 200);
+        append_filled_circle(
+            triangle_vertices,
+            local_viewport_position(layout, node.screen_position),
+            radius,
+            fill_color);
+    }
+}
+
+std::optional<std::string> render_viewport_framebuffer(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    ViewportRenderResources* resources) {
+    if (resources == nullptr || !resources->available) {
+        return "Viewport renderer is unavailable.";
+    }
+    if (resources->framebuffer == 0 || resources->color_texture == 0) {
+        return "Viewport framebuffer has not been created.";
+    }
+
+    std::vector<ViewportRenderVertex> line_vertices;
+    std::vector<ViewportRenderVertex> triangle_vertices;
+    line_vertices.reserve((layout.bones.size() * 6U) + 256U);
+    triangle_vertices.reserve(layout.bones.size() * 54U);
+    build_viewport_render_geometry(
+        state,
+        layout,
+        hovered_bone,
+        &line_vertices,
+        &triangle_vertices);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, resources->framebuffer);
+    glViewport(0, 0, resources->framebuffer_width, resources->framebuffer_height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.07f, 0.08f, 0.10f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(resources->program);
+    glUniform2f(
+        resources->view_size_location,
+        std::max(layout.canvas_size.x, 1.0f),
+        std::max(layout.canvas_size.y, 1.0f));
+    glBindVertexArray(resources->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
+
+    const auto draw_vertices = [&](const std::vector<ViewportRenderVertex>& vertices, GLenum mode) {
+        if (vertices.empty()) {
+            return;
+        }
+
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(vertices.size() * sizeof(ViewportRenderVertex)),
+            vertices.data(),
+            GL_STREAM_DRAW);
+        glDrawArrays(mode, 0, static_cast<GLsizei>(vertices.size()));
+    };
+    draw_vertices(line_vertices, GL_LINES);
+    draw_vertices(triangle_vertices, GL_TRIANGLES);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return std::nullopt;
+}
+
 std::optional<std::size_t> pick_bone_at_position(
     const ViewportLayout& layout,
     const ImVec2& position) {
     std::optional<std::size_t> best_bone;
     float best_distance = std::numeric_limits<float>::max();
-    const float joint_threshold = layout.joint_radius + 6.0f;
-    const float joint_threshold_squared = joint_threshold * joint_threshold;
+    const float joint_threshold_squared =
+        kBoneJointHitRadiusPixels * kBoneJointHitRadiusPixels;
 
     for (const BoneCanvasNode& node : layout.bones) {
         const float distance = squared_distance(position, node.screen_position);
@@ -3185,8 +4568,8 @@ std::optional<std::size_t> pick_bone_at_position(
         return best_bone;
     }
 
-    const float segment_threshold = std::max(6.0f, layout.joint_radius);
-    const float segment_threshold_squared = segment_threshold * segment_threshold;
+    const float segment_threshold_squared =
+        kBoneBodyHitThresholdPixels * kBoneBodyHitThresholdPixels;
     for (const BoneCanvasNode& node : layout.bones) {
         if (!node.parent_index.has_value() || *node.parent_index >= layout.bones.size()) {
             continue;
@@ -3236,7 +4619,10 @@ bool reload_project(ShellState* state) {
     state->timeline_time_seconds = 0.0;
     state->timeline_loop = previous_timeline_loop;
     state->timeline_playing = false;
+    state->command_stack.clear();
+    state->pending_edit_action.reset();
     state->project_dirty = false;
+    state->saved_project_snapshot.clear();
     state->error_message.clear();
 
     if (!state->load_result) {
@@ -3250,6 +4636,8 @@ bool reload_project(ShellState* state) {
     }
 
     state->viewport = state->load_result.project->editor_metadata.viewport;
+    state->saved_project_snapshot =
+        marrow::editor::serialize_project(*state->load_result.project);
     state->preview_skeleton =
         std::make_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
     state->animation_state =
@@ -3322,8 +4710,26 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
         if (ImGui::MenuItem("Reload Project")) {
             *reload_requested = true;
         }
-        if (ImGui::MenuItem("Quit")) {
+        if (ImGui::MenuItem("Quit", nullptr, false, window != nullptr)) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Edit")) {
+        if (ImGui::MenuItem(
+                "Undo",
+                "Ctrl+Z",
+                false,
+                state->command_stack.can_undo())) {
+            undo_project_change(state);
+        }
+        if (ImGui::MenuItem(
+                "Redo",
+                "Ctrl+Shift+Z / Ctrl+Y",
+                false,
+                state->command_stack.can_redo())) {
+            redo_project_change(state);
         }
         ImGui::EndMenu();
     }
@@ -3334,7 +4740,7 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
 }
 
 void draw_project_window(bool* reload_requested, ShellState* state) {
-    ImGui::Begin("Project");
+    ImGui::Begin(kProjectWindowTitle);
 
     if (ImGui::Button("Reload")) {
         *reload_requested = true;
@@ -3409,6 +4815,10 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
         project.transform_constraint_edits.size(),
         project.physics_constraint_edits.size(),
         state->project_dirty ? "unsaved changes" : "saved");
+    ImGui::Text(
+        "History: undo %zu  redo %zu",
+        state->command_stack.undo_count(),
+        state->command_stack.redo_count());
     ImGui::Text("Runtime skeleton: %s", project.resolved_skeleton_path().string().c_str());
     ImGui::Text("Runtime atlases: %s", join_paths(project.resolved_atlas_paths()).c_str());
     ImGui::Text(
@@ -3430,7 +4840,7 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
 }
 
 void draw_runtime_window(const ShellState& state) {
-    ImGui::Begin("Runtime Assets");
+    ImGui::Begin(kRuntimeAssetsWindowTitle);
 
     if (!state.load_result) {
         ImGui::TextUnformatted("Load a valid project to inspect runtime assets.");
@@ -3495,7 +4905,7 @@ void draw_runtime_window(const ShellState& state) {
 }
 
 void draw_constraints_window(ShellState* state) {
-    ImGui::Begin("Constraints");
+    ImGui::Begin(kConstraintsWindowTitle);
 
     if (!state->load_result || state->load_result.project == nullptr) {
         ImGui::TextUnformatted("Load a valid project to author constraint overrides.");
@@ -3513,23 +4923,28 @@ void draw_constraints_window(ShellState* state) {
 
     validate_selected_constraint(state);
 
+    const auto constraint_group = [&](ConstraintEditKind kind, std::string_view name) {
+        return std::string("constraint:") + constraint_kind_label(kind) + ":" +
+            std::string(name);
+    };
     const auto commit_constraint_change = [&](const marrow::editor::ProjectData& previous_project,
                                               ConstraintEditKind kind,
                                               std::string_view name,
                                               std::string failure_message,
-                                              std::string success_message) {
-        if (!rebuild_project_runtime(state)) {
-            const std::string rebuild_error = state->error_message;
-            *state->load_result.project = previous_project;
-            rebuild_project_runtime(state);
-            state->error_message = rebuild_error;
-            state->status_message = std::move(failure_message);
+                                              std::string success_message,
+                                              bool allow_merge = true) {
+        if (!apply_project_command_change(
+                state,
+                previous_project,
+                EditActionKind::EditProperty,
+                std::move(success_message),
+                constraint_group(kind, name),
+                allow_merge,
+                std::move(failure_message))) {
             return false;
         }
 
-        state->project_dirty = true;
         select_constraint(state, kind, name, "", false);
-        state->status_message = std::move(success_message);
         return true;
     };
 
@@ -3682,24 +5097,27 @@ void draw_constraints_window(ShellState* state) {
                 }
 
                 double edited_mix = display_edit.mix;
-                if (ImGui::SliderScalar(
-                        "Mix",
-                        ImGuiDataType_Double,
-                        &edited_mix,
-                        &kZero,
-                        &kOne,
-                        "%.2f")) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        project->ik_constraint_edits[*edit_index].mix = edited_mix;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Ik,
-                            project->ik_constraint_edits[*edit_index].name,
-                            "IK constraint edit failed",
-                            "Updated IK mix on " + selected_name);
-                    }
-                }
+                const bool mix_changed = ImGui::SliderScalar(
+                    "Mix",
+                    ImGuiDataType_Double,
+                    &edited_mix,
+                    &kZero,
+                    &kOne,
+                    "%.2f");
+                apply_coalesced_project_drag(
+                    state,
+                    mix_changed,
+                    EditActionKind::EditProperty,
+                    "Updated IK mix on " + selected_name,
+                    constraint_group(ConstraintEditKind::Ik, selected_name),
+                    false,
+                    "IK constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_ik_constraint_edit_index(state, selected_name)) {
+                            project->ik_constraint_edits[*edit_index].mix = edited_mix;
+                        }
+                    });
 
                 bool bend_positive = display_edit.bend_positive;
                 if (ImGui::Checkbox("Bend Positive", &bend_positive)) {
@@ -3845,44 +5263,50 @@ void draw_constraints_window(ShellState* state) {
                 }
 
                 double edited_position = display_edit.position;
-                if (ImGui::SliderScalar(
-                        "Position",
-                        ImGuiDataType_Double,
-                        &edited_position,
-                        &kZero,
-                        &kOne,
-                        "%.2f")) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_path_constraint_edit_index(state, selected_name)) {
-                        project->path_constraint_edits[*edit_index].position = edited_position;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Path,
-                            project->path_constraint_edits[*edit_index].name,
-                            "Path constraint edit failed",
-                            "Updated path position on " + selected_name);
-                    }
-                }
+                const bool position_changed = ImGui::SliderScalar(
+                    "Position",
+                    ImGuiDataType_Double,
+                    &edited_position,
+                    &kZero,
+                    &kOne,
+                    "%.2f");
+                apply_coalesced_project_drag(
+                    state,
+                    position_changed,
+                    EditActionKind::EditProperty,
+                    "Updated path position on " + selected_name,
+                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    false,
+                    "Path constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_path_constraint_edit_index(state, selected_name)) {
+                            project->path_constraint_edits[*edit_index].position = edited_position;
+                        }
+                    });
 
                 double edited_spacing = display_edit.spacing;
-                if (ImGui::SliderScalar(
-                        "Spacing",
-                        ImGuiDataType_Double,
-                        &edited_spacing,
-                        &kZero,
-                        &kOne,
-                        "%.2f")) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_path_constraint_edit_index(state, selected_name)) {
-                        project->path_constraint_edits[*edit_index].spacing = edited_spacing;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Path,
-                            project->path_constraint_edits[*edit_index].name,
-                            "Path constraint edit failed",
-                            "Updated path spacing on " + selected_name);
-                    }
-                }
+                const bool spacing_changed = ImGui::SliderScalar(
+                    "Spacing",
+                    ImGuiDataType_Double,
+                    &edited_spacing,
+                    &kZero,
+                    &kOne,
+                    "%.2f");
+                apply_coalesced_project_drag(
+                    state,
+                    spacing_changed,
+                    EditActionKind::EditProperty,
+                    "Updated path spacing on " + selected_name,
+                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    false,
+                    "Path constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_path_constraint_edit_index(state, selected_name)) {
+                            project->path_constraint_edits[*edit_index].spacing = edited_spacing;
+                        }
+                    });
 
                 int spacing_mode = display_edit.spacing_mode ==
                         marrow::runtime::PathConstraintSpacingMode::Percent
@@ -3909,45 +5333,52 @@ void draw_constraints_window(ShellState* state) {
                 }
 
                 double edited_rotate_mix = display_edit.rotate_mix;
-                if (ImGui::SliderScalar(
-                        "Rotate Mix",
-                        ImGuiDataType_Double,
-                        &edited_rotate_mix,
-                        &kZero,
-                        &kOne,
-                        "%.2f")) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_path_constraint_edit_index(state, selected_name)) {
-                        project->path_constraint_edits[*edit_index].rotate_mix = edited_rotate_mix;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Path,
-                            project->path_constraint_edits[*edit_index].name,
-                            "Path constraint edit failed",
-                            "Updated path rotate mix on " + selected_name);
-                    }
-                }
+                const bool rotate_mix_changed = ImGui::SliderScalar(
+                    "Rotate Mix",
+                    ImGuiDataType_Double,
+                    &edited_rotate_mix,
+                    &kZero,
+                    &kOne,
+                    "%.2f");
+                apply_coalesced_project_drag(
+                    state,
+                    rotate_mix_changed,
+                    EditActionKind::EditProperty,
+                    "Updated path rotate mix on " + selected_name,
+                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    false,
+                    "Path constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_path_constraint_edit_index(state, selected_name)) {
+                            project->path_constraint_edits[*edit_index].rotate_mix =
+                                edited_rotate_mix;
+                        }
+                    });
 
                 double edited_translate_mix = display_edit.translate_mix;
-                if (ImGui::SliderScalar(
-                        "Translate Mix",
-                        ImGuiDataType_Double,
-                        &edited_translate_mix,
-                        &kZero,
-                        &kOne,
-                        "%.2f")) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_path_constraint_edit_index(state, selected_name)) {
-                        project->path_constraint_edits[*edit_index].translate_mix =
-                            edited_translate_mix;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Path,
-                            project->path_constraint_edits[*edit_index].name,
-                            "Path constraint edit failed",
-                            "Updated path translate mix on " + selected_name);
-                    }
-                }
+                const bool translate_mix_changed = ImGui::SliderScalar(
+                    "Translate Mix",
+                    ImGuiDataType_Double,
+                    &edited_translate_mix,
+                    &kZero,
+                    &kOne,
+                    "%.2f");
+                apply_coalesced_project_drag(
+                    state,
+                    translate_mix_changed,
+                    EditActionKind::EditProperty,
+                    "Updated path translate mix on " + selected_name,
+                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    false,
+                    "Path constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_path_constraint_edit_index(state, selected_name)) {
+                            project->path_constraint_edits[*edit_index].translate_mix =
+                                edited_translate_mix;
+                        }
+                    });
             }
 
             ImGui::EndTabItem();
@@ -4098,25 +5529,27 @@ void draw_constraints_window(ShellState* state) {
                                             auto setter,
                                             std::string status) {
                     double edited_value = value;
-                    if (ImGui::SliderScalar(
-                            label,
-                            ImGuiDataType_Double,
-                            &edited_value,
-                            &kZero,
-                            &kOne,
-                            "%.2f")) {
-                        const marrow::editor::ProjectData previous_project = *project;
-                        if (const auto edit_index =
-                                ensure_transform_constraint_edit_index(state, selected_name)) {
-                            setter(&project->transform_constraint_edits[*edit_index], edited_value);
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Transform,
-                                project->transform_constraint_edits[*edit_index].name,
-                                "Transform constraint edit failed",
-                                std::move(status));
-                        }
-                    }
+                    const bool changed = ImGui::SliderScalar(
+                        label,
+                        ImGuiDataType_Double,
+                        &edited_value,
+                        &kZero,
+                        &kOne,
+                        "%.2f");
+                    apply_coalesced_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        constraint_group(ConstraintEditKind::Transform, selected_name),
+                        false,
+                        "Transform constraint edit failed",
+                        [&]() {
+                            if (const auto edit_index =
+                                    ensure_transform_constraint_edit_index(state, selected_name)) {
+                                setter(&project->transform_constraint_edits[*edit_index], edited_value);
+                            }
+                        });
                 };
                 update_mix(
                     "Rotate Mix",
@@ -4152,26 +5585,28 @@ void draw_constraints_window(ShellState* state) {
                                                auto setter,
                                                std::string status) {
                     double edited_value = value;
-                    if (ImGui::DragScalar(
-                            label,
-                            ImGuiDataType_Double,
-                            &edited_value,
-                            0.1f,
-                            nullptr,
-                            nullptr,
-                            "%.3f")) {
-                        const marrow::editor::ProjectData previous_project = *project;
-                        if (const auto edit_index =
-                                ensure_transform_constraint_edit_index(state, selected_name)) {
-                            setter(&project->transform_constraint_edits[*edit_index], edited_value);
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Transform,
-                                project->transform_constraint_edits[*edit_index].name,
-                                "Transform constraint edit failed",
-                                std::move(status));
-                        }
-                    }
+                    const bool changed = ImGui::DragScalar(
+                        label,
+                        ImGuiDataType_Double,
+                        &edited_value,
+                        0.1f,
+                        nullptr,
+                        nullptr,
+                        "%.3f");
+                    apply_coalesced_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        constraint_group(ConstraintEditKind::Transform, selected_name),
+                        false,
+                        "Transform constraint edit failed",
+                        [&]() {
+                            if (const auto edit_index =
+                                    ensure_transform_constraint_edit_index(state, selected_name)) {
+                                setter(&project->transform_constraint_edits[*edit_index], edited_value);
+                            }
+                        });
                 };
                 update_offset(
                     "Offset Rotation",
@@ -4351,25 +5786,27 @@ void draw_constraints_window(ShellState* state) {
                                                  double max_value,
                                                  std::string status) {
                     double edited_value = value;
-                    if (ImGui::SliderScalar(
-                            label,
-                            ImGuiDataType_Double,
-                            &edited_value,
-                            &kZero,
-                            &max_value,
-                            "%.2f")) {
-                        const marrow::editor::ProjectData previous_project = *project;
-                        if (const auto edit_index =
-                                ensure_physics_constraint_edit_index(state, selected_name)) {
-                            setter(&project->physics_constraint_edits[*edit_index], edited_value);
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Physics,
-                                project->physics_constraint_edits[*edit_index].name,
-                                "Physics constraint edit failed",
-                                std::move(status));
-                        }
-                    }
+                    const bool changed = ImGui::SliderScalar(
+                        label,
+                        ImGuiDataType_Double,
+                        &edited_value,
+                        &kZero,
+                        &max_value,
+                        "%.2f");
+                    apply_coalesced_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        constraint_group(ConstraintEditKind::Physics, selected_name),
+                        false,
+                        "Physics constraint edit failed",
+                        [&]() {
+                            if (const auto edit_index =
+                                    ensure_physics_constraint_edit_index(state, selected_name)) {
+                                setter(&project->physics_constraint_edits[*edit_index], edited_value);
+                            }
+                        });
                 };
                 update_positive_value(
                     "Inertia",
@@ -4409,26 +5846,28 @@ void draw_constraints_window(ShellState* state) {
                                               auto setter,
                                               std::string status) {
                     double edited_value = value;
-                    if (ImGui::DragScalar(
-                            label,
-                            ImGuiDataType_Double,
-                            &edited_value,
-                            0.5f,
-                            nullptr,
-                            nullptr,
-                            "%.2f")) {
-                        const marrow::editor::ProjectData previous_project = *project;
-                        if (const auto edit_index =
-                                ensure_physics_constraint_edit_index(state, selected_name)) {
-                            setter(&project->physics_constraint_edits[*edit_index], edited_value);
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Physics,
-                                project->physics_constraint_edits[*edit_index].name,
-                                "Physics constraint edit failed",
-                                std::move(status));
-                        }
-                    }
+                    const bool changed = ImGui::DragScalar(
+                        label,
+                        ImGuiDataType_Double,
+                        &edited_value,
+                        0.5f,
+                        nullptr,
+                        nullptr,
+                        "%.2f");
+                    apply_coalesced_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        constraint_group(ConstraintEditKind::Physics, selected_name),
+                        false,
+                        "Physics constraint edit failed",
+                        [&]() {
+                            if (const auto edit_index =
+                                    ensure_physics_constraint_edit_index(state, selected_name)) {
+                                setter(&project->physics_constraint_edits[*edit_index], edited_value);
+                            }
+                        });
                 };
                 update_force(
                     "Gravity X",
@@ -4510,7 +5949,7 @@ void draw_hierarchy_node(
 }
 
 void draw_hierarchy_window(ShellState* state) {
-    ImGui::Begin("Hierarchy");
+    ImGui::Begin(kHierarchyWindowTitle);
 
     if (!state->load_result) {
         ImGui::TextUnformatted("Load a valid project to inspect skeleton bones.");
@@ -4674,20 +6113,32 @@ void draw_draw_order_timeline_editor(
     ImGui::TextUnformatted(
         "Each key lists the full slot stack. Move entries up or down to preview reordered presentation.");
 
+    const auto track_group = [&]() {
+        return std::string("timeline:") + track.id;
+    };
+    const auto key_group = [&](std::size_t key_index) {
+        return track_group() + ":key:" + std::to_string(key_index);
+    };
     const auto commit_project_change = [&](const marrow::editor::ProjectData& previous_project,
-                                           std::string status_message) {
-        if (!rebuild_project_runtime(state)) {
-            const std::string rebuild_error = state->error_message;
-            *state->load_result.project = previous_project;
-            rebuild_project_runtime(state);
-            state->error_message = rebuild_error;
-            state->status_message = "Draw-order edit failed";
+                                           std::string status_message,
+                                           EditActionKind kind = EditActionKind::EditProperty,
+                                           std::string group = {},
+                                           bool allow_merge = true) {
+        if (group.empty()) {
+            group = track_group();
+        }
+        if (!apply_project_command_change(
+                state,
+                previous_project,
+                kind,
+                std::move(status_message),
+                std::move(group),
+                allow_merge,
+                "Draw-order edit failed")) {
             return false;
         }
 
-        state->project_dirty = true;
         state->selected_timeline_track_id = track.id;
-        state->status_message = std::move(status_message);
         return true;
     };
 
@@ -4714,7 +6165,10 @@ void draw_draw_order_timeline_editor(
                 editable_track.keyframes.insert(iterator, std::move(new_key));
                 commit_project_change(
                     previous_project,
-                    "Added a draw-order key on " + track.animation_name);
+                    "Added a draw-order key on " + track.animation_name,
+                    EditActionKind::AddKeyframe,
+                    track_group(),
+                    false);
             } else {
                 *state->load_result.project = previous_project;
                 state->status_message =
@@ -4730,29 +6184,52 @@ void draw_draw_order_timeline_editor(
         const std::string header = "Key " + std::to_string(key_index + 1U) +
             " @ " + format_time_seconds(display_key.time);
         if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-            double edited_time = display_key.time;
-            if (ImGui::DragScalar(
-                    "Time",
-                    ImGuiDataType_Double,
-                    &edited_time,
-                    0.01f,
-                    nullptr,
-                    nullptr,
-                    "%.3f s")) {
+            if (display_edit.keyframes.size() > 1U &&
+                ImGui::Button("Remove Key##draw_order")) {
                 const marrow::editor::ProjectData previous_project = *state->load_result.project;
                 if (const auto edit_index = ensure_draw_order_timeline_edit_index(state, track)) {
                     auto& editable_track =
                         state->load_result.project->draw_order_timeline_edits[*edit_index];
-                    editable_track.keyframes[key_index].time = clamp_existing_key_time(
-                        editable_track.keyframes,
-                        key_index,
-                        edited_time,
-                        duration_seconds);
+                    editable_track.keyframes.erase(
+                        editable_track.keyframes.begin() + static_cast<std::ptrdiff_t>(key_index));
                     commit_project_change(
                         previous_project,
-                        "Updated draw-order key timing on " + track.animation_name);
+                        "Removed a draw-order key on " + track.animation_name,
+                        EditActionKind::RemoveKeyframe,
+                        track_group(),
+                        false);
                 }
             }
+
+            double edited_time = display_key.time;
+            const bool time_changed = ImGui::DragScalar(
+                "Time",
+                ImGuiDataType_Double,
+                &edited_time,
+                0.01f,
+                nullptr,
+                nullptr,
+                "%.3f s");
+            apply_coalesced_project_drag(
+                state,
+                time_changed,
+                EditActionKind::EditProperty,
+                "Updated draw-order key timing on " + track.animation_name,
+                key_group(key_index),
+                false,
+                "Draw-order edit failed",
+                [&]() {
+                    if (const auto edit_index =
+                            ensure_draw_order_timeline_edit_index(state, track)) {
+                        auto& editable_track =
+                            state->load_result.project->draw_order_timeline_edits[*edit_index];
+                        editable_track.keyframes[key_index].time = clamp_existing_key_time(
+                            editable_track.keyframes,
+                            key_index,
+                            edited_time,
+                            duration_seconds);
+                    }
+                });
 
             if (ImGui::Button("Use Current Preview Order")) {
                 const marrow::editor::ProjectData previous_project = *state->load_result.project;
@@ -4867,20 +6344,32 @@ void draw_event_timeline_editor(
         }
     }
 
+    const auto event_track_group = [&]() {
+        return std::string("timeline:") + track.id;
+    };
+    const auto event_key_group = [&](std::size_t key_index) {
+        return event_track_group() + ":key:" + std::to_string(key_index);
+    };
     const auto commit_project_change = [&](const marrow::editor::ProjectData& previous_project,
-                                           std::string status_message) {
-        if (!rebuild_project_runtime(state)) {
-            const std::string rebuild_error = state->error_message;
-            *state->load_result.project = previous_project;
-            rebuild_project_runtime(state);
-            state->error_message = rebuild_error;
-            state->status_message = "Event edit failed";
+                                           std::string status_message,
+                                           EditActionKind kind = EditActionKind::EditProperty,
+                                           std::string group = {},
+                                           bool allow_merge = true) {
+        if (group.empty()) {
+            group = event_track_group();
+        }
+        if (!apply_project_command_change(
+                state,
+                previous_project,
+                kind,
+                std::move(status_message),
+                std::move(group),
+                allow_merge,
+                "Event edit failed")) {
             return false;
         }
 
-        state->project_dirty = true;
         state->selected_timeline_track_id = track.id;
-        state->status_message = std::move(status_message);
         return true;
     };
 
@@ -4900,7 +6389,10 @@ void draw_event_timeline_editor(
             editable_track.keyframes.insert(iterator, std::move(new_key));
             commit_project_change(
                 previous_project,
-                "Added an event key on " + track.animation_name);
+                "Added an event key on " + track.animation_name,
+                EditActionKind::AddKeyframe,
+                event_track_group(),
+                false);
         }
     }
 
@@ -4911,29 +6403,52 @@ void draw_event_timeline_editor(
         const std::string header = "Key " + std::to_string(key_index + 1U) +
             " @ " + format_time_seconds(display_key.time) + " / " + display_key.event_name;
         if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-            double edited_time = display_key.time;
-            if (ImGui::DragScalar(
-                    "Time",
-                    ImGuiDataType_Double,
-                    &edited_time,
-                    0.01f,
-                    nullptr,
-                    nullptr,
-                    "%.3f s")) {
+            if (display_edit.keyframes.size() > 1U &&
+                ImGui::Button("Remove Key##events")) {
                 const marrow::editor::ProjectData previous_project = *state->load_result.project;
                 if (const auto edit_index = ensure_event_timeline_edit_index(state, track)) {
                     auto& editable_track =
                         state->load_result.project->event_timeline_edits[*edit_index];
-                    editable_track.keyframes[key_index].time =
-                        clamp_existing_non_decreasing_key_time(
-                            editable_track.keyframes,
-                            key_index,
-                            edited_time);
+                    editable_track.keyframes.erase(
+                        editable_track.keyframes.begin() + static_cast<std::ptrdiff_t>(key_index));
                     commit_project_change(
                         previous_project,
-                        "Updated event key timing on " + track.animation_name);
+                        "Removed an event key on " + track.animation_name,
+                        EditActionKind::RemoveKeyframe,
+                        event_track_group(),
+                        false);
                 }
             }
+
+            double edited_time = display_key.time;
+            const bool time_changed = ImGui::DragScalar(
+                "Time",
+                ImGuiDataType_Double,
+                &edited_time,
+                0.01f,
+                nullptr,
+                nullptr,
+                "%.3f s");
+            apply_coalesced_project_drag(
+                state,
+                time_changed,
+                EditActionKind::EditProperty,
+                "Updated event key timing on " + track.animation_name,
+                event_key_group(key_index),
+                false,
+                "Event edit failed",
+                [&]() {
+                    if (const auto edit_index =
+                            ensure_event_timeline_edit_index(state, track)) {
+                        auto& editable_track =
+                            state->load_result.project->event_timeline_edits[*edit_index];
+                        editable_track.keyframes[key_index].time =
+                            clamp_existing_non_decreasing_key_time(
+                                editable_track.keyframes,
+                                key_index,
+                                edited_time);
+                    }
+                });
 
             if (ImGui::BeginCombo("Event", display_key.event_name.c_str())) {
                 for (const auto& definition : state->load_result.skeleton_data->events()) {
@@ -4976,7 +6491,8 @@ void draw_event_timeline_editor(
                                               std::optional<double> value,
                                               double default_value,
                                               auto setter,
-                                              std::string status) {
+                                              std::string toggle_status,
+                                              std::string value_status) {
                 bool enabled = value.has_value();
                 if (ImGui::Checkbox(toggle_label, &enabled)) {
                     const marrow::editor::ProjectData previous_project = *state->load_result.project;
@@ -4985,7 +6501,12 @@ void draw_event_timeline_editor(
                             &state->load_result.project->event_timeline_edits[*edit_index]
                                  .keyframes[key_index],
                             enabled ? std::optional<double>(default_value) : std::nullopt);
-                        commit_project_change(previous_project, std::move(status));
+                        commit_project_change(
+                            previous_project,
+                            std::move(toggle_status),
+                            EditActionKind::EditProperty,
+                            event_key_group(key_index),
+                            true);
                     }
                 }
                 if (!enabled) {
@@ -4993,23 +6514,31 @@ void draw_event_timeline_editor(
                 }
 
                 double edited_value = value.value_or(default_value);
-                if (ImGui::DragScalar(
-                        value_label,
-                        ImGuiDataType_Double,
-                        &edited_value,
-                        0.05f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    if (const auto edit_index = ensure_event_timeline_edit_index(state, track)) {
-                        setter(
-                            &state->load_result.project->event_timeline_edits[*edit_index]
-                                 .keyframes[key_index],
-                            std::optional<double>(edited_value));
-                        commit_project_change(previous_project, std::move(status));
-                    }
-                }
+                const bool value_changed = ImGui::DragScalar(
+                    value_label,
+                    ImGuiDataType_Double,
+                    &edited_value,
+                    0.05f,
+                    nullptr,
+                    nullptr,
+                    "%.3f");
+                apply_coalesced_project_drag(
+                    state,
+                    value_changed,
+                    EditActionKind::EditProperty,
+                    std::move(value_status),
+                    event_key_group(key_index),
+                    false,
+                    "Event edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_event_timeline_edit_index(state, track)) {
+                            setter(
+                                &state->load_result.project->event_timeline_edits[*edit_index]
+                                     .keyframes[key_index],
+                                std::optional<double>(edited_value));
+                        }
+                    });
             };
 
             bool override_int = display_key.int_value.has_value();
@@ -5054,7 +6583,8 @@ void draw_event_timeline_editor(
                 [](marrow::editor::EventKeyframeEdit* key, std::optional<double> value) {
                     key->float_value = value;
                 },
-                "Updated event float override");
+                "Updated event float override",
+                "Updated event float value");
             update_optional_number(
                 "Override Volume",
                 "Volume",
@@ -5065,7 +6595,8 @@ void draw_event_timeline_editor(
                 [](marrow::editor::EventKeyframeEdit* key, std::optional<double> value) {
                     key->volume = value;
                 },
-                "Updated event volume override");
+                "Updated event volume override",
+                "Updated event volume value");
             update_optional_number(
                 "Override Balance",
                 "Balance",
@@ -5076,7 +6607,8 @@ void draw_event_timeline_editor(
                 [](marrow::editor::EventKeyframeEdit* key, std::optional<double> value) {
                     key->balance = value;
                 },
-                "Updated event balance override");
+                "Updated event balance override",
+                "Updated event balance value");
 
             const auto update_optional_text = [&](const char* toggle_label,
                                                   const char* value_label,
@@ -5208,20 +6740,29 @@ void draw_transform_timeline_editor(
     ImGui::TextUnformatted(
         "Edits are stored in the .marrow project file and exported back into a .mskl skeleton.");
 
+    const auto track_group = [&]() {
+        return std::string("timeline:") + track->id;
+    };
+    const auto key_group = [&](std::size_t key_index) {
+        return track_group() + ":key:" + std::to_string(key_index);
+    };
     const auto commit_project_change = [&](const marrow::editor::ProjectData& previous_project,
+                                           EditActionKind kind,
+                                           std::string group,
+                                           bool allow_merge,
                                            std::string status_message) {
-        if (!rebuild_project_runtime(state)) {
-            const std::string rebuild_error = state->error_message;
-            *state->load_result.project = previous_project;
-            rebuild_project_runtime(state);
-            state->error_message = rebuild_error;
-            state->status_message = "Timeline edit failed";
+        if (!apply_project_command_change(
+                state,
+                previous_project,
+                kind,
+                std::move(status_message),
+                std::move(group),
+                allow_merge,
+                "Timeline edit failed")) {
             return false;
         }
 
-        state->project_dirty = true;
         state->selected_timeline_track_id = track->id;
-        state->status_message = std::move(status_message);
         return true;
     };
 
@@ -5248,6 +6789,9 @@ void draw_transform_timeline_editor(
                 editable_track.keyframes.insert(iterator, std::move(new_key));
                 commit_project_change(
                     previous_project,
+                    EditActionKind::AddKeyframe,
+                    track_group(),
+                    false,
                     "Added a " + std::string(transform_channel_label(*track->transform_channel)) +
                         " key on " + bone_name);
             } else {
@@ -5266,95 +6810,135 @@ void draw_transform_timeline_editor(
         if (ImGui::CollapsingHeader(
                 header.c_str(),
                 ImGuiTreeNodeFlags_DefaultOpen)) {
-            double edited_time = display_key.time;
-            if (ImGui::DragScalar(
-                    "Time",
-                    ImGuiDataType_Double,
-                    &edited_time,
-                    0.01f,
-                    nullptr,
-                    nullptr,
-                    "%.3f s")) {
+            if (display_edit.keyframes.size() > 1U &&
+                ImGui::Button("Remove Key##transform")) {
                 const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                if (edit_index.has_value()) {
+                if (const auto edit_index =
+                        ensure_transform_timeline_edit_index(state, *track)) {
                     auto& editable_track =
                         state->load_result.project->transform_timeline_edits[*edit_index];
-                    editable_track.keyframes[key_index].time = clamp_existing_key_time(
-                        editable_track.keyframes,
-                        key_index,
-                        edited_time,
-                        duration_seconds);
+                    editable_track.keyframes.erase(
+                        editable_track.keyframes.begin() + static_cast<std::ptrdiff_t>(key_index));
                     commit_project_change(
                         previous_project,
-                        "Updated key timing on " + bone_name + " " +
-                            std::string(transform_channel_label(*track->transform_channel)));
+                        EditActionKind::RemoveKeyframe,
+                        track_group(),
+                        false,
+                        "Removed a " +
+                            std::string(transform_channel_label(*track->transform_channel)) +
+                            " key on " + bone_name);
                 }
             }
 
+            double edited_time = display_key.time;
+            const bool time_changed = ImGui::DragScalar(
+                "Time",
+                ImGuiDataType_Double,
+                &edited_time,
+                0.01f,
+                nullptr,
+                nullptr,
+                "%.3f s");
+            apply_coalesced_project_drag(
+                state,
+                time_changed,
+                EditActionKind::EditProperty,
+                "Updated key timing on " + bone_name + " " +
+                    std::string(transform_channel_label(*track->transform_channel)),
+                key_group(key_index),
+                false,
+                "Timeline edit failed",
+                [&]() {
+                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
+                    if (edit_index.has_value()) {
+                        auto& editable_track =
+                            state->load_result.project->transform_timeline_edits[*edit_index];
+                        editable_track.keyframes[key_index].time = clamp_existing_key_time(
+                            editable_track.keyframes,
+                            key_index,
+                            edited_time,
+                            duration_seconds);
+                    }
+                });
+
             if (*track->transform_channel == marrow::editor::TransformTimelineChannel::Rotate) {
                 double edited_angle = display_key.angle;
-                if (ImGui::DragScalar(
-                        "Angle",
-                        ImGuiDataType_Double,
-                        &edited_angle,
-                        0.1f,
-                        nullptr,
-                        nullptr,
-                        "%.3f deg")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        state->load_result.project->transform_timeline_edits[*edit_index]
-                            .keyframes[key_index]
-                            .angle = edited_angle;
-                        commit_project_change(
-                            previous_project,
-                            "Updated key angle on " + bone_name);
-                    }
-                }
+                const bool angle_changed = ImGui::DragScalar(
+                    "Angle",
+                    ImGuiDataType_Double,
+                    &edited_angle,
+                    0.1f,
+                    nullptr,
+                    nullptr,
+                    "%.3f deg");
+                apply_coalesced_project_drag(
+                    state,
+                    angle_changed,
+                    EditActionKind::MoveBone,
+                    "Updated key angle on " + bone_name,
+                    key_group(key_index),
+                    false,
+                    "Timeline edit failed",
+                    [&]() {
+                        const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
+                        if (edit_index.has_value()) {
+                            state->load_result.project->transform_timeline_edits[*edit_index]
+                                .keyframes[key_index]
+                                .angle = edited_angle;
+                        }
+                    });
             } else {
                 double edited_x = display_key.x;
-                if (ImGui::DragScalar(
-                        "X",
-                        ImGuiDataType_Double,
-                        &edited_x,
-                        0.1f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        state->load_result.project->transform_timeline_edits[*edit_index]
-                            .keyframes[key_index]
-                            .x = edited_x;
-                        commit_project_change(
-                            previous_project,
-                            "Updated key X on " + bone_name);
-                    }
-                }
+                const bool x_changed = ImGui::DragScalar(
+                    "X",
+                    ImGuiDataType_Double,
+                    &edited_x,
+                    0.1f,
+                    nullptr,
+                    nullptr,
+                    "%.3f");
+                apply_coalesced_project_drag(
+                    state,
+                    x_changed,
+                    EditActionKind::MoveBone,
+                    "Updated key X on " + bone_name,
+                    key_group(key_index),
+                    false,
+                    "Timeline edit failed",
+                    [&]() {
+                        const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
+                        if (edit_index.has_value()) {
+                            state->load_result.project->transform_timeline_edits[*edit_index]
+                                .keyframes[key_index]
+                                .x = edited_x;
+                        }
+                    });
 
                 double edited_y = display_key.y;
-                if (ImGui::DragScalar(
-                        "Y",
-                        ImGuiDataType_Double,
-                        &edited_y,
-                        0.1f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        state->load_result.project->transform_timeline_edits[*edit_index]
-                            .keyframes[key_index]
-                            .y = edited_y;
-                        commit_project_change(
-                            previous_project,
-                            "Updated key Y on " + bone_name);
-                    }
-                }
+                const bool y_changed = ImGui::DragScalar(
+                    "Y",
+                    ImGuiDataType_Double,
+                    &edited_y,
+                    0.1f,
+                    nullptr,
+                    nullptr,
+                    "%.3f");
+                apply_coalesced_project_drag(
+                    state,
+                    y_changed,
+                    EditActionKind::MoveBone,
+                    "Updated key Y on " + bone_name,
+                    key_group(key_index),
+                    false,
+                    "Timeline edit failed",
+                    [&]() {
+                        const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
+                        if (edit_index.has_value()) {
+                            state->load_result.project->transform_timeline_edits[*edit_index]
+                                .keyframes[key_index]
+                                .y = edited_y;
+                        }
+                    });
             }
 
             int interpolation_kind = 0;
@@ -5416,6 +7000,9 @@ void draw_transform_timeline_editor(
                     }
                     commit_project_change(
                         previous_project,
+                        EditActionKind::EditProperty,
+                        key_group(key_index),
+                        true,
                         "Updated interpolation on " + bone_name + " " +
                             std::string(transform_channel_label(*track->transform_channel)));
                 }
@@ -5426,100 +7013,50 @@ void draw_transform_timeline_editor(
                 marrow::runtime::CubicBezierControlPoints bezier =
                     display_key.interpolation.cubic_bezier();
 
-                if (ImGui::DragScalar(
-                        "Bezier X1",
+                const auto update_bezier = [&](const char* label,
+                                               double* component,
+                                               bool clamp_x,
+                                               std::string status) {
+                    const bool changed = ImGui::DragScalar(
+                        label,
                         ImGuiDataType_Double,
-                        &bezier.cx1,
+                        component,
                         0.01f,
                         nullptr,
                         nullptr,
-                        "%.3f")) {
-                    bezier.cx1 = std::clamp(bezier.cx1, 0.0, 1.0);
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->transform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated bezier control point X1");
+                        "%.3f");
+                    if (clamp_x) {
+                        *component = std::clamp(*component, 0.0, 1.0);
                     }
-                }
-                if (ImGui::DragScalar(
-                        "Bezier Y1",
-                        ImGuiDataType_Double,
-                        &bezier.cy1,
-                        0.01f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->transform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated bezier control point Y1");
-                    }
-                }
-                if (ImGui::DragScalar(
-                        "Bezier X2",
-                        ImGuiDataType_Double,
-                        &bezier.cx2,
-                        0.01f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    bezier.cx2 = std::clamp(bezier.cx2, 0.0, 1.0);
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->transform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated bezier control point X2");
-                    }
-                }
-                if (ImGui::DragScalar(
-                        "Bezier Y2",
-                        ImGuiDataType_Double,
-                        &bezier.cy2,
-                        0.01f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->transform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated bezier control point Y2");
-                    }
-                }
+                    apply_coalesced_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        key_group(key_index),
+                        false,
+                        "Timeline edit failed",
+                        [&]() {
+                            const auto edit_index =
+                                ensure_transform_timeline_edit_index(state, *track);
+                            if (edit_index.has_value()) {
+                                auto& editable_key =
+                                    state->load_result.project
+                                        ->transform_timeline_edits[*edit_index]
+                                        .keyframes[key_index];
+                                editable_key.interpolation =
+                                    marrow::runtime::Interpolation::cubic_bezier(
+                                        bezier.cx1,
+                                        bezier.cy1,
+                                        bezier.cx2,
+                                        bezier.cy2);
+                            }
+                        });
+                };
+                update_bezier("Bezier X1", &bezier.cx1, true, "Updated bezier control point X1");
+                update_bezier("Bezier Y1", &bezier.cy1, false, "Updated bezier control point Y1");
+                update_bezier("Bezier X2", &bezier.cx2, true, "Updated bezier control point X2");
+                update_bezier("Bezier Y2", &bezier.cy2, false, "Updated bezier control point Y2");
             }
         }
         ImGui::PopID();
@@ -5579,20 +7116,32 @@ void draw_mesh_deform_timeline_editor(
     ImGui::TextUnformatted(
         "Offsets are authored per vertex in local mesh space and exported back into the .mskl deform timeline.");
 
+    const auto deform_track_group = [&]() {
+        return std::string("timeline:") + track.id;
+    };
+    const auto deform_key_group = [&](std::size_t key_index) {
+        return deform_track_group() + ":key:" + std::to_string(key_index);
+    };
     const auto commit_project_change = [&](const marrow::editor::ProjectData& previous_project,
-                                           std::string status_message) {
-        if (!rebuild_project_runtime(state)) {
-            const std::string rebuild_error = state->error_message;
-            *state->load_result.project = previous_project;
-            rebuild_project_runtime(state);
-            state->error_message = rebuild_error;
-            state->status_message = "Mesh deform edit failed";
+                                           std::string status_message,
+                                           EditActionKind kind = EditActionKind::EditProperty,
+                                           std::string group = {},
+                                           bool allow_merge = true) {
+        if (group.empty()) {
+            group = deform_track_group();
+        }
+        if (!apply_project_command_change(
+                state,
+                previous_project,
+                kind,
+                std::move(status_message),
+                std::move(group),
+                allow_merge,
+                "Mesh deform edit failed")) {
             return false;
         }
 
-        state->project_dirty = true;
         state->selected_timeline_track_id = track.id;
-        state->status_message = std::move(status_message);
         return true;
     };
 
@@ -5620,7 +7169,10 @@ void draw_mesh_deform_timeline_editor(
                 commit_project_change(
                     previous_project,
                     "Added a mesh deform key on " + slot_name + " / " +
-                        *track.deform_attachment_name);
+                        *track.deform_attachment_name,
+                    EditActionKind::AddKeyframe,
+                    deform_track_group(),
+                    false);
             } else {
                 *state->load_result.project = previous_project;
                 state->status_message = "Could not place a new deform key between existing keyframes";
@@ -5635,30 +7187,53 @@ void draw_mesh_deform_timeline_editor(
         const std::string header = "Key " + std::to_string(key_index + 1U) +
             " @ " + format_time_seconds(display_key.time);
         if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-            double edited_time = display_key.time;
-            if (ImGui::DragScalar(
-                    "Time",
-                    ImGuiDataType_Double,
-                    &edited_time,
-                    0.01f,
-                    nullptr,
-                    nullptr,
-                    "%.3f s")) {
+            if (display_edit.keyframes.size() > 1U &&
+                ImGui::Button("Remove Key##deform")) {
                 const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                if (edit_index.has_value()) {
+                if (const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track)) {
                     auto& editable_track =
                         state->load_result.project->mesh_deform_timeline_edits[*edit_index];
-                    editable_track.keyframes[key_index].time = clamp_existing_key_time(
-                        editable_track.keyframes,
-                        key_index,
-                        edited_time,
-                        duration_seconds);
+                    editable_track.keyframes.erase(
+                        editable_track.keyframes.begin() + static_cast<std::ptrdiff_t>(key_index));
                     commit_project_change(
                         previous_project,
-                        "Updated deform key timing on " + slot_name);
+                        "Removed a mesh deform key on " + slot_name + " / " +
+                            *track.deform_attachment_name,
+                        EditActionKind::RemoveKeyframe,
+                        deform_track_group(),
+                        false);
                 }
             }
+
+            double edited_time = display_key.time;
+            const bool time_changed = ImGui::DragScalar(
+                "Time",
+                ImGuiDataType_Double,
+                &edited_time,
+                0.01f,
+                nullptr,
+                nullptr,
+                "%.3f s");
+            apply_coalesced_project_drag(
+                state,
+                time_changed,
+                EditActionKind::EditProperty,
+                "Updated deform key timing on " + slot_name,
+                deform_key_group(key_index),
+                false,
+                "Mesh deform edit failed",
+                [&]() {
+                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
+                    if (edit_index.has_value()) {
+                        auto& editable_track =
+                            state->load_result.project->mesh_deform_timeline_edits[*edit_index];
+                        editable_track.keyframes[key_index].time = clamp_existing_key_time(
+                            editable_track.keyframes,
+                            key_index,
+                            edited_time,
+                            duration_seconds);
+                    }
+                });
 
             int interpolation_kind = 0;
             switch (display_key.interpolation.kind()) {
@@ -5728,100 +7303,50 @@ void draw_mesh_deform_timeline_editor(
                 marrow::runtime::CubicBezierControlPoints bezier =
                     display_key.interpolation.cubic_bezier();
 
-                if (ImGui::DragScalar(
-                        "Bezier X1",
+                const auto update_bezier = [&](const char* label,
+                                               double* component,
+                                               bool clamp_x,
+                                               std::string status) {
+                    const bool changed = ImGui::DragScalar(
+                        label,
                         ImGuiDataType_Double,
-                        &bezier.cx1,
+                        component,
                         0.01f,
                         nullptr,
                         nullptr,
-                        "%.3f")) {
-                    bezier.cx1 = std::clamp(bezier.cx1, 0.0, 1.0);
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->mesh_deform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated deform bezier control point X1");
+                        "%.3f");
+                    if (clamp_x) {
+                        *component = std::clamp(*component, 0.0, 1.0);
                     }
-                }
-                if (ImGui::DragScalar(
-                        "Bezier Y1",
-                        ImGuiDataType_Double,
-                        &bezier.cy1,
-                        0.01f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->mesh_deform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated deform bezier control point Y1");
-                    }
-                }
-                if (ImGui::DragScalar(
-                        "Bezier X2",
-                        ImGuiDataType_Double,
-                        &bezier.cx2,
-                        0.01f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    bezier.cx2 = std::clamp(bezier.cx2, 0.0, 1.0);
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->mesh_deform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated deform bezier control point X2");
-                    }
-                }
-                if (ImGui::DragScalar(
-                        "Bezier Y2",
-                        ImGuiDataType_Double,
-                        &bezier.cy2,
-                        0.01f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                    if (edit_index.has_value()) {
-                        auto& editable_key =
-                            state->load_result.project->mesh_deform_timeline_edits[*edit_index]
-                                .keyframes[key_index];
-                        editable_key.interpolation =
-                            marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
-                        commit_project_change(previous_project, "Updated deform bezier control point Y2");
-                    }
-                }
+                    apply_coalesced_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        deform_key_group(key_index),
+                        false,
+                        "Mesh deform edit failed",
+                        [&]() {
+                            const auto edit_index =
+                                ensure_mesh_deform_timeline_edit_index(state, track);
+                            if (edit_index.has_value()) {
+                                auto& editable_key =
+                                    state->load_result.project
+                                        ->mesh_deform_timeline_edits[*edit_index]
+                                        .keyframes[key_index];
+                                editable_key.interpolation =
+                                    marrow::runtime::Interpolation::cubic_bezier(
+                                        bezier.cx1,
+                                        bezier.cy1,
+                                        bezier.cx2,
+                                        bezier.cy2);
+                            }
+                        });
+                };
+                update_bezier("Bezier X1", &bezier.cx1, true, "Updated deform bezier control point X1");
+                update_bezier("Bezier Y1", &bezier.cy1, false, "Updated deform bezier control point Y1");
+                update_bezier("Bezier X2", &bezier.cx2, true, "Updated deform bezier control point X2");
+                update_bezier("Bezier Y2", &bezier.cy2, false, "Updated deform bezier control point Y2");
             }
 
             ImGui::Separator();
@@ -5833,49 +7358,59 @@ void draw_mesh_deform_timeline_editor(
                 const std::size_t y_index = x_index + 1U;
 
                 double edited_x = display_key.vertex_offsets[x_index];
-                if (ImGui::DragScalar(
-                        "X",
-                        ImGuiDataType_Double,
-                        &edited_x,
-                        0.25f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                    if (edit_index.has_value()) {
-                        state->load_result.project->mesh_deform_timeline_edits[*edit_index]
-                            .keyframes[key_index]
-                            .vertex_offsets[x_index] = edited_x;
-                        commit_project_change(
-                            previous_project,
-                            "Updated deform vertex X on " + slot_name + " / " +
-                                *track.deform_attachment_name);
-                    }
-                }
+                const bool x_changed = ImGui::DragScalar(
+                    "X",
+                    ImGuiDataType_Double,
+                    &edited_x,
+                    0.25f,
+                    nullptr,
+                    nullptr,
+                    "%.3f");
+                apply_coalesced_project_drag(
+                    state,
+                    x_changed,
+                    EditActionKind::EditProperty,
+                    "Updated deform vertex X on " + slot_name + " / " +
+                        *track.deform_attachment_name,
+                    deform_key_group(key_index) + ":vertex:" + std::to_string(vertex_index),
+                    false,
+                    "Mesh deform edit failed",
+                    [&]() {
+                        const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
+                        if (edit_index.has_value()) {
+                            state->load_result.project->mesh_deform_timeline_edits[*edit_index]
+                                .keyframes[key_index]
+                                .vertex_offsets[x_index] = edited_x;
+                        }
+                    });
 
                 ImGui::SameLine();
                 double edited_y = display_key.vertex_offsets[y_index];
-                if (ImGui::DragScalar(
-                        "Y",
-                        ImGuiDataType_Double,
-                        &edited_y,
-                        0.25f,
-                        nullptr,
-                        nullptr,
-                        "%.3f")) {
-                    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                    const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
-                    if (edit_index.has_value()) {
-                        state->load_result.project->mesh_deform_timeline_edits[*edit_index]
-                            .keyframes[key_index]
-                            .vertex_offsets[y_index] = edited_y;
-                        commit_project_change(
-                            previous_project,
-                            "Updated deform vertex Y on " + slot_name + " / " +
-                                *track.deform_attachment_name);
-                    }
-                }
+                const bool y_changed = ImGui::DragScalar(
+                    "Y",
+                    ImGuiDataType_Double,
+                    &edited_y,
+                    0.25f,
+                    nullptr,
+                    nullptr,
+                    "%.3f");
+                apply_coalesced_project_drag(
+                    state,
+                    y_changed,
+                    EditActionKind::EditProperty,
+                    "Updated deform vertex Y on " + slot_name + " / " +
+                        *track.deform_attachment_name,
+                    deform_key_group(key_index) + ":vertex:" + std::to_string(vertex_index),
+                    false,
+                    "Mesh deform edit failed",
+                    [&]() {
+                        const auto edit_index = ensure_mesh_deform_timeline_edit_index(state, track);
+                        if (edit_index.has_value()) {
+                            state->load_result.project->mesh_deform_timeline_edits[*edit_index]
+                                .keyframes[key_index]
+                                .vertex_offsets[y_index] = edited_y;
+                        }
+                    });
 
                 ImGui::SameLine();
                 ImGui::TextDisabled(
@@ -5892,7 +7427,7 @@ void draw_mesh_deform_timeline_editor(
 }
 
 void draw_timeline_window(ShellState* state) {
-    ImGui::Begin("Timeline");
+    ImGui::Begin(kTimelineWindowTitle);
 
     if (!state->load_result || !state->preview_skeleton) {
         ImGui::TextUnformatted("Load a valid project to scrub and inspect keyed animation tracks.");
@@ -6134,8 +7669,127 @@ void draw_timeline_window(ShellState* state) {
     ImGui::End();
 }
 
+void draw_viewport_fallback_scene(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    ImDrawList* draw_list) {
+    draw_list->AddRectFilled(
+        layout.canvas_origin,
+        layout.canvas_end,
+        IM_COL32(18, 21, 25, 255),
+        6.0f);
+    draw_list->AddRect(
+        layout.canvas_origin,
+        layout.canvas_end,
+        IM_COL32(56, 61, 69, 255),
+        6.0f);
+
+    const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state.viewport.zoom));
+    for (float x = first_grid_line(layout.world_origin_screen.x, layout.canvas_origin.x, grid_spacing);
+         x < layout.canvas_end.x;
+         x += grid_spacing) {
+        draw_list->AddLine(
+            ImVec2(x, layout.canvas_origin.y),
+            ImVec2(x, layout.canvas_end.y),
+            IM_COL32(31, 35, 41, 255));
+    }
+    for (float y = first_grid_line(layout.world_origin_screen.y, layout.canvas_origin.y, grid_spacing);
+         y < layout.canvas_end.y;
+         y += grid_spacing) {
+        draw_list->AddLine(
+            ImVec2(layout.canvas_origin.x, y),
+            ImVec2(layout.canvas_end.x, y),
+            IM_COL32(31, 35, 41, 255));
+    }
+
+    draw_list->AddLine(
+        ImVec2(layout.canvas_origin.x, layout.world_origin_screen.y),
+        ImVec2(layout.canvas_end.x, layout.world_origin_screen.y),
+        IM_COL32(189, 86, 37, 255),
+        1.5f);
+    draw_list->AddLine(
+        ImVec2(layout.world_origin_screen.x, layout.canvas_origin.y),
+        ImVec2(layout.world_origin_screen.x, layout.canvas_end.y),
+        IM_COL32(204, 177, 110, 255),
+        1.5f);
+
+    for (const BoneCanvasNode& node : layout.bones) {
+        if (!node.parent_index.has_value() || *node.parent_index >= layout.bones.size()) {
+            continue;
+        }
+
+        const BoneCanvasNode& parent = layout.bones[*node.parent_index];
+        const bool selected =
+            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+        const ImU32 line_color = selected
+            ? IM_COL32(247, 204, 114, 255)
+            : node.active ? IM_COL32(214, 163, 76, 220) : IM_COL32(111, 117, 125, 180);
+        draw_list->AddLine(
+            parent.screen_position,
+            node.screen_position,
+            line_color,
+            selected ? 3.0f : 2.0f);
+    }
+
+    for (const BoneCanvasNode& node : layout.bones) {
+        const bool selected =
+            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+        const bool hovered_selection =
+            hovered_bone.has_value() && *hovered_bone == node.bone_index;
+        const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
+        const ImU32 fill_color = selected
+            ? IM_COL32(247, 204, 114, 255)
+            : hovered_selection ? IM_COL32(226, 186, 97, 240)
+                                : node.active ? IM_COL32(208, 134, 57, 230)
+                                              : IM_COL32(98, 103, 110, 200);
+        const ImU32 outline_color =
+            node.active ? IM_COL32(33, 37, 41, 255) : IM_COL32(48, 50, 54, 255);
+        draw_list->AddCircleFilled(node.screen_position, radius, fill_color, 18);
+        draw_list->AddCircle(node.screen_position, radius, outline_color, 18, 1.5f);
+    }
+}
+
+void draw_viewport_annotations(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    ImDrawList* draw_list) {
+    if (!state.load_result) {
+        return;
+    }
+
+    const auto& bones = state.load_result.skeleton_data->bones();
+    for (const BoneCanvasNode& node : layout.bones) {
+        const bool selected =
+            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+        const bool hovered_selection =
+            hovered_bone.has_value() && *hovered_bone == node.bone_index;
+        const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
+        if (selected || hovered_selection || layout.bones.size() <= 12U) {
+            draw_list->AddText(
+                ImVec2(node.screen_position.x + radius + 6.0f, node.screen_position.y - 6.0f),
+                selected ? IM_COL32(247, 232, 191, 255) : IM_COL32(225, 212, 180, 220),
+                bones[node.bone_index].name.c_str());
+        }
+    }
+
+    if (state.selected_bone_index.has_value() &&
+        *state.selected_bone_index < bones.size()) {
+        std::ostringstream selection_stream;
+        selection_stream << bones[*state.selected_bone_index].name
+                         << "  pan(" << static_cast<int>(state.viewport.pan_x) << ", "
+                         << static_cast<int>(state.viewport.pan_y) << ")"
+                         << "  zoom " << state.viewport.zoom;
+        draw_list->AddText(
+            ImVec2(layout.canvas_origin.x + 14.0f, layout.canvas_origin.y + 12.0f),
+            IM_COL32(244, 230, 197, 255),
+            selection_stream.str().c_str());
+    }
+}
+
 void draw_viewport_window(ShellState* state) {
-    ImGui::Begin("Viewport");
+    ImGui::Begin(kViewportWindowTitle);
     const std::string preview_label =
         state->selected_animation_name.empty() ? std::string("Setup pose preview")
                                                : "Animation preview / " + state->selected_animation_name;
@@ -6157,6 +7811,28 @@ void draw_viewport_window(ShellState* state) {
     }
 
     const ImVec2 canvas_origin = ImGui::GetCursorScreenPos();
+    const ViewportFramebufferSize framebuffer_size = viewport_framebuffer_size(
+        canvas_size,
+        ImGui::GetIO().DisplayFramebufferScale);
+    bool use_framebuffer = state->viewport_renderer.available;
+    if (use_framebuffer) {
+        if (const auto error = ensure_viewport_framebuffer(
+                &state->viewport_renderer,
+                framebuffer_size.width,
+                framebuffer_size.height)) {
+            state->viewport_renderer.error_message = *error;
+            use_framebuffer = false;
+        }
+    }
+
+    if (use_framebuffer) {
+        ImGui::Image(
+            ImTextureRef(static_cast<ImTextureID>(state->viewport_renderer.color_texture)),
+            canvas_size,
+            kViewportImageUv0,
+            kViewportImageUv1);
+        ImGui::SetCursorScreenPos(canvas_origin);
+    }
     ImGui::InvisibleButton(
         "viewport_canvas",
         canvas_size,
@@ -6176,123 +7852,75 @@ void draw_viewport_window(ShellState* state) {
     }
 
     const auto layout = build_viewport_layout(*state, canvas_origin, canvas_size);
-    const ImVec2 canvas_end(
-        canvas_origin.x + canvas_size.x,
-        canvas_origin.y + canvas_size.y);
-    draw_list->AddRectFilled(canvas_origin, canvas_end, IM_COL32(18, 21, 25, 255), 6.0f);
-    draw_list->AddRect(canvas_origin, canvas_end, IM_COL32(56, 61, 69, 255), 6.0f);
-
-    if (!layout.has_value()) {
-        draw_list->AddText(
-            ImVec2(canvas_origin.x + 16.0f, canvas_origin.y + 16.0f),
-            IM_COL32(240, 232, 213, 255),
-            "Project load failed. Reload a valid .marrow file.");
-        ImGui::End();
-        return;
-    }
-
-    const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state->viewport.zoom));
-    for (float x = first_grid_line(layout->world_origin_screen.x, canvas_origin.x, grid_spacing);
-         x < layout->canvas_end.x;
-         x += grid_spacing) {
-        draw_list->AddLine(
-            ImVec2(x, canvas_origin.y),
-            ImVec2(x, layout->canvas_end.y),
-            IM_COL32(31, 35, 41, 255));
-    }
-    for (float y = first_grid_line(layout->world_origin_screen.y, canvas_origin.y, grid_spacing);
-         y < layout->canvas_end.y;
-         y += grid_spacing) {
-        draw_list->AddLine(
-            ImVec2(canvas_origin.x, y),
-            ImVec2(layout->canvas_end.x, y),
-            IM_COL32(31, 35, 41, 255));
-    }
-
-    draw_list->AddLine(
-        ImVec2(canvas_origin.x, layout->world_origin_screen.y),
-        ImVec2(layout->canvas_end.x, layout->world_origin_screen.y),
-        IM_COL32(189, 86, 37, 255),
-        1.5f);
-    draw_list->AddLine(
-        ImVec2(layout->world_origin_screen.x, canvas_origin.y),
-        ImVec2(layout->world_origin_screen.x, layout->canvas_end.y),
-        IM_COL32(204, 177, 110, 255),
-        1.5f);
-
     std::optional<std::size_t> hovered_bone;
-    if (hovered) {
+    if (hovered && layout.has_value()) {
         hovered_bone = pick_bone_at_position(*layout, ImGui::GetIO().MousePos);
     }
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovered_bone.has_value()) {
         select_bone(state, *hovered_bone, "Viewport", true);
     }
 
-    for (const BoneCanvasNode& node : layout->bones) {
-        if (!node.parent_index.has_value() || *node.parent_index >= layout->bones.size()) {
-            continue;
-        }
-
-        const BoneCanvasNode& parent = layout->bones[*node.parent_index];
-        const bool selected =
-            state->selected_bone_index.has_value() && *state->selected_bone_index == node.bone_index;
-        const ImU32 line_color = selected
-            ? IM_COL32(247, 204, 114, 255)
-            : node.active ? IM_COL32(214, 163, 76, 220) : IM_COL32(111, 117, 125, 180);
-        draw_list->AddLine(
-            parent.screen_position,
-            node.screen_position,
-            line_color,
-            selected ? 3.0f : 2.0f);
-    }
-
-    const auto& bones = state->load_result.skeleton_data->bones();
-    for (const BoneCanvasNode& node : layout->bones) {
-        const bool selected =
-            state->selected_bone_index.has_value() && *state->selected_bone_index == node.bone_index;
-        const bool hovered_selection =
-            hovered_bone.has_value() && *hovered_bone == node.bone_index;
-        const float radius = layout->joint_radius + (selected ? 2.0f : 0.0f);
-        const ImU32 fill_color = selected
-            ? IM_COL32(247, 204, 114, 255)
-            : hovered_selection ? IM_COL32(226, 186, 97, 240)
-                                : node.active ? IM_COL32(208, 134, 57, 230)
-                                              : IM_COL32(98, 103, 110, 200);
-        const ImU32 outline_color =
-            node.active ? IM_COL32(33, 37, 41, 255) : IM_COL32(48, 50, 54, 255);
-        draw_list->AddCircleFilled(node.screen_position, radius, fill_color, 18);
-        draw_list->AddCircle(node.screen_position, radius, outline_color, 18, 1.5f);
-
-        if (selected || hovered_selection || layout->bones.size() <= 12) {
-            draw_list->AddText(
-                ImVec2(node.screen_position.x + radius + 6.0f, node.screen_position.y - 6.0f),
-                selected ? IM_COL32(247, 232, 191, 255) : IM_COL32(225, 212, 180, 220),
-                bones[node.bone_index].name.c_str());
+    const ImVec2 canvas_end(
+        canvas_origin.x + canvas_size.x,
+        canvas_origin.y + canvas_size.y);
+    if (use_framebuffer && layout.has_value()) {
+        if (const auto error = render_viewport_framebuffer(
+                *state,
+                *layout,
+                hovered_bone,
+                &state->viewport_renderer)) {
+            state->viewport_renderer.error_message = *error;
+            use_framebuffer = false;
+        } else {
+            state->viewport_renderer.error_message.clear();
         }
     }
 
-    if (hovered_bone.has_value()) {
+    if (use_framebuffer) {
+        draw_list->AddRect(canvas_origin, canvas_end, IM_COL32(56, 61, 69, 255), 6.0f);
+    } else {
+        if (layout.has_value()) {
+            draw_viewport_fallback_scene(*state, *layout, hovered_bone, draw_list);
+        } else {
+            draw_list->AddRectFilled(
+                canvas_origin,
+                canvas_end,
+                IM_COL32(18, 21, 25, 255),
+                6.0f);
+            draw_list->AddRect(
+                canvas_origin,
+                canvas_end,
+                IM_COL32(56, 61, 69, 255),
+                6.0f);
+        }
+    }
+
+    if (layout.has_value()) {
+        draw_viewport_annotations(*state, *layout, hovered_bone, draw_list);
+    } else {
+        draw_list->AddText(
+            ImVec2(canvas_origin.x + 16.0f, canvas_origin.y + 16.0f),
+            IM_COL32(240, 232, 213, 255),
+            "Project load failed. Reload a valid .marrow file.");
+    }
+
+    if (hovered_bone.has_value() && state->load_result) {
+        const auto& bones = state->load_result.skeleton_data->bones();
         ImGui::SetTooltip("%s", bones[*hovered_bone].name.c_str());
     }
 
-    if (state->selected_bone_index.has_value() &&
-        *state->selected_bone_index < bones.size()) {
-        std::ostringstream selection_stream;
-        selection_stream << bones[*state->selected_bone_index].name
-                         << "  pan(" << static_cast<int>(state->viewport.pan_x) << ", "
-                         << static_cast<int>(state->viewport.pan_y) << ")"
-                         << "  zoom " << state->viewport.zoom;
+    if (!state->viewport_renderer.error_message.empty()) {
         draw_list->AddText(
-            ImVec2(canvas_origin.x + 14.0f, canvas_origin.y + 12.0f),
-            IM_COL32(244, 230, 197, 255),
-            selection_stream.str().c_str());
+            ImVec2(canvas_origin.x + 14.0f, canvas_end.y - 28.0f),
+            IM_COL32(228, 143, 104, 255),
+            state->viewport_renderer.error_message.c_str());
     }
 
     ImGui::End();
 }
 
 void draw_inspector_window(ShellState* state) {
-    ImGui::Begin("Inspector");
+    ImGui::Begin(kPropertiesWindowTitle);
 
     if (!state->load_result || !state->preview_skeleton) {
         ImGui::TextUnformatted("Load a valid project to inspect setup-pose data.");
@@ -6353,11 +7981,25 @@ void draw_inspector_window(ShellState* state) {
             ImGui::Text("Rotation: %.1f deg", setup_pose.rotation);
             ImGui::Text("Scale: (%.2f, %.2f)", setup_pose.scale_x, setup_pose.scale_y);
             ImGui::Text("Shear: (%.1f, %.1f)", setup_pose.shear_x, setup_pose.shear_y);
-            ImGui::Text(
-                "Inherit: rotation %s, scale %s, reflection %s",
-                yes_no(bone.setup_inherit.inherit_rotation),
-                yes_no(bone.setup_inherit.inherit_scale),
-                yes_no(bone.setup_inherit.inherit_reflection));
+            const char* inherit_label = "normal";
+            switch (bone.inherit) {
+            case marrow::runtime::BoneInherit::Normal:
+                inherit_label = "normal";
+                break;
+            case marrow::runtime::BoneInherit::OnlyTranslation:
+                inherit_label = "onlyTranslation";
+                break;
+            case marrow::runtime::BoneInherit::NoRotationOrReflection:
+                inherit_label = "noRotationOrReflection";
+                break;
+            case marrow::runtime::BoneInherit::NoScale:
+                inherit_label = "noScale";
+                break;
+            case marrow::runtime::BoneInherit::NoScaleOrReflection:
+                inherit_label = "noScaleOrReflection";
+                break;
+            }
+            ImGui::Text("Inherit: %s", inherit_label);
             ImGui::Separator();
             ImGui::TextUnformatted("World Pose");
             ImGui::Text("World position: (%.1f, %.1f)", world.world_x, world.world_y);
@@ -6584,10 +8226,13 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     advance_timeline_playback(shell_state, ImGui::GetIO().DeltaTime);
+    handle_project_history_shortcuts(shell_state);
 
     bool reload_requested = false;
     draw_menu_bar(window, &reload_requested, shell_state);
-    ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
+    const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+    const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
+    ensure_default_dock_layout(shell_state, dockspace_id, main_viewport);
     draw_project_window(&reload_requested, shell_state);
     draw_runtime_window(*shell_state);
     draw_constraints_window(shell_state);
@@ -6674,6 +8319,75 @@ int run_headless_smoke(const Options& options) {
             ImVec2(1280.0f, 720.0f));
         if (!smoke_layout.has_value()) {
             std::cerr << "Failed to build a viewport layout for headless smoke validation.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (kViewportImageUv0.x != 0.0f || kViewportImageUv0.y != 1.0f ||
+            kViewportImageUv1.x != 1.0f || kViewportImageUv1.y != 0.0f) {
+            std::cerr << "Viewport image UVs are not flipped for the OpenGL framebuffer texture.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const ViewportFramebufferSize initial_framebuffer_size =
+            viewport_framebuffer_size(ImVec2(320.0f, 180.0f), ImVec2(2.0f, 2.0f));
+        const ViewportFramebufferSize resized_framebuffer_size =
+            viewport_framebuffer_size(ImVec2(640.0f, 360.0f), ImVec2(2.0f, 2.0f));
+        if (initial_framebuffer_size.width != 640 ||
+            initial_framebuffer_size.height != 360 ||
+            resized_framebuffer_size.width != 1280 ||
+            resized_framebuffer_size.height != 720) {
+            std::cerr << "Viewport framebuffer sizing did not scale with the panel extent.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const ImVec2 spine_position = smoke_layout->bones[*spine_index].screen_position;
+        const ImVec2 arm_position = smoke_layout->bones[*arm_index].screen_position;
+        const ImVec2 bone_vector(
+            arm_position.x - spine_position.x,
+            arm_position.y - spine_position.y);
+        const float bone_length =
+            std::sqrt((bone_vector.x * bone_vector.x) + (bone_vector.y * bone_vector.y));
+        if (bone_length <= 1e-6f) {
+            std::cerr << "Viewport smoke validation could not build a valid spine->arm segment.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const ImVec2 bone_direction(bone_vector.x / bone_length, bone_vector.y / bone_length);
+        const ImVec2 bone_perpendicular(-bone_direction.y, bone_direction.x);
+
+        const ImVec2 joint_priority_probe(
+            spine_position.x + (bone_direction.x * (kBoneJointHitRadiusPixels - 1.5f)),
+            spine_position.y + (bone_direction.y * (kBoneJointHitRadiusPixels - 1.5f)));
+        const auto joint_priority_pick =
+            pick_bone_at_position(*smoke_layout, joint_priority_probe);
+        if (!joint_priority_pick.has_value() || *joint_priority_pick != *spine_index) {
+            std::cerr << "Viewport picking did not prioritize the 6px joint hit zone over the bone body.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const ImVec2 segment_midpoint(
+            (spine_position.x + arm_position.x) * 0.5f,
+            (spine_position.y + arm_position.y) * 0.5f);
+        const ImVec2 segment_body_probe(
+            segment_midpoint.x + (bone_perpendicular.x * (kBoneBodyHitThresholdPixels - 1.0f)),
+            segment_midpoint.y + (bone_perpendicular.y * (kBoneBodyHitThresholdPixels - 1.0f)));
+        const auto segment_body_pick =
+            pick_bone_at_position(*smoke_layout, segment_body_probe);
+        if (!segment_body_pick.has_value() || *segment_body_pick != *arm_index) {
+            std::cerr << "Viewport picking did not select the nearest bone within the 8px body threshold.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const ImVec2 segment_miss_probe(
+            segment_midpoint.x + (bone_perpendicular.x * (kBoneBodyHitThresholdPixels + 1.0f)),
+            segment_midpoint.y + (bone_perpendicular.y * (kBoneBodyHitThresholdPixels + 1.0f)));
+        if (pick_bone_at_position(*smoke_layout, segment_miss_probe).has_value()) {
+            std::cerr << "Viewport picking accepted a point outside the 8px bone body threshold.\n";
             ImGui::DestroyContext();
             return 1;
         }
@@ -7932,13 +9646,351 @@ int run_headless_smoke(const Options& options) {
         shell_state.project_dirty = false;
     }
 
+    {
+        if (const auto body_slot_index = shell_state.load_result.skeleton_data->find_slot_index("body")) {
+            const auto warrior_skin_index =
+                shell_state.load_result.skeleton_data->find_skin_index("warrior");
+            const auto mage_skin_index =
+                shell_state.load_result.skeleton_data->find_skin_index("mage");
+            const auto transform_edit_index =
+                ensure_transform_timeline_edit_index(&shell_state, *spine_track);
+            const auto transform_constraint_edit_index =
+                ensure_transform_constraint_edit_index(&shell_state, "editor_transform_follow");
+            if (!warrior_skin_index.has_value() || !mage_skin_index.has_value() ||
+                !transform_edit_index.has_value() ||
+                !transform_constraint_edit_index.has_value()) {
+                std::cerr << "Undo smoke could not resolve the baseline editor state.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+
+            shell_state.command_stack.clear();
+            shell_state.pending_edit_action.reset();
+            shell_state.preview_skin_names = {"default"};
+            shell_state.preview_slot_overrides.assign(
+                shell_state.preview_slot_overrides.size(),
+                std::nullopt);
+            if (!apply_preview_skin_selection(&shell_state, "Smoke", false)) {
+                std::cerr << "Undo smoke could not restore the default preview skin selection.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+            select_slot(&shell_state, *body_slot_index, "Smoke", false);
+            update_project_dirty_state(&shell_state);
+
+            const EditorHistorySnapshot undo_smoke_baseline =
+                capture_history_snapshot(shell_state);
+            UndoStack merge_stack;
+            {
+                EditorHistorySnapshot merged_before = undo_smoke_baseline;
+                EditorHistorySnapshot merged_mid = undo_smoke_baseline;
+                merged_mid.preview_skin_names.push_back("merge-mid");
+                EditorHistorySnapshot merged_after = merged_mid;
+                merged_after.preview_skin_names.push_back("merge-after");
+                merge_stack.push(make_edit_action(
+                    EditActionKind::MoveBone,
+                    "Merged drag step 1",
+                    "smoke:merge",
+                    true,
+                    merged_before,
+                    merged_mid));
+                merge_stack.push(make_edit_action(
+                    EditActionKind::MoveBone,
+                    "Merged drag step 2",
+                    "smoke:merge",
+                    true,
+                    merged_mid,
+                    merged_after));
+            }
+            if (merge_stack.undo_count() != 1U || merge_stack.redo_count() != 0U ||
+                merge_stack.peek_undo() == nullptr ||
+                merge_stack.peek_undo()->kind() != EditActionKind::MoveBone) {
+                std::cerr << "Undo smoke did not merge grouped drag actions into a single history entry.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+
+            UndoStack depth_stack;
+            for (std::size_t action_index = 0; action_index < 101U; ++action_index) {
+                EditorHistorySnapshot before = undo_smoke_baseline;
+                EditorHistorySnapshot after = undo_smoke_baseline;
+                after.preview_skin_names.push_back(
+                    "depth-" + std::to_string(action_index));
+                depth_stack.push(make_edit_action(
+                    EditActionKind::EditProperty,
+                    "Depth smoke " + std::to_string(action_index),
+                    "smoke:depth:" + std::to_string(action_index),
+                    false,
+                    before,
+                    after));
+            }
+            if (depth_stack.undo_count() != 100U || depth_stack.redo_count() != 0U) {
+                std::cerr << "Undo smoke did not cap the history depth at 100 actions.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+
+            const auto undo_track_group = [&]() {
+                return std::string("timeline:") + spine_track->id;
+            };
+            const auto undo_key_group = [&](std::size_t key_index) {
+                return undo_track_group() + ":key:" + std::to_string(key_index);
+            };
+
+            auto& rotate_edit =
+                shell_state.load_result.project->transform_timeline_edits[*transform_edit_index];
+            const std::size_t baseline_key_count = rotate_edit.keyframes.size();
+            if (const auto insert_time = insertable_key_time(
+                    rotate_edit.keyframes,
+                    0.625,
+                    selected_animation_duration(shell_state))) {
+                marrow::editor::ProjectData previous_project =
+                    *shell_state.load_result.project;
+                marrow::editor::TransformKeyframeEdit inserted_key =
+                    sample_transform_keyframe(shell_state, *spine_track);
+                inserted_key.time = *insert_time;
+                inserted_key.angle = 11.0;
+                inserted_key.interpolation = marrow::runtime::Interpolation::linear();
+                const auto insert_iterator = std::upper_bound(
+                    rotate_edit.keyframes.begin(),
+                    rotate_edit.keyframes.end(),
+                    inserted_key.time,
+                    [](double time, const marrow::editor::TransformKeyframeEdit& keyframe) {
+                        return time < keyframe.time;
+                    });
+                const std::size_t inserted_index = static_cast<std::size_t>(
+                    std::distance(rotate_edit.keyframes.begin(), insert_iterator));
+                rotate_edit.keyframes.insert(insert_iterator, inserted_key);
+                if (!apply_project_command_change(
+                        &shell_state,
+                        previous_project,
+                        EditActionKind::AddKeyframe,
+                        "Added smoke undo key on spine",
+                        undo_track_group(),
+                        false,
+                        "Undo smoke add-key action failed")) {
+                    std::cerr << "Undo smoke could not record the add-key action.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                previous_project = *shell_state.load_result.project;
+                shell_state.load_result.project->transform_timeline_edits[*transform_edit_index]
+                    .keyframes[inserted_index]
+                    .angle = 18.0;
+                if (!apply_project_command_change(
+                        &shell_state,
+                        previous_project,
+                        EditActionKind::MoveBone,
+                        "Moved smoke undo key on spine",
+                        undo_key_group(inserted_index),
+                        false,
+                        "Undo smoke move action failed")) {
+                    std::cerr << "Undo smoke could not record the move-key action.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                previous_project = *shell_state.load_result.project;
+                const double baseline_translate_mix =
+                    shell_state.load_result.project
+                        ->transform_constraint_edits[*transform_constraint_edit_index]
+                        .translate_mix;
+                shell_state.load_result.project
+                    ->transform_constraint_edits[*transform_constraint_edit_index]
+                    .translate_mix = 0.5;
+                if (!apply_project_command_change(
+                        &shell_state,
+                        previous_project,
+                        EditActionKind::EditProperty,
+                        "Edited smoke constraint translate mix",
+                        "constraint:Transform:editor_transform_follow",
+                        true,
+                        "Undo smoke constraint action failed")) {
+                    std::cerr << "Undo smoke could not record the constraint edit action.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                if (!set_preview_skin_enabled(
+                        &shell_state,
+                        *warrior_skin_index,
+                        true,
+                        false,
+                        true)) {
+                    std::cerr << "Undo smoke could not record the preview skin action.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                const AttachmentSelection mage_attachment_selection{
+                    *body_slot_index,
+                    *mage_skin_index,
+                    "mage_body"};
+                if (!apply_attachment_selection_to_preview_slot(
+                        &shell_state,
+                        mage_attachment_selection,
+                        "Smoke",
+                        false,
+                        true)) {
+                    std::cerr << "Undo smoke could not record the preview attachment swap.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                previous_project = *shell_state.load_result.project;
+                shell_state.load_result.project->transform_timeline_edits[*transform_edit_index]
+                    .keyframes.erase(
+                        shell_state.load_result.project->transform_timeline_edits[*transform_edit_index]
+                            .keyframes.begin() +
+                        static_cast<std::ptrdiff_t>(inserted_index));
+                if (!apply_project_command_change(
+                        &shell_state,
+                        previous_project,
+                        EditActionKind::RemoveKeyframe,
+                        "Removed smoke undo key on spine",
+                        undo_track_group(),
+                        false,
+                        "Undo smoke remove-key action failed")) {
+                    std::cerr << "Undo smoke could not record the remove-key action.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                const EditorHistorySnapshot undo_smoke_final =
+                    capture_history_snapshot(shell_state);
+                const auto* edited_constraint = find_named_constraint(
+                    shell_state.load_result.skeleton_data->transform_constraints(),
+                    "editor_transform_follow");
+                const auto* overridden_attachment =
+                    shell_state.preview_skeleton->current_attachment(*body_slot_index);
+                const bool warrior_enabled = std::find(
+                    shell_state.preview_skin_names.begin(),
+                    shell_state.preview_skin_names.end(),
+                    "warrior") != shell_state.preview_skin_names.end();
+                if (shell_state.command_stack.undo_count() != 6U ||
+                    shell_state.command_stack.redo_count() != 0U ||
+                    shell_state.load_result.project->transform_timeline_edits[*transform_edit_index]
+                            .keyframes.size() != baseline_key_count ||
+                    edited_constraint == nullptr ||
+                    !require_smoke_near(
+                        edited_constraint->translate_mix,
+                        0.5,
+                        1e-6,
+                        "undo smoke constraint translate mix") ||
+                    !warrior_enabled ||
+                    !shell_state.preview_slot_overrides[*body_slot_index].has_value() ||
+                    shell_state.preview_slot_overrides[*body_slot_index]->attachment_name !=
+                        "mage_body" ||
+                    overridden_attachment == nullptr ||
+                    overridden_attachment->name != "mage_body") {
+                    std::cerr << "Undo smoke did not preserve the final edited state before undo.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                for (int undo_index = 0; undo_index < 6; ++undo_index) {
+                    if (!undo_project_change(&shell_state)) {
+                        std::cerr << "Undo smoke failed while rewinding the editor history.\n";
+                        ImGui::DestroyContext();
+                        return 1;
+                    }
+                }
+                if (shell_state.command_stack.undo_count() != 0U ||
+                    shell_state.command_stack.redo_count() != 6U ||
+                    !history_snapshots_equal(
+                        capture_history_snapshot(shell_state),
+                        undo_smoke_baseline) ||
+                    shell_state.project_dirty) {
+                    std::cerr << "Undo smoke did not restore the baseline project and preview state.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                for (int redo_index = 0; redo_index < 6; ++redo_index) {
+                    if (!redo_project_change(&shell_state)) {
+                        std::cerr << "Undo smoke failed while replaying the editor history.\n";
+                        ImGui::DestroyContext();
+                        return 1;
+                    }
+                }
+                if (shell_state.command_stack.undo_count() != 6U ||
+                    shell_state.command_stack.redo_count() != 0U ||
+                    !history_snapshots_equal(
+                        capture_history_snapshot(shell_state),
+                        undo_smoke_final)) {
+                    std::cerr << "Undo smoke did not reapply the recorded action sequence.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                if (!undo_project_change(&shell_state) ||
+                    shell_state.command_stack.redo_count() != 1U) {
+                    std::cerr << "Undo smoke could not prepare the redo-clear validation.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+
+                previous_project = *shell_state.load_result.project;
+                shell_state.load_result.project
+                    ->transform_constraint_edits[*transform_constraint_edit_index]
+                    .translate_mix = baseline_translate_mix;
+                if (!apply_project_command_change(
+                        &shell_state,
+                        previous_project,
+                        EditActionKind::EditProperty,
+                        "Branched smoke constraint translate mix",
+                        "constraint:Transform:editor_transform_follow",
+                        true,
+                        "Undo smoke redo-clear action failed")) {
+                    std::cerr << "Undo smoke could not validate redo clearing after a new edit.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+                if (shell_state.command_stack.redo_count() != 0U) {
+                    std::cerr << "Undo smoke did not clear redo history after a new edit.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+            } else {
+                std::cerr << "Undo smoke could not find room for an inserted spine key.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+
+            if (!apply_history_snapshot(&shell_state, undo_smoke_baseline)) {
+                std::cerr << "Undo smoke failed to restore the baseline shell state.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+            shell_state.command_stack.clear();
+            shell_state.pending_edit_action.reset();
+            update_project_dirty_state(&shell_state);
+            if (shell_state.project_dirty) {
+                std::cerr << "Undo smoke left the project marked dirty after baseline restore.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+        } else {
+            std::cerr << "Undo smoke could not resolve the body slot for preview attachment validation.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+    }
+
     const int frame_count = options.auto_close_frames.value_or(1);
+    bool validated_dock_layout = false;
     for (int frame_index = 0; frame_index < frame_count; ++frame_index) {
         io.DeltaTime = 1.0f / 60.0f;
         ImGui::NewFrame();
         advance_timeline_playback(&shell_state, io.DeltaTime);
+        handle_project_history_shortcuts(&shell_state);
 
         bool reload_requested = false;
+        draw_menu_bar(nullptr, &reload_requested, &shell_state);
+        const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+        const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
+        ensure_default_dock_layout(&shell_state, dockspace_id, main_viewport);
         draw_project_window(&reload_requested, &shell_state);
         draw_runtime_window(shell_state);
         draw_constraints_window(&shell_state);
@@ -7946,6 +9998,43 @@ int run_headless_smoke(const Options& options) {
         draw_hierarchy_window(&shell_state);
         draw_viewport_window(&shell_state);
         draw_inspector_window(&shell_state);
+
+        if (!validated_dock_layout) {
+            const ImGuiWindow* viewport_window = ImGui::FindWindowByName(kViewportWindowTitle);
+            const ImGuiWindow* timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+            const ImGuiWindow* hierarchy_window = ImGui::FindWindowByName(kHierarchyWindowTitle);
+            const ImGuiWindow* properties_window = ImGui::FindWindowByName(kPropertiesWindowTitle);
+            const ImGuiDockNode* viewport_node =
+                ImGui::DockBuilderGetNode(shell_state.dock_layout.viewport_node_id);
+            const ImGuiDockNode* timeline_node =
+                ImGui::DockBuilderGetNode(shell_state.dock_layout.timeline_node_id);
+            const ImGuiDockNode* hierarchy_node =
+                ImGui::DockBuilderGetNode(shell_state.dock_layout.hierarchy_node_id);
+            const ImGuiDockNode* properties_node =
+                ImGui::DockBuilderGetNode(shell_state.dock_layout.properties_node_id);
+            if (!shell_state.default_dock_layout_initialized ||
+                viewport_window == nullptr ||
+                timeline_window == nullptr ||
+                hierarchy_window == nullptr ||
+                properties_window == nullptr ||
+                viewport_node == nullptr ||
+                timeline_node == nullptr ||
+                hierarchy_node == nullptr ||
+                properties_node == nullptr ||
+                viewport_window->DockId != shell_state.dock_layout.viewport_node_id ||
+                timeline_window->DockId != shell_state.dock_layout.timeline_node_id ||
+                hierarchy_window->DockId != shell_state.dock_layout.hierarchy_node_id ||
+                properties_window->DockId != shell_state.dock_layout.properties_node_id ||
+                !(viewport_node->Pos.x > hierarchy_node->Pos.x) ||
+                !(timeline_node->Pos.y > viewport_node->Pos.y) ||
+                !(properties_node->Pos.y > hierarchy_node->Pos.y) ||
+                std::abs(properties_node->Pos.x - hierarchy_node->Pos.x) > 1e-3f) {
+                std::cerr << "DockBuilder did not create the default Viewport/Timeline/Hierarchy/Properties layout.\n";
+                ImGui::DestroyContext();
+                return 1;
+            }
+            validated_dock_layout = true;
+        }
         ImGui::Render();
 
         if (reload_requested && !reload_project(&shell_state)) {
@@ -8024,6 +10113,10 @@ int main(int argc, char** argv) {
     ShellState shell_state;
     shell_state.project_path = parse_result.options.project_path;
     reload_project(&shell_state);
+    if (const auto viewport_error =
+            initialize_viewport_renderer(&shell_state.viewport_renderer)) {
+        shell_state.viewport_renderer.error_message = *viewport_error;
+    }
 
     int rendered_frames = 0;
     while (!glfwWindowShouldClose(window)) {
@@ -8038,6 +10131,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    destroy_viewport_renderer(&shell_state.viewport_renderer);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
