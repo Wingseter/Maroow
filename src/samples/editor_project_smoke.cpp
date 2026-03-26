@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "marrow/editor/project.hpp"
+#include "marrow/runtime/animation_compare.hpp"
 
 namespace {
 
@@ -574,7 +575,13 @@ bool validate_export_round_trip(
             constraint_bone_names(project_result.skeleton_data, authored_constraint->bone_indices) !=
                 constraint_bone_names(export_result.skeleton_data, exported_constraint->bone_indices) ||
             !require_near(exported_constraint->mix, authored_constraint->mix, "ik mix") ||
+            !require_near(
+                exported_constraint->softness,
+                authored_constraint->softness,
+                "ik softness") ||
             exported_constraint->bend_positive != authored_constraint->bend_positive ||
+            exported_constraint->compress != authored_constraint->compress ||
+            exported_constraint->stretch != authored_constraint->stretch ||
             project_result.skeleton_data->bones()[authored_constraint->target_bone_index].name !=
                 export_result.skeleton_data->bones()[exported_constraint->target_bone_index].name) {
             std::cerr << "IK constraint export did not preserve the authored constraint edit.\n";
@@ -670,9 +677,17 @@ bool validate_export_round_trip(
             exported_constraint == export_result.skeleton_data->physics_constraints().end() ||
             constraint_bone_names(project_result.skeleton_data, authored_constraint->bone_indices) !=
                 constraint_bone_names(export_result.skeleton_data, exported_constraint->bone_indices) ||
+            !require_near(exported_constraint->step, authored_constraint->step, "physics step") ||
+            !require_near(exported_constraint->x, authored_constraint->x, "physics x") ||
+            !require_near(exported_constraint->y, authored_constraint->y, "physics y") ||
+            !require_near(exported_constraint->rotate, authored_constraint->rotate, "physics rotate") ||
+            !require_near(exported_constraint->scale_x, authored_constraint->scale_x, "physics scaleX") ||
+            !require_near(exported_constraint->shear_x, authored_constraint->shear_x, "physics shearX") ||
+            !require_near(exported_constraint->limit, authored_constraint->limit, "physics limit") ||
             !require_near(exported_constraint->inertia, authored_constraint->inertia, "physics inertia") ||
             !require_near(exported_constraint->damping, authored_constraint->damping, "physics damping") ||
             !require_near(exported_constraint->strength, authored_constraint->strength, "physics strength") ||
+            !require_near(exported_constraint->mass_inverse, authored_constraint->mass_inverse, "physics massInverse") ||
             !require_near(exported_constraint->gravity.x, authored_constraint->gravity.x, "physics gravity.x") ||
             !require_near(exported_constraint->gravity.y, authored_constraint->gravity.y, "physics gravity.y") ||
             !require_near(exported_constraint->wind.x, authored_constraint->wind.x, "physics wind.x") ||
@@ -703,6 +718,114 @@ bool validate_export_round_trip(
     }
 
     std::cout << "Exported runtime skeleton: " << export_path.string() << '\n';
+    return true;
+}
+
+bool validate_undo_redo_cycle(const marrow::editor::ProjectLoadResult& project_result) {
+    if (project_result.project == nullptr ||
+        project_result.base_skeleton_document == nullptr) {
+        std::cerr << "Undo/redo validation requires a loaded editor project.\n";
+        return false;
+    }
+
+    const marrow::editor::ProjectData baseline_project = *project_result.project;
+    const std::string baseline_snapshot =
+        marrow::editor::serialize_project(baseline_project);
+
+    marrow::editor::ProjectData edited_project = baseline_project;
+    edited_project.editor_metadata.notes +=
+        edited_project.editor_metadata.notes.empty()
+            ? std::string("Undo/redo smoke edit.")
+            : std::string(" [undo-redo smoke]");
+
+    const std::string edited_snapshot =
+        marrow::editor::serialize_project(edited_project);
+    if (edited_snapshot == baseline_snapshot ||
+        edited_project.editor_metadata.notes == baseline_project.editor_metadata.notes) {
+        std::cerr << "Undo/redo validation did not produce a distinct project snapshot.\n";
+        return false;
+    }
+
+    const auto edited_runtime = marrow::editor::build_project_runtime(
+        edited_project,
+        *project_result.base_skeleton_document);
+    if (!edited_runtime) {
+        std::cerr << edited_runtime.error->format();
+        return false;
+    }
+
+    auto command = marrow::editor::make_project_command(
+        "Update project notes",
+        baseline_project,
+        edited_project);
+    if (!command.has_value() ||
+        command->before_serialized != baseline_snapshot ||
+        command->after_serialized != edited_snapshot) {
+        std::cerr << "Undo/redo validation did not capture serializable project snapshots.\n";
+        return false;
+    }
+
+    marrow::editor::ProjectCommandStack history;
+    history.push(*command);
+    if (!history.can_undo() || history.can_redo()) {
+        std::cerr << "Undo/redo validation did not record the command on the undo stack.\n";
+        return false;
+    }
+
+    marrow::editor::ProjectData current_project = edited_project;
+    const auto* undo_command = history.peek_undo();
+    if (undo_command == nullptr) {
+        std::cerr << "Undo/redo validation could not read the pending undo command.\n";
+        return false;
+    }
+
+    current_project = undo_command->before_project;
+    const auto undone_runtime = marrow::editor::build_project_runtime(
+        current_project,
+        *project_result.base_skeleton_document);
+    if (!undone_runtime) {
+        std::cerr << undone_runtime.error->format();
+        return false;
+    }
+    if (marrow::editor::serialize_project(current_project) != baseline_snapshot ||
+        current_project.editor_metadata.notes != baseline_project.editor_metadata.notes) {
+        std::cerr << "Undo/redo validation did not restore the previous project state.\n";
+        return false;
+    }
+
+    history.commit_undo();
+    if (history.can_undo() || !history.can_redo()) {
+        std::cerr << "Undo/redo validation did not move the command onto the redo stack.\n";
+        return false;
+    }
+
+    const auto* redo_command = history.peek_redo();
+    if (redo_command == nullptr) {
+        std::cerr << "Undo/redo validation could not read the pending redo command.\n";
+        return false;
+    }
+
+    current_project = redo_command->after_project;
+    const auto redone_runtime = marrow::editor::build_project_runtime(
+        current_project,
+        *project_result.base_skeleton_document);
+    if (!redone_runtime) {
+        std::cerr << redone_runtime.error->format();
+        return false;
+    }
+    if (marrow::editor::serialize_project(current_project) != edited_snapshot ||
+        current_project.editor_metadata.notes != edited_project.editor_metadata.notes) {
+        std::cerr << "Undo/redo validation did not restore the redone project state.\n";
+        return false;
+    }
+
+    history.commit_redo();
+    if (!history.can_undo() || history.can_redo()) {
+        std::cerr << "Undo/redo validation left the command stack in an invalid state.\n";
+        return false;
+    }
+
+    std::cout << "Undo/redo command stack validated.\n";
     return true;
 }
 
@@ -783,7 +906,48 @@ bool validate_binary_export(
         return false;
     }
 
+    marrow::runtime::SkeletonBinaryInspection inspection;
+    if (const auto error = marrow::runtime::inspect_skeleton_binary(
+            exported_binary_path,
+            &inspection)) {
+        std::cerr << error->format();
+        return false;
+    }
+    if (!inspection.has_optimized_animation_section ||
+        !inspection.keyframes_sorted_by_time_and_bone) {
+        std::cerr << "Binary export did not produce a sorted optimized animation payload.\n";
+        return false;
+    }
+
+    const auto json_runtime_result = marrow::runtime::load_skeleton_data(exported_json_path);
+    const auto binary_runtime_result = marrow::runtime::load_skeleton_data(exported_binary_path);
+    if (!json_runtime_result) {
+        std::cerr << json_runtime_result.error->format();
+        return false;
+    }
+    if (!binary_runtime_result) {
+        std::cerr << binary_runtime_result.error->format();
+        return false;
+    }
+
+    const auto comparison = marrow::runtime::compare_animation_roundtrip(
+        *json_runtime_result.skeleton_data,
+        *binary_runtime_result.skeleton_data);
+    if (!comparison) {
+        std::cerr << "Binary export runtime comparison failed: " << *comparison.error << '\n';
+        return false;
+    }
+    if (comparison.metrics.max_rotation_error_degrees > 0.1 ||
+        comparison.metrics.max_translation_error_pixels > 0.5) {
+        std::cerr << "Binary export exceeded the quantized animation roundtrip tolerance.\n";
+        return false;
+    }
+
     std::cout << "Exported runtime binary: " << exported_binary_path.string() << '\n';
+    std::cout << "Exported runtime binary errors: rotation="
+              << comparison.metrics.max_rotation_error_degrees
+              << "deg position=" << comparison.metrics.max_translation_error_pixels
+              << "px\n";
     return true;
 }
 
@@ -809,6 +973,9 @@ int main(int argc, char** argv) {
     }
 
     print_summary(result, parse_result.options.project_path);
+    if (!validate_undo_redo_cycle(result)) {
+        return 1;
+    }
     if (parse_result.options.export_runtime_path.has_value() ||
         parse_result.options.export_binary_path.has_value()) {
         marrow::editor::ProjectExportOptions export_options;

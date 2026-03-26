@@ -24,6 +24,8 @@ else()
     set(MARROW_OPENGL_LIBRARIES OpenGL::GL)
 endif()
 
+find_package(ZLIB REQUIRED)
+
 set(MARROW_IMGUI_DIR ${PROJECT_SOURCE_DIR}/external/imgui)
 add_library(marrow_imgui STATIC
     ${MARROW_IMGUI_DIR}/imgui.cpp
@@ -68,6 +70,11 @@ add_library(marrow_runtime STATIC
     src/runtime/atlas.cpp
     src/runtime/json.cpp
     src/runtime/skeleton.cpp
+    src/runtime/skeleton_animation.cpp
+    src/runtime/skeleton_constraints.cpp
+    src/runtime/skeleton_parse.cpp
+    src/runtime/skeleton_physics.cpp
+    src/runtime/skeleton_skin.cpp
 )
 
 target_include_directories(marrow_runtime
@@ -78,7 +85,14 @@ target_include_directories(marrow_runtime
 target_link_libraries(marrow_renderer
     PUBLIC
         marrow_runtime
+        glfw
+        ${MARROW_OPENGL_LIBRARIES}
+        ZLIB::ZLIB
 )
+
+if(APPLE)
+    target_compile_definitions(marrow_renderer PRIVATE GL_SILENCE_DEPRECATION)
+endif()
 
 add_library(marrow_editor STATIC
     src/editor/module.cpp
@@ -125,7 +139,22 @@ add_executable(marrow_fixture_smoke
 
 target_link_libraries(marrow_fixture_smoke
     PRIVATE
-        marrow_runtime
+        marrow_renderer
+)
+
+add_executable(marrow_unit_tests
+    src/tests/runtime_math_tests.cpp
+)
+
+target_include_directories(marrow_unit_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/runtime
+        ${PROJECT_SOURCE_DIR}/src/renderer
+)
+
+target_link_libraries(marrow_unit_tests
+    PRIVATE
+        marrow_renderer
 )
 
 add_executable(marrow_inspect

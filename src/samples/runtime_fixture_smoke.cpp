@@ -1,13 +1,16 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "marrow/runtime/animation_state.hpp"
+#include "marrow/renderer/module.hpp"
 #include "marrow/runtime/atlas.hpp"
 #include "marrow/runtime/json.hpp"
 #include "marrow/runtime/skeleton.hpp"
@@ -18,12 +21,18 @@ using marrow::runtime::AtlasData;
 using marrow::runtime::AtlasLoader;
 using marrow::runtime::AnimationState;
 using marrow::runtime::AnimationStateEventType;
+using marrow::runtime::AttachmentVertex;
+using marrow::runtime::BoneInherit;
+using marrow::runtime::BoneTransform;
+using marrow::runtime::BoneWorldTransform;
 using marrow::runtime::json::Document;
 using marrow::runtime::json::LoadError;
 using marrow::runtime::json::Value;
 using marrow::runtime::Skeleton;
 using marrow::runtime::SkeletonData;
 using marrow::runtime::TrackEntry;
+
+bool g_quantized_runtime_validation = false;
 
 struct StateEventRecord {
     AnimationStateEventType type;
@@ -63,8 +72,8 @@ bool print_error(const LoadError& error) {
 }
 
 bool require_near(double actual, double expected, std::string_view label) {
-    constexpr double kTolerance = 1e-6;
-    if (std::abs(actual - expected) <= kTolerance) {
+    const double tolerance = g_quantized_runtime_validation ? 5e-3 : 1e-6;
+    if (std::abs(actual - expected) <= tolerance) {
         return true;
     }
 
@@ -118,6 +127,760 @@ bool require_mesh_vertex(
     std::string_view label) {
     return require_near(actual.x, expected_x, std::string(label) + " x") &&
         require_near(actual.y, expected_y, std::string(label) + " y");
+}
+
+double normalize_test_rotation_degrees(double angle) {
+    return angle - (std::ceil(angle / 360.0 - 0.5) * 360.0);
+}
+
+std::shared_ptr<const SkeletonData> make_rotation_mixing_test_data(double setup_rotation) {
+    marrow::runtime::SkeletonInfo info;
+    info.name = "rotation_mixing";
+
+    std::vector<marrow::runtime::BoneData> bones;
+    marrow::runtime::BoneData root_bone;
+    root_bone.name = "root";
+    root_bone.setup_pose.rotation = setup_rotation;
+    bones.push_back(root_bone);
+
+    const auto make_rotate_animation =
+        [&](std::string name, const std::vector<std::pair<double, double>>& keyframes) {
+            marrow::runtime::AnimationData animation;
+            animation.name = std::move(name);
+            animation.targeted_bone_indices.push_back(0);
+
+            marrow::runtime::BoneRotateTimeline timeline;
+            timeline.bone_index = 0;
+            timeline.setup_rotation = setup_rotation;
+            timeline.keyframes.reserve(keyframes.size());
+            for (const auto& [time, angle] : keyframes) {
+                marrow::runtime::RotateKeyframe keyframe;
+                keyframe.time = time;
+                keyframe.angle = angle;
+                keyframe.interpolation = marrow::runtime::Interpolation::linear();
+                timeline.keyframes.push_back(std::move(keyframe));
+            }
+
+            animation.bone_rotate_timelines.push_back(std::move(timeline));
+            return animation;
+        };
+
+    std::vector<marrow::runtime::AnimationData> animations;
+    animations.push_back(make_rotate_animation("from_350", {{0.0, 350.0}, {1.0, 350.0}}));
+    animations.push_back(make_rotate_animation("to_10", {{0.0, 10.0}, {1.0, 10.0}}));
+    animations.push_back(make_rotate_animation("arc", {{0.0, 0.0}, {0.5, 170.0}, {1.0, -170.0}}));
+    animations.push_back(make_rotate_animation("relative", {{0.0, 10.0}, {1.0, -10.0}}));
+
+    return std::make_shared<SkeletonData>(
+        std::move(info),
+        std::move(bones),
+        std::vector<marrow::runtime::IkConstraintData>{},
+        std::vector<marrow::runtime::PathConstraintData>{},
+        std::vector<marrow::runtime::TransformConstraintData>{},
+        std::vector<marrow::runtime::PhysicsConstraintData>{},
+        std::vector<marrow::runtime::SlotData>{},
+        std::vector<marrow::runtime::EventDefinition>{},
+        std::move(animations),
+        std::vector<marrow::runtime::SkinData>{},
+        0.0,
+        std::vector<marrow::runtime::AnimationMixDefinition>{});
+}
+
+struct ReferenceBone {
+    BoneTransform local_pose{};
+    BoneInherit inherit{BoneInherit::Normal};
+    std::optional<std::size_t> parent_index;
+};
+
+BoneWorldTransform reference_local_world_transform(const BoneTransform& transform) {
+    constexpr double kPi = 3.14159265358979323846;
+    const double rotation_x = (transform.rotation + transform.shear_x) * kPi / 180.0;
+    const double rotation_y = (transform.rotation + 90.0 + transform.shear_y) * kPi / 180.0;
+
+    BoneWorldTransform world_transform;
+    world_transform.a = std::cos(rotation_x) * transform.scale_x;
+    world_transform.b = std::cos(rotation_y) * transform.scale_y;
+    world_transform.c = std::sin(rotation_x) * transform.scale_x;
+    world_transform.d = std::sin(rotation_y) * transform.scale_y;
+    world_transform.world_x = transform.x;
+    world_transform.world_y = transform.y;
+    return world_transform;
+}
+
+BoneWorldTransform reference_root_world_transform(
+    const BoneTransform& transform,
+    double skeleton_scale_x,
+    double skeleton_scale_y) {
+    BoneWorldTransform world_transform = reference_local_world_transform(transform);
+    world_transform.a *= skeleton_scale_x;
+    world_transform.b *= skeleton_scale_x;
+    world_transform.c *= skeleton_scale_y;
+    world_transform.d *= skeleton_scale_y;
+    world_transform.world_x *= skeleton_scale_x;
+    world_transform.world_y *= skeleton_scale_y;
+    return world_transform;
+}
+
+BoneWorldTransform reference_compose_world_transform(
+    const BoneWorldTransform& parent,
+    const ReferenceBone& bone,
+    double skeleton_scale_x,
+    double skeleton_scale_y) {
+    constexpr double kPi = 3.14159265358979323846;
+    const BoneTransform& local_pose = bone.local_pose;
+
+    BoneWorldTransform world_transform;
+    world_transform.world_x = parent.a * local_pose.x + parent.b * local_pose.y + parent.world_x;
+    world_transform.world_y = parent.c * local_pose.x + parent.d * local_pose.y + parent.world_y;
+
+    double pa = parent.a;
+    double pb = parent.b;
+    double pc = parent.c;
+    double pd = parent.d;
+
+    switch (bone.inherit) {
+    case BoneInherit::Normal: {
+        const BoneWorldTransform local = reference_local_world_transform(local_pose);
+        world_transform.a = pa * local.a + pb * local.c;
+        world_transform.b = pa * local.b + pb * local.d;
+        world_transform.c = pc * local.a + pd * local.c;
+        world_transform.d = pc * local.b + pd * local.d;
+        return world_transform;
+    }
+    case BoneInherit::OnlyTranslation: {
+        const BoneWorldTransform local = reference_local_world_transform(local_pose);
+        world_transform.a = local.a;
+        world_transform.b = local.b;
+        world_transform.c = local.c;
+        world_transform.d = local.d;
+        break;
+    }
+    case BoneInherit::NoRotationOrReflection: {
+        pa /= skeleton_scale_x;
+        pc /= skeleton_scale_y;
+
+        double scale = (pa * pa) + (pc * pc);
+        double parent_rotation = 0.0;
+        if (scale > 1e-4) {
+            scale = std::abs(pa * pd * skeleton_scale_y - pb * skeleton_scale_x * pc) / scale;
+            pb = pc * scale;
+            pd = pa * scale;
+            parent_rotation = std::atan2(pc, pa) * 180.0 / kPi;
+        } else {
+            pa = 0.0;
+            pc = 0.0;
+            parent_rotation = 90.0 - (std::atan2(pd, pb) * 180.0 / kPi);
+        }
+
+        const double rotation_x = (local_pose.rotation + local_pose.shear_x - parent_rotation) * kPi / 180.0;
+        const double rotation_y =
+            (local_pose.rotation + local_pose.shear_y - parent_rotation + 90.0) * kPi / 180.0;
+        const double la = std::cos(rotation_x) * local_pose.scale_x;
+        const double lb = std::cos(rotation_y) * local_pose.scale_y;
+        const double lc = std::sin(rotation_x) * local_pose.scale_x;
+        const double ld = std::sin(rotation_y) * local_pose.scale_y;
+        world_transform.a = pa * la - pb * lc;
+        world_transform.b = pa * lb - pb * ld;
+        world_transform.c = pc * la + pd * lc;
+        world_transform.d = pc * lb + pd * ld;
+        break;
+    }
+    case BoneInherit::NoScale:
+    case BoneInherit::NoScaleOrReflection: {
+        double rotation = local_pose.rotation * kPi / 180.0;
+        const double cos_rotation = std::cos(rotation);
+        const double sin_rotation = std::sin(rotation);
+        double za = (pa * cos_rotation + pb * sin_rotation) / skeleton_scale_x;
+        double zc = (pc * cos_rotation + pd * sin_rotation) / skeleton_scale_y;
+        double scale = std::sqrt((za * za) + (zc * zc));
+        if (scale > 1e-5) {
+            scale = 1.0 / scale;
+        }
+        za *= scale;
+        zc *= scale;
+        scale = std::sqrt((za * za) + (zc * zc));
+        if (bone.inherit == BoneInherit::NoScale &&
+            ((pa * pd - pb * pc) < 0.0) != ((skeleton_scale_x < 0.0) != (skeleton_scale_y < 0.0))) {
+            scale = -scale;
+        }
+
+        rotation = (kPi / 2.0) + std::atan2(zc, za);
+        const double zb = std::cos(rotation) * scale;
+        const double zd = std::sin(rotation) * scale;
+        const double shear_x = local_pose.shear_x * kPi / 180.0;
+        const double shear_y = (90.0 + local_pose.shear_y) * kPi / 180.0;
+        const double la = std::cos(shear_x) * local_pose.scale_x;
+        const double lb = std::cos(shear_y) * local_pose.scale_y;
+        const double lc = std::sin(shear_x) * local_pose.scale_x;
+        const double ld = std::sin(shear_y) * local_pose.scale_y;
+        world_transform.a = za * la + zb * lc;
+        world_transform.b = za * lb + zb * ld;
+        world_transform.c = zc * la + zd * lc;
+        world_transform.d = zc * lb + zd * ld;
+        break;
+    }
+    }
+
+    world_transform.a *= skeleton_scale_x;
+    world_transform.b *= skeleton_scale_x;
+    world_transform.c *= skeleton_scale_y;
+    world_transform.d *= skeleton_scale_y;
+    return world_transform;
+}
+
+std::vector<BoneWorldTransform> compute_reference_world_transforms(
+    const std::vector<ReferenceBone>& bones,
+    double skeleton_scale_x,
+    double skeleton_scale_y) {
+    std::vector<BoneWorldTransform> world_transforms(bones.size());
+    for (std::size_t index = 0; index < bones.size(); ++index) {
+        const ReferenceBone& bone = bones[index];
+        if (!bone.parent_index.has_value()) {
+            world_transforms[index] =
+                reference_root_world_transform(bone.local_pose, skeleton_scale_x, skeleton_scale_y);
+        } else {
+            world_transforms[index] = reference_compose_world_transform(
+                world_transforms[*bone.parent_index],
+                bone,
+                skeleton_scale_x,
+                skeleton_scale_y);
+        }
+    }
+
+    return world_transforms;
+}
+
+bool require_world_transform(
+    const BoneWorldTransform& actual,
+    const BoneWorldTransform& expected,
+    std::string_view label) {
+    return require_near(actual.a, expected.a, std::string(label) + " axis a") &&
+        require_near(actual.b, expected.b, std::string(label) + " axis b") &&
+        require_near(actual.c, expected.c, std::string(label) + " axis c") &&
+        require_near(actual.d, expected.d, std::string(label) + " axis d") &&
+        require_near(actual.world_x, expected.world_x, std::string(label) + " world x") &&
+        require_near(actual.world_y, expected.world_y, std::string(label) + " world y");
+}
+
+double wrap_reference_rotation_degrees(double angle) {
+    while (angle > 180.0) {
+        angle -= 360.0;
+    }
+    while (angle < -180.0) {
+        angle += 360.0;
+    }
+    return angle;
+}
+
+double world_axis_length(const BoneWorldTransform& transform) {
+    return std::hypot(transform.a, transform.c);
+}
+
+bool require_finite_world_transform(const BoneWorldTransform& transform, std::string_view label) {
+    const bool finite = std::isfinite(transform.a) && std::isfinite(transform.b) &&
+        std::isfinite(transform.c) && std::isfinite(transform.d) &&
+        std::isfinite(transform.world_x) && std::isfinite(transform.world_y);
+    if (finite) {
+        return true;
+    }
+
+    std::cerr << label << " produced a non-finite world transform.\n";
+    return false;
+}
+
+AttachmentVertex reference_bone_tip_local_vector(
+    const std::vector<ReferenceBone>& bones,
+    std::size_t bone_index) {
+    AttachmentVertex tip;
+    double best_length_squared = 0.0;
+    for (std::size_t child_index = 0; child_index < bones.size(); ++child_index) {
+        if (bones[child_index].parent_index != std::optional<std::size_t>{bone_index}) {
+            continue;
+        }
+
+        const BoneTransform& child_pose = bones[child_index].local_pose;
+        const double length_squared =
+            child_pose.x * child_pose.x + child_pose.y * child_pose.y;
+        if (length_squared <= best_length_squared) {
+            continue;
+        }
+
+        tip = {child_pose.x, child_pose.y};
+        best_length_squared = length_squared;
+    }
+
+    return tip;
+}
+
+struct ReferenceIkState {
+    std::vector<ReferenceBone> bones;
+    std::vector<BoneWorldTransform> world_transforms;
+    double skeleton_scale_x{1.0};
+    double skeleton_scale_y{1.0};
+
+    void update_world_transforms() {
+        world_transforms =
+            compute_reference_world_transforms(bones, skeleton_scale_x, skeleton_scale_y);
+    }
+};
+
+ReferenceIkState build_reference_ik_state(
+    const SkeletonData& skeleton_data,
+    double skeleton_scale_x = 1.0,
+    double skeleton_scale_y = 1.0) {
+    ReferenceIkState state;
+    state.skeleton_scale_x = skeleton_scale_x;
+    state.skeleton_scale_y = skeleton_scale_y;
+    state.bones.reserve(skeleton_data.bones().size());
+    for (const auto& bone : skeleton_data.bones()) {
+        state.bones.push_back(ReferenceBone{bone.setup_pose, bone.inherit, bone.parent_index});
+    }
+    state.update_world_transforms();
+    return state;
+}
+
+bool apply_reference_one_bone_ik(
+    ReferenceIkState* state,
+    std::size_t bone_index,
+    double target_x,
+    double target_y,
+    bool compress,
+    bool stretch,
+    double alpha) {
+    constexpr double kIkEpsilon = 1e-4;
+    const auto safe_nonzero = [](double value) {
+        if (std::abs(value) > kIkEpsilon) {
+            return value;
+        }
+        return value < 0.0 ? -kIkEpsilon : kIkEpsilon;
+    };
+    const auto scale_sign = [](double value) {
+        return value < 0.0 ? -1.0 : 1.0;
+    };
+
+    if (bone_index >= state->bones.size()) {
+        return false;
+    }
+    const std::optional<std::size_t> parent_index = state->bones[bone_index].parent_index;
+    if (!parent_index.has_value() || *parent_index >= state->world_transforms.size()) {
+        return false;
+    }
+
+    BoneTransform& pose = state->bones[bone_index].local_pose;
+    const BoneInherit inherit = state->bones[bone_index].inherit;
+    const BoneWorldTransform& bone_world = state->world_transforms[bone_index];
+    const BoneWorldTransform& parent_world = state->world_transforms[*parent_index];
+
+    double pa = parent_world.a;
+    double pb = parent_world.b;
+    double pc = parent_world.c;
+    double pd = parent_world.d;
+    double rotation_delta = -pose.shear_x - pose.rotation;
+    double tx = 0.0;
+    double ty = 0.0;
+
+    switch (inherit) {
+    case BoneInherit::OnlyTranslation:
+        tx = (target_x - bone_world.world_x) * scale_sign(state->skeleton_scale_x);
+        ty = (target_y - bone_world.world_y) * scale_sign(state->skeleton_scale_y);
+        break;
+    case BoneInherit::NoRotationOrReflection: {
+        const double determinant = std::abs(pa * pd - pb * pc);
+        const double scale = determinant / std::max(kIkEpsilon, pa * pa + pc * pc);
+        const double safe_scale_x = safe_nonzero(state->skeleton_scale_x);
+        const double safe_scale_y = safe_nonzero(state->skeleton_scale_y);
+        const double sa = pa / safe_scale_x;
+        const double sc = pc / safe_scale_y;
+        pb = -sc * scale * safe_scale_x;
+        pd = sa * scale * safe_scale_y;
+        rotation_delta += std::atan2(sc, sa) * 180.0 / 3.14159265358979323846;
+        [[fallthrough]];
+    }
+    default: {
+        const double world_offset_x = target_x - parent_world.world_x;
+        const double world_offset_y = target_y - parent_world.world_y;
+        const double determinant = pa * pd - pb * pc;
+        if (std::abs(determinant) > kIkEpsilon) {
+            tx = (world_offset_x * pd - world_offset_y * pb) / determinant - pose.x;
+            ty = (world_offset_y * pa - world_offset_x * pc) / determinant - pose.y;
+        }
+        break;
+    }
+    }
+
+    rotation_delta += std::atan2(ty, tx) * 180.0 / 3.14159265358979323846;
+    if (pose.scale_x < 0.0) {
+        rotation_delta += 180.0;
+    }
+    rotation_delta = wrap_reference_rotation_degrees(rotation_delta);
+
+    double scale_x = pose.scale_x;
+    if (compress || stretch) {
+        if (inherit == BoneInherit::NoScale ||
+            inherit == BoneInherit::NoScaleOrReflection) {
+            tx = target_x - bone_world.world_x;
+            ty = target_y - bone_world.world_y;
+        }
+
+        const AttachmentVertex tip_local = reference_bone_tip_local_vector(state->bones, bone_index);
+        const double bone_length = std::hypot(tip_local.x, tip_local.y);
+        const double scaled_length = bone_length * scale_x;
+        if (scaled_length > kIkEpsilon) {
+            const double target_distance_squared = tx * tx + ty * ty;
+            if ((compress && target_distance_squared < scaled_length * scaled_length) ||
+                (stretch && target_distance_squared > scaled_length * scaled_length)) {
+                const double scale =
+                    ((std::sqrt(target_distance_squared) / scaled_length) - 1.0) * alpha + 1.0;
+                scale_x *= scale;
+            }
+        }
+    }
+
+    pose.rotation = wrap_reference_rotation_degrees(pose.rotation + rotation_delta * alpha);
+    pose.scale_x = scale_x;
+    return true;
+}
+
+bool apply_reference_two_bone_ik(
+    ReferenceIkState* state,
+    std::size_t parent_bone_index,
+    std::size_t child_bone_index,
+    double target_x,
+    double target_y,
+    int bend_direction,
+    bool stretch,
+    double softness,
+    double alpha) {
+    constexpr double kIkEpsilon = 1e-4;
+    const auto safe_nonzero = [](double value) {
+        if (std::abs(value) > kIkEpsilon) {
+            return value;
+        }
+        return value < 0.0 ? -kIkEpsilon : kIkEpsilon;
+    };
+
+    if (parent_bone_index >= state->bones.size() || child_bone_index >= state->bones.size()) {
+        return false;
+    }
+    if (state->bones[parent_bone_index].inherit != BoneInherit::Normal ||
+        state->bones[child_bone_index].inherit != BoneInherit::Normal) {
+        return false;
+    }
+
+    const std::optional<std::size_t> grandparent_index =
+        state->bones[parent_bone_index].parent_index;
+    if (!grandparent_index.has_value() ||
+        *grandparent_index >= state->world_transforms.size()) {
+        return false;
+    }
+
+    BoneTransform& parent_pose = state->bones[parent_bone_index].local_pose;
+    BoneTransform& child_pose = state->bones[child_bone_index].local_pose;
+
+    double px = parent_pose.x;
+    double py = parent_pose.y;
+    double parent_scale_x = parent_pose.scale_x;
+    double parent_scale_y = parent_pose.scale_y;
+    double stretched_parent_scale_x = parent_scale_x;
+    double stretched_parent_scale_y = parent_scale_y;
+    double child_scale_x = child_pose.scale_x;
+    int parent_offset = 0;
+    int child_offset = 0;
+    int child_sign = 1;
+
+    if (parent_scale_x < 0.0) {
+        parent_scale_x = -parent_scale_x;
+        parent_offset = 180;
+        child_sign = -1;
+    }
+    if (parent_scale_y < 0.0) {
+        parent_scale_y = -parent_scale_y;
+        child_sign = -child_sign;
+    }
+    if (child_scale_x < 0.0) {
+        child_scale_x = -child_scale_x;
+        child_offset = 180;
+    }
+
+    const double cx = child_pose.x;
+    double cy = child_pose.y;
+    const BoneWorldTransform& parent_world = state->world_transforms[parent_bone_index];
+    double a = parent_world.a;
+    double b = parent_world.b;
+    double c = parent_world.c;
+    double d = parent_world.d;
+    const bool uniform_scale = std::abs(parent_scale_x - parent_scale_y) <= kIkEpsilon;
+    double child_world_x = 0.0;
+    double child_world_y = 0.0;
+    if (!uniform_scale || stretch) {
+        cy = 0.0;
+        child_world_x = a * cx + parent_world.world_x;
+        child_world_y = c * cx + parent_world.world_y;
+    } else {
+        child_world_x = a * cx + b * cy + parent_world.world_x;
+        child_world_y = c * cx + d * cy + parent_world.world_y;
+    }
+
+    const BoneWorldTransform& grandparent_world = state->world_transforms[*grandparent_index];
+    a = grandparent_world.a;
+    b = grandparent_world.b;
+    c = grandparent_world.c;
+    d = grandparent_world.d;
+
+    double inverse_determinant = a * d - b * c;
+    const double child_world_offset_x = child_world_x - grandparent_world.world_x;
+    const double child_world_offset_y = child_world_y - grandparent_world.world_y;
+    inverse_determinant =
+        std::abs(inverse_determinant) <= kIkEpsilon ? 0.0 : 1.0 / inverse_determinant;
+    const double child_parent_x =
+        (child_world_offset_x * d - child_world_offset_y * b) * inverse_determinant - px;
+    const double child_parent_y =
+        (child_world_offset_y * a - child_world_offset_x * c) * inverse_determinant - py;
+    const double parent_length =
+        std::sqrt(child_parent_x * child_parent_x + child_parent_y * child_parent_y);
+
+    const AttachmentVertex child_tip_local =
+        reference_bone_tip_local_vector(state->bones, child_bone_index);
+    const double child_length = std::hypot(child_tip_local.x, child_tip_local.y);
+    if (parent_length < kIkEpsilon || child_length < kIkEpsilon) {
+        if (!apply_reference_one_bone_ik(
+                state,
+                parent_bone_index,
+                target_x,
+                target_y,
+                false,
+                stretch,
+                alpha)) {
+            return false;
+        }
+        child_pose.y = cy;
+        child_pose.rotation = 0.0;
+        return true;
+    }
+
+    const double target_world_offset_x = target_x - grandparent_world.world_x;
+    const double target_world_offset_y = target_y - grandparent_world.world_y;
+    double target_parent_x =
+        (target_world_offset_x * d - target_world_offset_y * b) * inverse_determinant - px;
+    double target_parent_y =
+        (target_world_offset_y * a - target_world_offset_x * c) * inverse_determinant - py;
+    double distance_squared =
+        target_parent_x * target_parent_x + target_parent_y * target_parent_y;
+
+    double child_scaled_length = child_length * child_scale_x;
+    if (softness > 0.0) {
+        const double softness_scale =
+            std::max(0.0, softness) * parent_scale_x * (child_scale_x + 1.0) * 0.5;
+        if (softness_scale > kIkEpsilon) {
+            const double target_distance = std::sqrt(distance_squared);
+            const double softness_distance =
+                target_distance - parent_length - child_scaled_length * parent_scale_x +
+                softness_scale;
+            if (softness_distance > 0.0) {
+                const double softened =
+                    std::min(1.0, softness_distance / (softness_scale * 2.0)) - 1.0;
+                const double safe_target_distance =
+                    target_distance <= kIkEpsilon ? kIkEpsilon : target_distance;
+                const double pull =
+                    (softness_distance - softness_scale * (1.0 - softened * softened)) /
+                    safe_target_distance;
+                target_parent_x -= pull * target_parent_x;
+                target_parent_y -= pull * target_parent_y;
+                distance_squared =
+                    target_parent_x * target_parent_x + target_parent_y * target_parent_y;
+            }
+        }
+    }
+
+    double parent_angle = 0.0;
+    double child_angle = 0.0;
+    if (uniform_scale) {
+        child_scaled_length *= parent_scale_x;
+        const double denominator = 2.0 * parent_length * child_scaled_length;
+        double cosine = denominator <= kIkEpsilon
+            ? 1.0
+            : (distance_squared - parent_length * parent_length -
+               child_scaled_length * child_scaled_length) /
+                denominator;
+        if (cosine < -1.0) {
+            cosine = -1.0;
+            child_angle = 3.14159265358979323846 * static_cast<double>(bend_direction);
+        } else if (cosine > 1.0) {
+            cosine = 1.0;
+            child_angle = 0.0;
+            if (stretch) {
+                const double total_length =
+                    std::max(kIkEpsilon, parent_length + child_scaled_length);
+                const double scale =
+                    ((std::sqrt(distance_squared) / total_length) - 1.0) * alpha + 1.0;
+                stretched_parent_scale_x *= scale;
+            }
+        } else {
+            child_angle = std::acos(cosine) * static_cast<double>(bend_direction);
+        }
+
+        const double adjacent = parent_length + child_scaled_length * cosine;
+        const double opposite = child_scaled_length * std::sin(child_angle);
+        parent_angle = std::atan2(
+            target_parent_y * adjacent - target_parent_x * opposite,
+            target_parent_x * adjacent + target_parent_y * opposite);
+    } else {
+        const double scaled_child_x = parent_scale_x * child_scaled_length;
+        const double scaled_child_y = parent_scale_y * child_scaled_length;
+        const double scaled_child_x_squared = scaled_child_x * scaled_child_x;
+        const double scaled_child_y_squared = scaled_child_y * scaled_child_y;
+        const double target_angle = std::atan2(target_parent_y, target_parent_x);
+        const double curve = scaled_child_y_squared * parent_length * parent_length +
+            scaled_child_x_squared * distance_squared -
+            scaled_child_x_squared * scaled_child_y_squared;
+        const double curve_linear = -2.0 * scaled_child_y_squared * parent_length;
+        const double curve_quadratic = scaled_child_y_squared - scaled_child_x_squared;
+        const double discriminant =
+            curve_linear * curve_linear - 4.0 * curve_quadratic * curve;
+        if (discriminant >= 0.0) {
+            double root = std::sqrt(discriminant);
+            if (curve_linear < 0.0) {
+                root = -root;
+            }
+            const double q = -(curve_linear + root) * 0.5;
+            const double r0 =
+                std::abs(curve_quadratic) <= kIkEpsilon
+                ? std::numeric_limits<double>::infinity()
+                : q / curve_quadratic;
+            const double r1 =
+                std::abs(q) <= kIkEpsilon
+                ? std::numeric_limits<double>::infinity()
+                : curve / q;
+            const double chosen_root = std::abs(r0) < std::abs(r1) ? r0 : r1;
+            const double height_squared = distance_squared - chosen_root * chosen_root;
+            if (std::isfinite(chosen_root) && height_squared >= 0.0) {
+                const double height =
+                    std::sqrt(height_squared) * static_cast<double>(bend_direction);
+                const double safe_parent_scale_y = safe_nonzero(parent_scale_y);
+                const double safe_parent_scale_x = safe_nonzero(parent_scale_x);
+                parent_angle = target_angle - std::atan2(height, chosen_root);
+                child_angle = std::atan2(
+                    height / safe_parent_scale_y,
+                    (chosen_root - parent_length) / safe_parent_scale_x);
+            } else {
+                parent_angle = std::numeric_limits<double>::quiet_NaN();
+            }
+        } else {
+            parent_angle = std::numeric_limits<double>::quiet_NaN();
+        }
+
+        if (!std::isfinite(parent_angle) || !std::isfinite(child_angle)) {
+            double min_angle = 3.14159265358979323846;
+            double min_x = parent_length - scaled_child_x;
+            double min_distance = min_x * min_x;
+            double min_y = 0.0;
+            double max_angle = 0.0;
+            double max_x = parent_length + scaled_child_x;
+            double max_distance = max_x * max_x;
+            double max_y = 0.0;
+            const double denominator = scaled_child_x_squared - scaled_child_y_squared;
+            if (std::abs(denominator) > kIkEpsilon) {
+                const double value = -scaled_child_x * parent_length / denominator;
+                if (value >= -1.0 && value <= 1.0) {
+                    const double angle = std::acos(value);
+                    const double x = scaled_child_x * std::cos(angle) + parent_length;
+                    const double y = scaled_child_y * std::sin(angle);
+                    const double distance = x * x + y * y;
+                    if (distance < min_distance) {
+                        min_angle = angle;
+                        min_distance = distance;
+                        min_x = x;
+                        min_y = y;
+                    }
+                    if (distance > max_distance) {
+                        max_angle = angle;
+                        max_distance = distance;
+                        max_x = x;
+                        max_y = y;
+                    }
+                }
+            }
+
+            if (distance_squared <= (min_distance + max_distance) * 0.5) {
+                parent_angle =
+                    target_angle - std::atan2(min_y * static_cast<double>(bend_direction), min_x);
+                child_angle = min_angle * static_cast<double>(bend_direction);
+            } else {
+                parent_angle =
+                    target_angle - std::atan2(max_y * static_cast<double>(bend_direction), max_x);
+                child_angle = max_angle * static_cast<double>(bend_direction);
+            }
+        }
+    }
+
+    const double offset = std::atan2(cy, cx) * static_cast<double>(child_sign);
+    const double parent_rotation = parent_pose.rotation;
+    const double parent_delta = wrap_reference_rotation_degrees(
+        (parent_angle - offset) * 180.0 / 3.14159265358979323846 +
+        static_cast<double>(parent_offset) - parent_rotation);
+    parent_pose.rotation = wrap_reference_rotation_degrees(parent_rotation + parent_delta * alpha);
+    parent_pose.scale_x = stretched_parent_scale_x;
+    parent_pose.scale_y = stretched_parent_scale_y;
+    parent_pose.shear_x = 0.0;
+    parent_pose.shear_y = 0.0;
+
+    const double child_rotation = child_pose.rotation;
+    const double child_delta = wrap_reference_rotation_degrees(
+        ((child_angle + offset) * 180.0 / 3.14159265358979323846 - child_pose.shear_x) *
+            static_cast<double>(child_sign) +
+        static_cast<double>(child_offset) - child_rotation);
+    child_pose.rotation = wrap_reference_rotation_degrees(child_rotation + child_delta * alpha);
+    child_pose.y = cy;
+    return true;
+}
+
+void apply_reference_ik_constraints(
+    const SkeletonData& skeleton_data,
+    ReferenceIkState* state) {
+    for (const auto& constraint : skeleton_data.ik_constraints()) {
+        if (constraint.target_bone_index >= state->world_transforms.size()) {
+            continue;
+        }
+
+        const double target_x = state->world_transforms[constraint.target_bone_index].world_x;
+        const double target_y = state->world_transforms[constraint.target_bone_index].world_y;
+        if (constraint.bone_indices.size() == 1) {
+            apply_reference_one_bone_ik(
+                state,
+                constraint.bone_indices.front(),
+                target_x,
+                target_y,
+                constraint.compress,
+                constraint.stretch,
+                constraint.mix);
+            state->update_world_transforms();
+            continue;
+        }
+
+        if (constraint.bone_indices.size() == 2) {
+            apply_reference_two_bone_ik(
+                state,
+                constraint.bone_indices[0],
+                constraint.bone_indices[1],
+                target_x,
+                target_y,
+                constraint.bend_positive ? 1 : -1,
+                constraint.stretch,
+                constraint.softness,
+                constraint.mix);
+            state->update_world_transforms();
+        }
+    }
+}
+
+ReferenceIkState solve_reference_ik(
+    const SkeletonData& skeleton_data,
+    double skeleton_scale_x = 1.0,
+    double skeleton_scale_y = 1.0) {
+    ReferenceIkState state =
+        build_reference_ik_state(skeleton_data, skeleton_scale_x, skeleton_scale_y);
+    apply_reference_ik_constraints(skeleton_data, &state);
+    return state;
 }
 
 std::vector<std::size_t> sequential_draw_order(std::size_t slot_count) {
@@ -195,6 +958,24 @@ bool require_non_empty_array(
     return true;
 }
 
+bool require_supported_format_version(
+    const Document& document,
+    const Value& root,
+    std::string_view asset_label) {
+    const Value* version = nullptr;
+    if (const auto error = marrow::runtime::json::require_member(
+            document, root, "version", Value::Type::Number, "$", &version)) {
+        return print_error(*error);
+    }
+    if (version->as_number() != 1.0) {
+        std::cerr << asset_label << " fixture version expected 1 but got "
+                  << version->as_number() << ".\n";
+        return false;
+    }
+
+    return true;
+}
+
 bool validate_fixture_skeleton(const Document& document) {
     const Value& root = document.root;
     if (const auto error = marrow::runtime::json::require_type(
@@ -213,6 +994,9 @@ bool validate_fixture_skeleton(const Document& document) {
     if (const auto error = marrow::runtime::json::require_member(
             document, root, "marrow", Value::Type::String, "$")) {
         return print_error(*error);
+    }
+    if (!require_supported_format_version(document, root, ".mskl")) {
+        return false;
     }
     if (const auto error = marrow::runtime::json::require_member(
             document, root, "skeleton", Value::Type::Object, "$", &skeleton)) {
@@ -416,6 +1200,23 @@ bool validate_fixture_skeleton(const Document& document) {
     return true;
 }
 
+bool validate_fixture_atlas(const Document& document) {
+    const Value& root = document.root;
+    if (const auto error = marrow::runtime::json::require_type(
+            document, root, Value::Type::Object, "$")) {
+        return print_error(*error);
+    }
+    if (const auto error = marrow::runtime::json::require_member(
+            document, root, "marrow", Value::Type::String, "$")) {
+        return print_error(*error);
+    }
+    if (!require_supported_format_version(document, root, ".matl")) {
+        return false;
+    }
+
+    return true;
+}
+
 std::optional<Document> load_document_or_print(const std::filesystem::path& path) {
     const auto result = marrow::runtime::load_skeleton_document(path);
     if (!result) {
@@ -493,6 +1294,7 @@ bool validate_runtime_slot_presentation_model(const std::shared_ptr<const Skelet
 bool validate_runtime_slot_blend_modes() {
     constexpr std::string_view kBlendModeFixture = R"({
   "marrow": "1.0",
+  "version": 1,
   "skeleton": {
     "name": "blend_modes",
     "width": 64,
@@ -549,6 +1351,107 @@ bool validate_runtime_slot_blend_modes() {
     }
 
     std::cout << "Loaded supported slot blend modes: normal, additive, multiply, screen.\n";
+    return true;
+}
+
+bool validate_runtime_cyclic_bone_load_rejection() {
+    constexpr std::string_view kCyclicBoneFixture = R"({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "cyclic_bones",
+    "width": 64,
+    "height": 64
+  },
+  "bones": [
+    { "name": "root", "parent": "arm" },
+    { "name": "spine", "parent": "root" },
+    { "name": "arm", "parent": "spine" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "animations": {
+    "idle": {}
+  }
+})";
+
+    const auto document_result =
+        marrow::runtime::json::parse_document(kCyclicBoneFixture, "<cyclic-bones>");
+    if (!document_result) {
+        return print_error(*document_result.error);
+    }
+
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(*document_result.document);
+    if (skeleton_result) {
+        std::cerr << "Cyclic bone hierarchies should be rejected while loading SkeletonData.\n";
+        return false;
+    }
+
+    const std::string& message = skeleton_result.error->message;
+    if (message.find("$.bones: cyclic bone hierarchy detected") == std::string::npos ||
+        message.find("root") == std::string::npos ||
+        message.find("spine") == std::string::npos ||
+        message.find("arm") == std::string::npos) {
+        std::cerr << "Cyclic bone hierarchy error was not clear enough: "
+                  << skeleton_result.error->format() << '\n';
+        return false;
+    }
+
+    std::cout << "Rejected cyclic bone hierarchy at load time: "
+              << skeleton_result.error->message << '\n';
+    return true;
+}
+
+bool validate_runtime_skeleton_version_rejection() {
+    constexpr std::string_view kFutureVersionFixture = R"({
+  "marrow": "1.0",
+  "version": 99,
+  "skeleton": {
+    "name": "future_version",
+    "width": 64,
+    "height": 64
+  },
+  "bones": [
+    { "name": "root" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "skins": {},
+  "events": {},
+  "animations": {
+    "idle": {}
+  },
+  "mixing": {
+    "default": 0.0,
+    "entries": []
+  }
+})";
+
+    const auto document_result =
+        marrow::runtime::json::parse_document(kFutureVersionFixture, "<future-mskl-version>");
+    if (!document_result) {
+        return print_error(*document_result.error);
+    }
+
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(*document_result.document);
+    if (skeleton_result) {
+        std::cerr << "Future .mskl format versions should be rejected while loading.\n";
+        return false;
+    }
+
+    const std::string& message = skeleton_result.error->message;
+    if (message.find("$.version: unsupported .mskl format version 99") == std::string::npos ||
+        message.find("supported version is 1") == std::string::npos ||
+        message.find("migrate the asset to version 1") == std::string::npos) {
+        std::cerr << "Future .mskl version rejection message was not actionable: "
+                  << skeleton_result.error->format() << '\n';
+        return false;
+    }
+
+    std::cout << "Rejected unsupported .mskl version: "
+              << skeleton_result.error->message << '\n';
     return true;
 }
 
@@ -901,62 +1804,59 @@ bool validate_runtime_inherit_timeline_and_skin_constraints(
         return false;
     }
 
+    const auto expected_child_world = [&](BoneInherit inherit) {
+        std::vector<ReferenceBone> reference_bones;
+        reference_bones.reserve(skeleton_result.skeleton_data->bones().size());
+        for (const auto& bone : skeleton_result.skeleton_data->bones()) {
+            reference_bones.push_back(ReferenceBone{bone.setup_pose, bone.inherit, bone.parent_index});
+        }
+        reference_bones[*child_index].inherit = inherit;
+        return compute_reference_world_transforms(reference_bones, 1.0, 1.0)[*child_index];
+    };
+
     Skeleton direct_skeleton(skeleton_result.skeleton_data);
     direct_skeleton.apply_animation(*toggle_inherit, 0.0);
     const auto inherited_world = direct_skeleton.bone_world_transforms()[*child_index];
-    if (!direct_skeleton.bone_poses()[*child_index].inherit.inherit_rotation ||
-        !direct_skeleton.bone_poses()[*child_index].inherit.inherit_scale ||
-        !direct_skeleton.bone_poses()[*child_index].inherit.inherit_reflection ||
-        !require_near(inherited_world.world_x, 0.0, "inherit on world x") ||
-        !require_near(inherited_world.world_y, 20.0, "inherit on world y") ||
-        !require_near(inherited_world.a, 0.0, "inherit on axis a") ||
-        !require_near(inherited_world.b, 0.5, "inherit on axis b") ||
-        !require_near(inherited_world.c, 2.0, "inherit on axis c") ||
-        !require_near(inherited_world.d, 0.0, "inherit on axis d")) {
-        std::cerr << "Inherit timeline setup sample did not keep full parent inheritance enabled.\n";
+    if (direct_skeleton.bone_poses()[*child_index].inherit != BoneInherit::Normal ||
+        !require_world_transform(
+            inherited_world,
+            expected_child_world(BoneInherit::Normal),
+            "inherit normal")) {
+        std::cerr << "Inherit timeline setup sample did not keep normal inheritance enabled.\n";
         return false;
     }
 
     direct_skeleton.apply_animation(*toggle_inherit, 0.25);
-    const auto reflection_disabled_world = direct_skeleton.bone_world_transforms()[*child_index];
-    if (!direct_skeleton.bone_poses()[*child_index].inherit.inherit_rotation ||
-        !direct_skeleton.bone_poses()[*child_index].inherit.inherit_scale ||
-        direct_skeleton.bone_poses()[*child_index].inherit.inherit_reflection ||
-        !require_near(reflection_disabled_world.world_x, 0.0, "inherit reflection-off world x") ||
-        !require_near(reflection_disabled_world.world_y, 20.0, "inherit reflection-off world y") ||
-        !require_near(reflection_disabled_world.a, 0.0, "inherit reflection-off axis a") ||
-        !require_near(reflection_disabled_world.b, -0.5, "inherit reflection-off axis b") ||
-        !require_near(reflection_disabled_world.c, 2.0, "inherit reflection-off axis c") ||
-        !require_near(reflection_disabled_world.d, 0.0, "inherit reflection-off axis d")) {
-        std::cerr << "Inherit timeline did not remove reflected parent axes while keeping rotation and scale.\n";
+    const auto no_rotation_world = direct_skeleton.bone_world_transforms()[*child_index];
+    if (direct_skeleton.bone_poses()[*child_index].inherit !=
+            BoneInherit::NoRotationOrReflection ||
+        !require_world_transform(
+            no_rotation_world,
+            expected_child_world(BoneInherit::NoRotationOrReflection),
+            "inherit noRotationOrReflection")) {
+        std::cerr << "Inherit timeline did not apply noRotationOrReflection at t=0.25.\n";
         return false;
     }
 
     direct_skeleton.apply_animation(*toggle_inherit, 0.5);
-    const auto disabled_world = direct_skeleton.bone_world_transforms()[*child_index];
-    if (direct_skeleton.bone_poses()[*child_index].inherit.inherit_rotation ||
-        direct_skeleton.bone_poses()[*child_index].inherit.inherit_scale ||
-        direct_skeleton.bone_poses()[*child_index].inherit.inherit_reflection ||
-        !require_near(disabled_world.world_x, 0.0, "inherit off world x") ||
-        !require_near(disabled_world.world_y, 20.0, "inherit off world y") ||
-        !require_near(disabled_world.a, 1.0, "inherit off axis a") ||
-        !require_near(disabled_world.b, 0.0, "inherit off axis b") ||
-        !require_near(disabled_world.c, 0.0, "inherit off axis c") ||
-        !require_near(disabled_world.d, 1.0, "inherit off axis d")) {
-        std::cerr << "Inherit timeline did not disable parent rotation and scale inheritance at t=0.5.\n";
+    const auto translation_only_world = direct_skeleton.bone_world_transforms()[*child_index];
+    if (direct_skeleton.bone_poses()[*child_index].inherit != BoneInherit::OnlyTranslation ||
+        !require_world_transform(
+            translation_only_world,
+            expected_child_world(BoneInherit::OnlyTranslation),
+            "inherit onlyTranslation")) {
+        std::cerr << "Inherit timeline did not apply onlyTranslation at t=0.5.\n";
         return false;
     }
 
     direct_skeleton.apply_animation(*toggle_inherit, 1.0);
     const auto restored_world = direct_skeleton.bone_world_transforms()[*child_index];
-    if (!direct_skeleton.bone_poses()[*child_index].inherit.inherit_rotation ||
-        !direct_skeleton.bone_poses()[*child_index].inherit.inherit_scale ||
-        !direct_skeleton.bone_poses()[*child_index].inherit.inherit_reflection ||
-        !require_near(restored_world.a, 0.0, "inherit restored axis a") ||
-        !require_near(restored_world.b, 0.5, "inherit restored axis b") ||
-        !require_near(restored_world.c, 2.0, "inherit restored axis c") ||
-        !require_near(restored_world.d, 0.0, "inherit restored axis d")) {
-        std::cerr << "Inherit timeline did not restore full parent inheritance at t=1.0.\n";
+    if (direct_skeleton.bone_poses()[*child_index].inherit != BoneInherit::Normal ||
+        !require_world_transform(
+            restored_world,
+            expected_child_world(BoneInherit::Normal),
+            "inherit restored normal")) {
+        std::cerr << "Inherit timeline did not restore normal inheritance at t=1.0.\n";
         return false;
     }
 
@@ -966,10 +1866,11 @@ bool validate_runtime_inherit_timeline_and_skin_constraints(
     state.update(0.5);
     state.apply(state_skeleton);
     const auto state_world = state_skeleton.bone_world_transforms()[*child_index];
-    if (!require_near(state_world.a, 1.0, "state inherit off axis a") ||
-        !require_near(state_world.b, 0.0, "state inherit off axis b") ||
-        !require_near(state_world.c, 0.0, "state inherit off axis c") ||
-        !require_near(state_world.d, 1.0, "state inherit off axis d")) {
+    if (state_skeleton.bone_poses()[*child_index].inherit != BoneInherit::OnlyTranslation ||
+        !require_world_transform(
+            state_world,
+            expected_child_world(BoneInherit::OnlyTranslation),
+            "state inherit onlyTranslation")) {
         std::cerr << "AnimationState did not apply the inherit timeline through discrete track playback.\n";
         return false;
     }
@@ -978,11 +1879,81 @@ bool validate_runtime_inherit_timeline_and_skin_constraints(
               << skeleton_result.skeleton_data->skins().size() << '\n'
               << "  capeConstraintX="
               << skin_skeleton.bone_world_transforms()[*constrained_index].world_x
-              << ", reflectionOffAxes=(" << reflection_disabled_world.a << ", "
-              << reflection_disabled_world.b << ", " << reflection_disabled_world.c << ", "
-              << reflection_disabled_world.d << ")"
-              << ", inheritOffAxes=(" << disabled_world.a << ", " << disabled_world.b << ", "
-              << disabled_world.c << ", " << disabled_world.d << ")\n";
+              << ", noRotationAxes=(" << no_rotation_world.a << ", "
+              << no_rotation_world.b << ", " << no_rotation_world.c << ", "
+              << no_rotation_world.d << ")"
+              << ", onlyTranslationAxes=(" << translation_only_world.a << ", "
+              << translation_only_world.b << ", " << translation_only_world.c << ", "
+              << translation_only_world.d << ")\n";
+    return true;
+}
+
+bool validate_runtime_inherit_modes_with_nonuniform_parent_scale(
+    const std::filesystem::path& fixture_path) {
+    const std::optional<Document> document = load_document_or_print(fixture_path);
+    if (!document.has_value()) {
+        return false;
+    }
+
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(*document);
+    if (!skeleton_result) {
+        return print_error(*skeleton_result.error);
+    }
+
+    const std::vector<std::pair<std::string_view, BoneInherit>> expected_modes{
+        {"root", BoneInherit::Normal},
+        {"controller", BoneInherit::Normal},
+        {"normal_child", BoneInherit::Normal},
+        {"only_translation_child", BoneInherit::OnlyTranslation},
+        {"no_rotation_or_reflection_child", BoneInherit::NoRotationOrReflection},
+        {"no_scale_child", BoneInherit::NoScale},
+        {"no_scale_or_reflection_child", BoneInherit::NoScaleOrReflection},
+    };
+
+    std::vector<ReferenceBone> reference_bones;
+    reference_bones.reserve(skeleton_result.skeleton_data->bones().size());
+    for (const auto& bone : skeleton_result.skeleton_data->bones()) {
+        reference_bones.push_back(ReferenceBone{bone.setup_pose, bone.inherit, bone.parent_index});
+    }
+
+    constexpr double kSkeletonScaleX = 1.5;
+    constexpr double kSkeletonScaleY = 0.75;
+    const std::vector<BoneWorldTransform> expected_world =
+        compute_reference_world_transforms(reference_bones, kSkeletonScaleX, kSkeletonScaleY);
+
+    Skeleton skeleton(skeleton_result.skeleton_data);
+    skeleton.set_scale(kSkeletonScaleX, kSkeletonScaleY);
+    skeleton.update_world_transforms();
+
+    for (const auto& [bone_name, expected_inherit] : expected_modes) {
+        const auto bone_index = skeleton_result.skeleton_data->find_bone_index(bone_name);
+        if (!bone_index.has_value()) {
+            std::cerr << "Non-uniform inherit fixture lost bone lookup: " << bone_name << ".\n";
+            return false;
+        }
+
+        if (skeleton_result.skeleton_data->bones()[*bone_index].inherit != expected_inherit ||
+            skeleton.bone_poses()[*bone_index].inherit != expected_inherit ||
+            !require_world_transform(
+                skeleton.bone_world_transforms()[*bone_index],
+                expected_world[*bone_index],
+                std::string("non-uniform ") + std::string(bone_name))) {
+            std::cerr << "Runtime world transform did not match the Spine inherit reference for "
+                      << bone_name << ".\n";
+            return false;
+        }
+    }
+
+    const auto no_scale_index = skeleton_result.skeleton_data->find_bone_index("no_scale_child");
+    if (!no_scale_index.has_value()) {
+        std::cerr << "Non-uniform inherit fixture lost the no_scale_child lookup.\n";
+        return false;
+    }
+    const auto& no_scale_world = skeleton.bone_world_transforms()[*no_scale_index];
+    std::cout << "Loaded non-uniform inherit fixture: skeletonScale=(" << kSkeletonScaleX << ", "
+              << kSkeletonScaleY << ")\n"
+              << "  noScaleAxes=(" << no_scale_world.a << ", " << no_scale_world.b << ", "
+              << no_scale_world.c << ", " << no_scale_world.d << ")\n";
     return true;
 }
 
@@ -1335,16 +2306,28 @@ bool validate_runtime_weighted_mesh_model(const std::shared_ptr<const SkeletonDa
     const auto& top_right_arm = geometry.weights[1].influences[1];
     const auto& bottom_right_spine = geometry.weights[2].influences[0];
     const auto& bottom_right_arm = geometry.weights[2].influences[1];
+    const auto vertex_weight_sum = [](const marrow::runtime::MeshGeometry::VertexWeights& vertex_weights) {
+        double total = 0.0;
+        for (const marrow::runtime::MeshGeometry::VertexWeight& influence : vertex_weights.influences) {
+            total += influence.weight;
+        }
+
+        return total;
+    };
     if (top_left.bone_index != *spine_index ||
         !require_near(top_left.weight, 1.0, "top-left mesh weight") ||
+        !require_near(vertex_weight_sum(geometry.weights[0]), 1.0, "top-left mesh weight sum") ||
         top_right_spine.bone_index != *spine_index ||
         top_right_arm.bone_index != *arm_index ||
         !require_near(top_right_spine.weight, 0.75, "top-right spine weight") ||
         !require_near(top_right_arm.weight, 0.25, "top-right arm weight") ||
+        !require_near(vertex_weight_sum(geometry.weights[1]), 1.0, "top-right mesh weight sum") ||
         bottom_right_spine.bone_index != *spine_index ||
         bottom_right_arm.bone_index != *arm_index ||
         !require_near(bottom_right_spine.weight, 0.25, "bottom-right spine weight") ||
-        !require_near(bottom_right_arm.weight, 0.75, "bottom-right arm weight")) {
+        !require_near(bottom_right_arm.weight, 0.75, "bottom-right arm weight") ||
+        !require_near(vertex_weight_sum(geometry.weights[2]), 1.0, "bottom-right mesh weight sum") ||
+        !require_near(vertex_weight_sum(geometry.weights[3]), 1.0, "bottom-left mesh weight sum")) {
         std::cerr << "Weighted mesh influences did not preserve bone bindings.\n";
         return false;
     }
@@ -1511,6 +2494,129 @@ bool validate_runtime_mesh_deform_timelines(const std::shared_ptr<const Skeleton
     return true;
 }
 
+bool validate_linked_mesh_deform_inheritance(const std::filesystem::path& fixture_path) {
+    const std::optional<Document> document = load_document_or_print(fixture_path);
+    if (!document.has_value()) {
+        return false;
+    }
+
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(*document);
+    if (!skeleton_result) {
+        return print_error(*skeleton_result.error);
+    }
+
+    const auto body_slot_index = skeleton_result.skeleton_data->find_slot_index("body");
+    const marrow::runtime::AnimationData* inherit_animation =
+        skeleton_result.skeleton_data->find_animation("inherit_test");
+    if (!body_slot_index.has_value() || inherit_animation == nullptr) {
+        std::cerr << "Linked-mesh deform inheritance fixture is missing its body slot or animation.\n";
+        return false;
+    }
+
+    const marrow::runtime::AttachmentData* parent_mesh =
+        skeleton_result.skeleton_data->find_attachment_source(*body_slot_index, "body_mesh");
+    const marrow::runtime::AttachmentData* linked_deform =
+        skeleton_result.skeleton_data->find_attachment_source(*body_slot_index, "linked_deform");
+    const marrow::runtime::AttachmentData* linked_rigid =
+        skeleton_result.skeleton_data->find_attachment_source(*body_slot_index, "linked_rigid");
+    if (parent_mesh == nullptr || parent_mesh->mesh_geometry == nullptr ||
+        linked_deform == nullptr || linked_rigid == nullptr ||
+        linked_deform->mesh_geometry == nullptr || linked_rigid->mesh_geometry == nullptr ||
+        !linked_deform->linked_mesh.has_value() || !linked_rigid->linked_mesh.has_value() ||
+        !linked_deform->linked_mesh->deform || linked_rigid->linked_mesh->deform ||
+        linked_deform->mesh_geometry.get() != parent_mesh->mesh_geometry.get() ||
+        linked_rigid->mesh_geometry.get() != parent_mesh->mesh_geometry.get()) {
+        std::cerr << "Linked-mesh deform inheritance fixture did not preserve the parent mesh pair.\n";
+        return false;
+    }
+
+    const std::vector<double> expected_deform_offsets{0.0, 0.0, 10.0, -4.0, 6.0, 12.0, -8.0, 2.0};
+    const std::vector<double> expected_rigid_sample{0.0, 0.0, 5.0, -2.0, 3.0, 6.0, -4.0, 1.0};
+    const std::optional<std::vector<double>> deform_sample =
+        inherit_animation->sample_slot_deform(*body_slot_index, "body_mesh", 0.5);
+    const std::optional<std::vector<double>> rigid_sample =
+        inherit_animation->sample_slot_deform(*body_slot_index, "body_mesh", 0.75);
+    if (!deform_sample.has_value() || !rigid_sample.has_value() ||
+        *deform_sample != expected_deform_offsets ||
+        *rigid_sample != expected_rigid_sample) {
+        std::cerr << "Linked-mesh deform inheritance fixture did not preserve the expected parent FFD keys.\n";
+        return false;
+    }
+
+    const auto& geometry = *parent_mesh->mesh_geometry;
+
+    Skeleton deform_skeleton(skeleton_result.skeleton_data);
+    deform_skeleton.apply_animation(*inherit_animation, 0.5);
+    const marrow::runtime::AttachmentData* deform_attachment =
+        deform_skeleton.current_attachment(*body_slot_index);
+    const std::vector<double>* active_deform_offsets =
+        deform_skeleton.current_mesh_vertex_offsets(*body_slot_index);
+    const std::optional<marrow::runtime::MeshAttachmentPose> deform_pose =
+        deform_skeleton.evaluate_current_mesh_attachment(*body_slot_index);
+    if (deform_attachment == nullptr || deform_attachment->name != "linked_deform" ||
+        active_deform_offsets == nullptr || *active_deform_offsets != expected_deform_offsets ||
+        !deform_pose.has_value() || deform_pose->attachment_name != "linked_deform") {
+        std::cerr << "Deformable linked mesh did not inherit the parent FFD offsets during playback.\n";
+        return false;
+    }
+
+    for (std::size_t vertex_index = 0; vertex_index < deform_pose->vertices.size(); ++vertex_index) {
+        const marrow::runtime::MeshWorldVertex expected_vertex = blend_weighted_mesh_vertex(
+            deform_skeleton.bone_world_transforms(),
+            geometry.weights[vertex_index],
+            expected_deform_offsets[vertex_index * 2],
+            expected_deform_offsets[(vertex_index * 2) + 1]);
+        if (!require_mesh_vertex(
+                deform_pose->vertices[vertex_index],
+                expected_vertex.x,
+                expected_vertex.y,
+                "linked deform mesh vertex")) {
+            std::cerr << "Linked mesh with deform=true did not apply the inherited parent offsets.\n";
+            return false;
+        }
+    }
+
+    Skeleton rigid_skeleton(skeleton_result.skeleton_data);
+    rigid_skeleton.apply_animation(*inherit_animation, 0.75);
+    const marrow::runtime::AttachmentData* rigid_attachment =
+        rigid_skeleton.current_attachment(*body_slot_index);
+    const std::vector<double>* active_rigid_offsets =
+        rigid_skeleton.current_mesh_vertex_offsets(*body_slot_index);
+    const std::optional<marrow::runtime::MeshAttachmentPose> rigid_pose =
+        rigid_skeleton.evaluate_current_mesh_attachment(*body_slot_index);
+    if (rigid_attachment == nullptr || rigid_attachment->name != "linked_rigid" ||
+        active_rigid_offsets != nullptr || !rigid_pose.has_value() ||
+        rigid_pose->attachment_name != "linked_rigid") {
+        std::cerr << "Rigid linked mesh did not stay detached from the parent FFD offsets.\n";
+        return false;
+    }
+
+    for (std::size_t vertex_index = 0; vertex_index < rigid_pose->vertices.size(); ++vertex_index) {
+        const marrow::runtime::MeshWorldVertex expected_vertex = blend_weighted_mesh_vertex(
+            rigid_skeleton.bone_world_transforms(),
+            geometry.weights[vertex_index],
+            0.0,
+            0.0);
+        if (!require_mesh_vertex(
+                rigid_pose->vertices[vertex_index],
+                expected_vertex.x,
+                expected_vertex.y,
+                "linked rigid mesh vertex")) {
+            std::cerr << "Linked mesh with deform=false should stay rigid while the parent FFD is active.\n";
+            return false;
+        }
+    }
+
+    std::cout << "Loaded linked-mesh deform inheritance fixture: " << fixture_path.string() << '\n'
+              << "  deformAttachment=" << deform_attachment->name
+              << ", rigidAttachment=" << rigid_attachment->name << '\n'
+              << "  deformV1=(" << deform_pose->vertices[1].x << ", "
+              << deform_pose->vertices[1].y << ")"
+              << ", rigidV1=(" << rigid_pose->vertices[1].x << ", "
+              << rigid_pose->vertices[1].y << ")\n";
+    return true;
+}
+
 bool validate_runtime_animation_curves(const std::shared_ptr<const SkeletonData>& skeleton_data) {
     const auto* animation_ptr = skeleton_data->find_animation("idle");
     if (animation_ptr == nullptr) {
@@ -1545,8 +2651,9 @@ bool validate_runtime_animation_curves(const std::shared_ptr<const SkeletonData>
             marrow::runtime::InterpolationKind::Linear ||
         rotate_timeline->keyframes[1].interpolation.kind() !=
             marrow::runtime::InterpolationKind::CubicBezier ||
-        rotate_timeline->keyframes[2].interpolation.kind() !=
-            marrow::runtime::InterpolationKind::Stepped) {
+        (!g_quantized_runtime_validation &&
+         rotate_timeline->keyframes[2].interpolation.kind() !=
+             marrow::runtime::InterpolationKind::Stepped)) {
         std::cerr << "Rotate timeline interpolation kinds do not match the fixture curves.\n";
         return false;
     }
@@ -1595,8 +2702,10 @@ bool validate_runtime_animation_curves(const std::shared_ptr<const SkeletonData>
 
     if (!require_near(*linear_sample, 2.5, "linear rotate sample") ||
         !require_near(*bezier_sample, 3.9529315894941443, "bezier rotate sample") ||
-        !require_near(stepped_mid, 5.0, "stepped rotate sample mid") ||
-        !require_near(stepped_end, 10.0, "stepped rotate sample end") ||
+        (!g_quantized_runtime_validation &&
+         !require_near(stepped_mid, 5.0, "stepped rotate sample mid")) ||
+        (!g_quantized_runtime_validation &&
+         !require_near(stepped_end, 10.0, "stepped rotate sample end")) ||
         !require_near(*start_sample, 0.0, "rotate start sample") ||
         !require_near(*midpoint_sample, 5.0, "rotate midpoint sample") ||
         !require_near(*end_sample, 0.0, "rotate final sample") ||
@@ -1738,6 +2847,15 @@ bool validate_runtime_animation_events(const std::shared_ptr<const SkeletonData>
         [&](const marrow::runtime::AnimationEvent& event) {
             emitted_events.push_back(event);
         });
+    if (emitted_events.size() != 2 ||
+        emitted_events[0].name != "footstep" ||
+        emitted_events[1].name != "dust_vfx" ||
+        !require_near(emitted_events[0].time, 0.3, "same-time event 0 time") ||
+        !require_near(emitted_events[1].time, 0.3, "same-time event 1 time")) {
+        std::cerr << "Crossing the first event key should emit both same-timestamp events in fixture order.\n";
+        return false;
+    }
+
     skeleton.apply_animation(
         animation,
         0.35,
@@ -1957,6 +3075,192 @@ bool validate_runtime_slot_timelines(const std::shared_ptr<const SkeletonData>& 
     return true;
 }
 
+bool validate_runtime_error_reporting(const std::shared_ptr<const SkeletonData>& skeleton_data) {
+    const auto body_slot_index = skeleton_data->find_slot_index("body");
+    if (!body_slot_index.has_value()) {
+        std::cerr << "Error reporting validation requires the body slot.\n";
+        return false;
+    }
+
+    const auto make_test_data = [&](const auto& mutate) -> std::shared_ptr<const SkeletonData> {
+        std::vector<marrow::runtime::AnimationData> animations = skeleton_data->animations();
+        std::vector<marrow::runtime::SkinData> skins = skeleton_data->skins();
+        mutate(&animations, &skins);
+        return std::make_shared<SkeletonData>(
+            skeleton_data->info(),
+            skeleton_data->bones(),
+            skeleton_data->ik_constraints(),
+            skeleton_data->path_constraints(),
+            skeleton_data->transform_constraints(),
+            skeleton_data->physics_constraints(),
+            skeleton_data->slots(),
+            skeleton_data->events(),
+            std::move(animations),
+            std::move(skins),
+            skeleton_data->default_mix_duration(),
+            skeleton_data->mix_definitions());
+    };
+
+    const auto add_attachment_test_animation =
+        [&](std::vector<marrow::runtime::AnimationData>* animations,
+            std::string name,
+            std::optional<std::string> attachment_name) {
+            marrow::runtime::AnimationData animation;
+            animation.name = std::move(name);
+
+            marrow::runtime::SlotAttachmentTimeline timeline;
+            timeline.slot_index = *body_slot_index;
+            timeline.keyframes.push_back(
+                marrow::runtime::AttachmentKeyframe{0.0, std::move(attachment_name)});
+            animation.slot_attachment_timelines.push_back(std::move(timeline));
+            animations->push_back(std::move(animation));
+        };
+
+    auto prepare_error_capture = [](Skeleton* skeleton, std::vector<std::string>* errors) {
+        skeleton->clear_last_error();
+        errors->clear();
+        skeleton->set_error_callback([errors](std::string_view message) {
+            errors->push_back(std::string(message));
+        });
+    };
+
+    const auto empty_attachment_data = make_test_data([&](auto* animations, auto*) {
+        add_attachment_test_animation(
+            animations,
+            "invalid_empty_attachment",
+            std::optional<std::string>(std::string{}));
+    });
+    Skeleton empty_attachment_skeleton(empty_attachment_data);
+    std::vector<std::string> empty_errors;
+    prepare_error_capture(&empty_attachment_skeleton, &empty_errors);
+    const auto* empty_animation = empty_attachment_data->find_animation("invalid_empty_attachment");
+    const auto* empty_default_attachment =
+        empty_attachment_data->find_attachment("default", *body_slot_index);
+    if (empty_animation == nullptr || empty_default_attachment == nullptr) {
+        std::cerr << "Empty attachment error validation lost its fixture dependencies.\n";
+        return false;
+    }
+    empty_attachment_skeleton.apply_animation(*empty_animation, 0.0);
+    if (empty_attachment_skeleton.current_attachment(*body_slot_index) != empty_default_attachment ||
+        empty_attachment_skeleton.slot_states()[*body_slot_index].attachment_name != "body" ||
+        empty_errors.size() != 1 ||
+        empty_errors.front().find("rejected an empty attachment name") == std::string::npos) {
+        std::cerr << "Empty attachment names should now report an error without clearing the slot.\n";
+        return false;
+    }
+
+    const auto missing_attachment_data = make_test_data([&](auto* animations, auto*) {
+        add_attachment_test_animation(
+            animations,
+            "invalid_missing_attachment",
+            std::optional<std::string>(std::string("missing_attachment")));
+    });
+    Skeleton missing_attachment_skeleton(missing_attachment_data);
+    std::vector<std::string> missing_errors;
+    prepare_error_capture(&missing_attachment_skeleton, &missing_errors);
+    AnimationState missing_state(missing_attachment_data);
+    missing_state.set_animation(0, "invalid_missing_attachment", false);
+    const auto* missing_default_attachment =
+        missing_attachment_data->find_attachment("default", *body_slot_index);
+    if (missing_default_attachment == nullptr) {
+        std::cerr << "Missing attachment error validation lost the default body attachment.\n";
+        return false;
+    }
+    missing_state.apply(missing_attachment_skeleton);
+    if (missing_attachment_skeleton.current_attachment(*body_slot_index) != missing_default_attachment ||
+        missing_attachment_skeleton.slot_states()[*body_slot_index].attachment_name != "body" ||
+        missing_errors.size() != 1 ||
+        missing_errors.front().find("missing_attachment") == std::string::npos ||
+        missing_errors.front().find("could not be resolved in any skin") == std::string::npos) {
+        std::cerr << "Unknown attachment names should now report an actionable resolution error.\n";
+        return false;
+    }
+
+    Skeleton unresolved_attachment_skeleton(skeleton_data);
+    std::vector<std::string> unresolved_errors;
+    prepare_error_capture(&unresolved_attachment_skeleton, &unresolved_errors);
+    unresolved_attachment_skeleton.slot_states()[*body_slot_index].attachment_name = "ghost_attachment";
+    unresolved_attachment_skeleton.slot_states()[*body_slot_index].attachment_skin_index.reset();
+    if (unresolved_attachment_skeleton.current_attachment(*body_slot_index) != nullptr ||
+        unresolved_errors.size() != 1 ||
+        unresolved_errors.front().find("ghost_attachment") == std::string::npos ||
+        unresolved_errors.front().find("could not be resolved in any skin") == std::string::npos) {
+        std::cerr << "Resolving an invalid current attachment name should now report a clear error.\n";
+        return false;
+    }
+
+    const auto invalid_mesh_data = make_test_data([&](auto*, auto* skins) {
+        std::shared_ptr<marrow::runtime::MeshGeometry> invalid_geometry;
+        for (marrow::runtime::SkinData& skin : *skins) {
+            for (marrow::runtime::SkinSlotData& slot_attachment : skin.slot_attachments) {
+                if (slot_attachment.slot_index != *body_slot_index ||
+                    slot_attachment.attachment.name != "body_mesh" ||
+                    slot_attachment.attachment.mesh_geometry == nullptr) {
+                    continue;
+                }
+
+                invalid_geometry = std::make_shared<marrow::runtime::MeshGeometry>(
+                    *slot_attachment.attachment.mesh_geometry);
+                invalid_geometry->weights[0].influences[0].bone_index =
+                    skeleton_data->bones().size();
+                slot_attachment.attachment.mesh_geometry = invalid_geometry;
+            }
+        }
+
+        for (marrow::runtime::SkinData& skin : *skins) {
+            for (marrow::runtime::SkinSlotData& slot_attachment : skin.slot_attachments) {
+                if (slot_attachment.slot_index == *body_slot_index &&
+                    slot_attachment.attachment.name == "warrior_body") {
+                    slot_attachment.attachment.mesh_geometry = invalid_geometry;
+                }
+            }
+        }
+    });
+    Skeleton invalid_mesh_skeleton(invalid_mesh_data);
+    std::vector<std::string> invalid_mesh_errors;
+    prepare_error_capture(&invalid_mesh_skeleton, &invalid_mesh_errors);
+    if (!invalid_mesh_skeleton.set_skin("warrior")) {
+        std::cerr << "Invalid mesh error validation could not activate the warrior skin.\n";
+        return false;
+    }
+    if (invalid_mesh_skeleton.evaluate_current_mesh_attachment(*body_slot_index).has_value() ||
+        invalid_mesh_errors.size() != 1 ||
+        invalid_mesh_errors.front().find("warrior_body") == std::string::npos ||
+        invalid_mesh_errors.front().find("invalid bone index") == std::string::npos) {
+        std::cerr << "Runtime mesh evaluation should now report invalid weighted-mesh bone indices.\n";
+        return false;
+    }
+
+    marrow::renderer::DynamicMeshDrawCommand invalid_gpu_attachment;
+    invalid_gpu_attachment.attachment_name = "broken_gpu_mesh";
+    marrow::renderer::GpuSkinningVertexPayload invalid_payload;
+    invalid_payload.influence_count = 1;
+    invalid_payload.bone_indices[0] = 1;
+    invalid_payload.bone_local_positions[0] = {12.0, -8.0};
+    invalid_payload.bone_weights[0] = 1.0;
+    invalid_payload.uv = {0.25, 0.75};
+    invalid_gpu_attachment.vertex_payloads.push_back(invalid_payload);
+    const marrow::renderer::GpuSkinningEvaluationResult invalid_gpu_result =
+        marrow::renderer::evaluate_gpu_skinned_vertices(
+            invalid_gpu_attachment,
+            std::vector<BoneWorldTransform>{BoneWorldTransform{}});
+    if (invalid_gpu_result ||
+        !invalid_gpu_result.error_message.has_value() ||
+        invalid_gpu_result.error_message->find("broken_gpu_mesh") == std::string::npos ||
+        invalid_gpu_result.error_message->find("invalid bone index 1") == std::string::npos) {
+        std::cerr << "GPU skinning should now report invalid bone indices instead of returning an empty mesh.\n";
+        return false;
+    }
+
+    std::cout << "Validated runtime error reporting for silent failure paths.\n"
+              << "  emptyAttachment=" << empty_errors.front() << '\n'
+              << "  missingAttachment=" << missing_errors.front() << '\n'
+              << "  unresolvedAttachment=" << unresolved_errors.front() << '\n'
+              << "  invalidMesh=" << invalid_mesh_errors.front() << '\n'
+              << "  invalidGpu=" << *invalid_gpu_result.error_message << '\n';
+    return true;
+}
+
 bool validate_runtime_animation_state(const std::shared_ptr<const SkeletonData>& skeleton_data) {
     const auto* idle = skeleton_data->find_animation("idle");
     const auto* attack = skeleton_data->find_animation("attack");
@@ -1990,6 +3294,21 @@ bool validate_runtime_animation_state(const std::shared_ptr<const SkeletonData>&
             record.event_name = event->name;
         }
         records->push_back(std::move(record));
+    };
+    auto has_mode = [](
+                        const std::shared_ptr<TrackEntry>& entry,
+                        marrow::runtime::AnimationStateTimelineMode mode) {
+        if (entry == nullptr) {
+            return false;
+        }
+
+        for (const marrow::runtime::AnimationStateTimelineMode candidate : entry->timeline_modes) {
+            if (candidate == mode) {
+                return true;
+            }
+        }
+
+        return false;
     };
 
     std::vector<StateEventRecord> state_events;
@@ -2123,11 +3442,23 @@ bool validate_runtime_animation_state(const std::shared_ptr<const SkeletonData>&
     const std::optional<double> aim_arm_mix =
         aim->sample_bone_rotation(*arm_index, current_track_one->animation_time());
     const double mix_alpha = current_track_one->mix_time / current_track_one->mix_duration;
+    const double interrupted_arm_rotation =
+        skeleton.bone_poses()[*arm_index].local_pose.rotation;
     if (!attack_arm_mix.has_value() || !aim_arm_mix.has_value() ||
         !require_near(
             skeleton.bone_poses()[*arm_index].local_pose.rotation,
             *attack_arm_mix * (1.0 - mix_alpha) + *aim_arm_mix * mix_alpha,
             "crossfade arm rotation") ||
+        current_track_one->mixing_from->mixing_to.lock() != current_track_one ||
+        current_track_one->timeline_modes.empty() ||
+        current_track_one->timeline_modes.size() != current_track_one->timeline_hold_mix.size() ||
+        current_track_one->mixing_from->timeline_modes.empty() ||
+        current_track_one->mixing_from->timeline_modes.size() !=
+            current_track_one->mixing_from->timeline_hold_mix.size() ||
+        !has_mode(current_track_one, marrow::runtime::AnimationStateTimelineMode::Subsequent) ||
+        !(has_mode(current_track_one->mixing_from, marrow::runtime::AnimationStateTimelineMode::HoldFirst) ||
+          has_mode(current_track_one->mixing_from, marrow::runtime::AnimationStateTimelineMode::HoldSubsequent) ||
+          has_mode(current_track_one->mixing_from, marrow::runtime::AnimationStateTimelineMode::HoldMix)) ||
         count_state_events(state_events, AnimationStateEventType::Complete, 1, "attack") != 1 ||
         count_state_events(state_events, AnimationStateEventType::Interrupt, 1, "attack") != 1 ||
         count_state_events(state_events, AnimationStateEventType::Start, 1, "aim") != 1 ||
@@ -2137,33 +3468,52 @@ bool validate_runtime_animation_state(const std::shared_ptr<const SkeletonData>&
     }
 
     state.set_empty_animation(1, 0.3);
-    state.update(0.15);
     state.apply(skeleton);
 
     const std::shared_ptr<TrackEntry> empty_track_one = state.get_current(1);
     if (empty_track_one == nullptr ||
         empty_track_one->animation_name != "<empty>" ||
         empty_track_one->mixing_from == nullptr ||
-        empty_track_one->mixing_from->animation == nullptr) {
+        empty_track_one->mixing_from->animation == nullptr ||
+        !require_near(empty_track_one->track_end, 0.3, "empty animation trackEnd") ||
+        !require_near(
+            skeleton.bone_poses()[*arm_index].local_pose.rotation,
+            interrupted_arm_rotation,
+            "interrupt crossfade continuity") ||
+        empty_track_one->mixing_from->mixing_to.lock() != empty_track_one ||
+        !empty_track_one->mixing_from->snapshot_frozen ||
+        count_state_events(state_events, AnimationStateEventType::Interrupt, 1, "aim") != 1 ||
+        count_state_events(state_events, AnimationStateEventType::Start, 1, "<empty>") != 1) {
+        std::cerr << "Interrupting a live crossfade did not preserve the outgoing pose.\n";
+        return false;
+    }
+
+    state.update(0.15);
+    state.apply(skeleton);
+
+    const std::shared_ptr<TrackEntry> fading_empty_track = state.get_current(1);
+    if (fading_empty_track == nullptr ||
+        fading_empty_track->animation_name != "<empty>" ||
+        fading_empty_track->mixing_from == nullptr ||
+        fading_empty_track->mixing_from->animation == nullptr) {
         std::cerr << "Empty-animation fade-out did not keep the outgoing animation chain alive.\n";
         return false;
     }
 
-    const std::optional<double> aim_arm_fade =
-        aim->sample_bone_rotation(*arm_index, empty_track_one->mixing_from->animation_time());
-    const double fade_alpha = 1.0 - (empty_track_one->mix_time / empty_track_one->mix_duration);
-    if (!aim_arm_fade.has_value() ||
+    const double fade_alpha = 1.0 - (fading_empty_track->mix_time / fading_empty_track->mix_duration);
+    if (!require_near(fading_empty_track->track_end, 0.3, "fading empty trackEnd") ||
         !require_near(
             skeleton.bone_poses()[*arm_index].local_pose.rotation,
-            *aim_arm_fade * fade_alpha,
+            interrupted_arm_rotation * fade_alpha,
             "empty animation fade arm rotation") ||
-        count_state_events(state_events, AnimationStateEventType::Interrupt, 1, "aim") != 1 ||
-        count_state_events(state_events, AnimationStateEventType::Start, 1, "<empty>") != 1) {
+        !fading_empty_track->mixing_from->snapshot_frozen) {
         std::cerr << "Empty-animation fade-out did not preserve the outgoing pose or callbacks.\n";
         return false;
     }
 
     state.update(0.2);
+    state.apply(skeleton);
+    state.update(0.0);
     state.apply(skeleton);
 
     const std::optional<double> idle_spine_015 =
@@ -2204,6 +3554,152 @@ bool validate_runtime_animation_state(const std::shared_ptr<const SkeletonData>&
               << ", attack->aim=" << skeleton_data->mix_duration("attack", "aim") << '\n'
               << "  callbacks=start/interrupt/complete/end/dispose/event verified"
               << ", localAimEvents=" << aim_entry_events.size() << '\n';
+    return true;
+}
+
+bool validate_runtime_rotation_mixing_cross_detection() {
+    const auto mixing_data = make_rotation_mixing_test_data(0.0);
+    const auto bone_index = mixing_data->find_bone_index("root");
+    if (!bone_index.has_value()) {
+        std::cerr << "Rotation mixing validation could not build the synthetic test skeletons.\n";
+        return false;
+    }
+
+    const marrow::runtime::AnimationData* from_350 = mixing_data->find_animation("from_350");
+    const marrow::runtime::AnimationData* to_10 = mixing_data->find_animation("to_10");
+    const marrow::runtime::AnimationData* arc = mixing_data->find_animation("arc");
+    if (from_350 == nullptr || to_10 == nullptr || arc == nullptr) {
+        std::cerr << "Rotation mixing validation lost one of the synthetic animations.\n";
+        return false;
+    }
+
+    Skeleton never_applied_skeleton(mixing_data);
+    AnimationState never_applied_state(mixing_data);
+    never_applied_state.set_animation(0, "from_350", false);
+    never_applied_state.set_animation(0, "to_10", false, 1.0);
+    never_applied_state.update(0.5);
+    never_applied_state.apply(never_applied_skeleton);
+
+    const std::shared_ptr<TrackEntry> never_applied_entry = never_applied_state.get_current(0);
+    if (never_applied_entry == nullptr ||
+        never_applied_entry->mixing_from != nullptr ||
+        never_applied_entry->next_track_last < 0.0 ||
+        !require_near(
+            normalize_test_rotation_degrees(
+                never_applied_skeleton.bone_poses()[*bone_index].local_pose.rotation),
+            10.0,
+            "never-applied replacement skips mixingFrom")) {
+        std::cerr << "Replacing an unapplied entry still mixed from stale track state.\n";
+        return false;
+    }
+
+    Skeleton short_mix_skeleton(mixing_data);
+    AnimationState short_mix_state(mixing_data);
+    short_mix_state.set_animation(0, "from_350", false);
+    short_mix_state.apply(short_mix_skeleton);
+    short_mix_state.set_animation(0, "to_10", false, 1.0);
+    short_mix_state.update(0.5);
+    short_mix_state.apply(short_mix_skeleton);
+
+    const std::shared_ptr<TrackEntry> short_mix_entry = short_mix_state.get_current(0);
+    if (short_mix_entry == nullptr ||
+        short_mix_entry->mixing_from == nullptr ||
+        short_mix_entry->mixing_from->mixing_to.lock() != short_mix_entry ||
+        short_mix_entry->timelines_rotation.size() != 2 ||
+        short_mix_entry->mixing_from->timeline_modes.empty() ||
+        !require_near(
+            normalize_test_rotation_degrees(
+                short_mix_skeleton.bone_poses()[*bone_index].local_pose.rotation),
+            0.0,
+            "350->10 short-way mix")) {
+        std::cerr << "Rotation mixing did not preserve the short 20-degree crossfade arc.\n";
+        return false;
+    }
+
+    Skeleton partial_arc_skeleton(mixing_data);
+    AnimationState partial_arc_state(mixing_data);
+    std::shared_ptr<TrackEntry> partial_arc_entry =
+        partial_arc_state.set_animation(0, "arc", false);
+    partial_arc_entry->alpha = 0.5;
+    partial_arc_state.update(0.5);
+    partial_arc_state.apply(partial_arc_skeleton);
+    const double partial_arc_midpoint = normalize_test_rotation_degrees(
+        partial_arc_skeleton.bone_poses()[*bone_index].local_pose.rotation);
+
+    partial_arc_state.update(0.5);
+    partial_arc_state.apply(partial_arc_skeleton);
+    const double partial_arc_end = normalize_test_rotation_degrees(
+        partial_arc_skeleton.bone_poses()[*bone_index].local_pose.rotation);
+
+    if (partial_arc_entry->timelines_rotation.size() != 2 ||
+        !require_near(partial_arc_midpoint, 85.0, "partial arc @0.5") ||
+        !require_near(partial_arc_end, 95.0, "partial arc @1.0") ||
+        partial_arc_end <= partial_arc_midpoint) {
+        std::cerr << "The 0->170->-170 rotation did not stay continuous during partial mixing.\n";
+        return false;
+    }
+
+    Skeleton fade_arc_skeleton(mixing_data);
+    AnimationState fade_arc_state(mixing_data);
+    fade_arc_state.set_animation(0, "arc", false);
+    fade_arc_state.apply(fade_arc_skeleton);
+    fade_arc_state.set_empty_animation(0, 2.0);
+    fade_arc_state.update(0.5);
+    fade_arc_state.apply(fade_arc_skeleton);
+    const double fade_arc_before_cross = normalize_test_rotation_degrees(
+        fade_arc_skeleton.bone_poses()[*bone_index].local_pose.rotation);
+
+    fade_arc_state.update(0.5);
+    fade_arc_state.apply(fade_arc_skeleton);
+    const double fade_arc_after_cross = normalize_test_rotation_degrees(
+        fade_arc_skeleton.bone_poses()[*bone_index].local_pose.rotation);
+    const std::shared_ptr<TrackEntry> fade_arc_entry = fade_arc_state.get_current(0);
+
+    if (fade_arc_entry == nullptr ||
+        fade_arc_entry->mixing_from == nullptr ||
+        fade_arc_entry->mixing_from->timelines_rotation.size() != 2 ||
+        !require_near(fade_arc_before_cross, 127.5, "fade arc @0.5") ||
+        !require_near(fade_arc_after_cross, 95.0, "fade arc @1.0") ||
+        fade_arc_after_cross < 0.0) {
+        std::cerr << "Crossing the 180-degree boundary mid-crossfade caused a rotation pop.\n";
+        return false;
+    }
+
+    const auto relative_data = make_rotation_mixing_test_data(30.0);
+    const auto relative_bone_index = relative_data->find_bone_index("root");
+    const marrow::runtime::AnimationData* relative = relative_data->find_animation("relative");
+    if (!relative_bone_index.has_value() || relative == nullptr) {
+        std::cerr << "Setup-relative rotation validation lost the synthetic animation.\n";
+        return false;
+    }
+
+    const marrow::runtime::BoneRotateTimeline* relative_timeline =
+        relative->find_rotate_timeline(*relative_bone_index);
+    const std::optional<double> relative_sample =
+        relative->sample_bone_rotation(*relative_bone_index, 0.25);
+    Skeleton relative_skeleton(relative_data);
+    relative_skeleton.apply_animation(*relative, 0.25);
+    if (relative_timeline == nullptr ||
+        relative_timeline->keyframes.size() != 2 ||
+        !require_near(relative_timeline->setup_rotation, 30.0, "relative setup rotation") ||
+        !require_near(relative_timeline->keyframes[0].angle, 10.0, "relative key 0 delta") ||
+        !require_near(relative_timeline->keyframes[1].angle, -10.0, "relative key 1 delta") ||
+        !relative_sample.has_value() ||
+        !require_near(*relative_sample, 35.0, "relative sample @0.25") ||
+        !require_near(
+            relative_skeleton.bone_poses()[*relative_bone_index].local_pose.rotation,
+            35.0,
+            "relative applied rotation @0.25")) {
+        std::cerr << "Rotate timeline samples no longer stay relative to the setup pose.\n";
+        return false;
+    }
+
+    std::cout << "Loaded runtime rotation mixing cross-detection: tracks=1\n"
+              << "  shortMix=" << normalize_test_rotation_degrees(
+                     short_mix_skeleton.bone_poses()[*bone_index].local_pose.rotation)
+              << ", partialArc=(" << partial_arc_midpoint << ", " << partial_arc_end << ")\n"
+              << "  fadeArc=(" << fade_arc_before_cross << ", " << fade_arc_after_cross << ")"
+              << ", relativeSample=" << *relative_sample << '\n';
     return true;
 }
 
@@ -2335,10 +3831,10 @@ bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) 
         return print_error(*skeleton_result.error);
     }
 
-    const auto find_constraint = [&](std::string_view name)
-        -> const marrow::runtime::IkConstraintData* {
-        for (const marrow::runtime::IkConstraintData& constraint :
-             skeleton_result.skeleton_data->ik_constraints()) {
+    using marrow::runtime::IkConstraintData;
+
+    const auto find_constraint = [&](std::string_view name) -> const IkConstraintData* {
+        for (const IkConstraintData& constraint : skeleton_result.skeleton_data->ik_constraints()) {
             if (constraint.name == name) {
                 return &constraint;
             }
@@ -2346,71 +3842,220 @@ bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) 
         return nullptr;
     };
 
-    const auto upper_arm_pos_index = skeleton_result.skeleton_data->find_bone_index("upper_arm_pos");
-    const auto lower_arm_pos_index = skeleton_result.skeleton_data->find_bone_index("lower_arm_pos");
-    const auto hand_pos_index = skeleton_result.skeleton_data->find_bone_index("hand_pos");
-    const auto target_pos_index = skeleton_result.skeleton_data->find_bone_index("target_pos");
-    const auto upper_arm_neg_index = skeleton_result.skeleton_data->find_bone_index("upper_arm_neg");
-    const auto lower_arm_neg_index = skeleton_result.skeleton_data->find_bone_index("lower_arm_neg");
-    const auto hand_neg_index = skeleton_result.skeleton_data->find_bone_index("hand_neg");
-    const auto target_neg_index = skeleton_result.skeleton_data->find_bone_index("target_neg");
-    const auto turret_full_index = skeleton_result.skeleton_data->find_bone_index("turret_full");
-    const auto muzzle_full_index = skeleton_result.skeleton_data->find_bone_index("muzzle_full");
-    const auto target_full_index = skeleton_result.skeleton_data->find_bone_index("target_full");
-    const auto turret_half_index = skeleton_result.skeleton_data->find_bone_index("turret_half");
-    const auto muzzle_half_index = skeleton_result.skeleton_data->find_bone_index("muzzle_half");
-    const auto target_half_index = skeleton_result.skeleton_data->find_bone_index("target_half");
-    if (!upper_arm_pos_index.has_value() || !lower_arm_pos_index.has_value() ||
-        !hand_pos_index.has_value() || !target_pos_index.has_value() ||
-        !upper_arm_neg_index.has_value() || !lower_arm_neg_index.has_value() ||
-        !hand_neg_index.has_value() || !target_neg_index.has_value() ||
-        !turret_full_index.has_value() || !muzzle_full_index.has_value() ||
-        !target_full_index.has_value() || !turret_half_index.has_value() ||
-        !muzzle_half_index.has_value() || !target_half_index.has_value()) {
-        std::cerr << "IK fixture lost required bone lookups.\n";
-        return false;
+    std::optional<std::size_t> upper_arm_pos_index;
+    std::optional<std::size_t> lower_arm_pos_index;
+    std::optional<std::size_t> hand_pos_index;
+    std::optional<std::size_t> target_pos_index;
+    std::optional<std::size_t> upper_arm_neg_index;
+    std::optional<std::size_t> lower_arm_neg_index;
+    std::optional<std::size_t> hand_neg_index;
+    std::optional<std::size_t> target_neg_index;
+    std::optional<std::size_t> turret_full_index;
+    std::optional<std::size_t> muzzle_full_index;
+    std::optional<std::size_t> target_full_index;
+    std::optional<std::size_t> turret_half_index;
+    std::optional<std::size_t> muzzle_half_index;
+    std::optional<std::size_t> target_half_index;
+    std::optional<std::size_t> turret_stretch_index;
+    std::optional<std::size_t> muzzle_stretch_index;
+    std::optional<std::size_t> target_stretch_index;
+    std::optional<std::size_t> turret_compress_index;
+    std::optional<std::size_t> muzzle_compress_index;
+    std::optional<std::size_t> target_compress_index;
+    std::optional<std::size_t> upper_arm_soft_index;
+    std::optional<std::size_t> lower_arm_soft_index;
+    std::optional<std::size_t> hand_soft_index;
+    std::optional<std::size_t> target_soft_index;
+    std::optional<std::size_t> upper_arm_rigid_index;
+    std::optional<std::size_t> lower_arm_rigid_index;
+    std::optional<std::size_t> hand_rigid_index;
+    std::optional<std::size_t> target_rigid_index;
+    std::optional<std::size_t> upper_arm_nonuniform_index;
+    std::optional<std::size_t> lower_arm_nonuniform_index;
+    std::optional<std::size_t> hand_nonuniform_index;
+    std::optional<std::size_t> target_nonuniform_index;
+    std::optional<std::size_t> turret_flip_index;
+    std::optional<std::size_t> muzzle_flip_index;
+    std::optional<std::size_t> target_flip_index;
+    std::optional<std::size_t> upper_arm_overlap_index;
+    std::optional<std::size_t> lower_arm_overlap_index;
+    std::optional<std::size_t> hand_overlap_index;
+    std::optional<std::size_t> target_overlap_index;
+    std::optional<std::size_t> upper_arm_zero_index;
+    std::optional<std::size_t> lower_arm_zero_index;
+    std::optional<std::size_t> hand_zero_index;
+    std::optional<std::size_t> target_zero_index;
+    std::optional<std::size_t> upper_arm_stretch_index;
+    std::optional<std::size_t> hand_stretch_index;
+    std::optional<std::size_t> target_arm_stretch_index;
+
+    for (const auto& [name, out] :
+         std::vector<std::pair<std::string_view, std::optional<std::size_t>*>>{
+             {"upper_arm_pos", &upper_arm_pos_index},
+             {"lower_arm_pos", &lower_arm_pos_index},
+             {"hand_pos", &hand_pos_index},
+             {"target_pos", &target_pos_index},
+             {"upper_arm_neg", &upper_arm_neg_index},
+             {"lower_arm_neg", &lower_arm_neg_index},
+             {"hand_neg", &hand_neg_index},
+             {"target_neg", &target_neg_index},
+             {"turret_full", &turret_full_index},
+             {"muzzle_full", &muzzle_full_index},
+             {"target_full", &target_full_index},
+             {"turret_half", &turret_half_index},
+             {"muzzle_half", &muzzle_half_index},
+             {"target_half", &target_half_index},
+             {"turret_stretch", &turret_stretch_index},
+             {"muzzle_stretch", &muzzle_stretch_index},
+             {"target_stretch", &target_stretch_index},
+             {"turret_compress", &turret_compress_index},
+             {"muzzle_compress", &muzzle_compress_index},
+             {"target_compress", &target_compress_index},
+             {"upper_arm_soft", &upper_arm_soft_index},
+             {"lower_arm_soft", &lower_arm_soft_index},
+             {"hand_soft", &hand_soft_index},
+             {"target_soft", &target_soft_index},
+             {"upper_arm_rigid", &upper_arm_rigid_index},
+             {"lower_arm_rigid", &lower_arm_rigid_index},
+             {"hand_rigid", &hand_rigid_index},
+             {"target_rigid", &target_rigid_index},
+             {"upper_arm_nonuniform", &upper_arm_nonuniform_index},
+             {"lower_arm_nonuniform", &lower_arm_nonuniform_index},
+             {"hand_nonuniform", &hand_nonuniform_index},
+             {"target_nonuniform", &target_nonuniform_index},
+             {"turret_flip", &turret_flip_index},
+             {"muzzle_flip", &muzzle_flip_index},
+             {"target_flip", &target_flip_index},
+             {"upper_arm_overlap", &upper_arm_overlap_index},
+             {"lower_arm_overlap", &lower_arm_overlap_index},
+             {"hand_overlap", &hand_overlap_index},
+             {"target_overlap", &target_overlap_index},
+             {"upper_arm_zero", &upper_arm_zero_index},
+             {"lower_arm_zero", &lower_arm_zero_index},
+             {"hand_zero", &hand_zero_index},
+             {"target_zero", &target_zero_index},
+             {"upper_arm_stretch", &upper_arm_stretch_index},
+             {"hand_stretch", &hand_stretch_index},
+             {"target_arm_stretch", &target_arm_stretch_index},
+         }) {
+        *out = skeleton_result.skeleton_data->find_bone_index(name);
+        if (!out->has_value()) {
+            std::cerr << "IK fixture lost required bone lookup: " << name << ".\n";
+            return false;
+        }
     }
 
-    const marrow::runtime::IkConstraintData* arm_positive = find_constraint("arm_positive");
-    const marrow::runtime::IkConstraintData* arm_negative = find_constraint("arm_negative");
-    const marrow::runtime::IkConstraintData* turret_reach = find_constraint("turret_reach");
-    const marrow::runtime::IkConstraintData* turret_half_mix = find_constraint("turret_half_mix");
-    if (skeleton_result.skeleton_data->ik_constraints().size() != 4 ||
-        arm_positive == nullptr || arm_negative == nullptr ||
-        turret_reach == nullptr || turret_half_mix == nullptr) {
-        std::cerr << "IK fixture did not preserve the expected constraint registry.\n";
-        return false;
+    const IkConstraintData* arm_positive = nullptr;
+    const IkConstraintData* arm_negative = nullptr;
+    const IkConstraintData* turret_reach = nullptr;
+    const IkConstraintData* turret_half_mix = nullptr;
+    const IkConstraintData* turret_stretch = nullptr;
+    const IkConstraintData* turret_compress = nullptr;
+    const IkConstraintData* arm_soft = nullptr;
+    const IkConstraintData* arm_rigid = nullptr;
+    const IkConstraintData* arm_nonuniform = nullptr;
+    const IkConstraintData* turret_flip = nullptr;
+    const IkConstraintData* arm_overlap_root = nullptr;
+    const IkConstraintData* arm_zero_parent = nullptr;
+    const IkConstraintData* arm_stretch = nullptr;
+
+    for (const auto& [name, out] :
+         std::vector<std::pair<std::string_view, const IkConstraintData**>>{
+             {"arm_positive", &arm_positive},
+             {"arm_negative", &arm_negative},
+             {"turret_reach", &turret_reach},
+             {"turret_half_mix", &turret_half_mix},
+             {"turret_stretch", &turret_stretch},
+             {"turret_compress", &turret_compress},
+             {"arm_soft", &arm_soft},
+             {"arm_rigid", &arm_rigid},
+             {"arm_nonuniform", &arm_nonuniform},
+             {"turret_flip", &turret_flip},
+             {"arm_overlap_root", &arm_overlap_root},
+             {"arm_zero_parent", &arm_zero_parent},
+             {"arm_stretch", &arm_stretch},
+         }) {
+        *out = find_constraint(name);
+        if (*out == nullptr) {
+            std::cerr << "IK fixture lost required constraint lookup: " << name << ".\n";
+            return false;
+        }
     }
 
-    if (arm_positive->bone_indices !=
+    if (skeleton_result.skeleton_data->ik_constraints().size() != 13 ||
+        arm_positive->bone_indices !=
             std::vector<std::size_t>{*upper_arm_pos_index, *lower_arm_pos_index} ||
         arm_positive->target_bone_index != *target_pos_index ||
         !require_near(arm_positive->mix, 1.0, "arm_positive mix") ||
-        !arm_positive->bend_positive ||
         arm_negative->bone_indices !=
             std::vector<std::size_t>{*upper_arm_neg_index, *lower_arm_neg_index} ||
         arm_negative->target_bone_index != *target_neg_index ||
-        !require_near(arm_negative->mix, 1.0, "arm_negative mix") ||
         arm_negative->bend_positive ||
         turret_reach->bone_indices != std::vector<std::size_t>{*turret_full_index} ||
         turret_reach->target_bone_index != *target_full_index ||
-        !require_near(turret_reach->mix, 1.0, "turret_reach mix") ||
+        !require_near(turret_half_mix->mix, 0.5, "turret_half_mix mix") ||
         turret_half_mix->bone_indices != std::vector<std::size_t>{*turret_half_index} ||
-        turret_half_mix->target_bone_index != *target_half_index ||
-        !require_near(turret_half_mix->mix, 0.5, "turret_half_mix mix")) {
-        std::cerr << "Parsed IK constraints did not preserve bones, targets, mix, or bend metadata.\n";
+        turret_stretch->bone_indices != std::vector<std::size_t>{*turret_stretch_index} ||
+        !turret_stretch->stretch ||
+        turret_stretch->compress ||
+        turret_compress->bone_indices != std::vector<std::size_t>{*turret_compress_index} ||
+        !turret_compress->compress ||
+        turret_compress->stretch ||
+        !require_near(arm_soft->softness, 20.0, "arm_soft softness") ||
+        !arm_soft->bend_positive ||
+        arm_rigid->softness != 0.0 ||
+        arm_nonuniform->bone_indices !=
+            std::vector<std::size_t>{*upper_arm_nonuniform_index, *lower_arm_nonuniform_index} ||
+        turret_flip->bone_indices != std::vector<std::size_t>{*turret_flip_index} ||
+        arm_zero_parent->bone_indices !=
+            std::vector<std::size_t>{*upper_arm_zero_index, *lower_arm_zero_index} ||
+        !arm_stretch->stretch) {
+        std::cerr << "Parsed IK constraints did not preserve the expanded solver metadata.\n";
         return false;
     }
 
     Skeleton skeleton(skeleton_result.skeleton_data);
-    if (!require_near(
-            skeleton.bone_world_transforms()[*muzzle_full_index].world_x,
-            skeleton.bone_world_transforms()[*target_full_index].world_x,
-            "turret full mix muzzle x") ||
-        !require_near(
-            skeleton.bone_world_transforms()[*muzzle_full_index].world_y,
-            skeleton.bone_world_transforms()[*target_full_index].world_y,
-            "turret full mix muzzle y") ||
+    const ReferenceIkState reference = solve_reference_ik(*skeleton_result.skeleton_data);
+
+    const auto require_world_match = [&](std::size_t bone_index, std::string_view label) {
+        return require_world_transform(
+            skeleton.bone_world_transforms()[bone_index],
+            reference.world_transforms[bone_index],
+            label);
+    };
+    const auto require_target_match = [&](std::size_t tip_index,
+                                          std::size_t target_index,
+                                          std::string_view label) {
+        return require_near(
+                   skeleton.bone_world_transforms()[tip_index].world_x,
+                   skeleton.bone_world_transforms()[target_index].world_x,
+                   std::string(label) + " x") &&
+            require_near(
+                   skeleton.bone_world_transforms()[tip_index].world_y,
+                   skeleton.bone_world_transforms()[target_index].world_y,
+                   std::string(label) + " y");
+    };
+    const auto require_wrapped_reference_rotation = [&](std::size_t bone_index,
+                                                        std::string_view label) {
+        const double angle = reference.bones[bone_index].local_pose.rotation;
+        if (angle >= -180.000001 && angle <= 180.000001) {
+            return true;
+        }
+
+        std::cerr << label << " reference rotation was not wrapped to [-180, 180].\n";
+        return false;
+    };
+    const auto distance_between = [&](std::size_t a, std::size_t b) {
+        const double dx =
+            skeleton.bone_world_transforms()[a].world_x - skeleton.bone_world_transforms()[b].world_x;
+        const double dy =
+            skeleton.bone_world_transforms()[a].world_y - skeleton.bone_world_transforms()[b].world_y;
+        return std::hypot(dx, dy);
+    };
+
+    if (!require_world_match(*muzzle_full_index, "turret full") ||
+        !require_target_match(*muzzle_full_index, *target_full_index, "turret full mix muzzle") ||
+        !require_world_match(*muzzle_half_index, "turret half") ||
         !require_near(
             skeleton.bone_world_transforms()[*muzzle_half_index].world_x,
             340.0 + (60.0 * std::sqrt(0.5)),
@@ -2418,38 +4063,119 @@ bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) 
         !require_near(
             skeleton.bone_world_transforms()[*muzzle_half_index].world_y,
             60.0 * std::sqrt(0.5),
-            "turret half mix muzzle y")) {
-        std::cerr << "One-bone IK solving did not preserve full-mix reach and partial-mix aiming.\n";
+            "turret half mix muzzle y") ||
+        distance_between(*muzzle_half_index, *target_half_index) <= 0.0) {
+        std::cerr << "One-bone reachable IK no longer matches the Spine reference behavior.\n";
         return false;
     }
 
-    if (!require_near(
-            skeleton.bone_world_transforms()[*hand_pos_index].world_x,
-            skeleton.bone_world_transforms()[*target_pos_index].world_x,
-            "positive bend hand x") ||
+    if (!require_world_match(*hand_pos_index, "positive bend hand") ||
+        !require_target_match(*hand_pos_index, *target_pos_index, "positive bend hand")) {
+        std::cerr << "Positive-bend two-bone IK no longer matches the Spine reference behavior.\n";
+        return false;
+    }
+
+    if (!require_world_match(*hand_neg_index, "negative bend hand") ||
+        !require_target_match(*hand_neg_index, *target_neg_index, "negative bend hand") ||
+        (skeleton.bone_world_transforms()[*lower_arm_pos_index].world_y -
+             skeleton.bone_world_transforms()[*upper_arm_pos_index].world_y) *
+                (skeleton.bone_world_transforms()[*lower_arm_neg_index].world_y -
+                 skeleton.bone_world_transforms()[*upper_arm_neg_index].world_y) >=
+            0.0) {
+        std::cerr << "Negative-bend two-bone IK no longer matches the Spine reference behavior.\n";
+        return false;
+    }
+
+    if (!require_world_match(*muzzle_stretch_index, "one-bone stretch") ||
+        !require_target_match(*muzzle_stretch_index, *target_stretch_index, "stretch muzzle") ||
+        !require_world_match(*muzzle_compress_index, "one-bone compress") ||
+        !require_target_match(*muzzle_compress_index, *target_compress_index, "compress muzzle") ||
         !require_near(
-            skeleton.bone_world_transforms()[*hand_pos_index].world_y,
-            skeleton.bone_world_transforms()[*target_pos_index].world_y,
-            "positive bend hand y") ||
+            world_axis_length(skeleton.bone_world_transforms()[*turret_stretch_index]),
+            world_axis_length(reference.world_transforms[*turret_stretch_index]),
+            "stretch axis length") ||
         !require_near(
-            skeleton.bone_world_transforms()[*hand_neg_index].world_x,
-            skeleton.bone_world_transforms()[*target_neg_index].world_x,
-            "negative bend hand x") ||
-        !require_near(
-            skeleton.bone_world_transforms()[*hand_neg_index].world_y,
-            skeleton.bone_world_transforms()[*target_neg_index].world_y,
-            "negative bend hand y") ||
-        skeleton.bone_world_transforms()[*lower_arm_pos_index].world_y <=
-            skeleton.bone_world_transforms()[*upper_arm_pos_index].world_y ||
-        skeleton.bone_world_transforms()[*lower_arm_neg_index].world_y >=
-            skeleton.bone_world_transforms()[*upper_arm_neg_index].world_y) {
-        std::cerr << "Two-bone IK solving did not reach the targets or respect bend direction.\n";
+            world_axis_length(skeleton.bone_world_transforms()[*turret_compress_index]),
+            world_axis_length(reference.world_transforms[*turret_compress_index]),
+            "compress axis length") ||
+        world_axis_length(skeleton.bone_world_transforms()[*turret_stretch_index]) <= 1.0 ||
+        world_axis_length(skeleton.bone_world_transforms()[*turret_compress_index]) >= 1.0) {
+        std::cerr << "One-bone stretch/compress no longer matches the Spine reference.\n";
+        return false;
+    }
+
+    if (!require_world_match(*hand_soft_index, "softness hand") ||
+        !require_world_match(*hand_rigid_index, "rigid hand") ||
+        !require_wrapped_reference_rotation(*upper_arm_soft_index, "soft parent") ||
+        !require_wrapped_reference_rotation(*lower_arm_soft_index, "soft child") ||
+        !require_wrapped_reference_rotation(*upper_arm_rigid_index, "rigid parent") ||
+        !require_wrapped_reference_rotation(*lower_arm_rigid_index, "rigid child") ||
+        distance_between(*hand_soft_index, *target_soft_index) <=
+            distance_between(*hand_rigid_index, *target_rigid_index) ||
+        distance_between(*hand_soft_index, *upper_arm_soft_index) >=
+            distance_between(*hand_rigid_index, *upper_arm_rigid_index)) {
+        std::cerr << "Softness no longer smooths the full-extension snap against the rigid solve.\n";
+        return false;
+    }
+
+    if (!require_world_match(*hand_nonuniform_index, "non-uniform hand") ||
+        !require_world_match(*lower_arm_nonuniform_index, "non-uniform elbow")) {
+        std::cerr << "Non-uniform parent-scale IK no longer matches the ellipse reference solve.\n";
+        return false;
+    }
+
+    if (!require_world_match(*muzzle_flip_index, "negative scale muzzle") ||
+        !require_target_match(*muzzle_flip_index, *target_flip_index, "negative scale muzzle") ||
+        skeleton.bone_world_transforms()[*muzzle_flip_index].world_y <=
+            skeleton.bone_world_transforms()[*turret_flip_index].world_y) {
+        std::cerr << "Negative scale one-bone IK did not flip the aiming direction correctly.\n";
+        return false;
+    }
+
+    if (!require_finite_world_transform(
+            skeleton.bone_world_transforms()[*upper_arm_overlap_index],
+            "overlap parent") ||
+        !require_finite_world_transform(
+            skeleton.bone_world_transforms()[*lower_arm_overlap_index],
+            "overlap child") ||
+        !require_finite_world_transform(
+            skeleton.bone_world_transforms()[*hand_overlap_index],
+            "overlap tip") ||
+        !std::isfinite(distance_between(*hand_overlap_index, *target_overlap_index)) ||
+        !require_world_match(*hand_overlap_index, "overlap hand")) {
+        std::cerr << "Target-overlap IK produced a NaN or drifted from the Spine reference.\n";
+        return false;
+    }
+
+    if (!require_world_match(*hand_zero_index, "zero-length fallback hand") ||
+        !require_world_match(*lower_arm_zero_index, "zero-length fallback child") ||
+        !std::isfinite(distance_between(*hand_zero_index, *target_zero_index)) ||
+        skeleton.bone_world_transforms()[*hand_zero_index].world_y <=
+            skeleton.bone_world_transforms()[*upper_arm_zero_index].world_y) {
+        std::cerr << "Zero-length parent IK no longer falls back to the one-bone solve.\n";
+        return false;
+    }
+
+    if (!require_world_match(*hand_stretch_index, "two-bone stretch hand") ||
+        !require_target_match(*hand_stretch_index, *target_arm_stretch_index, "two-bone stretch hand") ||
+        world_axis_length(skeleton.bone_world_transforms()[*upper_arm_stretch_index]) <= 1.0) {
+        std::cerr << "Two-bone stretch no longer reaches unreachable targets via parent scaling.\n";
         return false;
     }
 
     skeleton.bone_poses()[*target_full_index].local_pose.y = -60.0;
     skeleton.update_world_transforms();
-    if (!require_near(
+
+    ReferenceIkState moved_reference = build_reference_ik_state(*skeleton_result.skeleton_data);
+    moved_reference.bones[*target_full_index].local_pose.y = -60.0;
+    moved_reference.update_world_transforms();
+    apply_reference_ik_constraints(*skeleton_result.skeleton_data, &moved_reference);
+
+    if (!require_world_transform(
+            skeleton.bone_world_transforms()[*muzzle_full_index],
+            moved_reference.world_transforms[*muzzle_full_index],
+            "moved turret full") ||
+        !require_near(
             skeleton.bone_world_transforms()[*muzzle_full_index].world_x,
             220.0,
             "moved turret muzzle x") ||
@@ -2467,12 +4193,20 @@ bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) 
               << skeleton.bone_world_transforms()[*muzzle_full_index].world_x << ", "
               << skeleton.bone_world_transforms()[*muzzle_full_index].world_y << ")"
               << ", oneBoneHalf=("
-              << skeleton.bone_world_transforms()[*muzzle_half_index].world_x << ", "
-              << skeleton.bone_world_transforms()[*muzzle_half_index].world_y << ")\n"
-              << "  bendPositiveElbowY="
-              << skeleton.bone_world_transforms()[*lower_arm_pos_index].world_y
-              << ", bendNegativeElbowY="
-              << skeleton.bone_world_transforms()[*lower_arm_neg_index].world_y << '\n';
+              << reference.world_transforms[*muzzle_half_index].world_x << ", "
+              << reference.world_transforms[*muzzle_half_index].world_y << ")\n"
+              << "  softReach=" << distance_between(*hand_soft_index, *upper_arm_soft_index)
+              << ", rigidReach=" << distance_between(*hand_rigid_index, *upper_arm_rigid_index)
+              << ", nonUniformHand=("
+              << skeleton.bone_world_transforms()[*hand_nonuniform_index].world_x << ", "
+              << skeleton.bone_world_transforms()[*hand_nonuniform_index].world_y << ")\n"
+              << "  stretchScale="
+              << world_axis_length(reference.world_transforms[*turret_stretch_index])
+              << ", compressScale="
+              << world_axis_length(reference.world_transforms[*turret_compress_index])
+              << ", movedFull=("
+              << skeleton.bone_world_transforms()[*muzzle_full_index].world_x << ", "
+              << skeleton.bone_world_transforms()[*muzzle_full_index].world_y << ")\n";
     return true;
 }
 
@@ -2619,6 +4353,47 @@ bool validate_runtime_path_transform_constraints(const std::filesystem::path& fi
         return false;
     }
 
+    const auto make_transform_constraint_test_data =
+        [&](const auto& mutate_constraints) -> std::shared_ptr<const SkeletonData> {
+            std::vector<marrow::runtime::TransformConstraintData> transform_constraints =
+                skeleton_result.skeleton_data->transform_constraints();
+            mutate_constraints(&transform_constraints);
+            return std::make_shared<SkeletonData>(
+                skeleton_result.skeleton_data->info(),
+                skeleton_result.skeleton_data->bones(),
+                skeleton_result.skeleton_data->ik_constraints(),
+                skeleton_result.skeleton_data->path_constraints(),
+                std::move(transform_constraints),
+                skeleton_result.skeleton_data->physics_constraints(),
+                skeleton_result.skeleton_data->slots(),
+                skeleton_result.skeleton_data->events(),
+                skeleton_result.skeleton_data->animations(),
+                skeleton_result.skeleton_data->skins(),
+                skeleton_result.skeleton_data->default_mix_duration(),
+                skeleton_result.skeleton_data->mix_definitions());
+        };
+
+    try {
+        const std::size_t invalid_bone_index = skeleton_result.skeleton_data->bones().size();
+        Skeleton invalid_target_skeleton(make_transform_constraint_test_data(
+            [&](auto* transform_constraints) {
+                transform_constraints->front().target_bone_indices = {invalid_bone_index};
+            }));
+        (void)invalid_target_skeleton;
+        std::cerr << "Invalid transform constraint bone indices should raise a clear runtime error.\n";
+        return false;
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        if (message.find("Transform constraint 'mirror_source' has invalid target bone index") ==
+                std::string::npos ||
+            message.find("bones=" + std::to_string(skeleton_result.skeleton_data->bones().size())) ==
+                std::string::npos) {
+            std::cerr << "Invalid transform constraint bone index did not report a clear error: "
+                      << message << '\n';
+            return false;
+        }
+    }
+
     std::cout << "Loaded runtime path/transform constraints: path="
               << skeleton_result.skeleton_data->path_constraints().size()
               << ", transform="
@@ -2672,9 +4447,17 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
 
     if (ribbon_secondary->bone_indices !=
             std::vector<std::size_t>{*ribbon_01_index, *ribbon_02_index} ||
+        !require_near(ribbon_secondary->step, 0.0166666667, "ribbon_secondary step") ||
+        !require_near(ribbon_secondary->x, 1.0, "ribbon_secondary x") ||
+        !require_near(ribbon_secondary->y, 1.0, "ribbon_secondary y") ||
+        !require_near(ribbon_secondary->rotate, 1.0, "ribbon_secondary rotate") ||
+        !require_near(ribbon_secondary->scale_x, 0.35, "ribbon_secondary scaleX") ||
+        !require_near(ribbon_secondary->shear_x, 0.0, "ribbon_secondary shearX") ||
+        !require_near(ribbon_secondary->limit, 30.0, "ribbon_secondary limit") ||
         !require_near(ribbon_secondary->inertia, 0.85, "ribbon_secondary inertia") ||
         !require_near(ribbon_secondary->damping, 4.0, "ribbon_secondary damping") ||
         !require_near(ribbon_secondary->strength, 18.0, "ribbon_secondary strength") ||
+        !require_near(ribbon_secondary->mass_inverse, 1.0, "ribbon_secondary massInverse") ||
         !require_near(ribbon_secondary->gravity.x, 0.0, "ribbon_secondary gravity.x") ||
         !require_near(ribbon_secondary->gravity.y, -24.0, "ribbon_secondary gravity.y") ||
         !require_near(ribbon_secondary->wind.x, 12.0, "ribbon_secondary wind.x") ||
@@ -2684,66 +4467,209 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
         return false;
     }
 
-    Skeleton skeleton(skeleton_result.skeleton_data);
+    const auto make_test_data = [&](const auto& modify_physics)
+        -> std::shared_ptr<const SkeletonData> {
+        std::vector<marrow::runtime::PhysicsConstraintData> physics_constraints =
+            skeleton_result.skeleton_data->physics_constraints();
+        modify_physics(&physics_constraints);
+        return std::make_shared<SkeletonData>(
+            skeleton_result.skeleton_data->info(),
+            skeleton_result.skeleton_data->bones(),
+            skeleton_result.skeleton_data->ik_constraints(),
+            skeleton_result.skeleton_data->path_constraints(),
+            skeleton_result.skeleton_data->transform_constraints(),
+            std::move(physics_constraints),
+            skeleton_result.skeleton_data->slots(),
+            skeleton_result.skeleton_data->events(),
+            skeleton_result.skeleton_data->animations(),
+            skeleton_result.skeleton_data->skins(),
+            skeleton_result.skeleton_data->default_mix_duration(),
+            skeleton_result.skeleton_data->mix_definitions());
+    };
+    const auto world_rotation_degrees = [](const BoneWorldTransform& transform) {
+        return std::atan2(transform.c, transform.a) * 180.0 / 3.14159265358979323846;
+    };
+
+    Skeleton setup_skeleton(skeleton_result.skeleton_data);
     if (!require_near(
-            skeleton.bone_world_transforms()[*ribbon_tip_index].world_x,
+            setup_skeleton.bone_world_transforms()[*ribbon_tip_index].world_x,
             210.0,
             "setup ribbon tip x") ||
         !require_near(
-            skeleton.bone_world_transforms()[*ribbon_tip_index].world_y,
+            setup_skeleton.bone_world_transforms()[*ribbon_tip_index].world_y,
             0.0,
             "setup ribbon tip y")) {
         std::cerr << "Physics fixture setup pose did not preserve the authored chain lengths.\n";
         return false;
     }
 
-    skeleton.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
-    skeleton.update_world_transforms();
+    Skeleton authored_pose(skeleton_result.skeleton_data);
+    authored_pose.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+    authored_pose.update_world_transforms(marrow::runtime::PhysicsMode::None);
+    const BoneWorldTransform authored_root = authored_pose.bone_world_transforms()[*ribbon_01_index];
+    const BoneWorldTransform authored_tip = authored_pose.bone_world_transforms()[*ribbon_tip_index];
 
-    const auto lagged_tip = skeleton.bone_world_transforms()[*ribbon_tip_index];
-    const double target_x = 0.0;
-    const double target_y = 210.0;
-    const double lagged_distance =
-        std::hypot(lagged_tip.world_x - target_x, lagged_tip.world_y - target_y);
-    if (lagged_distance <= 20.0) {
-        std::cerr << "Physics constraint did not preserve visible lag after the driving bone rotated.\n";
+    Skeleton physics_skeleton(skeleton_result.skeleton_data);
+    physics_skeleton.update_physics(1.0 / 60.0);
+    physics_skeleton.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+    physics_skeleton.update_physics(1.0 / 60.0);
+
+    const BoneWorldTransform lagged_root = physics_skeleton.bone_world_transforms()[*ribbon_01_index];
+    const BoneWorldTransform lagged_tip = physics_skeleton.bone_world_transforms()[*ribbon_tip_index];
+    const double position_delta_x = std::abs(lagged_root.world_x - authored_root.world_x);
+    const double position_delta_y = std::abs(lagged_root.world_y - authored_root.world_y);
+    const double rotation_delta = std::abs(
+        normalize_test_rotation_degrees(
+            world_rotation_degrees(lagged_root) - world_rotation_degrees(authored_root)));
+    const double scale_delta =
+        std::abs(world_axis_length(lagged_root) - world_axis_length(authored_root));
+    const double lagged_tip_distance = std::hypot(
+        lagged_tip.world_x - authored_tip.world_x,
+        lagged_tip.world_y - authored_tip.world_y);
+    if (position_delta_x <= 0.1 || position_delta_y <= 0.1 ||
+        rotation_delta <= 0.1 || scale_delta <= 1e-3 ||
+        lagged_tip_distance <= 1.0) {
+        std::cerr << "Physics update did not produce independent position/rotation/scale offsets."
+                  << " deltas=(" << position_delta_x << ", " << position_delta_y << ", "
+                  << rotation_delta << ", " << scale_delta << ")"
+                  << " tipDistance=" << lagged_tip_distance << '\n';
         return false;
     }
 
-    skeleton.update_physics(1.0 / 60.0);
-    const auto first_step_tip = skeleton.bone_world_transforms()[*ribbon_tip_index];
-    const double first_step_motion = std::hypot(
-        first_step_tip.world_x - lagged_tip.world_x,
-        first_step_tip.world_y - lagged_tip.world_y);
-    if (first_step_motion <= 0.1) {
-        std::cerr << "Physics step did not advance the constrained chain numerically.\n";
+    physics_skeleton.update_world_transforms(marrow::runtime::PhysicsMode::Pose);
+    if (!require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_01_index],
+            lagged_root,
+            "physics pose root") ||
+        !require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
+            lagged_tip,
+            "physics pose tip")) {
+        std::cerr << "Physics POSE mode did not preserve the accumulated offsets.\n";
         return false;
     }
 
-    for (int step = 0; step < 180; ++step) {
-        skeleton.update_physics(1.0 / 60.0);
+    physics_skeleton.update_world_transforms(marrow::runtime::PhysicsMode::None);
+    if (!require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_01_index],
+            authored_root,
+            "physics none root") ||
+        !require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
+            authored_tip,
+            "physics none tip")) {
+        std::cerr << "Physics NONE mode did not return to the authored pose.\n";
+        return false;
     }
-    const auto settled_tip = skeleton.bone_world_transforms()[*ribbon_tip_index];
-    const double settled_distance =
-        std::hypot(settled_tip.world_x - target_x, settled_tip.world_y - target_y);
-    if (settled_distance >= 1.0 ||
-        settled_distance >= lagged_distance ||
-        settled_tip.world_y <= lagged_tip.world_y) {
-        std::cerr << "Physics constraint did not converge toward the driven pose after secondary-motion lag."
-                  << " lagged=(" << lagged_tip.world_x << ", " << lagged_tip.world_y << ")"
-                  << " settled=(" << settled_tip.world_x << ", " << settled_tip.world_y << ")"
-                  << " target=(" << target_x << ", " << target_y << ")"
-                  << " distances=(" << lagged_distance << ", " << settled_distance << ")\n";
+
+    physics_skeleton.reset_physics();
+    if (!require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_01_index],
+            authored_root,
+            "physics reset root") ||
+        !require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
+            authored_tip,
+            "physics reset tip")) {
+        std::cerr << "Physics reset did not snapshot the current authored pose.\n";
+        return false;
+    }
+    physics_skeleton.update_world_transforms(marrow::runtime::PhysicsMode::Pose);
+    if (!require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_01_index],
+            authored_root,
+            "physics reset pose root") ||
+        !require_world_transform(
+            physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
+            authored_tip,
+            "physics reset pose tip")) {
+        std::cerr << "Physics reset left non-zero offsets or velocities behind.\n";
+        return false;
+    }
+
+    const auto frame_rate_data = make_test_data([](auto* physics_constraints) {
+        physics_constraints->front().limit = 1000.0;
+        physics_constraints->front().rotate = 0.0;
+        physics_constraints->front().scale_x = 0.0;
+        physics_constraints->front().shear_x = 0.0;
+        physics_constraints->front().strength = 120.0;
+        physics_constraints->front().damping = 20.0;
+        physics_constraints->front().wind = {0.0, 0.0};
+        physics_constraints->front().gravity = {0.0, 0.0};
+    });
+    Skeleton slow_frame_rate(frame_rate_data);
+    Skeleton fast_frame_rate(frame_rate_data);
+    slow_frame_rate.update_physics(1.0 / 60.0);
+    fast_frame_rate.update_physics(1.0 / 60.0);
+    slow_frame_rate.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+    fast_frame_rate.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+    for (int frame = 0; frame < 30; ++frame) {
+        slow_frame_rate.update_physics(1.0 / 30.0);
+    }
+    for (int frame = 0; frame < 120; ++frame) {
+        fast_frame_rate.update_physics(1.0 / 120.0);
+    }
+    const BoneWorldTransform slow_tip = slow_frame_rate.bone_world_transforms()[*ribbon_tip_index];
+    const BoneWorldTransform fast_tip = fast_frame_rate.bone_world_transforms()[*ribbon_tip_index];
+    if (std::abs(slow_tip.world_x - fast_tip.world_x) > 1e-2 ||
+        std::abs(slow_tip.world_y - fast_tip.world_y) > 1e-2 ||
+        std::abs(slow_frame_rate.bone_world_transforms()[*ribbon_01_index].a -
+                 fast_frame_rate.bone_world_transforms()[*ribbon_01_index].a) > 1e-2 ||
+        std::abs(slow_frame_rate.bone_world_transforms()[*ribbon_01_index].c -
+                 fast_frame_rate.bone_world_transforms()[*ribbon_01_index].c) > 1e-2) {
+        std::cerr << "Physics fixed-step accumulation still depends on frame rate."
+                  << " slowTip=(" << slow_tip.world_x << ", " << slow_tip.world_y << ")"
+                  << " fastTip=(" << fast_tip.world_x << ", " << fast_tip.world_y << ")\n";
+        return false;
+    }
+
+    Skeleton clamped_skeleton(make_test_data([](auto* physics_constraints) {
+        physics_constraints->front().step = 1.0;
+        physics_constraints->front().limit = 10.0;
+        physics_constraints->front().rotate = 0.0;
+        physics_constraints->front().scale_x = 0.0;
+        physics_constraints->front().shear_x = 0.0;
+        physics_constraints->front().wind = {0.0, 0.0};
+        physics_constraints->front().gravity = {0.0, 0.0};
+    }));
+    clamped_skeleton.update_physics(1.0 / 60.0);
+    clamped_skeleton.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+    clamped_skeleton.update_physics(0.25);
+    Skeleton clamped_authored(make_test_data([](auto* physics_constraints) {
+        physics_constraints->front().step = 1.0;
+        physics_constraints->front().limit = 10.0;
+        physics_constraints->front().rotate = 0.0;
+        physics_constraints->front().scale_x = 0.0;
+        physics_constraints->front().shear_x = 0.0;
+        physics_constraints->front().wind = {0.0, 0.0};
+        physics_constraints->front().gravity = {0.0, 0.0};
+    }));
+    clamped_authored.bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+    clamped_authored.update_world_transforms(marrow::runtime::PhysicsMode::None);
+    const BoneWorldTransform clamped_root = clamped_skeleton.bone_world_transforms()[*ribbon_01_index];
+    const BoneWorldTransform clamped_authored_root =
+        clamped_authored.bone_world_transforms()[*ribbon_01_index];
+    const double clamp_limit = 10.0 * 0.25;
+    if (std::abs(clamped_root.world_x - clamped_authored_root.world_x) > clamp_limit + 1e-6 ||
+        std::abs(clamped_root.world_y - clamped_authored_root.world_y) > clamp_limit + 1e-6) {
+        std::cerr << "Physics inertia was not clamped by limit * delta during a frame spike."
+                  << " delta=("
+                  << std::abs(clamped_root.world_x - clamped_authored_root.world_x) << ", "
+                  << std::abs(clamped_root.world_y - clamped_authored_root.world_y) << ")"
+                  << " limit=" << clamp_limit << '\n';
         return false;
     }
 
     std::cout << "Loaded runtime physics constraints: "
               << skeleton_result.skeleton_data->physics_constraints().size() << '\n'
-              << "  laggedTip=(" << lagged_tip.world_x << ", " << lagged_tip.world_y << ")"
-              << ", firstStep=(" << first_step_tip.world_x << ", " << first_step_tip.world_y << ")"
-              << ", settled=(" << settled_tip.world_x << ", " << settled_tip.world_y << ")\n"
-              << "  target=(" << target_x << ", " << target_y << ")"
-              << ", distances=(" << lagged_distance << ", " << settled_distance << ")\n";
+              << "  laggedRoot=(" << lagged_root.world_x << ", " << lagged_root.world_y << ")"
+              << ", laggedTip=(" << lagged_tip.world_x << ", " << lagged_tip.world_y << ")\n"
+              << "  authoredTip=(" << authored_tip.world_x << ", " << authored_tip.world_y << ")"
+              << ", slowTip=(" << slow_tip.world_x << ", " << slow_tip.world_y << ")"
+              << ", fastTip=(" << fast_tip.world_x << ", " << fast_tip.world_y << ")\n"
+              << "  deltas=(" << position_delta_x << ", " << position_delta_y << ", "
+              << rotation_delta << ", " << scale_delta << ")"
+              << ", clampLimit=" << clamp_limit << '\n';
     return true;
 }
 
@@ -2857,6 +4783,57 @@ bool validate_runtime_atlas_model(
     return true;
 }
 
+bool validate_runtime_atlas_version_rejection() {
+    constexpr std::string_view kFutureVersionAtlas = R"({
+  "marrow": "1.0",
+  "version": 99,
+  "atlas": {
+    "name": "future_version_atlas",
+    "image": "future.png",
+    "width": 64,
+    "height": 64,
+    "filter_min": "linear",
+    "filter_mag": "linear",
+    "wrap_x": "clamp_to_edge",
+    "wrap_y": "clamp_to_edge"
+  },
+  "regions": [
+    {
+      "name": "body",
+      "x": 0,
+      "y": 0,
+      "width": 32,
+      "height": 32
+    }
+  ]
+})";
+
+    const auto document_result =
+        marrow::runtime::json::parse_document(kFutureVersionAtlas, "<future-matl-version>");
+    if (!document_result) {
+        return print_error(*document_result.error);
+    }
+
+    const auto atlas_result = AtlasLoader::load(*document_result.document);
+    if (atlas_result) {
+        std::cerr << "Future .matl format versions should be rejected while loading.\n";
+        return false;
+    }
+
+    const std::string& message = atlas_result.error->message;
+    if (message.find("$.version: unsupported .matl format version 99") == std::string::npos ||
+        message.find("supported version is 1") == std::string::npos ||
+        message.find("migrate the asset to version 1") == std::string::npos) {
+        std::cerr << "Future .matl version rejection message was not actionable: "
+                  << atlas_result.error->format() << '\n';
+        return false;
+    }
+
+    std::cout << "Rejected unsupported .matl version: "
+              << atlas_result.error->message << '\n';
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2865,6 +4842,9 @@ int main(int argc, char** argv) {
     const std::filesystem::path atlas_path =
         argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path("assets/fixtures/player_idle.matl");
 
+    g_quantized_runtime_validation =
+        skeleton_path.extension() == marrow::runtime::skeleton_binary_extension();
+
     const std::optional<Document> skeleton_document = load_document_or_print(skeleton_path);
     const std::optional<Document> atlas_document = load_document_or_print(atlas_path);
     if (!skeleton_document.has_value() || !atlas_document.has_value()) {
@@ -2872,7 +4852,8 @@ int main(int argc, char** argv) {
     }
 
     const bool skeleton_ok = validate_fixture_skeleton(*skeleton_document);
-    const auto skeleton_result = marrow::runtime::load_skeleton_data(*skeleton_document);
+    const bool atlas_fixture_ok = validate_fixture_atlas(*atlas_document);
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(skeleton_path);
     if (!skeleton_result) {
         print_error(*skeleton_result.error);
         return 1;
@@ -2883,6 +4864,9 @@ int main(int argc, char** argv) {
     const bool runtime_inherit_skin_constraint_ok =
         validate_runtime_inherit_timeline_and_skin_constraints(
             "assets/fixtures/skin_inherit_constraints.mskl");
+    const bool runtime_inherit_modes_ok =
+        validate_runtime_inherit_modes_with_nonuniform_parent_scale(
+            "assets/fixtures/inherit_modes_nonuniform_scale.mskl");
     const bool runtime_attachment_extensions_ok =
         validate_runtime_attachment_extensions(skeleton_result.skeleton_data);
     const bool runtime_clipping_and_sequence_ok =
@@ -2893,16 +4877,26 @@ int main(int argc, char** argv) {
         validate_runtime_weighted_mesh_model(skeleton_result.skeleton_data);
     const bool runtime_mesh_deform_ok =
         validate_runtime_mesh_deform_timelines(skeleton_result.skeleton_data);
+    const bool runtime_linked_mesh_deform_inheritance_ok =
+        validate_linked_mesh_deform_inheritance(
+            "assets/fixtures/linked_mesh_deform_inheritance.mskl");
     const bool runtime_slot_presentation_ok =
         validate_runtime_slot_presentation_model(skeleton_result.skeleton_data);
     const bool runtime_slot_blend_modes_ok = validate_runtime_slot_blend_modes();
+    const bool runtime_cycle_rejection_ok = validate_runtime_cyclic_bone_load_rejection();
+    const bool runtime_skeleton_version_rejection_ok =
+        validate_runtime_skeleton_version_rejection();
     const bool runtime_animation_ok = validate_runtime_animation_curves(skeleton_result.skeleton_data);
     const bool runtime_event_ok =
         validate_runtime_animation_events(skeleton_result.skeleton_data);
     const bool runtime_slot_timelines_ok =
         validate_runtime_slot_timelines(skeleton_result.skeleton_data);
+    const bool runtime_error_reporting_ok =
+        validate_runtime_error_reporting(skeleton_result.skeleton_data);
     const bool runtime_animation_state_ok =
         validate_runtime_animation_state(skeleton_result.skeleton_data);
+    const bool runtime_rotation_mixing_ok =
+        validate_runtime_rotation_mixing_cross_detection();
     const bool runtime_reverse_and_root_motion_ok =
         validate_runtime_reverse_playback_and_root_motion(
             skeleton_result.skeleton_data);
@@ -2915,17 +4909,23 @@ int main(int argc, char** argv) {
         validate_runtime_physics_constraints("assets/fixtures/physics_constraints.mskl");
     const bool runtime_atlas_ok =
         validate_runtime_atlas_model(*atlas_document, skeleton_result.skeleton_data);
-    if (!skeleton_ok || !runtime_skeleton_ok || !runtime_skin_ok ||
-        !runtime_inherit_skin_constraint_ok ||
+    const bool runtime_atlas_version_rejection_ok = validate_runtime_atlas_version_rejection();
+    if (!skeleton_ok || !atlas_fixture_ok || !runtime_skeleton_ok || !runtime_skin_ok ||
+        !runtime_inherit_skin_constraint_ok || !runtime_inherit_modes_ok ||
         !runtime_attachment_extensions_ok || !runtime_clipping_and_sequence_ok ||
         !runtime_skeleton_bounds_ok ||
         !runtime_weighted_mesh_ok ||
         !runtime_mesh_deform_ok ||
-        !runtime_slot_presentation_ok || !runtime_slot_blend_modes_ok || !runtime_animation_ok ||
-        !runtime_event_ok || !runtime_slot_timelines_ok || !runtime_animation_state_ok ||
+        !runtime_linked_mesh_deform_inheritance_ok ||
+        !runtime_slot_presentation_ok || !runtime_slot_blend_modes_ok ||
+        !runtime_cycle_rejection_ok || !runtime_skeleton_version_rejection_ok ||
+        !runtime_animation_ok ||
+        !runtime_event_ok || !runtime_slot_timelines_ok || !runtime_error_reporting_ok ||
+        !runtime_animation_state_ok ||
+        !runtime_rotation_mixing_ok ||
         !runtime_reverse_and_root_motion_ok ||
         !runtime_ik_ok || !runtime_path_transform_ok || !runtime_physics_ok ||
-        !runtime_atlas_ok) {
+        !runtime_atlas_ok || !runtime_atlas_version_rejection_ok) {
         return 1;
     }
 

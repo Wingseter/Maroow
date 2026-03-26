@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "marrow/runtime/animation_compare.hpp"
 #include "marrow/runtime/skeleton.hpp"
 
 namespace {
@@ -185,6 +186,20 @@ std::string summarize_runtime(
     return stream.str();
 }
 
+void print_binary_inspection(
+    const std::filesystem::path& path,
+    const marrow::runtime::SkeletonBinaryInspection& inspection) {
+    std::cout << "Binary animation payload: " << path.string()
+              << " version=" << inspection.binary_version
+              << " optimized=" << (inspection.has_optimized_animation_section ? "yes" : "no")
+              << " animations=" << inspection.animation_count
+              << " rotate_channels=" << inspection.rotate_channel_count
+              << " translate_channels=" << inspection.translate_channel_count
+              << " keys=" << inspection.optimized_keyframe_count
+              << " sorted=" << (inspection.keyframes_sorted_by_time_and_bone ? "yes" : "no")
+              << '\n';
+}
+
 bool apply_requested_skins(
     marrow::runtime::Skeleton& skeleton,
     const std::vector<std::string>& requested_skins) {
@@ -315,7 +330,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    const auto result = marrow::runtime::load_skeleton_data(*document_result.document);
+    const auto result = marrow::runtime::load_skeleton_data(parse_result.options.skeleton_path);
     if (!result) {
         std::cerr << result.error->format();
         return 1;
@@ -333,6 +348,18 @@ int main(int argc, char** argv) {
 
     std::cout << "File: " << parse_result.options.skeleton_path.string() << '\n'
               << runtime_summary << '\n';
+
+    if (parse_result.options.skeleton_path.extension() ==
+        marrow::runtime::skeleton_binary_extension()) {
+        marrow::runtime::SkeletonBinaryInspection inspection;
+        if (const auto error = marrow::runtime::inspect_skeleton_binary(
+                parse_result.options.skeleton_path,
+                &inspection)) {
+            std::cerr << error->format();
+            return 1;
+        }
+        print_binary_inspection(parse_result.options.skeleton_path, inspection);
+    }
 
     if (parse_result.options.export_binary_path.has_value()) {
         std::cout << "Wrote binary asset: "
@@ -356,7 +383,7 @@ int main(int argc, char** argv) {
         }
 
         const auto compare_skeleton_result =
-            marrow::runtime::load_skeleton_data(*compare_document_result.document);
+            marrow::runtime::load_skeleton_data(*parse_result.options.compare_path);
         if (!compare_skeleton_result) {
             std::cerr << compare_skeleton_result.error->format();
             return 1;
@@ -378,6 +405,57 @@ int main(int argc, char** argv) {
                       << parse_result.options.skeleton_path.string() << " and "
                       << parse_result.options.compare_path->string() << ".\n";
             return 1;
+        }
+
+        const marrow::runtime::AnimationRoundtripComparison comparison =
+            marrow::runtime::compare_animation_roundtrip(
+                *result.skeleton_data,
+                *compare_skeleton_result.skeleton_data);
+        if (!comparison) {
+            std::cerr << "Animation comparison failed: " << *comparison.error << '\n';
+            return 1;
+        }
+        if (comparison.metrics.max_rotation_error_degrees > 0.1 ||
+            comparison.metrics.max_translation_error_pixels > 0.5) {
+            std::cerr << "Quantized animation roundtrip exceeded the allowed error budget.\n";
+            return 1;
+        }
+
+        std::cout << "Animation roundtrip: rotation_error="
+                  << comparison.metrics.max_rotation_error_degrees
+                  << "deg position_error="
+                  << comparison.metrics.max_translation_error_pixels
+                  << "px rotate_keys="
+                  << comparison.metrics.original_rotation_keyframes << "->"
+                  << comparison.metrics.roundtrip_rotation_keyframes
+                  << " translate_keys="
+                  << comparison.metrics.original_translation_keyframes << "->"
+                  << comparison.metrics.roundtrip_translation_keyframes << '\n';
+
+        std::error_code size_error;
+        const auto source_size = std::filesystem::file_size(
+            parse_result.options.skeleton_path,
+            size_error);
+        const auto compare_size = std::filesystem::file_size(
+            *parse_result.options.compare_path,
+            size_error);
+        if (!size_error) {
+            std::cout << "Size comparison: " << parse_result.options.skeleton_path.string()
+                      << "=" << source_size << " bytes "
+                      << parse_result.options.compare_path->string() << "=" << compare_size
+                      << " bytes\n";
+        }
+
+        if (parse_result.options.compare_path->extension() ==
+            marrow::runtime::skeleton_binary_extension()) {
+            marrow::runtime::SkeletonBinaryInspection inspection;
+            if (const auto error = marrow::runtime::inspect_skeleton_binary(
+                    *parse_result.options.compare_path,
+                    &inspection)) {
+                std::cerr << error->format();
+                return 1;
+            }
+            print_binary_inspection(*parse_result.options.compare_path, inspection);
         }
 
         std::cout << "Comparison: " << parse_result.options.skeleton_path.string() << " matches "

@@ -1,8 +1,15 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <variant>
 
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/atlas.hpp"
@@ -138,12 +145,35 @@ bool validate_skinned_vertex(
         require_near(vertex.uv.y, expected_v, std::string(label) + " v");
 }
 
+bool require_skinned_vertices_differ(
+    const std::vector<marrow::renderer::SkinnedMeshVertex>& lhs,
+    const std::vector<marrow::renderer::SkinnedMeshVertex>& rhs,
+    std::string_view label) {
+    if (lhs.size() != rhs.size()) {
+        std::cerr << label << " expected matching vertex counts but compared " << lhs.size()
+                  << " against " << rhs.size() << ".\n";
+        return false;
+    }
+
+    constexpr double kTolerance = 1e-6;
+    for (std::size_t index = 0; index < lhs.size(); ++index) {
+        if (std::abs(lhs[index].position.x - rhs[index].position.x) > kTolerance ||
+            std::abs(lhs[index].position.y - rhs[index].position.y) > kTolerance) {
+            return true;
+        }
+    }
+
+    std::cerr << label << " expected the animated mesh pose to move at least one vertex.\n";
+    return false;
+}
+
 const marrow::renderer::RegionAttachmentDrawCommand* find_region_attachment(
     const marrow::renderer::PreparedScene& scene,
     std::string_view slot_name) {
-    for (const auto& attachment : scene.region_attachments) {
-        if (attachment.slot_name == slot_name) {
-            return &attachment;
+    for (const auto& command : scene.draw_commands) {
+        const auto* attachment = marrow::renderer::region_attachment_command(command);
+        if (attachment != nullptr && attachment->slot_name == slot_name) {
+            return attachment;
         }
     }
 
@@ -153,9 +183,10 @@ const marrow::renderer::RegionAttachmentDrawCommand* find_region_attachment(
 const marrow::renderer::DynamicMeshDrawCommand* find_dynamic_mesh_attachment(
     const marrow::renderer::PreparedScene& scene,
     std::string_view slot_name) {
-    for (const auto& attachment : scene.dynamic_mesh_attachments) {
-        if (attachment.slot_name == slot_name) {
-            return &attachment;
+    for (const auto& command : scene.draw_commands) {
+        const auto* attachment = marrow::renderer::dynamic_mesh_attachment_command(command);
+        if (attachment != nullptr && attachment->slot_name == slot_name) {
+            return attachment;
         }
     }
 
@@ -226,25 +257,578 @@ bool require_mask_matches_clip(
     return require_masked_region_bounds(attachment, min_x, min_y, max_x, max_y, label);
 }
 
+struct DrawCommandCounts {
+    std::size_t region_attachments{0};
+    std::size_t dynamic_mesh_attachments{0};
+};
+
+DrawCommandCounts count_draw_commands(const marrow::renderer::PreparedScene& scene) {
+    DrawCommandCounts counts;
+    for (const auto& command : scene.draw_commands) {
+        if (marrow::renderer::region_attachment_command(command) != nullptr) {
+            ++counts.region_attachments;
+            continue;
+        }
+        if (marrow::renderer::dynamic_mesh_attachment_command(command) != nullptr) {
+            ++counts.dynamic_mesh_attachments;
+        }
+    }
+    return counts;
+}
+
+bool require_event_sequence(
+    const marrow::renderer::PreparedScene& scene,
+    const std::vector<marrow::renderer::PreparedSceneEventKind>& expected_kinds,
+    std::string_view label) {
+    if (scene.ordered_events.size() != expected_kinds.size()) {
+        std::cerr << label << " expected " << expected_kinds.size()
+                  << " ordered events but got " << scene.ordered_events.size() << ".\n";
+        return false;
+    }
+
+    for (std::size_t index = 0; index < expected_kinds.size(); ++index) {
+        if (scene.ordered_events[index].kind != expected_kinds[index]) {
+            std::cerr << label << " event[" << index << "] did not match the expected type.\n";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void translate_prepared_scene(
+    marrow::renderer::PreparedScene* scene,
+    double offset_x,
+    double offset_y) {
+    for (auto& bone : scene->bone_palette) {
+        bone.world_x += offset_x;
+        bone.world_y += offset_y;
+    }
+    for (auto& clip_attachment : scene->clip_attachments) {
+        for (auto& point : clip_attachment.polygon) {
+            point.x += offset_x;
+            point.y += offset_y;
+        }
+    }
+    for (auto& command : scene->draw_commands) {
+        if (auto* attachment = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(&command)) {
+            for (auto& vertex : attachment->vertices) {
+                vertex.position.x += offset_x;
+                vertex.position.y += offset_y;
+            }
+            for (auto& vertex : attachment->masked_vertices) {
+                vertex.position.x += offset_x;
+                vertex.position.y += offset_y;
+            }
+            continue;
+        }
+
+        auto* attachment = std::get_if<marrow::renderer::DynamicMeshDrawCommand>(&command);
+        for (auto& vertex : attachment->masked_vertices) {
+            vertex.position.x += offset_x;
+            vertex.position.y += offset_y;
+        }
+    }
+}
+
+bool append_scene_instance(
+    const marrow::renderer::PreparedScene& source,
+    marrow::renderer::PreparedScene* destination) {
+    if (destination->atlas_name.empty()) {
+        destination->atlas_name = source.atlas_name;
+        destination->atlas_image = source.atlas_image;
+        destination->atlas_filter_min = source.atlas_filter_min;
+        destination->atlas_filter_mag = source.atlas_filter_mag;
+        destination->atlas_wrap_x = source.atlas_wrap_x;
+        destination->atlas_wrap_y = source.atlas_wrap_y;
+        destination->premultiplied_alpha = source.premultiplied_alpha;
+        destination->skeleton_name = "batch_demo";
+    } else if (destination->atlas_image != source.atlas_image) {
+        std::cerr << "Cross-skeleton batching demo requires a shared atlas texture.\n";
+        return false;
+    } else if (destination->premultiplied_alpha != source.premultiplied_alpha) {
+        std::cerr << "Cross-skeleton batching demo requires a shared PMA mode.\n";
+        return false;
+    }
+
+    const std::size_t bone_offset = destination->bone_palette.size();
+    const std::size_t clip_offset = destination->clip_attachments.size();
+    const std::size_t draw_offset = destination->draw_commands.size();
+    const std::size_t event_offset = destination->ordered_events.size();
+    destination->bone_palette.insert(
+        destination->bone_palette.end(),
+        source.bone_palette.begin(),
+        source.bone_palette.end());
+
+    for (const auto& source_clip : source.clip_attachments) {
+        marrow::renderer::ClipAttachmentDrawCommand adjusted = source_clip;
+        adjusted.draw_order_index += event_offset;
+        destination->clip_attachments.push_back(std::move(adjusted));
+    }
+
+    for (const auto& source_command : source.draw_commands) {
+        if (const auto* region = marrow::renderer::region_attachment_command(source_command)) {
+            marrow::renderer::RegionAttachmentDrawCommand adjusted = *region;
+            adjusted.bone_index += bone_offset;
+            adjusted.draw_order_index += event_offset;
+            destination->draw_commands.push_back(std::move(adjusted));
+            continue;
+        }
+
+        const auto* mesh = marrow::renderer::dynamic_mesh_attachment_command(source_command);
+        marrow::renderer::DynamicMeshDrawCommand adjusted = *mesh;
+        adjusted.draw_order_index += event_offset;
+        for (auto& payload : adjusted.vertex_payloads) {
+            for (std::size_t influence_index = 0; influence_index < payload.influence_count;
+                 ++influence_index) {
+                payload.bone_indices[influence_index] += bone_offset;
+            }
+        }
+        destination->draw_commands.push_back(std::move(adjusted));
+    }
+
+    for (const auto& event : source.ordered_events) {
+        marrow::renderer::PreparedSceneEventRef adjusted = event;
+        if (event.kind == marrow::renderer::PreparedSceneEventKind::Draw) {
+            adjusted.index += draw_offset;
+        } else {
+            adjusted.index += clip_offset;
+        }
+        destination->ordered_events.push_back(adjusted);
+    }
+
+    return true;
+}
+
+bool require_batch_summary(
+    const marrow::renderer::PreparedSceneBatchSummary& summary,
+    std::size_t expected_draw_commands,
+    std::size_t expected_draw_calls,
+    std::size_t expected_merged_draw_calls,
+    std::string_view label) {
+    if (!summary) {
+        std::cerr << label << " failed to summarize batches: "
+                  << summary.error_message.value_or("unknown error") << ".\n";
+        return false;
+    }
+
+    if (summary.draw_command_count != expected_draw_commands ||
+        summary.draw_call_count != expected_draw_calls ||
+        summary.merged_draw_calls != expected_merged_draw_calls) {
+        std::cerr << label << " expected drawCommands=" << expected_draw_commands
+                  << ", drawCalls=" << expected_draw_calls
+                  << ", merged=" << expected_merged_draw_calls
+                  << " but got drawCommands=" << summary.draw_command_count
+                  << ", drawCalls=" << summary.draw_call_count
+                  << ", merged=" << summary.merged_draw_calls << ".\n";
+        return false;
+    }
+
+    return true;
+}
+
+std::filesystem::path resolve_atlas_image_path(
+    const std::filesystem::path& atlas_path,
+    const marrow::runtime::AtlasData& atlas) {
+    const std::filesystem::path declared_image_path(atlas.info().image);
+    return declared_image_path.is_absolute()
+        ? declared_image_path.lexically_normal()
+        : (atlas_path.parent_path() / declared_image_path).lexically_normal();
+}
+
+std::string format_pixel(const std::array<std::uint8_t, 4>& pixel) {
+    return "(" + std::to_string(pixel[0]) + ", " + std::to_string(pixel[1]) + ", " +
+        std::to_string(pixel[2]) + ", " + std::to_string(pixel[3]) + ")";
+}
+
+bool require_pixel_equals(
+    const std::array<std::uint8_t, 4>& actual,
+    const std::array<std::uint8_t, 4>& expected,
+    std::string_view label) {
+    if (actual == expected) {
+        return true;
+    }
+
+    std::cerr << label << " expected " << format_pixel(expected) << " but got "
+              << format_pixel(actual) << ".\n";
+    return false;
+}
+
+bool require_pixels_differ(
+    const std::array<std::uint8_t, 4>& actual,
+    const std::array<std::uint8_t, 4>& unexpected,
+    std::string_view label) {
+    if (actual != unexpected) {
+        return true;
+    }
+
+    std::cerr << label << " expected different framebuffer results but both were "
+              << format_pixel(actual) << ".\n";
+    return false;
+}
+
+bool require_rgb_equals(
+    const std::array<std::uint8_t, 4>& actual,
+    const std::array<std::uint8_t, 4>& expected,
+    std::string_view label) {
+    if (actual[0] == expected[0] && actual[1] == expected[1] && actual[2] == expected[2]) {
+        return true;
+    }
+
+    std::cerr << label << " expected RGB "
+              << "(" << static_cast<int>(expected[0]) << ", "
+              << static_cast<int>(expected[1]) << ", "
+              << static_cast<int>(expected[2]) << ")"
+              << " but got "
+              << "(" << static_cast<int>(actual[0]) << ", "
+              << static_cast<int>(actual[1]) << ", "
+              << static_cast<int>(actual[2]) << ").\n";
+    return false;
+}
+
+double clamp_unit(double value) {
+    return std::clamp(value, 0.0, 1.0);
+}
+
+std::array<double, 4> normalized_pixel(const std::array<std::uint8_t, 4>& pixel) {
+    return {
+        pixel[0] / 255.0,
+        pixel[1] / 255.0,
+        pixel[2] / 255.0,
+        pixel[3] / 255.0,
+    };
+}
+
+std::array<std::uint8_t, 4> sample_texture(
+    const marrow::renderer::TextureImage& image,
+    double u,
+    double v) {
+    if (image.width <= 0 || image.height <= 0 || image.rgba8.empty()) {
+        return {0, 0, 0, 0};
+    }
+
+    const std::size_t x = static_cast<std::size_t>(std::lround(
+        clamp_unit(u) * static_cast<double>(image.width - 1)));
+    const std::size_t y = static_cast<std::size_t>(std::lround(
+        clamp_unit(v) * static_cast<double>(image.height - 1)));
+    const std::size_t offset =
+        ((y * static_cast<std::size_t>(image.width)) + x) * 4U;
+    return {
+        image.rgba8[offset + 0],
+        image.rgba8[offset + 1],
+        image.rgba8[offset + 2],
+        image.rgba8[offset + 3],
+    };
+}
+
+std::array<std::uint8_t, 4> sample_region_attachment_center(
+    const marrow::renderer::TextureImage& image,
+    const marrow::renderer::RegionAttachmentDrawCommand& attachment) {
+    const double center_u = (attachment.vertices[0].uv.x + attachment.vertices[2].uv.x) * 0.5;
+    const double center_v = (attachment.vertices[0].uv.y + attachment.vertices[2].uv.y) * 0.5;
+    return sample_texture(image, center_u, center_v);
+}
+
+std::array<std::uint8_t, 4> sample_dynamic_mesh_center(
+    const marrow::renderer::TextureImage& image,
+    const marrow::renderer::DynamicMeshDrawCommand& attachment) {
+    if (attachment.vertex_payloads.empty()) {
+        return {0, 0, 0, 0};
+    }
+
+    double sum_u = 0.0;
+    double sum_v = 0.0;
+    for (const auto& vertex : attachment.vertex_payloads) {
+        sum_u += vertex.uv.x;
+        sum_v += vertex.uv.y;
+    }
+    const double divisor = static_cast<double>(attachment.vertex_payloads.size());
+    return sample_texture(image, sum_u / divisor, sum_v / divisor);
+}
+
+std::array<std::uint8_t, 4> premultiply_texel(const std::array<std::uint8_t, 4>& texel) {
+    const double alpha = texel[3] / 255.0;
+    return {
+        static_cast<std::uint8_t>(std::lround((texel[0] / 255.0) * alpha * 255.0)),
+        static_cast<std::uint8_t>(std::lround((texel[1] / 255.0) * alpha * 255.0)),
+        static_cast<std::uint8_t>(std::lround((texel[2] / 255.0) * alpha * 255.0)),
+        texel[3],
+    };
+}
+
+std::array<double, 4> shader_output(
+    const std::array<std::uint8_t, 4>& texel,
+    const marrow::runtime::SlotColor& light_color,
+    std::optional<marrow::runtime::SlotColor> dark_color,
+    bool premultiplied_alpha) {
+    const std::array<double, 4> normalized_texel = normalized_pixel(texel);
+    const double alpha = normalized_texel[3] * light_color.a;
+    std::array<double, 4> output{
+        normalized_texel[0] * light_color.r,
+        normalized_texel[1] * light_color.g,
+        normalized_texel[2] * light_color.b,
+        alpha,
+    };
+    if (!dark_color.has_value()) {
+        if (premultiplied_alpha) {
+            output[0] *= light_color.a;
+            output[1] *= light_color.a;
+            output[2] *= light_color.a;
+        }
+        return output;
+    }
+
+    const double u_pma = premultiplied_alpha ? 0.0 : 1.0;
+    output[0] =
+        ((u_pma + ((1.0 - u_pma) * normalized_texel[3])) - normalized_texel[0]) *
+            dark_color->r +
+        (normalized_texel[0] * light_color.r);
+    output[1] =
+        ((u_pma + ((1.0 - u_pma) * normalized_texel[3])) - normalized_texel[1]) *
+            dark_color->g +
+        (normalized_texel[1] * light_color.g);
+    output[2] =
+        ((u_pma + ((1.0 - u_pma) * normalized_texel[3])) - normalized_texel[2]) *
+            dark_color->b +
+        (normalized_texel[2] * light_color.b);
+    return output;
+}
+
+double blend_factor_value(
+    marrow::renderer::BlendFactor factor,
+    const std::array<double, 4>& source,
+    const std::array<double, 4>& destination,
+    std::size_t component_index) {
+    switch (factor) {
+    case marrow::renderer::BlendFactor::Zero:
+        return 0.0;
+    case marrow::renderer::BlendFactor::One:
+        return 1.0;
+    case marrow::renderer::BlendFactor::SrcAlpha:
+        return source[3];
+    case marrow::renderer::BlendFactor::OneMinusSrcAlpha:
+        return 1.0 - source[3];
+    case marrow::renderer::BlendFactor::DstColor:
+        return destination[component_index];
+    case marrow::renderer::BlendFactor::OneMinusSrcColor:
+        return 1.0 - source[component_index];
+    }
+
+    return 0.0;
+}
+
+std::array<std::uint8_t, 4> simulated_framebuffer_pixel(
+    const std::array<std::uint8_t, 4>& texel,
+    marrow::runtime::BlendMode blend_mode,
+    std::optional<marrow::runtime::SlotColor> dark_color,
+    bool premultiplied_alpha) {
+    constexpr marrow::runtime::SlotColor kLightColor{0.6, 0.4, 0.2, 1.0};
+    constexpr std::array<double, 4> kClearColor{{0.08, 0.09, 0.12, 1.0}};
+
+    const std::array<double, 4> source =
+        shader_output(texel, kLightColor, dark_color, premultiplied_alpha);
+    const marrow::renderer::BlendState blend_state =
+        marrow::renderer::blend_state_for(blend_mode, premultiplied_alpha);
+    std::array<double, 4> blended{};
+    for (std::size_t index = 0; index < blended.size(); ++index) {
+        blended[index] =
+            (source[index] * blend_factor_value(blend_state.src_factor, source, kClearColor, index)) +
+            (kClearColor[index] *
+             blend_factor_value(blend_state.dst_factor, source, kClearColor, index));
+    }
+
+    std::array<std::uint8_t, 4> pixel{};
+    for (std::size_t index = 0; index < pixel.size(); ++index) {
+        pixel[index] = static_cast<std::uint8_t>(std::lround(clamp_unit(blended[index]) * 255.0));
+    }
+    return pixel;
+}
+
+bool validate_framebuffer_blend_modes(const std::array<std::uint8_t, 4>& texel) {
+    const marrow::runtime::SlotColor dark_color{0.1, 0.3, 0.5, 1.0};
+    const auto pma_texel = premultiply_texel(texel);
+    const auto normal_pixel =
+        simulated_framebuffer_pixel(
+            texel,
+            marrow::runtime::BlendMode::Normal,
+            std::nullopt,
+            false);
+    const auto additive_pixel =
+        simulated_framebuffer_pixel(
+            texel,
+            marrow::runtime::BlendMode::Additive,
+            std::nullopt,
+            false);
+    const auto two_color_normal_pixel =
+        simulated_framebuffer_pixel(
+            texel,
+            marrow::runtime::BlendMode::Normal,
+            dark_color,
+            false);
+    const auto screen_pixel =
+        simulated_framebuffer_pixel(
+            texel,
+            marrow::runtime::BlendMode::Screen,
+            dark_color,
+            false);
+    const auto pma_two_color_normal_pixel =
+        simulated_framebuffer_pixel(
+            pma_texel,
+            marrow::runtime::BlendMode::Normal,
+            dark_color,
+            true);
+    const marrow::renderer::BlendState straight_normal_blend =
+        marrow::renderer::blend_state_for(marrow::runtime::BlendMode::Normal, false);
+    const marrow::renderer::BlendState pma_normal_blend =
+        marrow::renderer::blend_state_for(marrow::runtime::BlendMode::Normal, true);
+
+    if (!require_pixels_differ(
+            two_color_normal_pixel,
+            normal_pixel,
+            "two-color tint shader path") ||
+        !require_pixels_differ(
+            additive_pixel,
+            normal_pixel,
+            "additive blend mode smoke") ||
+        !require_pixels_differ(
+            screen_pixel,
+            two_color_normal_pixel,
+            "screen blend mode smoke") ||
+        !require_rgb_equals(
+            pma_two_color_normal_pixel,
+            two_color_normal_pixel,
+            "PMA vs straight-alpha two-color tint") ||
+        straight_normal_blend.src_factor != marrow::renderer::BlendFactor::SrcAlpha ||
+        straight_normal_blend.dst_factor != marrow::renderer::BlendFactor::OneMinusSrcAlpha ||
+        pma_normal_blend.src_factor != marrow::renderer::BlendFactor::One ||
+        pma_normal_blend.dst_factor != marrow::renderer::BlendFactor::OneMinusSrcAlpha) {
+        if (straight_normal_blend.src_factor != marrow::renderer::BlendFactor::SrcAlpha ||
+            straight_normal_blend.dst_factor != marrow::renderer::BlendFactor::OneMinusSrcAlpha ||
+            pma_normal_blend.src_factor != marrow::renderer::BlendFactor::One ||
+            pma_normal_blend.dst_factor != marrow::renderer::BlendFactor::OneMinusSrcAlpha) {
+            std::cerr << "Renderer PMA blend-state selection did not match the expected GL factors.\n";
+        }
+        return false;
+    }
+
+    std::cout << "Framebuffer blend/two-color smoke passed: normal="
+              << format_pixel(normal_pixel)
+              << ", additive=" << format_pixel(additive_pixel)
+              << ", normal+dark=" << format_pixel(two_color_normal_pixel)
+              << ", screen+dark=" << format_pixel(screen_pixel)
+              << ", pmaNormal+dark=" << format_pixel(pma_two_color_normal_pixel) << ".\n";
+    return true;
+}
+
+constexpr std::array<std::uint8_t, 4> kBodyAtlasTexel{{224, 160, 96, 180}};
+constexpr std::array<std::uint8_t, 4> kArmAtlasTexel{{96, 192, 240, 255}};
+constexpr std::array<std::uint8_t, 4> kWarriorBodyAtlasTexel{{112, 208, 120, 196}};
+constexpr std::array<std::uint8_t, 4> kSpark0AtlasTexel{{255, 224, 64, 200}};
+constexpr std::array<std::uint8_t, 4> kSpark3AtlasTexel{{255, 96, 160, 96}};
+constexpr std::array<std::uint8_t, 4> kWhiteTexel{{255, 255, 255, 255}};
+
+struct Options {
+    std::filesystem::path skeleton_path{"assets/fixtures/player_idle.mskl"};
+    std::filesystem::path atlas_path{"assets/fixtures/player_idle.matl"};
+    std::optional<int> auto_close_frames;
+    bool skip_render{false};
+};
+
+std::optional<Options> parse_options(int argc, char** argv) {
+    Options options;
+    std::size_t positional_index = 0;
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "--skip-render") {
+            options.skip_render = true;
+            continue;
+        }
+        if (argument == "--auto-close") {
+            if (index + 1 >= argc) {
+                std::cerr << "--auto-close requires a frame count.\n";
+                return std::nullopt;
+            }
+
+            try {
+                const int frame_count = std::stoi(argv[++index]);
+                if (frame_count <= 0) {
+                    std::cerr << "--auto-close frame count must be positive.\n";
+                    return std::nullopt;
+                }
+                options.auto_close_frames = frame_count;
+            } catch (const std::exception&) {
+                std::cerr << "--auto-close requires a valid integer frame count.\n";
+                return std::nullopt;
+            }
+            continue;
+        }
+
+        if (positional_index == 0) {
+            options.skeleton_path = argument;
+        } else if (positional_index == 1) {
+            options.atlas_path = argument;
+        } else {
+            std::cerr << "Unexpected argument: " << argument << '\n';
+            return std::nullopt;
+        }
+        ++positional_index;
+    }
+
+    return options;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    const std::filesystem::path skeleton_path =
-        argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("assets/fixtures/player_idle.mskl");
-    const std::filesystem::path atlas_path =
-        argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path("assets/fixtures/player_idle.matl");
+    const std::optional<Options> options = parse_options(argc, argv);
+    if (!options.has_value()) {
+        return 1;
+    }
 
-    const auto skeleton_result = marrow::runtime::load_skeleton_data(skeleton_path);
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(options->skeleton_path);
     if (!skeleton_result) {
         std::cerr << skeleton_result.error->format() << '\n';
         return 1;
     }
 
-    const auto atlas_result = marrow::runtime::AtlasLoader::load(atlas_path);
+    const auto atlas_result = marrow::runtime::AtlasLoader::load(options->atlas_path);
     if (!atlas_result) {
         std::cerr << atlas_result.error->format() << '\n';
         return 1;
     }
+    if (atlas_result.atlas_data->info().premultiplied_alpha) {
+        std::cerr << "The checked-in fixture atlas should stay in straight-alpha mode for MAR-062 coverage.\n";
+        return 1;
+    }
+
+    const std::filesystem::path atlas_image_path =
+        resolve_atlas_image_path(options->atlas_path, *atlas_result.atlas_data);
+    const marrow::renderer::TextureImageLoadResult atlas_texture =
+        marrow::renderer::load_png_texture_or_white(atlas_image_path);
+    if (!atlas_texture.loaded_from_file) {
+        std::cerr << atlas_texture.message << '\n';
+        return 1;
+    }
+    if (atlas_texture.image.width != 256 || atlas_texture.image.height != 256) {
+        std::cerr << "Atlas texture dimensions did not match the fixture metadata.\n";
+        return 1;
+    }
+    std::cout << atlas_texture.message << '\n';
+
+    const auto missing_texture = marrow::renderer::load_png_texture_or_white(
+        atlas_image_path.parent_path() / "missing_fixture_texture.png");
+    if (missing_texture.loaded_from_file ||
+        missing_texture.image.width != 1 ||
+        missing_texture.image.height != 1 ||
+        !require_pixel_equals(
+            sample_texture(missing_texture.image, 0.5, 0.5),
+            kWhiteTexel,
+            "missing atlas fallback texel")) {
+        std::cerr << "Missing atlas texture did not fall back to a white texel.\n";
+        return 1;
+    }
+    std::cout << "Missing atlas texture fallback validation passed.\n";
 
     const auto body_slot_index = skeleton_result.skeleton_data->find_slot_index("body");
     const auto spine_index = skeleton_result.skeleton_data->find_bone_index("spine");
@@ -268,13 +852,26 @@ int main(int argc, char** argv) {
     }
 
     const marrow::renderer::PreparedScene& scene = *scene_result.scene;
+    const DrawCommandCounts setup_counts = count_draw_commands(scene);
     if (scene.clip_attachments.size() != 1 ||
-        scene.region_attachments.size() != 3 ||
-        !scene.dynamic_mesh_attachments.empty()) {
+        setup_counts.region_attachments != 3 ||
+        setup_counts.dynamic_mesh_attachments != 0) {
         std::cerr << "Expected 1 setup-pose clip attachment, 3 region attachments, and 0 dynamic meshes"
                   << " but prepared clips=" << scene.clip_attachments.size()
-                  << ", regions=" << scene.region_attachments.size()
-                  << ", meshes=" << scene.dynamic_mesh_attachments.size() << ".\n";
+                  << ", regions=" << setup_counts.region_attachments
+                  << ", meshes=" << setup_counts.dynamic_mesh_attachments << ".\n";
+        return 1;
+    }
+    if (!require_event_sequence(
+            scene,
+            {
+                marrow::renderer::PreparedSceneEventKind::Draw,
+                marrow::renderer::PreparedSceneEventKind::Draw,
+                marrow::renderer::PreparedSceneEventKind::ClipStart,
+                marrow::renderer::PreparedSceneEventKind::Draw,
+                marrow::renderer::PreparedSceneEventKind::ClipEnd,
+            },
+            "setup scene clip event ordering")) {
         return 1;
     }
 
@@ -371,15 +968,77 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const auto setup_body_texel = sample_region_attachment_center(atlas_texture.image, *setup_body);
+    const auto setup_arm_texel = sample_region_attachment_center(atlas_texture.image, *setup_arm);
+    const auto setup_spark_texel = sample_region_attachment_center(atlas_texture.image, *setup_spark);
+    if (!require_pixel_equals(setup_body_texel, kBodyAtlasTexel, "setup body atlas sampling") ||
+        !require_pixel_equals(setup_arm_texel, kArmAtlasTexel, "setup arm atlas sampling") ||
+        !require_pixel_equals(setup_spark_texel, kSpark0AtlasTexel, "setup spark atlas sampling")) {
+        std::cerr << "Setup-pose UVs did not sample the expected atlas regions.\n";
+        return 1;
+    }
+    std::cout << "Setup-pose atlas texture sampling validation passed.\n";
+
     marrow::renderer::SampleAppWindow window;
     window.title = "Marrow Render Validation";
     window.width = 1280;
     window.height = 720;
 
-    const marrow::renderer::DemoShell shell(window, scene);
+    const marrow::renderer::DemoShell shell(window, scene, atlas_image_path);
 
     std::cout << shell.launch_report() << '\n';
     std::cout << "Setup-pose region attachment validation passed.\n";
+    std::cout << "Interactive renderer sample includes a screen-blended body slot for visual blend-mode validation.\n";
+    const marrow::renderer::PreparedSceneBatchSummary setup_batch_summary =
+        marrow::renderer::summarize_prepared_scene_batches(scene);
+    if (!require_batch_summary(setup_batch_summary, 3, 2, 1, "setup scene batching") ||
+        setup_batch_summary.batches.size() != 2 ||
+        setup_batch_summary.batches[0].blend_mode != marrow::runtime::BlendMode::Screen ||
+        setup_batch_summary.batches[0].shader_variant !=
+            marrow::renderer::ColorShaderVariant::TwoColorTint ||
+        setup_batch_summary.batches[0].draw_command_count != 1 ||
+        setup_batch_summary.batches[1].blend_mode != marrow::runtime::BlendMode::Normal ||
+        setup_batch_summary.batches[1].shader_variant !=
+            marrow::renderer::ColorShaderVariant::SingleColor ||
+        setup_batch_summary.batches[1].draw_command_count != 2 ||
+        setup_batch_summary.bone_uniform_count != scene.bone_palette.size() + 1) {
+        std::cerr << "Setup-pose batch summary did not match the expected merged draw-call layout.\n";
+        return 1;
+    }
+    std::cout << "Setup-pose batch merge validation passed: 3 draw commands -> "
+              << setup_batch_summary.draw_call_count << " draw calls.\n";
+    marrow::renderer::PreparedScene same_blend_variant_scene = scene;
+    for (auto& command : same_blend_variant_scene.draw_commands) {
+        if (auto* attachment = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(&command);
+            attachment != nullptr && attachment->slot_name == "body") {
+            attachment->blend_mode = marrow::runtime::BlendMode::Normal;
+        }
+    }
+    const marrow::renderer::PreparedSceneBatchSummary same_blend_variant_summary =
+        marrow::renderer::summarize_prepared_scene_batches(same_blend_variant_scene);
+    if (!require_batch_summary(
+            same_blend_variant_summary,
+            3,
+            2,
+            1,
+            "same-blend shader variant batching") ||
+        same_blend_variant_summary.batches.size() != 2 ||
+        same_blend_variant_summary.batches[0].blend_mode != marrow::runtime::BlendMode::Normal ||
+        same_blend_variant_summary.batches[0].shader_variant !=
+            marrow::renderer::ColorShaderVariant::TwoColorTint ||
+        same_blend_variant_summary.batches[0].draw_command_count != 1 ||
+        same_blend_variant_summary.batches[1].blend_mode != marrow::runtime::BlendMode::Normal ||
+        same_blend_variant_summary.batches[1].shader_variant !=
+            marrow::renderer::ColorShaderVariant::SingleColor ||
+        same_blend_variant_summary.batches[1].draw_command_count != 2) {
+        std::cerr << "Shared-blend batching did not preserve the single-color/two-color shader split.\n";
+        return 1;
+    }
+    std::cout << "Shared normal-blend shader split validation passed: dark-tinted body stayed isolated from untinted slots.\n";
+    if (!validate_framebuffer_blend_modes(setup_body_texel)) {
+        std::cerr << "Framebuffer blend-mode smoke validation failed.\n";
+        return 1;
+    }
 
     skeleton.advance_attachment_playback(0.375);
     const auto sequence_scene_result =
@@ -402,7 +1061,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const marrow::renderer::DemoShell sequence_shell(window, sequence_scene);
+    const auto sequence_spark_texel =
+        sample_region_attachment_center(atlas_texture.image, *sequence_spark);
+    if (!require_pixel_equals(
+            sequence_spark_texel,
+            kSpark3AtlasTexel,
+            "sequence spark atlas sampling")) {
+        std::cerr << "Sequence playback did not sample the expected atlas frame.\n";
+        return 1;
+    }
+
+    const marrow::renderer::DemoShell sequence_shell(window, sequence_scene, atlas_image_path);
     std::cout << sequence_shell.launch_report() << '\n';
     std::cout << "Sequence attachment playback validation passed at t=0.375.\n";
     skeleton.set_attachment_playback_time(0.0);
@@ -411,6 +1080,22 @@ int main(int argc, char** argv) {
         skeleton_result.skeleton_data->find_animation("idle");
     if (idle_animation == nullptr) {
         std::cerr << "Fixture did not load the idle animation for renderer validation.\n";
+        return 1;
+    }
+
+    constexpr double kAnimatedComparisonTime = 0.625;
+    skeleton.apply_animation(*idle_animation, kAnimatedComparisonTime);
+    const auto comparison_scene_result =
+        marrow::renderer::prepare_setup_pose_scene(skeleton, *atlas_result.atlas_data);
+    if (!comparison_scene_result) {
+        std::cerr << comparison_scene_result.error_message << '\n';
+        return 1;
+    }
+
+    const marrow::renderer::PreparedScene& comparison_scene = *comparison_scene_result.scene;
+    const auto* comparison_body = find_dynamic_mesh_attachment(comparison_scene, "body");
+    if (comparison_body == nullptr) {
+        std::cerr << "Comparison pose did not preserve the weighted mesh draw command.\n";
         return 1;
     }
 
@@ -425,9 +1110,10 @@ int main(int argc, char** argv) {
     }
 
     const marrow::renderer::PreparedScene& animated_scene = *animated_scene_result.scene;
+    const DrawCommandCounts animated_counts = count_draw_commands(animated_scene);
     if (animated_scene.clip_attachments.size() != 1 ||
-        animated_scene.region_attachments.size() != 2 ||
-        animated_scene.dynamic_mesh_attachments.size() != 1) {
+        animated_counts.region_attachments != 2 ||
+        animated_counts.dynamic_mesh_attachments != 1) {
         std::cerr << "Animated body attachment was "
                   << (animated_body_attachment != nullptr
                           ? animated_body_attachment->name
@@ -440,8 +1126,27 @@ int main(int argc, char** argv) {
                   << ".\n";
         std::cerr << "Expected 1 animated clip attachment, 2 animated region attachments, and 1 dynamic mesh attachment but prepared "
                   << animated_scene.clip_attachments.size() << " clip attachments, "
-                  << animated_scene.region_attachments.size() << " region attachments and "
-                  << animated_scene.dynamic_mesh_attachments.size() << " dynamic mesh attachments.\n";
+                  << animated_counts.region_attachments << " region attachments and "
+                  << animated_counts.dynamic_mesh_attachments << " dynamic mesh attachments.\n";
+        return 1;
+    }
+    if (!require_event_sequence(
+            animated_scene,
+            {
+                marrow::renderer::PreparedSceneEventKind::Draw,
+                marrow::renderer::PreparedSceneEventKind::Draw,
+                marrow::renderer::PreparedSceneEventKind::ClipStart,
+                marrow::renderer::PreparedSceneEventKind::Draw,
+                marrow::renderer::PreparedSceneEventKind::ClipEnd,
+            },
+            "animated scene clip event ordering")) {
+        return 1;
+    }
+    if (animated_scene.draw_commands.size() != 3 ||
+        marrow::renderer::region_attachment_command(animated_scene.draw_commands[0]) == nullptr ||
+        marrow::renderer::dynamic_mesh_attachment_command(animated_scene.draw_commands[1]) == nullptr ||
+        marrow::renderer::region_attachment_command(animated_scene.draw_commands[2]) == nullptr) {
+        std::cerr << "Animated prepared scene did not preserve a single interleaved draw-command list.\n";
         return 1;
     }
 
@@ -460,6 +1165,11 @@ int main(int argc, char** argv) {
         draw_back->slot_index != 1 ||
         draw_back->bone_index != 2) {
         std::cerr << "Animated draw order did not place the arm slot first.\n";
+        return 1;
+    }
+    if (!(draw_back->draw_order_index < draw_front->draw_order_index &&
+          draw_front->draw_order_index < draw_spark->draw_order_index)) {
+        std::cerr << "Animated draw commands did not preserve region/mesh interleaving order.\n";
         return 1;
     }
     if (draw_front->attachment_name != "warrior_body" ||
@@ -501,6 +1211,14 @@ int main(int argc, char** argv) {
     }
     if (draw_front->vertex_payloads.size() != 4 || draw_front->indices.size() != 6) {
         std::cerr << "Animated weighted mesh did not upload the expected dynamic mesh buffers.\n";
+        return 1;
+    }
+
+    if (!require_pixel_equals(
+            sample_dynamic_mesh_center(atlas_texture.image, *draw_front),
+            kWarriorBodyAtlasTexel,
+            "animated mesh atlas sampling")) {
+        std::cerr << "Animated weighted mesh UVs did not sample the expected atlas region.\n";
         return 1;
     }
 
@@ -553,10 +1271,26 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const std::vector<marrow::renderer::SkinnedMeshVertex> skinned_vertices =
+    const marrow::renderer::GpuSkinningEvaluationResult skinned_result =
         marrow::renderer::evaluate_gpu_skinned_vertices(
             *draw_front,
             animated_scene.bone_palette);
+    const marrow::renderer::GpuSkinningEvaluationResult comparison_skinned_result =
+        marrow::renderer::evaluate_gpu_skinned_vertices(
+            *comparison_body,
+            comparison_scene.bone_palette);
+    if (!skinned_result || !comparison_skinned_result) {
+        std::cerr << (skinned_result.error_message.has_value()
+                         ? *skinned_result.error_message
+                         : *comparison_skinned_result.error_message)
+                  << '\n';
+        return 1;
+    }
+
+    const std::vector<marrow::renderer::SkinnedMeshVertex>& skinned_vertices =
+        skinned_result.vertices;
+    const std::vector<marrow::renderer::SkinnedMeshVertex>& comparison_skinned_vertices =
+        comparison_skinned_result.vertices;
     const std::optional<marrow::runtime::MeshAttachmentPose> runtime_mesh =
         skeleton.evaluate_current_mesh_attachment(*body_slot_index);
     if (!runtime_mesh.has_value() || skinned_vertices.size() != runtime_mesh->vertices.size()) {
@@ -594,12 +1328,89 @@ int main(int argc, char** argv) {
         std::cerr << "GPU skinning vertex evaluation did not match the runtime weighted mesh pose.\n";
         return 1;
     }
+    if (!require_skinned_vertices_differ(
+            comparison_skinned_vertices,
+            skinned_vertices,
+            "animated pose change")) {
+        return 1;
+    }
 
-    const marrow::renderer::DemoShell animated_shell(window, animated_scene);
+    const marrow::renderer::DemoShell animated_shell(window, animated_scene, atlas_image_path);
     std::cout << animated_shell.launch_report() << '\n';
+    const marrow::renderer::PreparedSceneBatchSummary animated_batch_summary =
+        marrow::renderer::summarize_prepared_scene_batches(animated_scene);
+    if (!require_batch_summary(animated_batch_summary, 3, 3, 0, "animated scene batching")) {
+        return 1;
+    }
     std::cout << "Animated slot timeline presentation validation passed.\n";
     std::cout << "GPU-skinned weighted mesh validation passed.\n";
     std::cout << "GPU-skinned FFD deform timeline validation passed at t="
               << kAnimatedSampleTime << ".\n";
+
+    marrow::renderer::PreparedScene batched_scene;
+    constexpr std::size_t kBatchSkeletonCount = 3;
+    for (std::size_t skeleton_index = 0; skeleton_index < kBatchSkeletonCount; ++skeleton_index) {
+        marrow::runtime::Skeleton batch_skeleton(skeleton_result.skeleton_data);
+        batch_skeleton.set_to_setup_pose();
+        batch_skeleton.slot_states()[*body_slot_index].attachment_name.clear();
+        const auto batched_scene_result =
+            marrow::renderer::prepare_setup_pose_scene(batch_skeleton, *atlas_result.atlas_data);
+        if (!batched_scene_result) {
+            std::cerr << batched_scene_result.error_message << '\n';
+            return 1;
+        }
+
+        marrow::renderer::PreparedScene translated_scene = *batched_scene_result.scene;
+        translate_prepared_scene(
+            &translated_scene,
+            (static_cast<double>(skeleton_index) - 1.0) * 160.0,
+            0.0);
+        if (!append_scene_instance(translated_scene, &batched_scene)) {
+            return 1;
+        }
+    }
+
+    const marrow::renderer::PreparedSceneBatchSummary cross_skeleton_batch_summary =
+        marrow::renderer::summarize_prepared_scene_batches(batched_scene);
+    if (!require_batch_summary(
+            cross_skeleton_batch_summary,
+            6,
+            1,
+            5,
+            "cross-skeleton batching") ||
+        cross_skeleton_batch_summary.batches.size() != 1 ||
+        cross_skeleton_batch_summary.batches.front().blend_mode !=
+            marrow::runtime::BlendMode::Normal ||
+        cross_skeleton_batch_summary.batches.front().draw_command_count != 6 ||
+        cross_skeleton_batch_summary.vertex_buffer_bytes == 0 ||
+        cross_skeleton_batch_summary.index_buffer_bytes == 0) {
+        std::cerr << "Cross-skeleton batch summary did not produce the expected single merged draw call.\n";
+        return 1;
+    }
+
+    const marrow::renderer::DemoShell batching_shell(window, batched_scene, atlas_image_path);
+    std::cout << batching_shell.launch_report() << '\n';
+    std::cout << "Cross-skeleton batch merge validation passed: 6 draw commands from 3 skeletons merged into 1 draw call.\n";
+
+    if (options->skip_render) {
+        std::cout << "Renderer startup skipped after atlas texture validation.\n";
+        return 0;
+    }
+
+    if (options->auto_close_frames.has_value()) {
+        if (const std::optional<std::string> render_error =
+                batching_shell.run(options->auto_close_frames)) {
+            std::cerr << *render_error << '\n';
+            return 1;
+        }
+        std::cout << "Auto-close smoke mode completed after loading the atlas texture into OpenGL.\n";
+        return 0;
+    }
+
+    if (const std::optional<std::string> render_error = batching_shell.run()) {
+        std::cerr << *render_error << '\n';
+        return 1;
+    }
+
     return 0;
 }

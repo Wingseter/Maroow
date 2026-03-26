@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001–039) delivered the core runtime, editor shell, and export pipeline. Phase 2 (MAR-040+) addresses critical bugs, missing GL rendering, and production hardening identified in post-implementation review.",
+  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001\u2013039) delivered the core runtime, editor shell, and export pipeline. Phase 2 (MAR-040+) addresses critical bugs, missing GL rendering, and production hardening identified in post-implementation review.",
   "qualityGates": [
     "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -716,17 +716,20 @@
         "Existing fixture smoke tests pass unchanged."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T11:03:48.665523+00:00",
+      "completedAt": "2026-03-26T11:28:54.560959+00:00",
+      "updatedAt": "2026-03-26T11:28:54.560816+00:00"
     },
     {
       "id": "MAR-041",
       "title": "Rewrite IK constraint solver to match Spine reference",
-      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180° flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
+      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180\u00b0 flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
       "acceptanceCriteria": [
         "Two-bone IK does not produce NaN when target overlaps the chain root.",
         "Softness parameter smooths the snap at full extension (test with softness=20).",
         "Non-uniform parent scale (scaleX=1, scaleY=2) produces correct IK solution via ellipse solver.",
-        "Negative bone scaleX flips IK rotation by 180°.",
+        "Negative bone scaleX flips IK rotation by 180\u00b0.",
         "Zero-length parent bone falls back to single-bone IK, not skip.",
         "All angle results are wrapped to [-180, 180].",
         "A comprehensive IK test suite covers: reachable, unreachable, degenerate, non-uniform, negative scale, softness cases."
@@ -734,22 +737,28 @@
       "dependsOn": [
         "MAR-040"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T11:28:56.675245+00:00",
+      "completedAt": "2026-03-26T12:04:37.604880+00:00",
+      "updatedAt": "2026-03-26T12:04:37.604700+00:00"
     },
     {
       "id": "MAR-042",
       "title": "Implement Spine-compatible rotation mixing with cross-detection",
-      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the ±180° boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
+      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the \u00b1180\u00b0 boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
       "acceptanceCriteria": [
         "AnimationState maintains a timelinesRotation array per track for cross-detection.",
-        "Rotation from 350° to 10° interpolates the short way (20° arc) during mixing.",
-        "Crossing the ±180° boundary mid-crossfade does not cause a rotation pop.",
+        "Rotation from 350\u00b0 to 10\u00b0 interpolates the short way (20\u00b0 arc) during mixing.",
+        "Crossing the \u00b1180\u00b0 boundary mid-crossfade does not cause a rotation pop.",
         "The O(1) normalization formula (ceil(diff/360 - 0.5) * 360) replaces the while loop.",
-        "A test with a 3-keyframe rotation (0° → 170° → -170°) produces smooth continuous rotation.",
+        "A test with a 3-keyframe rotation (0\u00b0 \u2192 170\u00b0 \u2192 -170\u00b0) produces smooth continuous rotation.",
         "Existing rotation smoke tests pass."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T12:04:39.723566+00:00",
+      "completedAt": "2026-03-26T12:21:27.679049+00:00",
+      "updatedAt": "2026-03-26T12:21:27.678892+00:00"
     },
     {
       "id": "MAR-043",
@@ -762,7 +771,10 @@
         "Existing weighted mesh smoke tests still pass."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T12:21:29.791950+00:00",
+      "completedAt": "2026-03-26T12:37:17.722853+00:00",
+      "updatedAt": "2026-03-26T12:37:17.722677+00:00"
     },
     {
       "id": "MAR-044",
@@ -778,7 +790,10 @@
         "Existing physics fixture assertions pass."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T12:37:19.819965+00:00",
+      "completedAt": "2026-03-26T13:08:49.264856+00:00",
+      "updatedAt": "2026-03-26T13:08:49.264684+00:00"
     },
     {
       "id": "MAR-045",
@@ -791,7 +806,10 @@
         "A test with two events at the same timestamp fires both in correct order."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T13:08:51.376464+00:00",
+      "completedAt": "2026-03-26T13:18:25.376465+00:00",
+      "updatedAt": "2026-03-26T13:18:25.376320+00:00"
     },
     {
       "id": "MAR-046",
@@ -806,7 +824,10 @@
       "dependsOn": [
         "MAR-040"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T13:18:27.480406+00:00",
+      "completedAt": "2026-03-26T13:29:42.317253+00:00",
+      "updatedAt": "2026-03-26T13:29:42.317091+00:00"
     },
     {
       "id": "MAR-047",
@@ -815,11 +836,14 @@
       "acceptanceCriteria": [
         "A vertex shader transforms 2D positions and passes UVs to the fragment shader.",
         "A fragment shader samples a texture and applies slot color tint.",
-        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed — use a solid white 1x1 texture fallback).",
+        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed \u2014 use a solid white 1x1 texture fallback).",
         "The window stays open until closed by the user."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T13:29:44.419746+00:00",
+      "completedAt": "2026-03-26T13:48:13.767312+00:00",
+      "updatedAt": "2026-03-26T13:48:13.767176+00:00"
     },
     {
       "id": "MAR-048",
@@ -834,7 +858,10 @@
       "dependsOn": [
         "MAR-047"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T13:48:15.867709+00:00",
+      "completedAt": "2026-03-26T14:19:06.594769+00:00",
+      "updatedAt": "2026-03-26T14:19:06.594624+00:00"
     },
     {
       "id": "MAR-049",
@@ -849,7 +876,10 @@
       "dependsOn": [
         "MAR-047"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T14:19:08.700177+00:00",
+      "completedAt": "2026-03-26T14:44:57.216717+00:00",
+      "updatedAt": "2026-03-26T14:44:57.216584+00:00"
     },
     {
       "id": "MAR-050",
@@ -864,7 +894,10 @@
       "dependsOn": [
         "MAR-047"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T14:44:59.322932+00:00",
+      "completedAt": "2026-03-26T15:05:37.351434+00:00",
+      "updatedAt": "2026-03-26T15:05:37.351294+00:00"
     },
     {
       "id": "MAR-053",
@@ -877,7 +910,10 @@
         "The renderer uses the correct atlas region for the active sequence frame."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T15:05:39.457178+00:00",
+      "completedAt": "2026-03-26T15:12:16.628725+00:00",
+      "updatedAt": "2026-03-26T15:12:16.628584+00:00"
     },
     {
       "id": "MAR-054",
@@ -890,7 +926,10 @@
         "The editor project smoke test validates at least one undo/redo cycle."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T15:12:18.734339+00:00",
+      "completedAt": "2026-03-26T15:28:14.831640+00:00",
+      "updatedAt": "2026-03-26T15:28:14.831509+00:00"
     },
     {
       "id": "MAR-055",
@@ -903,7 +942,10 @@
         "All existing fixture smoke tests produce identical world transforms."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T15:28:16.930753+00:00",
+      "completedAt": "2026-03-26T15:37:08.945070+00:00",
+      "updatedAt": "2026-03-26T15:37:08.944887+00:00"
     },
     {
       "id": "MAR-056",
@@ -916,7 +958,10 @@
         "CMakeLists.txt is updated with the new source files."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T15:37:11.043821+00:00",
+      "completedAt": "2026-03-26T15:55:44.057622+00:00",
+      "updatedAt": "2026-03-26T15:55:44.057480+00:00"
     },
     {
       "id": "MAR-057",
@@ -929,7 +974,10 @@
         "Error paths are exercised by new negative test cases in the smoke test."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T15:55:46.162956+00:00",
+      "completedAt": "2026-03-26T16:13:21.164315+00:00",
+      "updatedAt": "2026-03-26T16:13:21.164161+00:00"
     },
     {
       "id": "MAR-058",
@@ -947,7 +995,10 @@
         "MAR-041",
         "MAR-042"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T16:13:23.271931+00:00",
+      "completedAt": "2026-03-26T16:28:04.592510+00:00",
+      "updatedAt": "2026-03-26T16:28:04.592351+00:00"
     },
     {
       "id": "MAR-059",
@@ -960,7 +1011,10 @@
         "Existing fixtures load successfully after adding the version field."
       ],
       "dependsOn": [],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T16:28:06.702488+00:00",
+      "completedAt": "2026-03-26T16:41:02.984802+00:00",
+      "updatedAt": "2026-03-26T16:41:02.984590+00:00"
     },
     {
       "id": "MAR-060",
@@ -978,7 +1032,10 @@
       "dependsOn": [
         "MAR-042"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T16:41:05.085386+00:00",
+      "completedAt": "2026-03-26T17:36:48.755198+00:00",
+      "updatedAt": "2026-03-26T17:36:48.755055+00:00"
     },
     {
       "id": "MAR-061",
@@ -995,7 +1052,10 @@
       "dependsOn": [
         "MAR-047"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T17:36:50.854407+00:00",
+      "completedAt": "2026-03-26T17:59:06.165076+00:00",
+      "updatedAt": "2026-03-26T17:59:06.164927+00:00"
     },
     {
       "id": "MAR-062",
@@ -1012,7 +1072,10 @@
       "dependsOn": [
         "MAR-047"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T17:59:08.272498+00:00",
+      "completedAt": "2026-03-26T18:15:17.720863+00:00",
+      "updatedAt": "2026-03-26T18:15:17.720720+00:00"
     },
     {
       "id": "MAR-063",
@@ -1030,7 +1093,10 @@
         "MAR-047",
         "MAR-049"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T18:15:19.823798+00:00",
+      "completedAt": "2026-03-26T18:38:53.096059+00:00",
+      "updatedAt": "2026-03-26T18:38:53.095910+00:00"
     },
     {
       "id": "MAR-064",
@@ -1049,7 +1115,10 @@
         "MAR-047",
         "MAR-049"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T18:38:55.186196+00:00",
+      "completedAt": "2026-03-26T19:00:53.103565+00:00",
+      "updatedAt": "2026-03-26T19:00:53.103412+00:00"
     },
     {
       "id": "MAR-065",
@@ -1066,24 +1135,30 @@
       "dependsOn": [
         "MAR-054"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T19:00:55.208291+00:00",
+      "completedAt": "2026-03-26T19:35:33.907773+00:00",
+      "updatedAt": "2026-03-26T19:35:33.907615+00:00"
     },
     {
       "id": "MAR-066",
       "title": "Add binary format keyframe quantization and key reduction",
       "description": "Research from Riot Games shows 48-bit quantized keyframes (16-bit time + 16-bit channel index + 32-bit payload for 2D) with iterative Bezier curve fitting can reduce animation data by 50-70%. Implement at export time: (1) Quantize rotation to 16-bit, position to 2x16-bit. (2) Curve fit to remove redundant keyframes within error threshold. (3) Store all keyframes contiguously sorted by time for cache-friendly playback.",
       "acceptanceCriteria": [
-        "Export pipeline quantizes rotation keyframes to 16-bit (±0.006° precision).",
+        "Export pipeline quantizes rotation keyframes to 16-bit (\u00b10.006\u00b0 precision).",
         "Position keyframes quantize to 2x16-bit with animation bounding box range reduction.",
         "Key reduction removes redundant keyframes within configurable error threshold.",
         "Binary format stores keyframes contiguously sorted by (time, bone_index).",
-        "Roundtrip test: original animation vs quantized animation has max error < 0.1° rotation, < 0.5px position.",
+        "Roundtrip test: original animation vs quantized animation has max error < 0.1\u00b0 rotation, < 0.5px position.",
         "Size comparison logged: binary-quantized vs JSON."
       ],
       "dependsOn": [
         "MAR-059"
       ],
-      "status": "open"
+      "status": "done",
+      "startedAt": "2026-03-26T19:35:36.012626+00:00",
+      "completedAt": "2026-03-26T20:09:55.072671+00:00",
+      "updatedAt": "2026-03-26T20:09:55.072494+00:00"
     }
   ]
 }
