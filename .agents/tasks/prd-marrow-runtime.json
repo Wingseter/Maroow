@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001\u2013039) delivered the core runtime, editor shell, and export pipeline. Phase 2 (MAR-040+) addresses critical bugs, missing GL rendering, and production hardening identified in post-implementation review.",
+  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, and documentation.",
   "qualityGates": [
     "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -724,12 +724,12 @@
     {
       "id": "MAR-041",
       "title": "Rewrite IK constraint solver to match Spine reference",
-      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180\u00b0 flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
+      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180° flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
       "acceptanceCriteria": [
         "Two-bone IK does not produce NaN when target overlaps the chain root.",
         "Softness parameter smooths the snap at full extension (test with softness=20).",
         "Non-uniform parent scale (scaleX=1, scaleY=2) produces correct IK solution via ellipse solver.",
-        "Negative bone scaleX flips IK rotation by 180\u00b0.",
+        "Negative bone scaleX flips IK rotation by 180°.",
         "Zero-length parent bone falls back to single-bone IK, not skip.",
         "All angle results are wrapped to [-180, 180].",
         "A comprehensive IK test suite covers: reachable, unreachable, degenerate, non-uniform, negative scale, softness cases."
@@ -745,13 +745,13 @@
     {
       "id": "MAR-042",
       "title": "Implement Spine-compatible rotation mixing with cross-detection",
-      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the \u00b1180\u00b0 boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
+      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the ±180° boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
       "acceptanceCriteria": [
         "AnimationState maintains a timelinesRotation array per track for cross-detection.",
-        "Rotation from 350\u00b0 to 10\u00b0 interpolates the short way (20\u00b0 arc) during mixing.",
-        "Crossing the \u00b1180\u00b0 boundary mid-crossfade does not cause a rotation pop.",
+        "Rotation from 350° to 10° interpolates the short way (20° arc) during mixing.",
+        "Crossing the ±180° boundary mid-crossfade does not cause a rotation pop.",
         "The O(1) normalization formula (ceil(diff/360 - 0.5) * 360) replaces the while loop.",
-        "A test with a 3-keyframe rotation (0\u00b0 \u2192 170\u00b0 \u2192 -170\u00b0) produces smooth continuous rotation.",
+        "A test with a 3-keyframe rotation (0° → 170° → -170°) produces smooth continuous rotation.",
         "Existing rotation smoke tests pass."
       ],
       "dependsOn": [],
@@ -836,7 +836,7 @@
       "acceptanceCriteria": [
         "A vertex shader transforms 2D positions and passes UVs to the fragment shader.",
         "A fragment shader samples a texture and applies slot color tint.",
-        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed \u2014 use a solid white 1x1 texture fallback).",
+        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed — use a solid white 1x1 texture fallback).",
         "The window stays open until closed by the user."
       ],
       "dependsOn": [],
@@ -1145,11 +1145,11 @@
       "title": "Add binary format keyframe quantization and key reduction",
       "description": "Research from Riot Games shows 48-bit quantized keyframes (16-bit time + 16-bit channel index + 32-bit payload for 2D) with iterative Bezier curve fitting can reduce animation data by 50-70%. Implement at export time: (1) Quantize rotation to 16-bit, position to 2x16-bit. (2) Curve fit to remove redundant keyframes within error threshold. (3) Store all keyframes contiguously sorted by time for cache-friendly playback.",
       "acceptanceCriteria": [
-        "Export pipeline quantizes rotation keyframes to 16-bit (\u00b10.006\u00b0 precision).",
+        "Export pipeline quantizes rotation keyframes to 16-bit (±0.006° precision).",
         "Position keyframes quantize to 2x16-bit with animation bounding box range reduction.",
         "Key reduction removes redundant keyframes within configurable error threshold.",
         "Binary format stores keyframes contiguously sorted by (time, bone_index).",
-        "Roundtrip test: original animation vs quantized animation has max error < 0.1\u00b0 rotation, < 0.5px position.",
+        "Roundtrip test: original animation vs quantized animation has max error < 0.1° rotation, < 0.5px position.",
         "Size comparison logged: binary-quantized vs JSON."
       ],
       "dependsOn": [
@@ -1159,6 +1159,313 @@
       "startedAt": "2026-03-26T19:35:36.012626+00:00",
       "completedAt": "2026-03-26T20:09:55.072671+00:00",
       "updatedAt": "2026-03-26T20:09:55.072494+00:00"
+    },
+    {
+      "id": "MAR-067",
+      "title": "Extract RenderCommand abstraction from monolithic GL renderer",
+      "description": "Refactor module.cpp to separate draw command generation (what to draw) from GL submission (how to draw), following Spine's RenderCommand pattern. The renderer should produce a CommandList of (vertices, indices, texture handle, blend mode) tuples that any backend can consume. This is the prerequisite for multi-backend support.",
+      "acceptanceCriteria": [
+        "A RenderCommandList struct holds ordered draw commands with vertex data, index data, texture handle, and blend mode.",
+        "The existing GL code consumes RenderCommandList through a Backend interface.",
+        "No GL calls exist outside the OpenGL backend implementation.",
+        "All existing renderer_sample and smoke tests pass unchanged.",
+        "The Backend interface has create/destroy, begin_frame/end_frame, submit_commands methods."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-068",
+      "title": "Integrate sokol_gfx as multi-backend renderer",
+      "description": "Research recommends sokol_gfx for the best coverage-to-complexity ratio: Metal, Vulkan, GL, GLES, WebGL, D3D11 from single-header C. Replace the direct GL backend with sokol_gfx calls. Use sokol-shdc to cross-compile the existing GLSL into a C header with per-backend shader bytecode (GLSL, MSL, HLSL, SPIR-V, WGSL).",
+      "acceptanceCriteria": [
+        "sokol_gfx.h and sokol_app.h are vendored in external/.",
+        "sokol-shdc compiles the vertex/fragment shaders into a multi-backend C header.",
+        "The SokolBackend implementation consumes RenderCommandList from MAR-067.",
+        "marrow_renderer_sample renders correctly using sokol_gfx on the current platform.",
+        "Build system detects the platform and selects the appropriate backend (Metal on macOS, GL on Linux)."
+      ],
+      "dependsOn": [
+        "MAR-067"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-069",
+      "title": "Verify Metal rendering on macOS via sokol_gfx",
+      "description": "macOS deprecated OpenGL. Verify the sokol_gfx Metal backend renders correctly: textured quads, blend modes, two-color tint, stencil clipping, GPU skinned meshes. Fix any platform-specific issues.",
+      "acceptanceCriteria": [
+        "marrow_renderer_sample renders on macOS using the Metal backend (no GL fallback).",
+        "All 4 blend modes (Normal/Additive/Multiply/Screen) produce correct output.",
+        "Two-color tint and stencil clipping work on Metal.",
+        "The editor shell renders the viewport via Metal.",
+        "No OpenGL deprecation warnings in the build."
+      ],
+      "dependsOn": [
+        "MAR-068"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-070",
+      "title": "Create C API wrapper for FFI (marrow_c.h)",
+      "description": "Expose the C++ runtime as a stable C API for game engine bindings (Unity C#, Godot GDExtension, Rust FFI). Use opaque handle types (MarrowSkeleton*, MarrowAnimState*), extern C free functions, MarrowStatusCode error returns, and callback-based event listeners with function_pointer + void* user_data.",
+      "acceptanceCriteria": [
+        "include/marrow/marrow_c.h provides the complete public API as extern C functions.",
+        "Each C++ class has a distinct opaque handle type (not void*).",
+        "All functions return MarrowStatusCode; no exceptions cross the C boundary.",
+        "Event listeners use function_pointer + void* user_data pattern.",
+        "A C-only smoke test (no C++ includes) compiles and exercises load/animate/render.",
+        "ABI version check function prevents mismatched header/library usage."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-071",
+      "title": "Add custom memory allocator support",
+      "description": "Game engines require custom allocators for console/mobile. Add a marrow::Allocator interface with allocate(size, alignment)/deallocate(ptr, size), settable globally at startup. Route all internal new/delete through it. Expose as MarrowAllocator callback struct in the C API.",
+      "acceptanceCriteria": [
+        "marrow::Allocator virtual interface with allocate/deallocate methods.",
+        "Global default allocator uses std::malloc/free.",
+        "set_allocator() replaces the global allocator before any Marrow calls.",
+        "All runtime heap allocations go through the allocator (no direct new/delete).",
+        "A test with a counting allocator verifies zero leaked allocations after full lifecycle.",
+        "C API exposes MarrowAllocator struct with function pointers."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-072",
+      "title": "Ensure thread-safe concurrent skeleton updates",
+      "description": "Game engines parallelize skeleton updates across threads. Audit the runtime for global mutable state. Document the contract: distinct Skeleton+AnimationState instances can be updated concurrently from different threads. SkeletonData is immutable and safely shared.",
+      "acceptanceCriteria": [
+        "No static mutable state exists in the animation/skeleton update hot path.",
+        "SkeletonData is documented as thread-safe for concurrent read access.",
+        "A stress test spawns N threads, each updating a unique Skeleton instance from shared SkeletonData.",
+        "No data races detected under ThreadSanitizer.",
+        "The threading contract is documented in the public API headers."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-073",
+      "title": "Implement hot-reload for skeleton assets",
+      "description": "Allow re-loading .mskl/.matl at runtime without restarting. Implement capture_state()/restore_state() on AnimationState to preserve playback position across reloads. The editor should auto-reload when source files change.",
+      "acceptanceCriteria": [
+        "AnimationState::capture_state() returns a serializable snapshot of track configuration.",
+        "AnimationState::restore_state() resumes playback from a snapshot after SkeletonData rebuild.",
+        "The editor watches .mskl/.matl files and triggers hot-reload on change.",
+        "Hot-reload preserves current animation, track time, and mix state.",
+        "A smoke test validates: load → play → modify .mskl → reload → verify playback continues."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-074",
+      "title": "Implement Spine JSON importer",
+      "description": "Parse Spine's JSON export format (.json) and convert to Marrow's .mskl format. Legal: file formats are not copyrightable; our own parser is fine. Target Spine 4.x JSON. Implement in phases: bones/slots/skins first, then animations, then constraints. Handle the tricky weighted mesh vertex encoding where format switches based on len(vertices) > len(uvs).",
+      "acceptanceCriteria": [
+        "A spine_to_marrow CLI tool converts Spine .json to .mskl.",
+        "Bones, slots, skins, and basic region/mesh attachments convert correctly.",
+        "Animation timelines (rotate, translate, scale, color, attachment) convert correctly.",
+        "Weighted mesh vertex encoding is handled for both weighted and unweighted cases.",
+        "IK, path, and transform constraints convert to Marrow equivalents.",
+        "A test converts a known Spine sample skeleton and validates bone positions match."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-075",
+      "title": "Implement Spine atlas importer",
+      "description": "Parse Spine's line-based .atlas text format and convert to Marrow's .matl JSON. Handle atlas page headers, region definitions, rotation flags (Spine uses 90° CW), filter/wrap modes, and multi-page atlases.",
+      "acceptanceCriteria": [
+        "The spine_to_marrow tool also converts .atlas to .matl.",
+        "Atlas page metadata (image name, size, filter, wrap) converts correctly.",
+        "Region definitions (name, bounds, origin, rotation) convert correctly.",
+        "Spine's 90° CW rotation flag is handled (UVs adjusted or flag preserved).",
+        "Multi-page atlases produce multiple .matl files or a combined document.",
+        "A test converts a known Spine atlas and validates region lookups match."
+      ],
+      "dependsOn": [
+        "MAR-074"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-076",
+      "title": "Implement texture atlas packer in the editor",
+      "description": "Add an atlas packing tool using the MaxRects Best Short Side Fit algorithm. Support padding, trim/whitespace stripping, and bleed/extrude. Use stb_rect_pack for the initial implementation, upgradeable to MaxRectsBinPack for rotation support.",
+      "acceptanceCriteria": [
+        "The editor can generate a .matl + packed PNG from individual sprite images.",
+        "MaxRects BSSF algorithm produces compact packing.",
+        "Padding (configurable, default 2px) prevents texture bleeding.",
+        "Trim removes transparent borders and records offset for correct rendering.",
+        "Bleed/extrude extends edge pixels by 1px to prevent seam artifacts.",
+        "A test packs 20+ regions and validates the output atlas loads correctly."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-077",
+      "title": "Implement SoA bone data layout with SIMD transform propagation",
+      "description": "Convert bone arrays from AoS to SoA layout: separate float arrays for worldX, worldY, a, b, c, d. Implement SSE2 and NEON code paths for batch bone transform propagation (4 bones simultaneously). Store bones in topological order so parent_index < child_index always holds.",
+      "acceptanceCriteria": [
+        "Bone world transforms are stored as 6 separate float arrays (SoA layout).",
+        "SSE2 path processes 4 bones per iteration on x86-64.",
+        "NEON path processes 4 bones per iteration on ARM/Apple Silicon.",
+        "Scalar fallback exists for unsupported platforms.",
+        "marrow_benchmark shows measurable speedup (>2x) for 100+ bone skeletons.",
+        "All existing smoke tests produce identical results."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-078",
+      "title": "Add frustum culling and update-rate throttling",
+      "description": "Add visibility culling and animation update rate control as first-class runtime features. Invisible skeletons skip all update work. Distant skeletons update at reduced frequency with pose interpolation.",
+      "acceptanceCriteria": [
+        "set_visible(false) skips animation apply, world transform, and render for a skeleton.",
+        "set_update_interval(n) updates animation every nth frame, interpolating between known poses.",
+        "Culling reduces per-skeleton cost to near-zero (verified by profiler).",
+        "Throttled update at interval=3 produces visually acceptable results.",
+        "A stress test with 200 skeletons (100 culled, 50 throttled) runs at 60fps."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-079",
+      "title": "Build marrow_benchmark stress test harness",
+      "description": "Create a benchmark binary that spawns N skeletons with configurable bone count and measures frame time. Report per-skeleton breakdown: animation apply, world transform, mesh skinning, constraint solving, render prepare. Produce a 0-100 performance score.",
+      "acceptanceCriteria": [
+        "marrow_benchmark spawns N skeletons (default 100) with configurable complexity.",
+        "Per-frame timing breakdown printed: animation_us, transform_us, skinning_us, constraint_us, render_us.",
+        "Total frame time and estimated max skeletons at 60fps reported.",
+        "Performance score 0-100 based on target: 200 medium skeletons at 60fps = 100.",
+        "Results are reproducible (variance < 10% across runs).",
+        "AGENTS.md documents the benchmark command."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-080",
+      "title": "Implement onion skinning in the editor viewport",
+      "description": "Show ghost frames before/after the current timeline position. Support frame-based and keyframe-based modes, anchor mode for stable arcs, and separate before/after colors (cool/warm). Render as semi-transparent tinted pass. Limit to 3+3 ghosts default.",
+      "acceptanceCriteria": [
+        "Frame-based ghosts show N frames before and after current time with configurable step.",
+        "Keyframe-based ghosts show only at actual keyframe positions.",
+        "Anchor mode shows ghosts at fixed intervals relative to frame 0.",
+        "Before ghosts render in blue tint, after ghosts in red/warm tint.",
+        "Alpha decreases with distance from current frame.",
+        "Default is 3 before + 3 after; user-configurable up to 6+6.",
+        "Toggle on/off via editor menu."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-081",
+      "title": "Implement brush-based weight painting in the editor",
+      "description": "Add a weight painting tool for mesh bone influences. Brush modes: paint (add weight), erase (remove weight), smooth (average neighbors). Display weights as heat map overlay (blue=0, red=1). This is the most requested feature across all 2D animation communities.",
+      "acceptanceCriteria": [
+        "Paint mode adds bone influence weight under brush with configurable radius and strength.",
+        "Erase mode removes weight from the active bone.",
+        "Smooth mode averages weights with neighboring vertices.",
+        "Heat map overlay shows current weights (blue→green→yellow→red gradient).",
+        "Weights auto-normalize to sum=1.0 after each stroke.",
+        "Undo/redo works for each paint stroke.",
+        "Real-time mesh deformation preview while painting."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-082",
+      "title": "Implement PSD layer import pipeline",
+      "description": "Import Photoshop PSD files as individual sprite layers, automatically creating slots and region attachments from layer names. This is the standard 2D animation art pipeline.",
+      "acceptanceCriteria": [
+        "PSD file can be loaded and individual layers extracted as images.",
+        "Layer names map to slot/attachment names in the skeleton.",
+        "Layer positions preserved as attachment offsets.",
+        "Groups/folders map to bone hierarchy hints.",
+        "Re-import updates existing attachments without losing animation data.",
+        "A test imports a sample PSD and validates slot creation."
+      ],
+      "dependsOn": [
+        "MAR-076"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-083",
+      "title": "Add animation layers (additive and override)",
+      "description": "Support non-destructive animation layering: base layer plays the main animation, additive layers modify on top (e.g., breathing overlay), override layers replace specific bones (e.g., aim direction). Per-layer weight control.",
+      "acceptanceCriteria": [
+        "AnimationState supports multiple layers with configurable blend mode (additive/override).",
+        "Each layer has an alpha weight (0.0 to 1.0).",
+        "Additive layers add their deltas on top of lower layers.",
+        "Override layers replace bone transforms for specified bones.",
+        "A test plays walk + breathing additive + aim override simultaneously.",
+        "Performance impact of 3 active layers is < 50% overhead vs single layer."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-084",
+      "title": "Implement debug overlay for bones, constraints, and meshes",
+      "description": "Add a debug rendering mode that draws bone hierarchy lines, IK reach cones, path constraint splines, physics spring visualization, mesh wireframes, and bounding boxes. Toggle per category in the editor.",
+      "acceptanceCriteria": [
+        "Bone hierarchy renders as colored lines (parent→child) with joint circles.",
+        "IK constraints show target marker and reach limit arc.",
+        "Path constraints show the bezier spline curve.",
+        "Physics constraints show spring/damper visualization.",
+        "Mesh wireframe overlay can be toggled.",
+        "Bounding box polygons render as semi-transparent outlines.",
+        "Each debug category can be toggled independently in the editor."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-085",
+      "title": "Add runtime profiling instrumentation and HUD overlay",
+      "description": "Instrument the runtime with per-frame timing and provide a text HUD overlay. Report: skeleton count, draw calls, vertex count, and per-phase timing (animation, transform, skinning, constraints, render).",
+      "acceptanceCriteria": [
+        "marrow_profiler_frame() returns a struct with per-phase microsecond timings.",
+        "A text HUD overlay can be toggled in the editor and renderer_sample.",
+        "HUD shows: skeletons, draw calls, vertices, batch merges, total frame time.",
+        "Draw call batching statistics include break reasons (texture/blend/clip changes).",
+        "Profiling overhead is < 1% when enabled, zero when disabled.",
+        "marrow_benchmark uses the profiler to generate its report."
+      ],
+      "dependsOn": [
+        "MAR-079"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-086",
+      "title": "Write Quick Start guide and API concepts documentation",
+      "description": "Create the most important documentation pages: a Quick Start (load → animate → render in one page) and a Concepts page explaining SkeletonData/Skeleton/AnimationState architecture. Add Doxygen comments to all public API headers.",
+      "acceptanceCriteria": [
+        "docs/quick-start.md shows a complete working example from zero to rendered animation.",
+        "docs/concepts.md explains the SkeletonData→Skeleton→AnimationState→Renderer data flow.",
+        "All public functions in include/marrow/ have @brief and @param Doxygen comments.",
+        "Doxygen builds with zero warnings.",
+        "docs/format-spec.md documents .mskl, .matl, .mbin, and .marrow file formats.",
+        "AGENTS.md links to all documentation entry points."
+      ],
+      "dependsOn": [],
+      "status": "open"
     }
   ]
 }
