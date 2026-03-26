@@ -1,13 +1,14 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/discription.md, following the documented order of renderer and runtime validation first, then the standalone editor and export pipeline.",
+  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001–039) delivered the core runtime, editor shell, and export pipeline. Phase 2 (MAR-040+) addresses critical bugs, missing GL rendering, and production hardening identified in post-implementation review.",
   "qualityGates": [
     "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
     "When a story changes file formats, update checked-in sample assets and any matching operational docs in the same iteration.",
     "Every completed story must leave the repository in a clean git state with build, test, or inspection commands recorded in AGENTS.md and the Ralph progress log.",
-    "Prefer runtime-verifiable slices over placeholder scaffolding; if a feature cannot be fully validated yet, add the smallest executable test harness that proves the implemented slice."
+    "Prefer runtime-verifiable slices over placeholder scaffolding; if a feature cannot be fully validated yet, add the smallest executable test harness that proves the implemented slice.",
+    "Bug-fix stories must include a regression test that would have caught the original defect, added to marrow_fixture_smoke or a dedicated test target."
   ],
   "stories": [
     {
@@ -701,6 +702,388 @@
       "startedAt": "2026-03-25T18:59:52.560783+00:00",
       "completedAt": "2026-03-25T19:11:05.689033+00:00",
       "updatedAt": "2026-03-25T19:11:05.688876+00:00"
+    },
+    {
+      "id": "MAR-040",
+      "title": "Fix bone inherit modes for non-uniform parent scale",
+      "description": "Research confirmed Marrow's shear formula matches Spine exactly. However, Spine has 5 discrete inherit modes (NORMAL, ONLY_TRANSLATION, NO_ROTATION_OR_REFLECTION, NO_SCALE, NO_SCALE_OR_REFLECTION) while Marrow maps them to 3 booleans, producing incorrect transforms when parent has non-uniform scale. Implement all 5 modes matching Spine's Bone.c updateWorldTransformWith(). Also add skeleton-level scaleX/scaleY that Spine applies to root bones.",
+      "acceptanceCriteria": [
+        "All 5 Spine inherit modes are implemented as a discrete enum, not boolean flags.",
+        "NO_ROTATION_OR_REFLECTION uses Spine's cross-term correction: s = abs(pa*pd - pb*pc) / (pa*pa + pc*pc).",
+        "NO_SCALE and NO_SCALE_OR_REFLECTION use Spine's axis rotation + length normalization algorithm.",
+        "Skeleton-level scaleX/scaleY is applied to root bone transforms.",
+        "A test with non-uniform parent scale validates each inherit mode produces correct transforms.",
+        "Existing fixture smoke tests pass unchanged."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-041",
+      "title": "Rewrite IK constraint solver to match Spine reference",
+      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180° flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
+      "acceptanceCriteria": [
+        "Two-bone IK does not produce NaN when target overlaps the chain root.",
+        "Softness parameter smooths the snap at full extension (test with softness=20).",
+        "Non-uniform parent scale (scaleX=1, scaleY=2) produces correct IK solution via ellipse solver.",
+        "Negative bone scaleX flips IK rotation by 180°.",
+        "Zero-length parent bone falls back to single-bone IK, not skip.",
+        "All angle results are wrapped to [-180, 180].",
+        "A comprehensive IK test suite covers: reachable, unreachable, degenerate, non-uniform, negative scale, softness cases."
+      ],
+      "dependsOn": [
+        "MAR-040"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-042",
+      "title": "Implement Spine-compatible rotation mixing with cross-detection",
+      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the ±180° boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
+      "acceptanceCriteria": [
+        "AnimationState maintains a timelinesRotation array per track for cross-detection.",
+        "Rotation from 350° to 10° interpolates the short way (20° arc) during mixing.",
+        "Crossing the ±180° boundary mid-crossfade does not cause a rotation pop.",
+        "The O(1) normalization formula (ceil(diff/360 - 0.5) * 360) replaces the while loop.",
+        "A test with a 3-keyframe rotation (0° → 170° → -170°) produces smooth continuous rotation.",
+        "Existing rotation smoke tests pass."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-043",
+      "title": "Normalize mesh vertex weights on load",
+      "description": "Mesh weight parsing validates that weights sum to positive but does not normalize to 1.0. GPU skinning (renderer/module.cpp) assumes normalized weights. Add normalization at parse time and assert the invariant in the renderer.",
+      "acceptanceCriteria": [
+        "Mesh vertex weights are normalized to sum=1.0 during skeleton loading.",
+        "The renderer asserts or documents that incoming weights are pre-normalized.",
+        "A fixture mesh with intentionally non-unit weights (e.g., 0.3+0.5=0.8) loads correctly after normalization.",
+        "Existing weighted mesh smoke tests still pass."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-044",
+      "title": "Rewrite physics constraints to Spine's offset-based model",
+      "description": "Research found Marrow's physics model is architecturally different from Spine. Spine uses offset-based simulation (tracks deviation from animated pose) with fixed timestep accumulator and 4 independent channels (X/Y position, rotation, scale). Marrow uses position-tracking spring with variable timestep, producing frame-rate-dependent results. Rewrite to match Spine's PhysicsConstraint.c: (1) Offset-based model with xOffset/yOffset/rotateOffset/scaleOffset. (2) Fixed timestep accumulator (step parameter). (3) Previous-position tracking (ux/uy, cx/cy). (4) Inertia limiting (limit * delta). (5) SP_PHYSICS_POSE mode for applying offsets without simulating. (6) Proper reset/initialization.",
+      "acceptanceCriteria": [
+        "Physics simulation uses fixed timestep accumulator (configurable step size).",
+        "Position, rotation, and scale are simulated as independent offset channels.",
+        "Frame rate does not affect physics behavior (test at 30fps vs 120fps produces same result at t=1.0).",
+        "Inertia is clamped by limit * delta to prevent instability during frame spikes.",
+        "reset() snapshots current world position and zeroes all velocities/offsets.",
+        "POSE mode applies accumulated offsets without advancing simulation.",
+        "Existing physics fixture assertions pass."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-045",
+      "title": "Fix transform constraint bounds check and event timeline ordering",
+      "description": "Transform constraint solver (skeleton.cpp:6216) accesses data_->bones()[bone_index] without prior bounds validation. Event timeline (skeleton.cpp:2447) uses < instead of <= for timestamp ordering, inconsistent with other timelines. Fix both issues.",
+      "acceptanceCriteria": [
+        "Transform constraint validates bone_index before accessing bones().",
+        "Event timeline uses <= for timestamp monotonicity, consistent with all other timeline types.",
+        "Invalid bone index in a transform constraint produces a clear error instead of UB.",
+        "A test with two events at the same timestamp fires both in correct order."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-046",
+      "title": "Implement linked mesh FFD deform inheritance",
+      "description": "Linked meshes with deform=true should inherit FFD vertex offsets from their parent mesh during animation. Currently the deform flag is parsed but parent FFD offsets are not propagated. Wire deform inheritance through the mesh deformation pipeline.",
+      "acceptanceCriteria": [
+        "A linked mesh with deform=true applies the parent mesh's FFD offsets during animation.",
+        "A linked mesh with deform=false stays rigid regardless of parent deformation.",
+        "A new fixture linked mesh pair validates both cases.",
+        "Existing mesh deform smoke tests still pass."
+      ],
+      "dependsOn": [
+        "MAR-040"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-047",
+      "title": "Implement OpenGL shader pipeline for region attachments",
+      "description": "The renderer currently only prepares draw command data but has no actual GL calls. Create the minimal OpenGL rendering pipeline: compile a textured-quad vertex/fragment shader pair, set up VAO/VBO, and render region attachments as textured quads using the prepared draw commands.",
+      "acceptanceCriteria": [
+        "A vertex shader transforms 2D positions and passes UVs to the fragment shader.",
+        "A fragment shader samples a texture and applies slot color tint.",
+        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed — use a solid white 1x1 texture fallback).",
+        "The window stays open until closed by the user."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-048",
+      "title": "Implement OpenGL blend modes and two-color tinting shader",
+      "description": "Extend the GL pipeline with per-draw-command blend mode switching (glBlendFunc for Normal/Additive/Multiply/Screen) and a two-color tint shader variant: output = texColor * light + (1 - texColor.a) * dark.",
+      "acceptanceCriteria": [
+        "Each draw command applies the correct glBlendFunc before rendering.",
+        "A two-color tint shader path is available and activated when dark_color is non-default.",
+        "marrow_renderer_sample visually demonstrates at least one non-Normal blend mode.",
+        "A smoke assertion validates that additive and screen blend produce different framebuffer results than normal."
+      ],
+      "dependsOn": [
+        "MAR-047"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-049",
+      "title": "Implement OpenGL dynamic mesh rendering with GPU skinning",
+      "description": "Extend the GL pipeline to upload DynamicMeshDrawCommand vertex/index data into VBOs and render skinned meshes. Use the pre-computed CPU-side skinned vertices from the renderer module.",
+      "acceptanceCriteria": [
+        "Dynamic mesh vertex data is uploaded to a GL VBO each frame.",
+        "Index data drives GL draw calls for skinned mesh triangles.",
+        "marrow_renderer_sample renders the fixture weighted mesh alongside region attachments.",
+        "Mesh vertices update visually when the animation pose changes."
+      ],
+      "dependsOn": [
+        "MAR-047"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-050",
+      "title": "Implement texture atlas loading into GL textures",
+      "description": "Load the atlas image file referenced in .matl into a GL texture so region and mesh attachments render with actual texture data instead of a fallback. Support PNG loading via stb_image or a minimal image loader.",
+      "acceptanceCriteria": [
+        "The atlas image path from .matl is loaded into a GL texture at startup.",
+        "Region attachment UVs correctly sample from the loaded atlas texture.",
+        "A sample atlas PNG is checked into assets/ for validation.",
+        "Fallback to white texture when the image file is missing."
+      ],
+      "dependsOn": [
+        "MAR-047"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-053",
+      "title": "Implement sequence attachment frame advancement in renderer",
+      "description": "Sequence attachments (sprite sheet animations like spark_fx) are parsed and stored but the renderer does not advance frames based on fps and playback mode. Wire sequence frame selection into the render preparation path.",
+      "acceptanceCriteria": [
+        "Sequence attachments select the correct frame region based on animation time and configured fps.",
+        "Playback modes (loop, once, pingpong) are respected.",
+        "marrow_fixture_smoke validates sequence frame selection at multiple time points.",
+        "The renderer uses the correct atlas region for the active sequence frame."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-054",
+      "title": "Add undo/redo to the editor",
+      "description": "Implement an undo/redo command stack in the editor so all project modifications (keyframe edits, constraint changes, property edits) can be reverted. Use a command-pattern approach with serializable operations.",
+      "acceptanceCriteria": [
+        "Every editor modification pushes an undoable command onto the stack.",
+        "Ctrl+Z undoes the last command and restores the previous state.",
+        "Ctrl+Shift+Z or Ctrl+Y redoes a previously undone command.",
+        "The editor project smoke test validates at least one undo/redo cycle."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-055",
+      "title": "Replace per-frame cycle detection with topological bone sort",
+      "description": "update_world_transforms() currently runs cycle detection with evaluated/evaluating vectors every frame. For large skeletons at 60fps this adds overhead. Compute a topological bone evaluation order once at load time and reuse it for all subsequent updates.",
+      "acceptanceCriteria": [
+        "Bone evaluation order is computed once during SkeletonData loading.",
+        "update_world_transforms() iterates the pre-sorted order without per-frame cycle detection.",
+        "Circular bone hierarchies are detected and rejected at load time with a clear error.",
+        "All existing fixture smoke tests produce identical world transforms."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-056",
+      "title": "Split skeleton.cpp into focused modules",
+      "description": "skeleton.cpp is 7000+ lines covering parsing, constraints, skins, animation application, and physics. Split into: skeleton_parse.cpp, skeleton_constraints.cpp, skeleton_skin.cpp, skeleton_animation.cpp, and skeleton_physics.cpp while keeping the same public API.",
+      "acceptanceCriteria": [
+        "skeleton.cpp is split into 5+ focused source files.",
+        "include/marrow/runtime/skeleton.hpp public API is unchanged.",
+        "All existing tests compile and pass without modification.",
+        "CMakeLists.txt is updated with the new source files."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-057",
+      "title": "Add error reporting for silent failure paths",
+      "description": "Several code paths silently fail: GPU skinning returns empty vector on bad bone index (renderer/module.cpp:267), empty attachment name silently replaces (skeleton.cpp:3232). Convert these to explicit error reporting via std::optional<std::string> or error callbacks.",
+      "acceptanceCriteria": [
+        "GPU skinning evaluation reports an error on invalid bone index instead of returning empty.",
+        "Attachment operations report errors on invalid names instead of silently proceeding.",
+        "At least 3 previously-silent error paths now produce actionable messages.",
+        "Error paths are exercised by new negative test cases in the smoke test."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-058",
+      "title": "Add comprehensive unit tests for runtime math",
+      "description": "The current test coverage is limited to 2 smoke test files. Add focused unit tests for: interpolation edge cases, matrix composition, IK solving, physics stepping, and SkeletonBounds queries. Use a lightweight test framework or plain assertions.",
+      "acceptanceCriteria": [
+        "A new test target (marrow_unit_tests) exists in CMakeLists.txt.",
+        "Interpolation tests cover: boundary values (alpha=0, 1), bezier extremes, stepped transitions.",
+        "Matrix tests cover: identity, pure rotation, pure scale, shear, parent-child composition.",
+        "IK tests cover: reachable, unreachable, degenerate, and wrap-around cases.",
+        "All tests pass and are documented in AGENTS.md."
+      ],
+      "dependsOn": [
+        "MAR-040",
+        "MAR-041",
+        "MAR-042"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-059",
+      "title": "Add .mskl/.matl format version header and migration check",
+      "description": "Current format files have no version header, making future format changes risky. Add a 'version' field to .mskl and .matl root objects, validate on load, and reject unsupported versions with a clear message.",
+      "acceptanceCriteria": [
+        "All .mskl and .matl fixture files include a 'version' field.",
+        "The loader validates the version and rejects unknown versions with an actionable error.",
+        "A test with a future version number (e.g., 99) produces a clear rejection message.",
+        "Existing fixtures load successfully after adding the version field."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-060",
+      "title": "Implement AnimationState timeline mode system",
+      "description": "Research found Spine uses SUBSEQUENT/FIRST/HOLD_SUBSEQUENT/HOLD_FIRST/HOLD_MIX modes per timeline to control how each property blends during mixing. This determines whether a timeline uses setup pose or current pose as the base. Marrow has none of this, using flat weight-based blend. Also add: trackEnd for empty animation auto-clear, interruptAlpha for smooth crossfade interruption, mixingTo back-pointer for doubly-linked mixing chain, never-applied entry detection (nextTrackLast == -1).",
+      "acceptanceCriteria": [
+        "Each timeline in a TrackEntry has an assigned mode (SUBSEQUENT/FIRST/HOLD_SUBSEQUENT/HOLD_FIRST/HOLD_MIX).",
+        "Timeline modes are computed via _computeHold using the mixingTo chain.",
+        "TrackEntry has trackEnd field; empty animations auto-clear when trackLast >= trackEnd.",
+        "interruptAlpha preserves mix progress when a crossfade is interrupted.",
+        "Entries that were never applied (nextTrackLast == -1) skip mixing-from.",
+        "A test interrupting a crossfade mid-transition produces smooth result, not a pop.",
+        "A test validates empty animation fades to setup pose and auto-clears the track."
+      ],
+      "dependsOn": [
+        "MAR-042"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-061",
+      "title": "Implement streaming VBO batch renderer with draw call merging",
+      "description": "Research shows production Spine renderers use a single streaming VBO batcher that merges consecutive draw commands sharing the same (texture, blend_mode) pair. Marrow's PreparedScene currently separates region and mesh attachments. Unify into a single slot-ordered draw list, allocate one large VBO (~2MB), map + append vertices each frame, and issue glDrawElements per batch boundary. Use mat3x2 for bone palette uniforms (half the cost of mat4).",
+      "acceptanceCriteria": [
+        "PreparedScene produces a single interleaved draw command list ordered by slot index.",
+        "Consecutive commands with same texture and blend mode are merged into one batch.",
+        "A streaming VBO (GL_STREAM_DRAW) uploads all vertices in one glBufferSubData per frame.",
+        "Bone palette uses mat3x2 uniforms (6 floats per bone, not 16).",
+        "A renderer sample with multiple skeletons demonstrates cross-skeleton batching.",
+        "Draw call count is logged and verified to be minimal."
+      ],
+      "dependsOn": [
+        "MAR-047"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-062",
+      "title": "Implement two-color tint shader with PMA support",
+      "description": "Research found the exact Spine two-color tint formula: output.rgb = (texColor.a - texColor.rgb) * dark.rgb + texColor.rgb * light.rgb for PMA textures. Also support a u_pma toggle for straight-alpha: output.rgb = (u_pma + (1-u_pma)*texColor.a - texColor.rgb) * dark + texColor.rgb * light. Dark color must be a per-vertex attribute (not uniform) for correct batching across slots with different dark colors.",
+      "acceptanceCriteria": [
+        "Fragment shader implements the exact Spine PMA two-color tint formula.",
+        "dark_color is passed as a per-vertex attribute (4 x uint8 normalized).",
+        "A u_pma uniform toggles between premultiplied and straight alpha modes.",
+        "PMA blend mode uses glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA).",
+        "Renderer sample demonstrates visible two-color tinting on at least one slot.",
+        "Non-tinted slots use a simplified shader path (skip dark color reads)."
+      ],
+      "dependsOn": [
+        "MAR-047"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-063",
+      "title": "Implement GPU stencil-based clipping for clip attachments",
+      "description": "Research shows GPU stencil clipping is simpler and more performant than CPU polygon clipping for Spine-like runtimes. Algorithm: (1) flush batch, (2) disable color writes, (3) clear stencil, (4) set stencil op to INVERT, (5) draw clip polygon as triangle fan, (6) enable color + stencil test NOTEQUAL, (7) draw clipped attachments, (8) disable stencil. This handles concave polygons natively via stencil inversion.",
+      "acceptanceCriteria": [
+        "GLFW window requests 8-bit stencil buffer (GLFW_STENCIL_BITS, 8).",
+        "Clipping polygon renders to stencil buffer using GL_INVERT with triangle fan.",
+        "Draw commands between clip-start and clip-end are stencil-tested.",
+        "Stencil state is restored after clip range ends.",
+        "A test with a concave clipping polygon correctly masks interior attachments.",
+        "Nested clipping uses incremented stencil reference values."
+      ],
+      "dependsOn": [
+        "MAR-047",
+        "MAR-049"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-064",
+      "title": "Implement editor viewport with FBO, docking, and bone picking",
+      "description": "Research provides exact patterns for ImGui FBO viewport, DockBuilder layout, and bone picking. Wire GL rendering into an offscreen FBO, display via ImGui::Image with UV flip, use DockSpaceOverViewport + DockBuilder for default panel layout (Viewport/Timeline/Hierarchy/Properties), and implement point-to-segment bone picking in screen space with joint priority.",
+      "acceptanceCriteria": [
+        "Editor renders skeleton into an FBO and displays it as ImGui::Image in the viewport panel.",
+        "UV coordinates are Y-flipped for OpenGL convention (ImVec2(0,1) to ImVec2(1,0)).",
+        "FBO resizes when the viewport panel resizes.",
+        "DockBuilder creates default layout: Viewport center, Timeline bottom, Hierarchy left-top, Properties left-bottom.",
+        "Clicking in viewport picks the nearest bone using screen-space point-to-segment distance.",
+        "Joint hit zones (6px radius) take priority over bone body hit zones (8px threshold).",
+        "Selected bone highlights in viewport and syncs with inspector."
+      ],
+      "dependsOn": [
+        "MAR-047",
+        "MAR-049"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-065",
+      "title": "Implement editor undo/redo with command pattern",
+      "description": "Research provides the ImGui-specific undo/redo pattern: use EditAction command objects with undo()/redo() methods, IsItemDeactivatedAfterEdit() to coalesce continuous drags into single undo entries, and merge-by-group for related edits. Implement for: bone transform edits, keyframe add/remove/modify, constraint property changes, and skin/attachment swaps.",
+      "acceptanceCriteria": [
+        "UndoStack maintains undo and redo vectors of EditAction objects (max depth 100).",
+        "Ctrl+Z undoes, Ctrl+Shift+Z redoes.",
+        "ImGui sliders/drags use IsItemDeactivatedAfterEdit to coalesce into one undo entry.",
+        "At least 4 action types implemented: MoveBone, AddKeyframe, RemoveKeyframe, EditProperty.",
+        "Redo stack clears when a new action is executed after undo.",
+        "Editor smoke test validates a full undo/redo cycle."
+      ],
+      "dependsOn": [
+        "MAR-054"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-066",
+      "title": "Add binary format keyframe quantization and key reduction",
+      "description": "Research from Riot Games shows 48-bit quantized keyframes (16-bit time + 16-bit channel index + 32-bit payload for 2D) with iterative Bezier curve fitting can reduce animation data by 50-70%. Implement at export time: (1) Quantize rotation to 16-bit, position to 2x16-bit. (2) Curve fit to remove redundant keyframes within error threshold. (3) Store all keyframes contiguously sorted by time for cache-friendly playback.",
+      "acceptanceCriteria": [
+        "Export pipeline quantizes rotation keyframes to 16-bit (±0.006° precision).",
+        "Position keyframes quantize to 2x16-bit with animation bounding box range reduction.",
+        "Key reduction removes redundant keyframes within configurable error threshold.",
+        "Binary format stores keyframes contiguously sorted by (time, bone_index).",
+        "Roundtrip test: original animation vs quantized animation has max error < 0.1° rotation, < 0.5px position.",
+        "Size comparison logged: binary-quantized vs JSON."
+      ],
+      "dependsOn": [
+        "MAR-059"
+      ],
+      "status": "open"
     }
   ]
 }
