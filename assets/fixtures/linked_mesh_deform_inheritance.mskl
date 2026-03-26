@@ -1,0 +1,193 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "linked_mesh_deform_inheritance",
+    "width": 100,
+    "height": 80
+  },
+  "bones": [
+    {
+      "name": "root"
+    }
+  ],
+  "slots": [
+    {
+      "name": "body",
+      "bone": "root",
+      "attachment": "body"
+    }
+  ],
+  "skins": {
+    "default": {
+      "body": {
+        "attachment": "body",
+        "type": "region",
+        "region": "body"
+      }
+    },
+    "mesh_base": {
+      "body": {
+        "attachment": "body_mesh",
+        "type": "mesh",
+        "region": "body",
+        "vertices": [
+          -40,
+          -30,
+          40,
+          -30,
+          40,
+          30,
+          -40,
+          30
+        ],
+        "triangles": [
+          0,
+          1,
+          2,
+          2,
+          3,
+          0
+        ],
+        "uvs": [
+          0,
+          0,
+          1,
+          0,
+          1,
+          1,
+          0,
+          1
+        ],
+        "weights": [
+          [
+            {
+              "bone": "root",
+              "x": -40,
+              "y": -30,
+              "weight": 1.0
+            }
+          ],
+          [
+            {
+              "bone": "root",
+              "x": 40,
+              "y": -30,
+              "weight": 1.0
+            }
+          ],
+          [
+            {
+              "bone": "root",
+              "x": 40,
+              "y": 30,
+              "weight": 1.0
+            }
+          ],
+          [
+            {
+              "bone": "root",
+              "x": -40,
+              "y": 30,
+              "weight": 1.0
+            }
+          ]
+        ]
+      }
+    },
+    "linked_deform_skin": {
+      "body": {
+        "attachment": "linked_deform",
+        "type": "linked_mesh",
+        "region": "body",
+        "parent": "body_mesh",
+        "skin": "mesh_base",
+        "deform": true
+      }
+    },
+    "linked_rigid_skin": {
+      "body": {
+        "attachment": "linked_rigid",
+        "type": "linked_mesh",
+        "region": "body",
+        "parent": "body_mesh",
+        "skin": "mesh_base",
+        "deform": false
+      }
+    }
+  },
+  "animations": {
+    "inherit_test": {
+      "slots": {
+        "body": {
+          "attachment": [
+            {
+              "time": 0.0,
+              "attachment": "body"
+            },
+            {
+              "time": 0.25,
+              "attachment": "linked_deform"
+            },
+            {
+              "time": 0.75,
+              "attachment": "linked_rigid"
+            },
+            {
+              "time": 1.0,
+              "attachment": "body"
+            }
+          ]
+        }
+      },
+      "deform": {
+        "body": {
+          "body_mesh": [
+            {
+              "time": 0.0,
+              "vertices": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "curve": "linear"
+            },
+            {
+              "time": 0.5,
+              "vertices": [
+                0,
+                0,
+                10,
+                -4,
+                6,
+                12,
+                -8,
+                2
+              ],
+              "curve": "linear"
+            },
+            {
+              "time": 1.0,
+              "vertices": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "curve": "linear"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "inherit_modes_nonuniform_scale",
+    "width": 128,
+    "height": 128
+  },
+  "bones": [
+    {
+      "name": "root",
+      "x": 4,
+      "y": -6,
+      "rotation": 15,
+      "scaleX": 1.2,
+      "scaleY": 0.9,
+      "shearX": 5,
+      "shearY": -10
+    },
+    {
+      "name": "controller",
+      "parent": "root",
+      "x": 20,
+      "y": 12,
+      "rotation": 35,
+      "scaleX": 2.0,
+      "scaleY": 0.5,
+      "shearX": 0,
+      "shearY": 15
+    },
+    {
+      "name": "normal_child",
+      "parent": "controller",
+      "x": 12,
+      "y": -7,
+      "rotation": 25,
+      "scaleX": 1.1,
+      "scaleY": 0.8,
+      "shearX": 10,
+      "shearY": -5,
+      "inherit": "normal"
+    },
+    {
+      "name": "only_translation_child",
+      "parent": "controller",
+      "x": 12,
+      "y": -7,
+      "rotation": 25,
+      "scaleX": 1.1,
+      "scaleY": 0.8,
+      "shearX": 10,
+      "shearY": -5,
+      "inherit": "onlyTranslation"
+    },
+    {
+      "name": "no_rotation_or_reflection_child",
+      "parent": "controller",
+      "x": 12,
+      "y": -7,
+      "rotation": 25,
+      "scaleX": 1.1,
+      "scaleY": 0.8,
+      "shearX": 10,
+      "shearY": -5,
+      "inherit": "noRotationOrReflection"
+    },
+    {
+      "name": "no_scale_child",
+      "parent": "controller",
+      "x": 12,
+      "y": -7,
+      "rotation": 25,
+      "scaleX": 1.1,
+      "scaleY": 0.8,
+      "shearX": 10,
+      "shearY": -5,
+      "inherit": "noScale"
+    },
+    {
+      "name": "no_scale_or_reflection_child",
+      "parent": "controller",
+      "x": 12,
+      "y": -7,
+      "rotation": 25,
+      "scaleX": 1.1,
+      "scaleY": 0.8,
+      "shearX": 10,
+      "shearY": -5,
+      "inherit": "noScaleOrReflection"
+    }
+  ],
+  "slots": [
+    {
+      "name": "dummy",
+      "bone": "root",
+      "attachment": "dummy"
+    }
+  ],
+  "skins": {
+    "default": {
+      "dummy": {
+        "attachment": "dummy",
+        "type": "region",
+        "region": "dummy"
+      }
+    }
+  },
+  "animations": {
+    "setup": {}
+  },
+  "events": {
+    "noop": {}
+  }
+}

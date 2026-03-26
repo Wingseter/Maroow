@@ -1,5 +1,6 @@
 {
   "marrow": "1.0",
+  "version": 1,
   "skeleton": {
     "name": "skin_inherit_constraints",
     "width": 256,
@@ -73,27 +74,19 @@
           "inherit": [
             {
               "time": 0.0,
-              "inheritRotation": true,
-              "inheritScale": true,
-              "inheritReflection": true
+              "inherit": "normal"
             },
             {
               "time": 0.25,
-              "inheritRotation": true,
-              "inheritScale": true,
-              "inheritReflection": false
+              "inherit": "noRotationOrReflection"
             },
             {
               "time": 0.5,
-              "inheritRotation": false,
-              "inheritScale": false,
-              "inheritReflection": false
+              "inherit": "onlyTranslation"
             },
             {
               "time": 1.0,
-              "inheritRotation": true,
-              "inheritScale": true,
-              "inheritReflection": true
+              "inherit": "normal"
             }
           ]
         }

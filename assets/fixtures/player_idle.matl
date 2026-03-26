@@ -1,5 +1,6 @@
 {
   "marrow": "1.0",
+  "version": 1,
   "atlas": {
     "name": "player_fixture",
     "image": "player_fixture.png",
@@ -8,7 +9,8 @@
     "filter_min": "linear",
     "filter_mag": "linear",
     "wrap_x": "clamp_to_edge",
-    "wrap_y": "clamp_to_edge"
+    "wrap_y": "clamp_to_edge",
+    "premultiplied_alpha": false
   },
   "regions": [
     {

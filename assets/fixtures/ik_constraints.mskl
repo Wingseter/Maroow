@@ -1,9 +1,10 @@
 {
   "marrow": "1.0",
+  "version": 1,
   "skeleton": {
     "name": "ik_constraints",
-    "width": 480,
-    "height": 320
+    "width": 960,
+    "height": 640
   },
   "bones": [
     { "name": "root" },
@@ -20,7 +21,40 @@
     { "name": "target_full", "parent": "root", "x": 220, "y": 60 },
     { "name": "turret_half", "parent": "root", "x": 340, "y": 0 },
     { "name": "muzzle_half", "parent": "turret_half", "x": 60, "y": 0 },
-    { "name": "target_half", "parent": "root", "x": 340, "y": 60 }
+    { "name": "target_half", "parent": "root", "x": 340, "y": 60 },
+    { "name": "turret_stretch", "parent": "root", "x": 220, "y": -120 },
+    { "name": "muzzle_stretch", "parent": "turret_stretch", "x": 60, "y": 0 },
+    { "name": "target_stretch", "parent": "root", "x": 220, "y": 20 },
+    { "name": "turret_compress", "parent": "root", "x": 340, "y": -120 },
+    { "name": "muzzle_compress", "parent": "turret_compress", "x": 60, "y": 0 },
+    { "name": "target_compress", "parent": "root", "x": 370, "y": -120 },
+    { "name": "upper_arm_soft", "parent": "root", "x": -220, "y": -120 },
+    { "name": "lower_arm_soft", "parent": "upper_arm_soft", "x": 100, "y": 0 },
+    { "name": "hand_soft", "parent": "lower_arm_soft", "x": 80, "y": 0 },
+    { "name": "target_soft", "parent": "root", "x": -30, "y": -120 },
+    { "name": "upper_arm_rigid", "parent": "root", "x": -220, "y": -240 },
+    { "name": "lower_arm_rigid", "parent": "upper_arm_rigid", "x": 100, "y": 0 },
+    { "name": "hand_rigid", "parent": "lower_arm_rigid", "x": 80, "y": 0 },
+    { "name": "target_rigid", "parent": "root", "x": -30, "y": -240 },
+    { "name": "upper_arm_nonuniform", "parent": "root", "x": -220, "y": 220, "scaleX": 1, "scaleY": 2 },
+    { "name": "lower_arm_nonuniform", "parent": "upper_arm_nonuniform", "x": 100, "y": 0 },
+    { "name": "hand_nonuniform", "parent": "lower_arm_nonuniform", "x": 60, "y": 0 },
+    { "name": "target_nonuniform", "parent": "root", "x": -80, "y": 320 },
+    { "name": "turret_flip", "parent": "root", "x": 460, "y": 0, "scaleX": -1 },
+    { "name": "muzzle_flip", "parent": "turret_flip", "x": 60, "y": 0 },
+    { "name": "target_flip", "parent": "root", "x": 460, "y": 60 },
+    { "name": "upper_arm_overlap", "parent": "root", "x": -460, "y": 0 },
+    { "name": "lower_arm_overlap", "parent": "upper_arm_overlap", "x": 100, "y": 0 },
+    { "name": "hand_overlap", "parent": "lower_arm_overlap", "x": 80, "y": 0 },
+    { "name": "target_overlap", "parent": "root", "x": -460, "y": 0 },
+    { "name": "upper_arm_zero", "parent": "root", "x": -460, "y": 180 },
+    { "name": "lower_arm_zero", "parent": "upper_arm_zero", "x": 0, "y": 0 },
+    { "name": "hand_zero", "parent": "lower_arm_zero", "x": 60, "y": 0 },
+    { "name": "target_zero", "parent": "root", "x": -420, "y": 220 },
+    { "name": "upper_arm_stretch", "parent": "root", "x": 0, "y": 420 },
+    { "name": "lower_arm_stretch", "parent": "upper_arm_stretch", "x": 100, "y": 0 },
+    { "name": "hand_stretch", "parent": "lower_arm_stretch", "x": 80, "y": 0 },
+    { "name": "target_arm_stretch", "parent": "root", "x": 210, "y": 420 }
   ],
   "slots": [
     { "name": "debug", "bone": "root", "attachment": "debug" }
@@ -54,6 +88,70 @@
       "bones": ["turret_half"],
       "target": "target_half",
       "mix": 0.5
+    },
+    {
+      "name": "turret_stretch",
+      "bones": ["turret_stretch"],
+      "target": "target_stretch",
+      "mix": 1.0,
+      "stretch": true
+    },
+    {
+      "name": "turret_compress",
+      "bones": ["turret_compress"],
+      "target": "target_compress",
+      "mix": 1.0,
+      "compress": true
+    },
+    {
+      "name": "arm_soft",
+      "bones": ["upper_arm_soft", "lower_arm_soft"],
+      "target": "target_soft",
+      "mix": 1.0,
+      "bendPositive": true,
+      "softness": 20.0
+    },
+    {
+      "name": "arm_rigid",
+      "bones": ["upper_arm_rigid", "lower_arm_rigid"],
+      "target": "target_rigid",
+      "mix": 1.0,
+      "bendPositive": true
+    },
+    {
+      "name": "arm_nonuniform",
+      "bones": ["upper_arm_nonuniform", "lower_arm_nonuniform"],
+      "target": "target_nonuniform",
+      "mix": 1.0,
+      "bendPositive": true
+    },
+    {
+      "name": "turret_flip",
+      "bones": ["turret_flip"],
+      "target": "target_flip",
+      "mix": 1.0
+    },
+    {
+      "name": "arm_overlap_root",
+      "bones": ["upper_arm_overlap", "lower_arm_overlap"],
+      "target": "target_overlap",
+      "mix": 1.0,
+      "bendPositive": true
+    },
+    {
+      "name": "arm_zero_parent",
+      "bones": ["upper_arm_zero", "lower_arm_zero"],
+      "target": "target_zero",
+      "mix": 1.0,
+      "bendPositive": true
+    },
+    {
+      "name": "arm_stretch",
+      "bones": ["upper_arm_stretch", "lower_arm_stretch"],
+      "target": "target_arm_stretch",
+      "mix": 1.0,
+      "bendPositive": true,
+      "stretch": true
     }
   ]
 }

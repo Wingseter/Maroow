@@ -1,5 +1,6 @@
 {
   "marrow": "1.0",
+  "version": 1,
   "skeleton": {
     "name": "player",
     "width": 256,
@@ -294,13 +295,13 @@
               "bone": "spine",
               "x": 64,
               "y": -80,
-              "weight": 0.75
+              "weight": 0.6
             },
             {
               "bone": "arm_l",
               "x": 94,
               "y": -90,
-              "weight": 0.25
+              "weight": 0.2
             }
           ],
           [
@@ -308,13 +309,13 @@
               "bone": "spine",
               "x": 64,
               "y": 80,
-              "weight": 0.25
+              "weight": 0.2
             },
             {
               "bone": "arm_l",
               "x": 94,
               "y": 70,
-              "weight": 0.75
+              "weight": 0.6
             }
           ],
           [
@@ -322,13 +323,13 @@
               "bone": "spine",
               "x": -64,
               "y": 80,
-              "weight": 0.75
+              "weight": 0.6
             },
             {
               "bone": "arm_l",
               "x": -34,
               "y": 70,
-              "weight": 0.25
+              "weight": 0.2
             }
           ]
         ]

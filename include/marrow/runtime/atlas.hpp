@@ -22,6 +22,7 @@ struct AtlasInfo {
     std::string filter_mag;
     std::string wrap_x;
     std::string wrap_y;
+    bool premultiplied_alpha{false};
 };
 
 struct AtlasRegion {

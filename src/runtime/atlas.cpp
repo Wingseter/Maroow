@@ -1,6 +1,7 @@
 #include "marrow/runtime/atlas.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace marrow::runtime {
@@ -10,6 +11,8 @@ using json::Document;
 using json::LoadError;
 using json::SourceLocation;
 using json::Value;
+
+constexpr int kSupportedAtlasFormatVersion = 1;
 
 LoadError validation_error(
     const Document& document,
@@ -25,6 +28,46 @@ const Value* find_optional_member(const Value& object, std::string_view key) {
         return nullptr;
     }
     return json::find_member(object, key);
+}
+
+std::optional<LoadError> validate_format_version(const Document& document, const Value& root) {
+    const Value* version_value = json::find_member(root, "version");
+    if (version_value == nullptr) {
+        return validation_error(
+            document,
+            root.location(),
+            "$.version",
+            "missing .matl format version; re-export or migrate the asset to version " +
+                std::to_string(kSupportedAtlasFormatVersion));
+    }
+    if (const auto error = json::require_type(
+            document, *version_value, Value::Type::Number, "$.version")) {
+        return error;
+    }
+
+    const double version_number = version_value->as_number();
+    if (!std::isfinite(version_number) || std::floor(version_number) != version_number ||
+        version_number < 1.0) {
+        return validation_error(
+            document,
+            version_value->location(),
+            "$.version",
+            ".matl format version must be a positive integer");
+    }
+
+    const int version = static_cast<int>(version_number);
+    if (version != kSupportedAtlasFormatVersion) {
+        return validation_error(
+            document,
+            version_value->location(),
+            "$.version",
+            "unsupported .matl format version " + std::to_string(version) +
+                "; supported version is " + std::to_string(kSupportedAtlasFormatVersion) +
+                ". Re-export or migrate the asset to version " +
+                std::to_string(kSupportedAtlasFormatVersion));
+    }
+
+    return std::nullopt;
 }
 
 std::optional<LoadError> read_required_string(
@@ -78,6 +121,28 @@ std::optional<LoadError> read_optional_number(
     }
 
     *value_out = member->as_number();
+    return std::nullopt;
+}
+
+std::optional<LoadError> read_optional_boolean(
+    const Document& document,
+    const Value& object,
+    std::string_view key,
+    std::string_view json_path,
+    bool* value_out) {
+    const Value* member = find_optional_member(object, key);
+    if (member == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = json::require_type(
+            document,
+            *member,
+            Value::Type::Boolean,
+            std::string(json_path) + "." + std::string(key))) {
+        return error;
+    }
+
+    *value_out = member->as_boolean();
     return std::nullopt;
 }
 
@@ -142,6 +207,14 @@ std::optional<LoadError> parse_atlas_info(
     }
     if (const auto error = read_required_string(
             document, *atlas, "wrap_y", "$.atlas", &info_out->wrap_y)) {
+        return error;
+    }
+    if (const auto error = read_optional_boolean(
+            document,
+            *atlas,
+            "premultiplied_alpha",
+            "$.atlas",
+            &info_out->premultiplied_alpha)) {
         return error;
     }
 
@@ -279,6 +352,10 @@ AtlasDataResult AtlasLoader::load(const json::Document& document) {
     }
     if (const auto error = json::require_member(
             document, root, "marrow", Value::Type::String, "$")) {
+        result.error = *error;
+        return result;
+    }
+    if (const auto error = validate_format_version(document, root)) {
         result.error = *error;
         return result;
     }

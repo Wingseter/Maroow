@@ -50,6 +50,9 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 | `.png` | 실제 텍스처 아틀라스 | 이미지 |
 
 > 개발 초기에는 JSON으로 시작, 디버깅 안정화 후 바이너리 컴파일러 추가
+> `.mskl` / `.matl` 루트에는 정수 `version` 필드가 포함되며, 현재 런타임은 `version: 1`만 로드한다.
+> `.matl.atlas.premultiplied_alpha` 불리언으로 straight alpha와 PMA 텍스처를 구분하며, 렌더러는 이 값을 기준으로 셰이더/블렌드 경로를 전환한다.
+> `.mbin`은 검증된 런타임 문서를 그대로 보존하면서 회전/이동 키프레임에 대해 16-bit 시간/채널 인덱스 + 양자화 payload를 추가 저장해, 내보내기 시 키 감소와 런타임 quantized playback을 지원한다.
 
 ---
 
@@ -58,6 +61,7 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 ```json
 {
   "marrow": "1.0",
+  "version": 1,
   "skeleton": {
     "name": "player",
     "width": 256,
