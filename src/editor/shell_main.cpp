@@ -1,8 +1,10 @@
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -29,9 +31,12 @@
 #include "imgui_impl_opengl3.h"
 #include "imgui_internal.h"
 
+#include "marrow/allocator.hpp"
 #include "marrow/editor/module.hpp"
 #include "marrow/editor/project.hpp"
+#include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
+#include "marrow/runtime/profiler.hpp"
 
 namespace {
 
@@ -71,6 +76,22 @@ struct ViewportLayout {
     std::vector<BoneCanvasNode> bones;
 };
 
+struct OnionSkinGhostPose {
+    std::vector<BoneCanvasNode> bones;
+    double time_seconds{0.0};
+    int distance_rank{0};
+    bool before_current{true};
+    ImU32 line_color{0};
+    ImU32 fill_color{0};
+    ImU32 outline_color{0};
+};
+
+struct OnionSkinSampleSpec {
+    double time_seconds{0.0};
+    int distance_rank{0};
+    bool before_current{true};
+};
+
 struct ViewportRenderVertex {
     float position_x{0.0f};
     float position_y{0.0f};
@@ -99,6 +120,12 @@ struct ViewportRenderResources {
     int framebuffer_width{0};
     int framebuffer_height{0};
     std::string error_message;
+};
+
+struct RuntimeAssetWatchEntry {
+    std::filesystem::path path;
+    bool exists{false};
+    std::optional<std::filesystem::file_time_type> write_time;
 };
 
 struct DockLayoutState {
@@ -135,6 +162,75 @@ struct MeshWeightVertexRow {
     std::vector<MeshWeightInfluenceRow> influences;
 };
 
+enum class WeightPaintMode {
+    Paint,
+    Erase,
+    Smooth,
+};
+
+struct WeightPaintSettings {
+    bool enabled{false};
+    WeightPaintMode mode{WeightPaintMode::Paint};
+    float radius_pixels{44.0f};
+    float strength{0.35f};
+    bool show_heatmap{true};
+};
+
+struct MeshWeightPaintTarget {
+    std::size_t slot_index{0};
+    std::optional<std::size_t> source_skin_index;
+    std::string source_skin_name;
+    std::string slot_name;
+    std::string source_attachment_name;
+    std::string display_attachment_name;
+    const marrow::runtime::AttachmentData* source_attachment{nullptr};
+    const marrow::runtime::AttachmentData* display_attachment{nullptr};
+};
+
+struct MeshWeightOverlayVertex {
+    ImVec2 screen_position{};
+    marrow::runtime::MeshWorldVertex world_position{};
+    double weight{0.0};
+};
+
+struct MeshWeightOverlay {
+    MeshWeightPaintTarget target;
+    std::vector<MeshWeightOverlayVertex> vertices;
+    std::vector<std::size_t> triangles;
+    std::vector<std::vector<std::size_t>> neighbors;
+    std::vector<double> vertex_offsets;
+};
+
+struct DebugOverlayLineSegment {
+    ImVec2 start{};
+    ImVec2 end{};
+    ImU32 color{0};
+    float thickness{1.0f};
+};
+
+struct DebugOverlayCircle {
+    ImVec2 center{};
+    float radius{0.0f};
+    ImU32 fill_color{0};
+    ImU32 outline_color{0};
+    float outline_thickness{1.0f};
+};
+
+struct DebugOverlayStats {
+    bool bones_enabled{false};
+    std::size_t ik_constraint_count{0};
+    std::size_t path_constraint_count{0};
+    std::size_t physics_constraint_count{0};
+    std::size_t mesh_attachment_count{0};
+    std::size_t bounding_box_count{0};
+};
+
+struct DebugOverlayGeometry {
+    std::vector<DebugOverlayLineSegment> lines;
+    std::vector<DebugOverlayCircle> circles;
+    DebugOverlayStats stats{};
+};
+
 struct TimelineTrackRow {
     std::string id;
     std::string label;
@@ -165,6 +261,16 @@ struct EditorHistorySnapshot {
     std::string serialized_project;
     std::vector<std::string> preview_skin_names;
     std::vector<std::optional<AttachmentSelection>> preview_slot_overrides;
+};
+
+struct MeshWeightStrokeState {
+    bool active{false};
+    bool changed{false};
+    EditorHistorySnapshot before_snapshot;
+    std::string label;
+    std::string group;
+    ImVec2 last_sample_position{};
+    bool has_last_sample{false};
 };
 
 enum class EditActionKind {
@@ -272,13 +378,16 @@ struct PendingEditAction {
 struct ShellState {
     std::filesystem::path project_path;
     marrow::editor::ViewportState viewport{};
+    bool hud_overlay_enabled{false};
+    WeightPaintSettings weight_paint{};
     marrow::editor::ProjectLoadResult load_result{};
     UndoStack command_stack;
     std::optional<PendingEditAction> pending_edit_action;
+    MeshWeightStrokeState weight_paint_stroke{};
     ViewportRenderResources viewport_renderer{};
     DockLayoutState dock_layout{};
-    std::unique_ptr<marrow::runtime::Skeleton> preview_skeleton;
-    std::unique_ptr<marrow::runtime::AnimationState> animation_state;
+    marrow::UniquePtr<marrow::runtime::Skeleton> preview_skeleton;
+    marrow::UniquePtr<marrow::runtime::AnimationState> animation_state;
     std::optional<std::size_t> selected_bone_index;
     std::optional<std::size_t> selected_slot_index;
     std::optional<AttachmentSelection> selected_attachment;
@@ -305,6 +414,8 @@ struct ShellState {
     std::string saved_project_snapshot;
     std::string status_message;
     std::string error_message;
+    std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
+    std::optional<marrow::runtime::ProfilerFrame> hud_overlay_frame;
 };
 
 constexpr char kProjectWindowTitle[] = "Project";
@@ -319,6 +430,8 @@ constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};
 constexpr ImVec2 kViewportImageUv1{1.0f, 0.0f};
 constexpr float kPi = 3.14159265358979323846f;
+constexpr double kOnionSkinFrameRate = 60.0;
+constexpr double kOnionSkinFrameDuration = 1.0 / kOnionSkinFrameRate;
 constexpr const char* kViewportVertexShaderSource = R"(#version 150
 in vec2 a_position;
 in vec4 a_color;
@@ -358,6 +471,7 @@ std::string source_skin_name(
 const char* blend_mode_name(marrow::runtime::BlendMode blend_mode);
 const char* attachment_kind_name(marrow::runtime::AttachmentKind kind);
 const char* sequence_playback_mode_name(marrow::runtime::SequencePlaybackMode mode);
+const char* onion_skin_mode_name(marrow::editor::OnionSkinMode mode);
 std::string format_slot_color(const marrow::runtime::SlotColor& color);
 std::vector<std::string> normalize_preview_skin_names(
     const marrow::runtime::SkeletonData& skeleton,
@@ -435,6 +549,19 @@ bool record_action_from_snapshots(
     std::string group,
     bool allow_merge);
 bool rebuild_project_runtime(ShellState* state);
+std::vector<std::filesystem::path> current_runtime_asset_paths(const ShellState& state);
+void reset_runtime_asset_watch(ShellState* state);
+bool apply_current_animation_state_to_preview(ShellState* state);
+bool restore_preview_playback(
+    ShellState* state,
+    const marrow::runtime::AnimationStateSnapshot& snapshot);
+bool reload_runtime_source_assets(ShellState* state);
+enum class RuntimeAssetPollOutcome {
+    Unchanged,
+    Reloaded,
+    Failed,
+};
+RuntimeAssetPollOutcome poll_runtime_asset_changes(ShellState* state);
 std::optional<std::string> initialize_viewport_renderer(
     ViewportRenderResources* resources);
 void destroy_viewport_renderer(ViewportRenderResources* resources);
@@ -448,17 +575,22 @@ std::optional<std::string> ensure_viewport_framebuffer(
 std::optional<std::string> render_viewport_framebuffer(
     const ShellState& state,
     const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     ViewportRenderResources* resources);
 void draw_viewport_fallback_scene(
     const ShellState& state,
     const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     ImDrawList* draw_list);
 void draw_viewport_annotations(
     const ShellState& state,
     const ViewportLayout& layout,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     ImDrawList* draw_list);
 void ensure_default_dock_layout(
     ShellState* state,
@@ -476,8 +608,28 @@ bool apply_project_command_change(
 bool undo_project_change(ShellState* state);
 bool redo_project_change(ShellState* state);
 void handle_project_history_shortcuts(ShellState* state);
+float squared_distance(const ImVec2& a, const ImVec2& b);
+template <typename MutateFn>
+bool execute_viewport_setting_edit_action(
+    ShellState* state,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate);
+template <typename MutateFn>
+bool apply_coalesced_viewport_drag(
+    ShellState* state,
+    bool changed,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate);
 bool save_project_file(ShellState* state, bool update_status_message);
 bool export_runtime_assets_file(ShellState* state, bool update_status_message);
+void apply_preview_slot_overrides(
+    const ShellState& state,
+    marrow::runtime::Skeleton* skeleton);
+void apply_preview_slot_overrides(ShellState* state);
 bool refresh_preview_pose(ShellState* state);
 bool set_selected_animation(
     ShellState* state,
@@ -485,6 +637,15 @@ bool set_selected_animation(
     std::string_view source,
     bool update_status_message,
     bool reset_time);
+std::optional<marrow::runtime::ProfilerFrame> build_preview_profiler_frame(
+    const ShellState& state);
+ImVec2 screen_from_world(
+    const ViewportLayout& layout,
+    double world_x,
+    double world_y);
+ImVec2 local_viewport_position(
+    const ViewportLayout& layout,
+    const ImVec2& screen_position);
 bool scrub_timeline_time(
     ShellState* state,
     double time_seconds,
@@ -497,6 +658,10 @@ bool focus_timeline_track(
     double time_seconds,
     std::string_view source,
     bool update_status_message);
+std::vector<double> collect_animation_key_times(const marrow::runtime::AnimationData& animation);
+std::vector<OnionSkinGhostPose> build_onion_skin_ghost_poses(
+    const ShellState& state,
+    const ViewportLayout& layout);
 void draw_draw_order_timeline_editor(
     ShellState* state,
     const TimelineTrackRow& track);
@@ -668,6 +833,63 @@ std::vector<std::filesystem::path> absolutize_paths(
         absolute_paths.push_back(absolutize_path(path));
     }
     return absolute_paths;
+}
+
+RuntimeAssetWatchEntry make_runtime_asset_watch_entry(const std::filesystem::path& path) {
+    RuntimeAssetWatchEntry entry;
+    entry.path = absolutize_path(path);
+
+    std::error_code error;
+    entry.exists = std::filesystem::exists(entry.path, error);
+    if (error || !entry.exists) {
+        entry.exists = false;
+        return entry;
+    }
+
+    const auto write_time = std::filesystem::last_write_time(entry.path, error);
+    if (!error) {
+        entry.write_time = write_time;
+    }
+    return entry;
+}
+
+bool runtime_asset_watch_entry_equal(
+    const RuntimeAssetWatchEntry& left,
+    const RuntimeAssetWatchEntry& right) {
+    return left.path == right.path &&
+        left.exists == right.exists &&
+        left.write_time == right.write_time;
+}
+
+std::vector<std::filesystem::path> current_runtime_asset_paths(const ShellState& state) {
+    std::vector<std::filesystem::path> paths;
+    if (!state.load_result || state.load_result.project == nullptr) {
+        return paths;
+    }
+
+    paths.push_back(absolutize_path(state.load_result.project->resolved_skeleton_path()));
+    for (const auto& atlas_path : state.load_result.project->resolved_atlas_paths()) {
+        paths.push_back(absolutize_path(atlas_path));
+    }
+    return paths;
+}
+
+std::vector<RuntimeAssetWatchEntry> capture_runtime_asset_watch_entries(const ShellState& state) {
+    const std::vector<std::filesystem::path> paths = current_runtime_asset_paths(state);
+    std::vector<RuntimeAssetWatchEntry> entries;
+    entries.reserve(paths.size());
+    for (const auto& path : paths) {
+        entries.push_back(make_runtime_asset_watch_entry(path));
+    }
+    return entries;
+}
+
+void reset_runtime_asset_watch(ShellState* state) {
+    if (state == nullptr) {
+        return;
+    }
+
+    state->runtime_asset_watch_entries = capture_runtime_asset_watch_entries(*state);
 }
 
 void materialize_temp_project_runtime_assets(
@@ -1432,6 +1654,7 @@ void assign_history_snapshot(
     }
 
     *state->load_result.project = snapshot.project;
+    state->viewport.onion_skin = snapshot.project.editor_metadata.viewport.onion_skin;
     state->preview_skin_names = snapshot.preview_skin_names;
     state->preview_slot_overrides = snapshot.preview_slot_overrides;
 }
@@ -1540,6 +1763,28 @@ bool record_action_from_snapshots(
 }
 
 template <typename MutateFn>
+bool execute_viewport_setting_edit_action(
+    ShellState* state,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    const EditorHistorySnapshot before = capture_history_snapshot(*state);
+    mutate();
+    return record_action_from_snapshots(
+        state,
+        before,
+        EditActionKind::EditProperty,
+        std::move(label),
+        std::move(group),
+        allow_merge);
+}
+
+template <typename MutateFn>
 bool execute_preview_edit_action(
     ShellState* state,
     EditActionKind kind,
@@ -1633,6 +1878,119 @@ bool apply_coalesced_project_drag(
     }
 
     return true;
+}
+
+template <typename MutateFn>
+bool apply_onion_skin_edit(
+    ShellState* state,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate) {
+    return execute_viewport_setting_edit_action(
+        state,
+        std::move(label),
+        std::move(group),
+        allow_merge,
+        [&]() {
+            auto settings = state->viewport.onion_skin;
+            mutate(&settings);
+            state->viewport.onion_skin = settings;
+            state->load_result.project->editor_metadata.viewport.onion_skin = settings;
+        });
+}
+
+template <typename MutateFn>
+bool apply_debug_overlay_edit(
+    ShellState* state,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate) {
+    return execute_viewport_setting_edit_action(
+        state,
+        std::move(label),
+        std::move(group),
+        allow_merge,
+        [&]() {
+            auto settings = state->viewport.debug_overlay;
+            mutate(&settings);
+            state->viewport.debug_overlay = settings;
+            state->load_result.project->editor_metadata.viewport.debug_overlay = settings;
+        });
+}
+
+template <typename MutateFn>
+bool apply_coalesced_viewport_drag(
+    ShellState* state,
+    bool changed,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    const ImGuiID item_id = ImGui::GetItemID();
+    if (ImGui::IsItemActivated()) {
+        state->pending_edit_action = PendingEditAction{
+            item_id,
+            EditActionKind::EditProperty,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            capture_history_snapshot(*state)};
+    }
+
+    if (changed) {
+        mutate();
+        update_project_dirty_state(state);
+    }
+
+    if (ImGui::IsItemDeactivatedAfterEdit() &&
+        state->pending_edit_action.has_value() &&
+        state->pending_edit_action->item_id == item_id) {
+        PendingEditAction pending = std::move(*state->pending_edit_action);
+        state->pending_edit_action.reset();
+        return record_action_from_snapshots(
+            state,
+            pending.before_snapshot,
+            pending.kind,
+            std::move(pending.label),
+            std::move(pending.group),
+            pending.allow_merge);
+    }
+
+    if (ImGui::IsItemDeactivated() &&
+        state->pending_edit_action.has_value() &&
+        state->pending_edit_action->item_id == item_id) {
+        state->pending_edit_action.reset();
+    }
+
+    return true;
+}
+
+template <typename MutateFn>
+bool apply_coalesced_onion_skin_drag(
+    ShellState* state,
+    bool changed,
+    std::string label,
+    std::string group,
+    bool allow_merge,
+    MutateFn mutate) {
+    return apply_coalesced_viewport_drag(
+        state,
+        changed,
+        std::move(label),
+        std::move(group),
+        allow_merge,
+        [&]() {
+            auto settings = state->viewport.onion_skin;
+            mutate(&settings);
+            state->viewport.onion_skin = settings;
+            state->load_result.project->editor_metadata.viewport.onion_skin = settings;
+        });
 }
 
 const char* constraint_kind_label(ConstraintEditKind kind) {
@@ -2646,6 +3004,17 @@ const char* sequence_playback_mode_name(
     return "unknown";
 }
 
+const char* onion_skin_mode_name(marrow::editor::OnionSkinMode mode) {
+    switch (mode) {
+    case marrow::editor::OnionSkinMode::Frame:
+        return "Frame";
+    case marrow::editor::OnionSkinMode::Keyframe:
+        return "Keyframe";
+    }
+
+    return "Frame";
+}
+
 std::string format_slot_color(const marrow::runtime::SlotColor& color) {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(2)
@@ -2803,6 +3172,719 @@ std::vector<MeshWeightVertexRow> build_mesh_weight_rows(
     }
 
     return rows;
+}
+
+const char* weight_paint_mode_name(WeightPaintMode mode) {
+    switch (mode) {
+    case WeightPaintMode::Paint:
+        return "Paint";
+    case WeightPaintMode::Erase:
+        return "Erase";
+    case WeightPaintMode::Smooth:
+        return "Smooth";
+    }
+
+    return "Paint";
+}
+
+ImVec4 interpolate_color(const ImVec4& start, const ImVec4& end, float alpha) {
+    return ImVec4(
+        start.x + ((end.x - start.x) * alpha),
+        start.y + ((end.y - start.y) * alpha),
+        start.z + ((end.z - start.z) * alpha),
+        start.w + ((end.w - start.w) * alpha));
+}
+
+ImVec4 mesh_weight_heatmap_color(double weight, float alpha = 0.55f) {
+    const float t = std::clamp(static_cast<float>(weight), 0.0f, 1.0f);
+    const ImVec4 blue(0.12f, 0.33f, 0.95f, alpha);
+    const ImVec4 green(0.13f, 0.74f, 0.39f, alpha);
+    const ImVec4 yellow(0.96f, 0.83f, 0.24f, alpha);
+    const ImVec4 red(0.91f, 0.28f, 0.17f, alpha);
+
+    if (t <= (1.0f / 3.0f)) {
+        return interpolate_color(blue, green, t * 3.0f);
+    }
+    if (t <= (2.0f / 3.0f)) {
+        return interpolate_color(green, yellow, (t - (1.0f / 3.0f)) * 3.0f);
+    }
+    return interpolate_color(yellow, red, (t - (2.0f / 3.0f)) * 3.0f);
+}
+
+std::optional<marrow::runtime::AttachmentVertex> inverse_transform_point_safe(
+    const marrow::runtime::BoneWorldTransform& transform,
+    double world_x,
+    double world_y) {
+    constexpr double kEpsilon = 1e-8;
+    const double determinant = (transform.a * transform.d) - (transform.b * transform.c);
+    if (std::abs(determinant) <= kEpsilon) {
+        return std::nullopt;
+    }
+
+    const double inverse_determinant = 1.0 / determinant;
+    const double translated_x = world_x - transform.world_x;
+    const double translated_y = world_y - transform.world_y;
+    return marrow::runtime::AttachmentVertex{
+        ((translated_x * transform.d) - (translated_y * transform.b)) * inverse_determinant,
+        ((translated_y * transform.a) - (translated_x * transform.c)) * inverse_determinant};
+}
+
+double weight_for_bone(
+    const marrow::runtime::MeshGeometry::VertexWeights& vertex_weights,
+    std::size_t bone_index) {
+    for (const auto& influence : vertex_weights.influences) {
+        if (influence.bone_index == bone_index) {
+            return influence.weight;
+        }
+    }
+    return 0.0;
+}
+
+std::vector<std::vector<std::size_t>> build_mesh_vertex_neighbors(
+    const std::vector<std::size_t>& triangles,
+    std::size_t vertex_count) {
+    std::vector<std::vector<std::size_t>> neighbors(vertex_count);
+    for (std::size_t index = 0; index + 2U < triangles.size(); index += 3U) {
+        const std::size_t a = triangles[index];
+        const std::size_t b = triangles[index + 1U];
+        const std::size_t c = triangles[index + 2U];
+        if (a >= vertex_count || b >= vertex_count || c >= vertex_count) {
+            continue;
+        }
+
+        const auto connect = [&](std::size_t from, std::size_t to) {
+            auto& entries = neighbors[from];
+            if (std::find(entries.begin(), entries.end(), to) == entries.end()) {
+                entries.push_back(to);
+            }
+        };
+        connect(a, b);
+        connect(a, c);
+        connect(b, a);
+        connect(b, c);
+        connect(c, a);
+        connect(c, b);
+    }
+
+    return neighbors;
+}
+
+marrow::editor::MeshWeightAttachmentEdit build_mesh_weight_attachment_edit_from_runtime(
+    const MeshWeightPaintTarget& target,
+    const marrow::runtime::SkeletonData& skeleton) {
+    marrow::editor::MeshWeightAttachmentEdit edit;
+    edit.skin_name = target.source_skin_name;
+    edit.slot_name = target.slot_name;
+    edit.attachment_name = target.source_attachment_name;
+    if (target.source_attachment == nullptr || target.source_attachment->mesh_geometry == nullptr) {
+        return edit;
+    }
+
+    edit.vertices.reserve(target.source_attachment->mesh_geometry->weights.size());
+    for (const auto& source_vertex : target.source_attachment->mesh_geometry->weights) {
+        marrow::editor::MeshWeightVertexEdit vertex;
+        vertex.influences.reserve(source_vertex.influences.size());
+        for (const auto& source_influence : source_vertex.influences) {
+            const std::string bone_name =
+                source_influence.bone_index < skeleton.bones().size()
+                ? skeleton.bones()[source_influence.bone_index].name
+                : ("<bone " + std::to_string(source_influence.bone_index) + ">");
+            vertex.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
+                bone_name,
+                source_influence.x,
+                source_influence.y,
+                source_influence.weight});
+        }
+        edit.vertices.push_back(std::move(vertex));
+    }
+
+    return edit;
+}
+
+bool mesh_weight_vertex_equal(
+    const marrow::editor::MeshWeightVertexEdit& left,
+    const marrow::editor::MeshWeightVertexEdit& right,
+    double tolerance = 1e-6) {
+    if (left.influences.size() != right.influences.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < left.influences.size(); ++index) {
+        const auto& lhs = left.influences[index];
+        const auto& rhs = right.influences[index];
+        if (lhs.bone_name != rhs.bone_name ||
+            std::abs(lhs.x - rhs.x) > tolerance ||
+            std::abs(lhs.y - rhs.y) > tolerance ||
+            std::abs(lhs.weight - rhs.weight) > tolerance) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void normalize_mesh_weight_vertex_edit(marrow::editor::MeshWeightVertexEdit* vertex) {
+    if (vertex == nullptr) {
+        return;
+    }
+
+    constexpr double kWeightEpsilon = 1e-6;
+    auto& influences = vertex->influences;
+    influences.erase(
+        std::remove_if(
+            influences.begin(),
+            influences.end(),
+            [](const marrow::editor::MeshWeightInfluenceEdit& influence) {
+                return influence.weight <= kWeightEpsilon;
+            }),
+        influences.end());
+    if (influences.empty()) {
+        return;
+    }
+
+    if (influences.size() > 4U) {
+        std::stable_sort(
+            influences.begin(),
+            influences.end(),
+            [](const marrow::editor::MeshWeightInfluenceEdit& lhs,
+               const marrow::editor::MeshWeightInfluenceEdit& rhs) {
+                return lhs.weight > rhs.weight;
+            });
+        influences.resize(4U);
+    }
+
+    double total_weight = 0.0;
+    for (const auto& influence : influences) {
+        total_weight += influence.weight;
+    }
+    if (total_weight <= kWeightEpsilon) {
+        influences.clear();
+        return;
+    }
+
+    for (auto& influence : influences) {
+        influence.weight /= total_weight;
+    }
+}
+
+void store_mesh_weight_attachment_edit(
+    marrow::editor::ProjectData* project,
+    marrow::editor::MeshWeightAttachmentEdit edit) {
+    if (project == nullptr) {
+        return;
+    }
+
+    marrow::editor::MeshWeightAttachmentEdit* existing =
+        project->find_mesh_weight_attachment_edit(
+            edit.skin_name,
+            edit.slot_name,
+            edit.attachment_name);
+    if (existing != nullptr) {
+        *existing = std::move(edit);
+    } else {
+        project->mesh_weight_attachment_edits.push_back(std::move(edit));
+    }
+}
+
+std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const ShellState& state) {
+    if (!state.load_result || !state.preview_skeleton || !state.selected_slot_index.has_value()) {
+        return std::nullopt;
+    }
+
+    const std::size_t slot_index = *state.selected_slot_index;
+    const auto& skeleton = *state.load_result.skeleton_data;
+    if (slot_index >= skeleton.slots().size()) {
+        return std::nullopt;
+    }
+
+    const marrow::runtime::AttachmentData* display_attachment =
+        state.preview_skeleton->current_attachment(slot_index);
+    if (display_attachment == nullptr || display_attachment->mesh_geometry == nullptr) {
+        return std::nullopt;
+    }
+
+    MeshWeightPaintTarget target;
+    target.slot_index = slot_index;
+    target.slot_name = skeleton.slots()[slot_index].name;
+    target.display_attachment_name = display_attachment->name;
+    target.display_attachment = display_attachment;
+
+    if (display_attachment->kind == marrow::runtime::AttachmentKind::LinkedMesh &&
+        display_attachment->linked_mesh.has_value()) {
+        target.source_skin_index =
+            display_attachment->linked_mesh->parent_skin_index.has_value()
+                ? display_attachment->linked_mesh->parent_skin_index
+                : skeleton.default_skin_index();
+        target.source_attachment_name =
+            display_attachment->linked_mesh->parent_attachment;
+        target.source_attachment =
+            target.source_skin_index.has_value()
+                ? skeleton.find_attachment(
+                      *target.source_skin_index,
+                      slot_index,
+                      target.source_attachment_name)
+                : nullptr;
+    } else {
+        std::optional<std::size_t> source_skin_index;
+        target.source_attachment =
+            skeleton.find_attachment_source(slot_index, display_attachment->name, &source_skin_index);
+        target.source_skin_index = source_skin_index;
+        target.source_attachment_name = display_attachment->name;
+    }
+
+    if (target.source_attachment == nullptr || target.source_attachment->mesh_geometry == nullptr) {
+        return std::nullopt;
+    }
+
+    target.source_skin_name = source_skin_name(skeleton, target.source_skin_index);
+    return target;
+}
+
+std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
+    const ShellState& state,
+    const ViewportLayout& layout) {
+    const std::optional<MeshWeightPaintTarget> target = current_mesh_weight_paint_target(state);
+    if (!target.has_value() || !state.preview_skeleton) {
+        return std::nullopt;
+    }
+
+    const std::optional<marrow::runtime::MeshAttachmentPose> pose =
+        state.preview_skeleton->evaluate_current_mesh_attachment(target->slot_index);
+    if (!pose.has_value() ||
+        target->display_attachment == nullptr ||
+        target->display_attachment->mesh_geometry == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto& geometry = *target->display_attachment->mesh_geometry;
+    if (pose->vertices.size() != geometry.weights.size()) {
+        return std::nullopt;
+    }
+
+    MeshWeightOverlay overlay;
+    overlay.target = *target;
+    overlay.triangles = geometry.triangles;
+    overlay.neighbors = build_mesh_vertex_neighbors(geometry.triangles, pose->vertices.size());
+    const std::vector<double>* vertex_offsets =
+        state.preview_skeleton->current_mesh_vertex_offsets(target->slot_index);
+    if (vertex_offsets != nullptr) {
+        overlay.vertex_offsets = *vertex_offsets;
+    } else {
+        overlay.vertex_offsets.assign(pose->vertices.size() * 2U, 0.0);
+    }
+
+    overlay.vertices.reserve(pose->vertices.size());
+    for (std::size_t vertex_index = 0; vertex_index < pose->vertices.size(); ++vertex_index) {
+        const double selected_weight =
+            state.selected_bone_index.has_value()
+                ? weight_for_bone(geometry.weights[vertex_index], *state.selected_bone_index)
+                : 0.0;
+        overlay.vertices.push_back(MeshWeightOverlayVertex{
+            screen_from_world(
+                layout,
+                pose->vertices[vertex_index].x,
+                pose->vertices[vertex_index].y),
+            pose->vertices[vertex_index],
+            selected_weight});
+    }
+
+    return overlay;
+}
+
+bool apply_paint_weight_to_vertex(
+    const ShellState& state,
+    const MeshWeightOverlay& overlay,
+    std::size_t vertex_index,
+    double stamp_strength,
+    marrow::editor::MeshWeightVertexEdit* vertex) {
+    if (!state.load_result || !state.selected_bone_index.has_value() ||
+        vertex == nullptr ||
+        vertex_index >= overlay.vertices.size() ||
+        *state.selected_bone_index >= state.load_result.skeleton_data->bones().size() ||
+        *state.selected_bone_index >= state.preview_skeleton->bone_world_transforms().size()) {
+        return false;
+    }
+
+    marrow::editor::MeshWeightVertexEdit updated = *vertex;
+    const auto& skeleton = *state.load_result.skeleton_data;
+    const std::string active_bone_name = skeleton.bones()[*state.selected_bone_index].name;
+    auto influence_it = std::find_if(
+        updated.influences.begin(),
+        updated.influences.end(),
+        [&](const marrow::editor::MeshWeightInfluenceEdit& influence) {
+            return influence.bone_name == active_bone_name;
+        });
+
+    if (influence_it == updated.influences.end()) {
+        const double offset_x =
+            (vertex_index * 2U) < overlay.vertex_offsets.size()
+                ? overlay.vertex_offsets[vertex_index * 2U]
+                : 0.0;
+        const double offset_y =
+            ((vertex_index * 2U) + 1U) < overlay.vertex_offsets.size()
+                ? overlay.vertex_offsets[(vertex_index * 2U) + 1U]
+                : 0.0;
+        const auto bind_position = inverse_transform_point_safe(
+            state.preview_skeleton->bone_world_transforms()[*state.selected_bone_index],
+            overlay.vertices[vertex_index].world_position.x,
+            overlay.vertices[vertex_index].world_position.y);
+        if (!bind_position.has_value()) {
+            return false;
+        }
+
+        updated.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
+            active_bone_name,
+            bind_position->x - offset_x,
+            bind_position->y - offset_y,
+            0.0});
+        influence_it = updated.influences.end() - 1;
+    }
+
+    influence_it->weight += stamp_strength;
+    normalize_mesh_weight_vertex_edit(&updated);
+    if (updated.influences.empty() || mesh_weight_vertex_equal(*vertex, updated)) {
+        return false;
+    }
+
+    *vertex = std::move(updated);
+    return true;
+}
+
+bool apply_erase_weight_to_vertex(
+    const ShellState& state,
+    double stamp_strength,
+    marrow::editor::MeshWeightVertexEdit* vertex) {
+    if (!state.load_result || !state.selected_bone_index.has_value() || vertex == nullptr) {
+        return false;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    if (*state.selected_bone_index >= skeleton.bones().size()) {
+        return false;
+    }
+
+    if (vertex->influences.size() <= 1U) {
+        return false;
+    }
+
+    marrow::editor::MeshWeightVertexEdit updated = *vertex;
+    const std::string active_bone_name = skeleton.bones()[*state.selected_bone_index].name;
+    auto influence_it = std::find_if(
+        updated.influences.begin(),
+        updated.influences.end(),
+        [&](const marrow::editor::MeshWeightInfluenceEdit& influence) {
+            return influence.bone_name == active_bone_name;
+        });
+    if (influence_it == updated.influences.end()) {
+        return false;
+    }
+
+    influence_it->weight = std::max(0.0, influence_it->weight - stamp_strength);
+    normalize_mesh_weight_vertex_edit(&updated);
+    if (updated.influences.empty() || mesh_weight_vertex_equal(*vertex, updated)) {
+        return false;
+    }
+
+    *vertex = std::move(updated);
+    return true;
+}
+
+bool apply_smooth_weight_to_vertex(
+    const std::vector<marrow::editor::MeshWeightVertexEdit>& source_vertices,
+    const MeshWeightOverlay& overlay,
+    std::size_t vertex_index,
+    double stamp_strength,
+    marrow::editor::MeshWeightVertexEdit* vertex) {
+    if (vertex == nullptr || vertex_index >= overlay.neighbors.size()) {
+        return false;
+    }
+
+    struct AveragedInfluence {
+        std::string bone_name;
+        double average_weight{0.0};
+        double bind_x_sum{0.0};
+        double bind_y_sum{0.0};
+        double bind_weight_sum{0.0};
+    };
+
+    const auto accumulate_vertex = [&](const marrow::editor::MeshWeightVertexEdit& sample_vertex,
+                                       std::vector<AveragedInfluence>* averages) {
+        for (const auto& influence : sample_vertex.influences) {
+            auto averaged_it = std::find_if(
+                averages->begin(),
+                averages->end(),
+                [&](const AveragedInfluence& averaged) {
+                    return averaged.bone_name == influence.bone_name;
+                });
+            if (averaged_it == averages->end()) {
+                averages->push_back(AveragedInfluence{influence.bone_name});
+                averaged_it = averages->end() - 1;
+            }
+
+            averaged_it->average_weight += influence.weight;
+            averaged_it->bind_x_sum += influence.x * influence.weight;
+            averaged_it->bind_y_sum += influence.y * influence.weight;
+            averaged_it->bind_weight_sum += influence.weight;
+        }
+    };
+
+    std::vector<AveragedInfluence> averages;
+    averages.reserve(8U);
+    int sample_count = 1;
+    accumulate_vertex(*vertex, &averages);
+
+    for (const std::size_t neighbor_index : overlay.neighbors[vertex_index]) {
+        if (neighbor_index >= source_vertices.size()) {
+            continue;
+        }
+
+        accumulate_vertex(source_vertices[neighbor_index], &averages);
+        ++sample_count;
+    }
+
+    if (sample_count <= 1) {
+        return false;
+    }
+
+    std::vector<std::string> ordered_bones;
+    ordered_bones.reserve(averages.size());
+    for (const auto& influence : vertex->influences) {
+        ordered_bones.push_back(influence.bone_name);
+    }
+    for (const AveragedInfluence& averaged : averages) {
+        if (std::find(ordered_bones.begin(), ordered_bones.end(), averaged.bone_name) ==
+            ordered_bones.end()) {
+            ordered_bones.push_back(averaged.bone_name);
+        }
+    }
+
+    marrow::editor::MeshWeightVertexEdit updated;
+    updated.influences.reserve(ordered_bones.size());
+    constexpr double kWeightEpsilon = 1e-6;
+    for (const std::string& bone_name : ordered_bones) {
+        const auto current_it = std::find_if(
+            vertex->influences.begin(),
+            vertex->influences.end(),
+            [&](const marrow::editor::MeshWeightInfluenceEdit& influence) {
+                return influence.bone_name == bone_name;
+            });
+        const auto averaged_it = std::find_if(
+            averages.begin(),
+            averages.end(),
+            [&](const AveragedInfluence& averaged) {
+                return averaged.bone_name == bone_name;
+            });
+
+        const double current_weight =
+            current_it != vertex->influences.end() ? current_it->weight : 0.0;
+        const double average_weight =
+            averaged_it != averages.end()
+                ? averaged_it->average_weight / static_cast<double>(sample_count)
+                : 0.0;
+        const double blended_weight =
+            current_weight + ((average_weight - current_weight) * stamp_strength);
+        if (blended_weight <= kWeightEpsilon) {
+            continue;
+        }
+
+        double bind_x = current_it != vertex->influences.end() ? current_it->x : 0.0;
+        double bind_y = current_it != vertex->influences.end() ? current_it->y : 0.0;
+        if (averaged_it != averages.end() && averaged_it->bind_weight_sum > kWeightEpsilon) {
+            const double average_bind_x = averaged_it->bind_x_sum / averaged_it->bind_weight_sum;
+            const double average_bind_y = averaged_it->bind_y_sum / averaged_it->bind_weight_sum;
+            if (current_it != vertex->influences.end()) {
+                bind_x = current_it->x + ((average_bind_x - current_it->x) * stamp_strength);
+                bind_y = current_it->y + ((average_bind_y - current_it->y) * stamp_strength);
+            } else {
+                bind_x = average_bind_x;
+                bind_y = average_bind_y;
+            }
+        }
+
+        updated.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
+            bone_name,
+            bind_x,
+            bind_y,
+            blended_weight});
+    }
+
+    normalize_mesh_weight_vertex_edit(&updated);
+    if (updated.influences.empty() || mesh_weight_vertex_equal(*vertex, updated)) {
+        return false;
+    }
+
+    *vertex = std::move(updated);
+    return true;
+}
+
+std::string weight_paint_stroke_label(
+    const ShellState& state,
+    const MeshWeightPaintTarget& target) {
+    std::string bone_name = "<bone>";
+    if (state.load_result &&
+        state.selected_bone_index.has_value() &&
+        *state.selected_bone_index < state.load_result.skeleton_data->bones().size()) {
+        bone_name = state.load_result.skeleton_data->bones()[*state.selected_bone_index].name;
+    }
+
+    switch (state.weight_paint.mode) {
+    case WeightPaintMode::Paint:
+        return "Painted " + bone_name + " weights on " + target.source_attachment_name;
+    case WeightPaintMode::Erase:
+        return "Erased " + bone_name + " weights on " + target.source_attachment_name;
+    case WeightPaintMode::Smooth:
+        return "Smoothed weights on " + target.source_attachment_name;
+    }
+
+    return "Edited mesh weights";
+}
+
+void reset_weight_paint_stroke(ShellState* state) {
+    if (state == nullptr) {
+        return;
+    }
+
+    state->weight_paint_stroke.active = false;
+    state->weight_paint_stroke.changed = false;
+    state->weight_paint_stroke.label.clear();
+    state->weight_paint_stroke.group.clear();
+    state->weight_paint_stroke.has_last_sample = false;
+}
+
+void begin_weight_paint_stroke(
+    ShellState* state,
+    const MeshWeightPaintTarget& target) {
+    if (state == nullptr || state->weight_paint_stroke.active || !state->load_result) {
+        return;
+    }
+
+    state->weight_paint_stroke.active = true;
+    state->weight_paint_stroke.changed = false;
+    state->weight_paint_stroke.before_snapshot = capture_history_snapshot(*state);
+    state->weight_paint_stroke.label = weight_paint_stroke_label(*state, target);
+    state->weight_paint_stroke.group =
+        "mesh-weight:" + target.source_skin_name + ":" + target.slot_name + ":" +
+        target.source_attachment_name;
+    state->weight_paint_stroke.has_last_sample = false;
+}
+
+bool finish_weight_paint_stroke(ShellState* state) {
+    if (state == nullptr || !state->weight_paint_stroke.active) {
+        return false;
+    }
+
+    const bool changed = state->weight_paint_stroke.changed;
+    const EditorHistorySnapshot before_snapshot = state->weight_paint_stroke.before_snapshot;
+    const std::string label = state->weight_paint_stroke.label;
+    const std::string group = state->weight_paint_stroke.group;
+    reset_weight_paint_stroke(state);
+
+    if (!changed) {
+        return false;
+    }
+
+    return record_action_from_snapshots(
+        state,
+        before_snapshot,
+        EditActionKind::EditProperty,
+        label,
+        group,
+        false);
+}
+
+bool apply_weight_paint_sample(
+    ShellState* state,
+    const MeshWeightOverlay& overlay,
+    const ImVec2& screen_position) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    if ((state->weight_paint.mode == WeightPaintMode::Paint ||
+         state->weight_paint.mode == WeightPaintMode::Erase) &&
+        (!state->selected_bone_index.has_value() ||
+         *state->selected_bone_index >= state->load_result.skeleton_data->bones().size())) {
+        return false;
+    }
+
+    marrow::editor::MeshWeightAttachmentEdit next_edit =
+        build_mesh_weight_attachment_edit_from_runtime(
+            overlay.target,
+            *state->load_result.skeleton_data);
+    if (next_edit.vertices.empty()) {
+        return false;
+    }
+
+    const std::vector<marrow::editor::MeshWeightVertexEdit> smooth_source_vertices =
+        next_edit.vertices;
+    bool changed = false;
+    for (std::size_t vertex_index = 0; vertex_index < overlay.vertices.size(); ++vertex_index) {
+        if (vertex_index >= next_edit.vertices.size()) {
+            break;
+        }
+
+        const float distance = std::sqrt(
+            squared_distance(screen_position, overlay.vertices[vertex_index].screen_position));
+        if (distance > state->weight_paint.radius_pixels) {
+            continue;
+        }
+
+        const double falloff = 1.0 -
+            (static_cast<double>(distance) /
+             std::max(static_cast<double>(state->weight_paint.radius_pixels), 1.0));
+        const double stamp_strength =
+            std::clamp(
+                static_cast<double>(state->weight_paint.strength) * falloff,
+                0.0,
+                1.0);
+        if (stamp_strength <= 1e-6) {
+            continue;
+        }
+
+        bool vertex_changed = false;
+        switch (state->weight_paint.mode) {
+        case WeightPaintMode::Paint:
+            vertex_changed = apply_paint_weight_to_vertex(
+                *state,
+                overlay,
+                vertex_index,
+                stamp_strength,
+                &next_edit.vertices[vertex_index]);
+            break;
+        case WeightPaintMode::Erase:
+            vertex_changed = apply_erase_weight_to_vertex(
+                *state,
+                stamp_strength,
+                &next_edit.vertices[vertex_index]);
+            break;
+        case WeightPaintMode::Smooth:
+            vertex_changed = apply_smooth_weight_to_vertex(
+                smooth_source_vertices,
+                overlay,
+                vertex_index,
+                stamp_strength,
+                &next_edit.vertices[vertex_index]);
+            break;
+        }
+
+        changed = changed || vertex_changed;
+    }
+
+    if (!changed) {
+        return false;
+    }
+
+    const marrow::editor::ProjectData previous_project = *state->load_result.project;
+    store_mesh_weight_attachment_edit(state->load_result.project.get(), std::move(next_edit));
+    if (!rebuild_project_runtime(state)) {
+        *state->load_result.project = previous_project;
+        state->status_message = "Weight paint stroke failed";
+        return false;
+    }
+
+    update_project_dirty_state(state);
+    state->weight_paint_stroke.changed = true;
+    return true;
 }
 
 std::optional<AttachmentSelection> first_attachment_selection_for_slot(
@@ -2969,6 +4051,52 @@ double timeline_preview_duration(const ShellState& state) {
     return std::max(0.0, primary_duration) +
         std::max(0.0, state.preview_queue_delay) +
         std::max(0.0, queued_animation->duration());
+}
+
+template <typename Timeline>
+void append_timeline_key_times(
+    const std::vector<Timeline>& timelines,
+    std::vector<double>* key_times) {
+    if (key_times == nullptr) {
+        return;
+    }
+
+    for (const Timeline& timeline : timelines) {
+        for (const auto& keyframe : timeline.keyframes) {
+            key_times->push_back(keyframe.time);
+        }
+    }
+}
+
+std::vector<double> collect_animation_key_times(const marrow::runtime::AnimationData& animation) {
+    std::vector<double> key_times;
+    append_timeline_key_times(animation.bone_rotate_timelines, &key_times);
+    append_timeline_key_times(animation.bone_inherit_timelines, &key_times);
+    append_timeline_key_times(animation.bone_translate_timelines, &key_times);
+    append_timeline_key_times(animation.bone_scale_timelines, &key_times);
+    append_timeline_key_times(animation.bone_shear_timelines, &key_times);
+    append_timeline_key_times(animation.slot_attachment_timelines, &key_times);
+    append_timeline_key_times(animation.slot_color_timelines, &key_times);
+    append_timeline_key_times(animation.mesh_deform_timelines, &key_times);
+    if (animation.draw_order_timeline_data.has_value()) {
+        for (const auto& keyframe : animation.draw_order_timeline_data->keyframes) {
+            key_times.push_back(keyframe.time);
+        }
+    }
+    if (animation.event_timeline_data.has_value()) {
+        for (const auto& keyframe : animation.event_timeline_data->keyframes) {
+            key_times.push_back(keyframe.time);
+        }
+    }
+
+    std::sort(key_times.begin(), key_times.end());
+    key_times.erase(
+        std::unique(
+            key_times.begin(),
+            key_times.end(),
+            [](double lhs, double rhs) { return std::abs(lhs - rhs) <= 1e-6; }),
+        key_times.end());
+    return key_times;
 }
 
 std::string format_time_seconds(double time_seconds) {
@@ -3204,25 +4332,26 @@ std::optional<double> nearest_key_time(
     return best_time;
 }
 
-void apply_preview_slot_overrides(ShellState* state) {
-    if (!state->load_result || !state->preview_skeleton) {
+void apply_preview_slot_overrides(
+    const ShellState& state,
+    marrow::runtime::Skeleton* skeleton) {
+    if (!state.load_result || skeleton == nullptr) {
         return;
     }
 
-    auto& slot_states = state->preview_skeleton->slot_states();
-    auto& mesh_deforms = state->preview_skeleton->mesh_deform_states();
+    auto& slot_states = skeleton->slot_states();
+    auto& mesh_deforms = skeleton->mesh_deform_states();
     for (std::size_t slot_index = 0;
-         slot_index < state->preview_slot_overrides.size() && slot_index < slot_states.size();
+         slot_index < state.preview_slot_overrides.size() && slot_index < slot_states.size();
          ++slot_index) {
-        const auto& override_selection = state->preview_slot_overrides[slot_index];
+        const auto& override_selection = state.preview_slot_overrides[slot_index];
         if (!override_selection.has_value()) {
             continue;
         }
 
         if (!resolve_attachment_reference(
-                *state->load_result.skeleton_data,
+                *state.load_result.skeleton_data,
                 *override_selection).has_value()) {
-            state->preview_slot_overrides[slot_index].reset();
             continue;
         }
 
@@ -3234,6 +4363,26 @@ void apply_preview_slot_overrides(ShellState* state) {
             mesh_deforms[slot_index].vertex_offsets.clear();
         }
     }
+}
+
+void apply_preview_slot_overrides(ShellState* state) {
+    if (!state->load_result || !state->preview_skeleton) {
+        return;
+    }
+
+    for (std::size_t slot_index = 0; slot_index < state->preview_slot_overrides.size(); ++slot_index) {
+        const auto& override_selection = state->preview_slot_overrides[slot_index];
+        if (!override_selection.has_value()) {
+            continue;
+        }
+        if (!resolve_attachment_reference(
+                *state->load_result.skeleton_data,
+                *override_selection).has_value()) {
+            state->preview_slot_overrides[slot_index].reset();
+        }
+    }
+
+    apply_preview_slot_overrides(*state, state->preview_skeleton.get());
 }
 
 std::string_view transform_channel_label(marrow::editor::TransformTimelineChannel channel) {
@@ -3757,6 +4906,11 @@ bool rebuild_project_runtime(ShellState* state) {
         return false;
     }
 
+    std::optional<marrow::runtime::AnimationStateSnapshot> playback_snapshot;
+    if (state->animation_state != nullptr) {
+        playback_snapshot = state->animation_state->capture_state();
+    }
+
     const auto runtime_result = marrow::editor::build_project_runtime(
         *state->load_result.project,
         *state->load_result.base_skeleton_document);
@@ -3767,9 +4921,10 @@ bool rebuild_project_runtime(ShellState* state) {
 
     state->load_result.skeleton_data = runtime_result.skeleton_data;
     state->preview_skeleton =
-        std::make_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
+        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
     state->animation_state =
-        std::make_unique<marrow::runtime::AnimationState>(state->load_result.skeleton_data);
+        marrow::allocate_unique<marrow::runtime::AnimationState>(
+            state->load_result.skeleton_data);
     state->preview_skin_names = normalize_preview_skin_names(
         *state->load_result.skeleton_data,
         state->preview_skin_names);
@@ -3803,7 +4958,18 @@ bool rebuild_project_runtime(ShellState* state) {
     }
     validate_selected_constraint(state);
 
-    if (!refresh_preview_pose(state)) {
+    bool restored_playback = false;
+    if (playback_snapshot.has_value()) {
+        for (const auto& track_root : playback_snapshot->track_roots) {
+            if (!track_root.has_value()) {
+                continue;
+            }
+            restored_playback = restore_preview_playback(state, *playback_snapshot);
+            break;
+        }
+    }
+
+    if (!restored_playback && !refresh_preview_pose(state)) {
         return false;
     }
     if (state->selected_slot_index.has_value()) {
@@ -3996,6 +5162,60 @@ std::optional<std::size_t> preview_root_bone_index(
     return std::nullopt;
 }
 
+bool apply_current_animation_state_to_preview(ShellState* state) {
+    if (!state->load_result || !state->preview_skeleton || !state->animation_state) {
+        return false;
+    }
+
+    const auto& skeleton = *state->load_result.skeleton_data;
+    normalize_state_preview_settings(state);
+    state->preview_skin_names =
+        normalize_preview_skin_names(skeleton, state->preview_skin_names);
+
+    std::vector<std::string_view> skin_names;
+    skin_names.reserve(state->preview_skin_names.size());
+    for (const std::string& skin_name : state->preview_skin_names) {
+        skin_names.push_back(skin_name);
+    }
+
+    if (!state->preview_skeleton->set_skin_composition(skin_names)) {
+        state->error_message = "Failed to apply the requested preview skin composition.";
+        return false;
+    }
+
+    state->preview_root_motion_delta = {};
+    state->preview_root_motion_total = {};
+    state->preview_events.clear();
+    state->preview_skeleton->set_attachment_playback_time(state->timeline_time_seconds);
+    state->animation_state->apply(*state->preview_skeleton);
+    apply_preview_slot_overrides(state);
+    state->error_message.clear();
+    return true;
+}
+
+bool restore_preview_playback(
+    ShellState* state,
+    const marrow::runtime::AnimationStateSnapshot& snapshot) {
+    if (!state->animation_state || !state->preview_skeleton || !state->load_result) {
+        return false;
+    }
+
+    state->animation_state->restore_state(snapshot);
+
+    if (const std::shared_ptr<marrow::runtime::TrackEntry> current =
+            state->animation_state->get_current(0);
+        current != nullptr && !current->is_empty &&
+        state->load_result.skeleton_data->find_animation(current->animation_name) != nullptr) {
+        state->selected_animation_name = current->animation_name;
+        state->timeline_time_seconds = std::clamp(
+            current->track_time,
+            0.0,
+            timeline_preview_duration(*state));
+    }
+
+    return apply_current_animation_state_to_preview(state);
+}
+
 bool refresh_preview_pose(ShellState* state) {
     if (!state->load_result || !state->preview_skeleton) {
         return false;
@@ -4020,7 +5240,8 @@ bool refresh_preview_pose(ShellState* state) {
     if (!state->animation_state ||
         state->animation_state->data().get() != state->load_result.skeleton_data.get()) {
         state->animation_state =
-            std::make_unique<marrow::runtime::AnimationState>(state->load_result.skeleton_data);
+            marrow::allocate_unique<marrow::runtime::AnimationState>(
+                state->load_result.skeleton_data);
     }
 
     state->preview_root_motion_delta = {};
@@ -4105,6 +5326,160 @@ bool refresh_preview_pose(ShellState* state) {
     apply_preview_slot_overrides(state);
     state->error_message.clear();
     return true;
+}
+
+std::optional<marrow::runtime::ProfilerFrame> build_preview_profiler_frame(
+    const ShellState& state) {
+    if (!state.load_result || state.load_result.atlas_data.empty()) {
+        return std::nullopt;
+    }
+
+    const auto& skeleton_data = *state.load_result.skeleton_data;
+    marrow::runtime::ProfilerCapture profiler(true);
+    profiler.begin_frame();
+    bool render_ready = true;
+
+    marrow::runtime::Skeleton scratch_skeleton(state.load_result.skeleton_data);
+    const std::vector<std::string> preview_skin_names =
+        normalize_preview_skin_names(skeleton_data, state.preview_skin_names);
+    std::vector<std::string_view> skin_names;
+    skin_names.reserve(preview_skin_names.size());
+    for (const std::string& skin_name : preview_skin_names) {
+        skin_names.push_back(skin_name);
+    }
+    if (!scratch_skeleton.set_skin_composition(skin_names)) {
+        return std::nullopt;
+    }
+
+    const double preview_duration = timeline_preview_duration(state);
+    const double sampled_time =
+        preview_duration > 0.0 ? std::clamp(state.timeline_time_seconds, 0.0, preview_duration)
+                               : 0.0;
+    scratch_skeleton.set_attachment_playback_time(sampled_time);
+
+    if (const marrow::runtime::AnimationData* animation = selected_animation(state)) {
+        marrow::runtime::AnimationState scratch_animation_state(state.load_result.skeleton_data);
+        marrow::runtime::profile_phase(
+            &profiler,
+            marrow::runtime::ProfilerPhase::Animation,
+            [&]() {
+                scratch_animation_state.clear_tracks();
+                const bool primary_loop =
+                    state.preview_queue_enabled ? false : state.timeline_loop;
+                std::shared_ptr<marrow::runtime::TrackEntry> current =
+                    scratch_animation_state.set_animation(
+                        0,
+                        animation->name,
+                        primary_loop,
+                        0.0);
+                current->reverse = state.preview_reverse;
+                current->alpha = 1.0;
+
+                if (state.preview_queue_enabled) {
+                    if (const auto* queued_animation = queued_preview_animation(state)) {
+                        const std::optional<double> mix_duration =
+                            state.preview_use_custom_mix_duration
+                                ? std::optional<double>(state.preview_custom_mix_duration)
+                                : std::nullopt;
+                        std::shared_ptr<marrow::runtime::TrackEntry> queued_entry =
+                            scratch_animation_state.add_animation(
+                                0,
+                                queued_animation->name,
+                                false,
+                                state.preview_queue_delay,
+                                mix_duration);
+                        queued_entry->reverse = state.preview_reverse;
+                    }
+                }
+
+                constexpr double kPreviewStep = 1.0 / 60.0;
+                double elapsed_time = 0.0;
+                while ((elapsed_time + kPreviewStep) < (sampled_time - 1e-9)) {
+                    scratch_animation_state.update(kPreviewStep);
+                    elapsed_time += kPreviewStep;
+                }
+                const double final_step = sampled_time - elapsed_time;
+                if (final_step > 1e-9) {
+                    scratch_animation_state.update(final_step);
+                }
+
+                scratch_animation_state.apply_pose(scratch_skeleton);
+            });
+    }
+
+    marrow::runtime::WorldTransformTimingBreakdown timing_breakdown;
+    scratch_skeleton.update_world_transforms(
+        marrow::runtime::PhysicsMode::Pose,
+        &timing_breakdown);
+    profiler.add_world_transform_timing(timing_breakdown);
+
+    apply_preview_slot_overrides(state, &scratch_skeleton);
+
+    marrow::runtime::profile_phase(
+        &profiler,
+        marrow::runtime::ProfilerPhase::Skinning,
+        [&]() {
+            for (std::size_t slot_index = 0;
+                 slot_index < scratch_skeleton.slot_states().size();
+                 ++slot_index) {
+                const auto* attachment = scratch_skeleton.current_attachment(slot_index);
+                if (attachment == nullptr ||
+                    (attachment->kind != marrow::runtime::AttachmentKind::Mesh &&
+                     attachment->kind != marrow::runtime::AttachmentKind::LinkedMesh)) {
+                    continue;
+                }
+
+                if (!scratch_skeleton.evaluate_current_mesh_attachment(slot_index).has_value()) {
+                    render_ready = false;
+                    return;
+                }
+            }
+        });
+    if (!render_ready) {
+        return std::nullopt;
+    }
+
+    marrow::runtime::profile_phase(
+        &profiler,
+        marrow::runtime::ProfilerPhase::Render,
+        [&]() {
+            const marrow::renderer::PreparedSceneResult scene_result =
+                marrow::renderer::prepare_setup_pose_scene(
+                    scratch_skeleton,
+                    *state.load_result.atlas_data.front());
+            if (!scene_result) {
+                render_ready = false;
+                return;
+            }
+
+            const marrow::renderer::PreparedSceneBatchSummary batch_summary =
+                marrow::renderer::summarize_prepared_scene_batches(*scene_result.scene);
+            if (!batch_summary) {
+                render_ready = false;
+                return;
+            }
+
+            marrow::runtime::ProfilerDrawStats draw_stats;
+            draw_stats.skeleton_count = batch_summary.skeleton_count;
+            draw_stats.draw_calls = batch_summary.draw_call_count;
+            draw_stats.vertices = batch_summary.vertex_count;
+            draw_stats.batch_merges = batch_summary.merged_draw_calls;
+            draw_stats.break_reasons.texture_changes =
+                batch_summary.break_reasons.texture_changes;
+            draw_stats.break_reasons.blend_changes =
+                batch_summary.break_reasons.blend_changes;
+            draw_stats.break_reasons.clip_changes =
+                batch_summary.break_reasons.clip_changes;
+            draw_stats.break_reasons.shader_changes =
+                batch_summary.break_reasons.shader_changes;
+            profiler.add_draw_stats(draw_stats);
+        });
+    if (!render_ready) {
+        return std::nullopt;
+    }
+
+    profiler.end_frame();
+    return marrow::runtime::marrow_profiler_frame(profiler);
 }
 
 bool set_selected_animation(
@@ -4360,6 +5735,254 @@ std::optional<ViewportLayout> build_viewport_layout(
     return layout;
 }
 
+double onion_skin_sample_time_for_preview(
+    const ShellState& state,
+    double time_seconds) {
+    const double duration = selected_animation_duration(state);
+    if (duration <= 0.0) {
+        return 0.0;
+    }
+
+    const double clamped_time = std::clamp(time_seconds, 0.0, duration);
+    if (state.preview_reverse && !state.preview_queue_enabled) {
+        return std::clamp(duration - clamped_time, 0.0, duration);
+    }
+
+    return clamped_time;
+}
+
+bool sample_preview_pose_at_time(
+    const ShellState& state,
+    double time_seconds,
+    marrow::runtime::Skeleton* skeleton) {
+    if (!state.load_result || skeleton == nullptr) {
+        return false;
+    }
+
+    const auto& skeleton_data = *state.load_result.skeleton_data;
+    const std::vector<std::string> normalized_skins =
+        normalize_preview_skin_names(skeleton_data, state.preview_skin_names);
+    std::vector<std::string_view> skin_names;
+    skin_names.reserve(normalized_skins.size());
+    for (const std::string& skin_name : normalized_skins) {
+        skin_names.push_back(skin_name);
+    }
+
+    if (!skeleton->set_skin_composition(skin_names)) {
+        return false;
+    }
+
+    if (const auto* animation = selected_animation(state)) {
+        const double sample_time = onion_skin_sample_time_for_preview(state, time_seconds);
+        skeleton->set_attachment_playback_time(sample_time);
+        skeleton->apply_animation(*animation, sample_time);
+    } else {
+        skeleton->set_to_setup_pose();
+        skeleton->set_attachment_playback_time(0.0);
+    }
+
+    apply_preview_slot_overrides(state, skeleton);
+    return true;
+}
+
+float onion_skin_alpha(int distance_rank) {
+    const int safe_rank = std::max(distance_rank, 1);
+    return std::clamp(0.48f / static_cast<float>(safe_rank), 0.08f, 0.48f);
+}
+
+std::vector<OnionSkinSampleSpec> build_onion_skin_sample_specs(const ShellState& state) {
+    std::vector<OnionSkinSampleSpec> specs;
+    if (!state.load_result || !state.viewport.onion_skin.enabled) {
+        return specs;
+    }
+
+    const auto* animation = selected_animation(state);
+    if (animation == nullptr) {
+        return specs;
+    }
+
+    const auto& settings = state.viewport.onion_skin;
+    const double duration = selected_animation_duration(state);
+    const double current_time =
+        duration > 0.0 ? std::clamp(state.timeline_time_seconds, 0.0, duration) : 0.0;
+    const int stride = std::max(settings.step, 1);
+    if (settings.before_count <= 0 && settings.after_count <= 0) {
+        return specs;
+    }
+
+    const auto append_far_to_near = [&](std::vector<OnionSkinSampleSpec>* samples) {
+        if (samples == nullptr) {
+            return;
+        }
+        std::reverse(samples->begin(), samples->end());
+        specs.insert(specs.end(), samples->begin(), samples->end());
+    };
+
+    if (settings.mode == marrow::editor::OnionSkinMode::Keyframe) {
+        const std::vector<double> key_times = collect_animation_key_times(*animation);
+        std::vector<OnionSkinSampleSpec> before_specs;
+        std::vector<OnionSkinSampleSpec> after_specs;
+
+        const auto lower = std::lower_bound(
+            key_times.begin(),
+            key_times.end(),
+            current_time - 1e-6);
+        std::ptrdiff_t before_index =
+            static_cast<std::ptrdiff_t>(std::distance(key_times.begin(), lower)) - 1;
+        for (int rank = 1;
+             rank <= settings.before_count && before_index >= 0;
+             ++rank, before_index -= stride) {
+            before_specs.push_back(OnionSkinSampleSpec{
+                key_times[static_cast<std::size_t>(before_index)],
+                rank,
+                true});
+        }
+
+        const auto upper = std::upper_bound(
+            key_times.begin(),
+            key_times.end(),
+            current_time + 1e-6);
+        std::ptrdiff_t after_index =
+            static_cast<std::ptrdiff_t>(std::distance(key_times.begin(), upper));
+        for (int rank = 1;
+             rank <= settings.after_count &&
+             after_index >= 0 &&
+             after_index < static_cast<std::ptrdiff_t>(key_times.size());
+             ++rank, after_index += stride) {
+            after_specs.push_back(OnionSkinSampleSpec{
+                key_times[static_cast<std::size_t>(after_index)],
+                rank,
+                false});
+        }
+
+        append_far_to_near(&before_specs);
+        append_far_to_near(&after_specs);
+        return specs;
+    }
+
+    const double frame_interval = static_cast<double>(stride) * kOnionSkinFrameDuration;
+    if (frame_interval <= 0.0) {
+        return specs;
+    }
+
+    std::vector<OnionSkinSampleSpec> before_specs;
+    std::vector<OnionSkinSampleSpec> after_specs;
+    if (settings.anchor_to_zero) {
+        const double scaled_time = current_time / frame_interval;
+        double before_anchor_index = std::floor(scaled_time + 1e-9);
+        if (std::abs((before_anchor_index * frame_interval) - current_time) <= 1e-6) {
+            before_anchor_index -= 1.0;
+        }
+        for (int rank = 1; rank <= settings.before_count; ++rank) {
+            const double sample_index = before_anchor_index - static_cast<double>(rank - 1);
+            const double sample_time = sample_index * frame_interval;
+            if (sample_time < -1e-6) {
+                break;
+            }
+            before_specs.push_back(OnionSkinSampleSpec{
+                std::max(0.0, sample_time),
+                rank,
+                true});
+        }
+
+        double after_anchor_index = std::ceil(scaled_time - 1e-9);
+        if (std::abs((after_anchor_index * frame_interval) - current_time) <= 1e-6) {
+            after_anchor_index += 1.0;
+        }
+        for (int rank = 1; rank <= settings.after_count; ++rank) {
+            const double sample_index = after_anchor_index + static_cast<double>(rank - 1);
+            const double sample_time = sample_index * frame_interval;
+            if (sample_time > duration + 1e-6) {
+                break;
+            }
+            after_specs.push_back(OnionSkinSampleSpec{
+                std::min(duration, sample_time),
+                rank,
+                false});
+        }
+    } else {
+        for (int rank = 1; rank <= settings.before_count; ++rank) {
+            const double sample_time = current_time - (static_cast<double>(rank) * frame_interval);
+            if (sample_time < -1e-6) {
+                break;
+            }
+            before_specs.push_back(OnionSkinSampleSpec{
+                std::max(0.0, sample_time),
+                rank,
+                true});
+        }
+        for (int rank = 1; rank <= settings.after_count; ++rank) {
+            const double sample_time = current_time + (static_cast<double>(rank) * frame_interval);
+            if (sample_time > duration + 1e-6) {
+                break;
+            }
+            after_specs.push_back(OnionSkinSampleSpec{
+                std::min(duration, sample_time),
+                rank,
+                false});
+        }
+    }
+
+    append_far_to_near(&before_specs);
+    append_far_to_near(&after_specs);
+    return specs;
+}
+
+std::vector<OnionSkinGhostPose> build_onion_skin_ghost_poses(
+    const ShellState& state,
+    const ViewportLayout& layout) {
+    std::vector<OnionSkinGhostPose> ghost_poses;
+    if (!state.load_result || !state.viewport.onion_skin.enabled) {
+        return ghost_poses;
+    }
+
+    const std::vector<OnionSkinSampleSpec> samples = build_onion_skin_sample_specs(state);
+    if (samples.empty()) {
+        return ghost_poses;
+    }
+
+    marrow::runtime::Skeleton sampled_skeleton(state.load_result.skeleton_data);
+    ghost_poses.reserve(samples.size());
+    for (const OnionSkinSampleSpec& sample : samples) {
+        if (!sample_preview_pose_at_time(state, sample.time_seconds, &sampled_skeleton)) {
+            continue;
+        }
+
+        OnionSkinGhostPose ghost_pose;
+        ghost_pose.time_seconds = sample.time_seconds;
+        ghost_pose.distance_rank = sample.distance_rank;
+        ghost_pose.before_current = sample.before_current;
+        ghost_pose.bones.reserve(state.load_result.skeleton_data->bones().size());
+        const float alpha = onion_skin_alpha(sample.distance_rank);
+        const int alpha_channel = static_cast<int>(std::lround(alpha * 255.0f));
+        if (sample.before_current) {
+            ghost_pose.line_color = IM_COL32(98, 170, 255, alpha_channel);
+            ghost_pose.fill_color = IM_COL32(70, 129, 212, alpha_channel);
+        } else {
+            ghost_pose.line_color = IM_COL32(255, 140, 102, alpha_channel);
+            ghost_pose.fill_color = IM_COL32(214, 102, 74, alpha_channel);
+        }
+        ghost_pose.outline_color = IM_COL32(18, 21, 25, alpha_channel);
+
+        const auto& skeleton_data = *state.load_result.skeleton_data;
+        const auto& world_transforms = sampled_skeleton.bone_world_transforms();
+        for (std::size_t bone_index = 0; bone_index < skeleton_data.bones().size(); ++bone_index) {
+            ghost_pose.bones.push_back(BoneCanvasNode{
+                bone_index,
+                skeleton_data.bones()[bone_index].parent_index,
+                screen_from_world(
+                    layout,
+                    world_transforms[bone_index].world_x,
+                    world_transforms[bone_index].world_y),
+                sampled_skeleton.is_bone_active(bone_index)});
+        }
+
+        ghost_poses.push_back(std::move(ghost_pose));
+    }
+
+    return ghost_poses;
+}
+
 ImVec2 local_viewport_position(const ViewportLayout& layout, const ImVec2& screen_position) {
     return ImVec2(
         screen_position.x - layout.canvas_origin.x,
@@ -4384,6 +6007,23 @@ void append_colored_line(
     const ImVec4 float_color = ImGui::ColorConvertU32ToFloat4(color);
     vertices->push_back(viewport_vertex(start, float_color));
     vertices->push_back(viewport_vertex(end, float_color));
+}
+
+void append_polyline_lines(
+    std::vector<ViewportRenderVertex>* vertices,
+    const std::vector<ImVec2>& points,
+    ImU32 color,
+    bool closed) {
+    if (vertices == nullptr || points.size() < 2U) {
+        return;
+    }
+
+    for (std::size_t point_index = 1; point_index < points.size(); ++point_index) {
+        append_colored_line(vertices, points[point_index - 1U], points[point_index], color);
+    }
+    if (closed) {
+        append_colored_line(vertices, points.back(), points.front(), color);
+    }
 }
 
 void append_filled_circle(
@@ -4412,10 +6052,732 @@ void append_filled_circle(
     }
 }
 
+void append_colored_triangle(
+    std::vector<ViewportRenderVertex>* vertices,
+    const ImVec2& position0,
+    const ImVec4& color0,
+    const ImVec2& position1,
+    const ImVec4& color1,
+    const ImVec2& position2,
+    const ImVec4& color2) {
+    vertices->push_back(viewport_vertex(position0, color0));
+    vertices->push_back(viewport_vertex(position1, color1));
+    vertices->push_back(viewport_vertex(position2, color2));
+}
+
+void append_mesh_weight_overlay_geometry(
+    const ViewportLayout& layout,
+    const MeshWeightOverlay& overlay,
+    std::vector<ViewportRenderVertex>* triangle_vertices,
+    std::vector<ViewportRenderVertex>* line_vertices) {
+    if (triangle_vertices == nullptr || line_vertices == nullptr) {
+        return;
+    }
+
+    for (std::size_t triangle_index = 0; triangle_index + 2U < overlay.triangles.size();
+         triangle_index += 3U) {
+        const std::size_t a = overlay.triangles[triangle_index];
+        const std::size_t b = overlay.triangles[triangle_index + 1U];
+        const std::size_t c = overlay.triangles[triangle_index + 2U];
+        if (a >= overlay.vertices.size() ||
+            b >= overlay.vertices.size() ||
+            c >= overlay.vertices.size()) {
+            continue;
+        }
+
+        append_colored_triangle(
+            triangle_vertices,
+            local_viewport_position(layout, overlay.vertices[a].screen_position),
+            mesh_weight_heatmap_color(overlay.vertices[a].weight),
+            local_viewport_position(layout, overlay.vertices[b].screen_position),
+            mesh_weight_heatmap_color(overlay.vertices[b].weight),
+            local_viewport_position(layout, overlay.vertices[c].screen_position),
+            mesh_weight_heatmap_color(overlay.vertices[c].weight));
+    }
+
+    for (const MeshWeightOverlayVertex& vertex : overlay.vertices) {
+        append_filled_circle(
+            triangle_vertices,
+            local_viewport_position(layout, vertex.screen_position),
+            std::clamp(layout.render_joint_radius * 0.75f, 4.0f, 8.0f),
+            ImGui::ColorConvertFloat4ToU32(mesh_weight_heatmap_color(vertex.weight, 0.82f)),
+            14);
+    }
+}
+
+marrow::runtime::AttachmentVertex transform_attachment_vertex_local(
+    const marrow::runtime::BoneWorldTransform& transform,
+    double x,
+    double y) {
+    return marrow::runtime::AttachmentVertex{
+        transform.world_x + (transform.a * x) + (transform.b * y),
+        transform.world_y + (transform.c * x) + (transform.d * y)};
+}
+
+std::optional<marrow::runtime::AttachmentVertex> longest_child_local_offset(
+    const marrow::runtime::Skeleton& skeleton,
+    const marrow::runtime::SkeletonData& skeleton_data,
+    std::size_t bone_index) {
+    const auto& poses = skeleton.bone_poses();
+    if (bone_index >= poses.size()) {
+        return std::nullopt;
+    }
+
+    marrow::runtime::AttachmentVertex tip{};
+    double best_length_squared = 0.0;
+    for (std::size_t child_index = 0; child_index < skeleton_data.bones().size(); ++child_index) {
+        if (skeleton_data.bones()[child_index].parent_index != std::optional<std::size_t>{bone_index} ||
+            child_index >= poses.size()) {
+            continue;
+        }
+
+        const auto& child_pose = poses[child_index].local_pose;
+        const double length_squared =
+            (child_pose.x * child_pose.x) + (child_pose.y * child_pose.y);
+        if (length_squared <= best_length_squared) {
+            continue;
+        }
+
+        tip = marrow::runtime::AttachmentVertex{child_pose.x, child_pose.y};
+        best_length_squared = length_squared;
+    }
+
+    if (best_length_squared <= 1e-8) {
+        return std::nullopt;
+    }
+    return tip;
+}
+
+std::optional<marrow::runtime::AttachmentVertex> bone_tip_world_position(
+    const marrow::runtime::Skeleton& skeleton,
+    const marrow::runtime::SkeletonData& skeleton_data,
+    std::size_t bone_index) {
+    const auto& world_transforms = skeleton.bone_world_transforms();
+    if (bone_index >= world_transforms.size()) {
+        return std::nullopt;
+    }
+
+    const auto local_tip = longest_child_local_offset(skeleton, skeleton_data, bone_index);
+    if (!local_tip.has_value()) {
+        return std::nullopt;
+    }
+
+    return transform_attachment_vertex_local(
+        world_transforms[bone_index],
+        local_tip->x,
+        local_tip->y);
+}
+
+void add_debug_line_segment(
+    DebugOverlayGeometry* overlay,
+    const ImVec2& start,
+    const ImVec2& end,
+    ImU32 color,
+    float thickness = 1.0f) {
+    if (overlay == nullptr) {
+        return;
+    }
+
+    overlay->lines.push_back(DebugOverlayLineSegment{start, end, color, thickness});
+}
+
+void add_debug_polyline_segments(
+    DebugOverlayGeometry* overlay,
+    const std::vector<ImVec2>& points,
+    ImU32 color,
+    float thickness = 1.0f,
+    bool closed = false) {
+    if (overlay == nullptr || points.size() < 2U) {
+        return;
+    }
+
+    for (std::size_t point_index = 1; point_index < points.size(); ++point_index) {
+        add_debug_line_segment(
+            overlay,
+            points[point_index - 1U],
+            points[point_index],
+            color,
+            thickness);
+    }
+    if (closed) {
+        add_debug_line_segment(overlay, points.back(), points.front(), color, thickness);
+    }
+}
+
+void add_debug_cross_marker(
+    DebugOverlayGeometry* overlay,
+    const ImVec2& center,
+    float radius,
+    ImU32 color,
+    float thickness = 1.0f) {
+    if (overlay == nullptr || radius <= 0.0f) {
+        return;
+    }
+
+    add_debug_line_segment(
+        overlay,
+        ImVec2(center.x - radius, center.y),
+        ImVec2(center.x + radius, center.y),
+        color,
+        thickness);
+    add_debug_line_segment(
+        overlay,
+        ImVec2(center.x, center.y - radius),
+        ImVec2(center.x, center.y + radius),
+        color,
+        thickness);
+}
+
+void add_debug_arrow(
+    DebugOverlayGeometry* overlay,
+    const ImVec2& start,
+    const ImVec2& end,
+    ImU32 color,
+    float thickness = 1.0f) {
+    if (overlay == nullptr) {
+        return;
+    }
+
+    add_debug_line_segment(overlay, start, end, color, thickness);
+    const ImVec2 direction(end.x - start.x, end.y - start.y);
+    const float length = std::sqrt((direction.x * direction.x) + (direction.y * direction.y));
+    if (length <= 1e-4f) {
+        return;
+    }
+
+    const ImVec2 unit(direction.x / length, direction.y / length);
+    const ImVec2 perpendicular(-unit.y, unit.x);
+    const float head_length = std::min(14.0f, std::max(6.0f, length * 0.28f));
+    const ImVec2 head_base(
+        end.x - (unit.x * head_length),
+        end.y - (unit.y * head_length));
+    add_debug_line_segment(
+        overlay,
+        end,
+        ImVec2(
+            head_base.x + (perpendicular.x * (head_length * 0.45f)),
+            head_base.y + (perpendicular.y * (head_length * 0.45f))),
+        color,
+        thickness);
+    add_debug_line_segment(
+        overlay,
+        end,
+        ImVec2(
+            head_base.x - (perpendicular.x * (head_length * 0.45f)),
+            head_base.y - (perpendicular.y * (head_length * 0.45f))),
+        color,
+        thickness);
+}
+
+std::vector<marrow::runtime::AttachmentVertex> sample_path_curve_points(
+    const std::vector<marrow::runtime::AttachmentVertex>& control_points,
+    int samples_per_segment = 16) {
+    std::vector<marrow::runtime::AttachmentVertex> sampled_points;
+    if (control_points.size() < 4U || samples_per_segment <= 0) {
+        return sampled_points;
+    }
+
+    for (std::size_t point_index = 0; point_index + 3U < control_points.size(); point_index += 3U) {
+        for (int sample_index = 0; sample_index <= samples_per_segment; ++sample_index) {
+            if (point_index > 0U && sample_index == 0) {
+                continue;
+            }
+
+            const double t = static_cast<double>(sample_index) /
+                static_cast<double>(samples_per_segment);
+            const double inv_t = 1.0 - t;
+            const double basis0 = inv_t * inv_t * inv_t;
+            const double basis1 = 3.0 * inv_t * inv_t * t;
+            const double basis2 = 3.0 * inv_t * t * t;
+            const double basis3 = t * t * t;
+            const auto& p0 = control_points[point_index];
+            const auto& p1 = control_points[point_index + 1U];
+            const auto& p2 = control_points[point_index + 2U];
+            const auto& p3 = control_points[point_index + 3U];
+            sampled_points.push_back(marrow::runtime::AttachmentVertex{
+                (p0.x * basis0) + (p1.x * basis1) + (p2.x * basis2) + (p3.x * basis3),
+                (p0.y * basis0) + (p1.y * basis1) + (p2.y * basis2) + (p3.y * basis3)});
+        }
+    }
+
+    return sampled_points;
+}
+
+void add_debug_spring_segments(
+    DebugOverlayGeometry* overlay,
+    const ImVec2& start,
+    const ImVec2& end,
+    ImU32 color,
+    float thickness = 1.0f,
+    int coil_count = 6,
+    float amplitude = 5.0f) {
+    if (overlay == nullptr) {
+        return;
+    }
+
+    const ImVec2 direction(end.x - start.x, end.y - start.y);
+    const float length = std::sqrt((direction.x * direction.x) + (direction.y * direction.y));
+    if (length <= 1e-4f) {
+        add_debug_line_segment(overlay, start, end, color, thickness);
+        return;
+    }
+
+    const ImVec2 unit(direction.x / length, direction.y / length);
+    const ImVec2 perpendicular(-unit.y, unit.x);
+    const int points_per_coil = 2;
+    const int interior_point_count = std::max(coil_count * points_per_coil, 2);
+    std::vector<ImVec2> points;
+    points.reserve(static_cast<std::size_t>(interior_point_count + 2));
+    points.push_back(start);
+    for (int point_index = 1; point_index <= interior_point_count; ++point_index) {
+        const float alpha =
+            static_cast<float>(point_index) /
+            static_cast<float>(interior_point_count + 1);
+        const float lateral =
+            (point_index % 2 == 0 ? -1.0f : 1.0f) *
+            std::min(amplitude, length * 0.18f);
+        points.emplace_back(
+            start.x + (direction.x * alpha) + (perpendicular.x * lateral),
+            start.y + (direction.y * alpha) + (perpendicular.y * lateral));
+    }
+    points.push_back(end);
+    add_debug_polyline_segments(overlay, points, color, thickness, false);
+}
+
+DebugOverlayGeometry build_debug_overlay_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout) {
+    DebugOverlayGeometry overlay;
+    overlay.stats.bones_enabled = state.viewport.debug_overlay.bones;
+    if (!state.load_result || !state.preview_skeleton) {
+        return overlay;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
+    if (world_transforms.size() != skeleton.bones().size()) {
+        return overlay;
+    }
+
+    const auto slot_selected =
+        [&](std::size_t slot_index) {
+            return state.selected_slot_index.has_value() &&
+                *state.selected_slot_index == slot_index;
+        };
+    const auto constraint_selected =
+        [&](ConstraintEditKind kind, std::string_view name) {
+            return state.selected_constraint.has_value() &&
+                state.selected_constraint->kind == kind &&
+                state.selected_constraint->name == name;
+        };
+
+    if (state.viewport.debug_overlay.ik_constraints) {
+        for (const auto& constraint : skeleton.ik_constraints()) {
+            if (constraint.bone_indices.empty() ||
+                constraint.bone_indices.front() >= world_transforms.size() ||
+                constraint.target_bone_index >= world_transforms.size()) {
+                continue;
+            }
+
+            const bool selected = constraint_selected(ConstraintEditKind::Ik, constraint.name);
+            const ImU32 primary_color = selected
+                ? IM_COL32(178, 255, 186, 245)
+                : IM_COL32(106, 224, 134, 210);
+            const ImU32 secondary_color = selected
+                ? IM_COL32(127, 214, 255, 220)
+                : IM_COL32(91, 181, 222, 180);
+            const ImVec2 origin = screen_from_world(
+                layout,
+                world_transforms[constraint.bone_indices.front()].world_x,
+                world_transforms[constraint.bone_indices.front()].world_y);
+            const ImVec2 target = screen_from_world(
+                layout,
+                world_transforms[constraint.target_bone_index].world_x,
+                world_transforms[constraint.target_bone_index].world_y);
+
+            add_debug_line_segment(&overlay, origin, target, secondary_color, 1.5f);
+            overlay.circles.push_back(DebugOverlayCircle{
+                target,
+                std::clamp(layout.render_joint_radius * 0.9f, 4.0f, 8.0f),
+                IM_COL32(66, 154, 87, 92),
+                primary_color,
+                1.4f});
+            add_debug_cross_marker(
+                &overlay,
+                target,
+                std::clamp(layout.render_joint_radius * 0.7f, 4.0f, 7.0f),
+                primary_color,
+                1.6f);
+
+            double first_length = 0.0;
+            double second_length = 0.0;
+            if (constraint.bone_indices.size() == 1U) {
+                if (const auto tip =
+                        bone_tip_world_position(
+                            *state.preview_skeleton,
+                            skeleton,
+                            constraint.bone_indices.front())) {
+                    const ImVec2 tip_screen = screen_from_world(layout, tip->x, tip->y);
+                    first_length = std::sqrt(
+                        squared_distance(origin, tip_screen));
+                }
+            } else if (constraint.bone_indices.size() >= 2U &&
+                       constraint.bone_indices[1U] < world_transforms.size()) {
+                const ImVec2 joint = screen_from_world(
+                    layout,
+                    world_transforms[constraint.bone_indices[1U]].world_x,
+                    world_transforms[constraint.bone_indices[1U]].world_y);
+                first_length = std::sqrt(squared_distance(origin, joint));
+                if (const auto tip =
+                        bone_tip_world_position(
+                            *state.preview_skeleton,
+                            skeleton,
+                            constraint.bone_indices[1U])) {
+                    const ImVec2 tip_screen = screen_from_world(layout, tip->x, tip->y);
+                    second_length = std::sqrt(squared_distance(joint, tip_screen));
+                }
+            }
+
+            const float outer_radius =
+                static_cast<float>(std::max(first_length + second_length, first_length));
+            const float inner_radius =
+                static_cast<float>(std::abs(first_length - second_length));
+            if (outer_radius > 1.0f) {
+                const float base_angle = std::atan2(target.y - origin.y, target.x - origin.x);
+                const float sweep = constraint.bone_indices.size() >= 2U ? 0.95f : 0.70f;
+                std::vector<ImVec2> arc_points;
+                constexpr int kArcSegments = 24;
+                arc_points.reserve(kArcSegments + 1);
+                for (int segment_index = 0; segment_index <= kArcSegments; ++segment_index) {
+                    const float alpha =
+                        static_cast<float>(segment_index) / static_cast<float>(kArcSegments);
+                    const float angle = base_angle - sweep + ((2.0f * sweep) * alpha);
+                    arc_points.emplace_back(
+                        origin.x + (std::cos(angle) * outer_radius),
+                        origin.y + (std::sin(angle) * outer_radius));
+                }
+                add_debug_polyline_segments(&overlay, arc_points, primary_color, 1.4f, false);
+
+                if (constraint.bone_indices.size() >= 2U && inner_radius > 1.0f) {
+                    std::vector<ImVec2> inner_arc_points;
+                    inner_arc_points.reserve(kArcSegments + 1);
+                    for (int segment_index = 0; segment_index <= kArcSegments; ++segment_index) {
+                        const float alpha =
+                            static_cast<float>(segment_index) /
+                            static_cast<float>(kArcSegments);
+                        const float angle = base_angle - sweep + ((2.0f * sweep) * alpha);
+                        inner_arc_points.emplace_back(
+                            origin.x + (std::cos(angle) * inner_radius),
+                            origin.y + (std::sin(angle) * inner_radius));
+                    }
+                    add_debug_polyline_segments(
+                        &overlay,
+                        inner_arc_points,
+                        IM_COL32(81, 171, 108, 140),
+                        1.0f,
+                        false);
+                }
+            }
+
+            ++overlay.stats.ik_constraint_count;
+        }
+    }
+
+    if (state.viewport.debug_overlay.path_constraints) {
+        for (const auto& constraint : skeleton.path_constraints()) {
+            if (constraint.slot_index >= skeleton.slots().size() ||
+                constraint.slot_index >= state.preview_skeleton->slot_states().size()) {
+                continue;
+            }
+
+            const auto* attachment = state.preview_skeleton->current_attachment(constraint.slot_index);
+            if (attachment == nullptr || !attachment->path_attachment.has_value()) {
+                continue;
+            }
+
+            const std::size_t path_bone_index = skeleton.slots()[constraint.slot_index].bone_index;
+            if (path_bone_index >= world_transforms.size()) {
+                continue;
+            }
+
+            std::vector<marrow::runtime::AttachmentVertex> world_points;
+            world_points.reserve(attachment->path_attachment->control_points.size());
+            for (const auto& point : attachment->path_attachment->control_points) {
+                world_points.push_back(transform_attachment_vertex_local(
+                    world_transforms[path_bone_index],
+                    point.x,
+                    point.y));
+            }
+            const std::vector<marrow::runtime::AttachmentVertex> sampled_points =
+                sample_path_curve_points(world_points);
+            if (sampled_points.size() < 2U) {
+                continue;
+            }
+
+            std::vector<ImVec2> screen_points;
+            screen_points.reserve(sampled_points.size());
+            for (const auto& point : sampled_points) {
+                screen_points.push_back(screen_from_world(layout, point.x, point.y));
+            }
+
+            const bool selected = constraint_selected(ConstraintEditKind::Path, constraint.name);
+            add_debug_polyline_segments(
+                &overlay,
+                screen_points,
+                selected ? IM_COL32(135, 214, 255, 245) : IM_COL32(83, 181, 230, 210),
+                selected ? 2.0f : 1.5f,
+                false);
+            ++overlay.stats.path_constraint_count;
+        }
+    }
+
+    if (state.viewport.debug_overlay.physics_constraints) {
+        for (const auto& constraint : skeleton.physics_constraints()) {
+            const bool selected = constraint_selected(ConstraintEditKind::Physics, constraint.name);
+            const ImU32 spring_color = selected
+                ? IM_COL32(129, 255, 244, 240)
+                : IM_COL32(88, 214, 203, 210);
+            const ImU32 force_color = selected
+                ? IM_COL32(164, 216, 255, 210)
+                : IM_COL32(116, 176, 214, 170);
+
+            bool drew_constraint = false;
+            for (const std::size_t bone_index : constraint.bone_indices) {
+                if (bone_index >= world_transforms.size()) {
+                    continue;
+                }
+                const auto tip = bone_tip_world_position(*state.preview_skeleton, skeleton, bone_index);
+                if (!tip.has_value()) {
+                    continue;
+                }
+
+                const ImVec2 start = screen_from_world(
+                    layout,
+                    world_transforms[bone_index].world_x,
+                    world_transforms[bone_index].world_y);
+                const ImVec2 end = screen_from_world(layout, tip->x, tip->y);
+                add_debug_spring_segments(
+                    &overlay,
+                    start,
+                    end,
+                    spring_color,
+                    selected ? 2.0f : 1.4f,
+                    6,
+                    std::clamp(layout.render_joint_radius * 0.85f, 4.0f, 7.5f));
+
+                const ImVec2 midpoint((start.x + end.x) * 0.5f, (start.y + end.y) * 0.5f);
+                const ImVec2 direction(end.x - start.x, end.y - start.y);
+                const float length =
+                    std::sqrt((direction.x * direction.x) + (direction.y * direction.y));
+                if (length > 1e-4f) {
+                    const ImVec2 unit(direction.x / length, direction.y / length);
+                    const ImVec2 perpendicular(-unit.y, unit.x);
+                    const float damper_half =
+                        std::clamp(layout.render_joint_radius * 0.8f, 4.0f, 8.0f);
+                    add_debug_line_segment(
+                        &overlay,
+                        ImVec2(
+                            midpoint.x - (perpendicular.x * damper_half),
+                            midpoint.y - (perpendicular.y * damper_half)),
+                        ImVec2(
+                            midpoint.x + (perpendicular.x * damper_half),
+                            midpoint.y + (perpendicular.y * damper_half)),
+                        spring_color,
+                        selected ? 2.0f : 1.4f);
+                    add_debug_line_segment(
+                        &overlay,
+                        ImVec2(
+                            midpoint.x - (unit.x * (damper_half * 0.7f)),
+                            midpoint.y - (unit.y * (damper_half * 0.7f))),
+                        ImVec2(
+                            midpoint.x + (unit.x * (damper_half * 0.7f)),
+                            midpoint.y + (unit.y * (damper_half * 0.7f))),
+                        spring_color,
+                        1.2f);
+                }
+
+                const ImVec2 force_end = screen_from_world(
+                    layout,
+                    tip->x + (constraint.wind.x * 0.18),
+                    tip->y + (constraint.gravity.y * 0.18));
+                add_debug_arrow(&overlay, end, force_end, force_color, 1.2f);
+                drew_constraint = true;
+            }
+
+            if (drew_constraint) {
+                ++overlay.stats.physics_constraint_count;
+            }
+        }
+    }
+
+    if (state.viewport.debug_overlay.mesh_wireframes) {
+        std::vector<bool> seen_slots(skeleton.slots().size(), false);
+        for (const std::size_t slot_index : state.preview_skeleton->draw_order()) {
+            if (slot_index >= skeleton.slots().size() || seen_slots[slot_index]) {
+                continue;
+            }
+            seen_slots[slot_index] = true;
+
+            const auto pose = state.preview_skeleton->evaluate_current_mesh_attachment(slot_index);
+            if (!pose.has_value()) {
+                continue;
+            }
+
+            const ImU32 color = slot_selected(slot_index)
+                ? IM_COL32(255, 194, 120, 235)
+                : IM_COL32(244, 152, 96, 180);
+            for (std::size_t triangle_index = 0; triangle_index + 2U < pose->triangles.size();
+                 triangle_index += 3U) {
+                const std::size_t a = pose->triangles[triangle_index];
+                const std::size_t b = pose->triangles[triangle_index + 1U];
+                const std::size_t c = pose->triangles[triangle_index + 2U];
+                if (a >= pose->vertices.size() ||
+                    b >= pose->vertices.size() ||
+                    c >= pose->vertices.size()) {
+                    continue;
+                }
+
+                const ImVec2 p0 =
+                    screen_from_world(layout, pose->vertices[a].x, pose->vertices[a].y);
+                const ImVec2 p1 =
+                    screen_from_world(layout, pose->vertices[b].x, pose->vertices[b].y);
+                const ImVec2 p2 =
+                    screen_from_world(layout, pose->vertices[c].x, pose->vertices[c].y);
+                add_debug_line_segment(&overlay, p0, p1, color, 1.2f);
+                add_debug_line_segment(&overlay, p1, p2, color, 1.2f);
+                add_debug_line_segment(&overlay, p2, p0, color, 1.2f);
+            }
+
+            ++overlay.stats.mesh_attachment_count;
+        }
+    }
+
+    if (state.viewport.debug_overlay.bounding_boxes) {
+        marrow::runtime::SkeletonBounds bounds;
+        bounds.update(*state.preview_skeleton, false);
+        for (const auto& bounding_box : bounds.bounding_boxes()) {
+            if (bounding_box.polygon.size() < 2U) {
+                continue;
+            }
+
+            std::vector<ImVec2> screen_points;
+            screen_points.reserve(bounding_box.polygon.size());
+            for (const auto& point : bounding_box.polygon) {
+                screen_points.push_back(screen_from_world(layout, point.x, point.y));
+            }
+
+            const ImU32 color = slot_selected(bounding_box.slot_index)
+                ? IM_COL32(255, 122, 122, 220)
+                : IM_COL32(226, 95, 95, 170);
+            add_debug_polyline_segments(&overlay, screen_points, color, 1.4f, true);
+            ++overlay.stats.bounding_box_count;
+        }
+    }
+
+    return overlay;
+}
+
+void append_debug_overlay_geometry(
+    const ViewportLayout& layout,
+    const DebugOverlayGeometry& overlay,
+    std::vector<ViewportRenderVertex>* line_vertices,
+    std::vector<ViewportRenderVertex>* triangle_vertices) {
+    if (line_vertices == nullptr || triangle_vertices == nullptr) {
+        return;
+    }
+
+    for (const auto& line : overlay.lines) {
+        append_colored_line(
+            line_vertices,
+            local_viewport_position(layout, line.start),
+            local_viewport_position(layout, line.end),
+            line.color);
+    }
+    for (const auto& circle : overlay.circles) {
+        if ((circle.fill_color & IM_COL32_A_MASK) != 0U) {
+            append_filled_circle(
+                triangle_vertices,
+                local_viewport_position(layout, circle.center),
+                circle.radius,
+                circle.fill_color,
+                18);
+        }
+        if ((circle.outline_color & IM_COL32_A_MASK) != 0U) {
+            std::vector<ImVec2> circle_points;
+            constexpr int kCircleSegments = 24;
+            circle_points.reserve(kCircleSegments);
+            for (int segment_index = 0; segment_index < kCircleSegments; ++segment_index) {
+                const float angle =
+                    (2.0f * kPi * static_cast<float>(segment_index)) /
+                    static_cast<float>(kCircleSegments);
+                circle_points.emplace_back(
+                    local_viewport_position(layout, circle.center).x +
+                        (std::cos(angle) * circle.radius),
+                    local_viewport_position(layout, circle.center).y +
+                        (std::sin(angle) * circle.radius));
+            }
+            append_polyline_lines(line_vertices, circle_points, circle.outline_color, true);
+        }
+    }
+}
+
+void append_viewport_pose_geometry(
+    const ViewportLayout& layout,
+    const std::vector<BoneCanvasNode>& bones,
+    float joint_radius,
+    std::optional<std::size_t> selected_bone,
+    std::optional<std::size_t> hovered_bone,
+    ImU32 active_line_color,
+    ImU32 inactive_line_color,
+    ImU32 selected_line_color,
+    ImU32 active_fill_color,
+    ImU32 inactive_fill_color,
+    ImU32 hovered_fill_color,
+    ImU32 selected_fill_color,
+    std::vector<ViewportRenderVertex>* line_vertices,
+    std::vector<ViewportRenderVertex>* triangle_vertices) {
+    for (const BoneCanvasNode& node : bones) {
+        if (!node.parent_index.has_value() || *node.parent_index >= bones.size()) {
+            continue;
+        }
+
+        const BoneCanvasNode& parent = bones[*node.parent_index];
+        const bool selected =
+            selected_bone.has_value() && *selected_bone == node.bone_index;
+        const ImU32 line_color = selected
+            ? selected_line_color
+            : node.active ? active_line_color : inactive_line_color;
+        append_colored_line(
+            line_vertices,
+            local_viewport_position(layout, parent.screen_position),
+            local_viewport_position(layout, node.screen_position),
+            line_color);
+    }
+
+    for (const BoneCanvasNode& node : bones) {
+        const bool selected =
+            selected_bone.has_value() && *selected_bone == node.bone_index;
+        const bool hovered_selection =
+            hovered_bone.has_value() && *hovered_bone == node.bone_index;
+        const float radius = joint_radius + (selected ? 2.0f : 0.0f);
+        const ImU32 fill_color = selected
+            ? selected_fill_color
+            : hovered_selection ? hovered_fill_color
+                                : node.active ? active_fill_color : inactive_fill_color;
+        append_filled_circle(
+            triangle_vertices,
+            local_viewport_position(layout, node.screen_position),
+            radius,
+            fill_color);
+    }
+}
+
 void build_viewport_render_geometry(
     const ShellState& state,
     const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     std::vector<ViewportRenderVertex>* line_vertices,
     std::vector<ViewportRenderVertex>* triangle_vertices) {
     const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state.viewport.zoom));
@@ -4449,47 +6811,60 @@ void build_viewport_render_geometry(
         ImVec2(layout.world_origin_screen.x - layout.canvas_origin.x, layout.canvas_size.y),
         IM_COL32(204, 177, 110, 255));
 
-    for (const BoneCanvasNode& node : layout.bones) {
-        if (!node.parent_index.has_value() || *node.parent_index >= layout.bones.size()) {
-            continue;
-        }
-
-        const BoneCanvasNode& parent = layout.bones[*node.parent_index];
-        const bool selected =
-            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
-        const ImU32 line_color = selected
-            ? IM_COL32(247, 204, 114, 255)
-            : node.active ? IM_COL32(214, 163, 76, 220) : IM_COL32(111, 117, 125, 180);
-        append_colored_line(
+    for (const OnionSkinGhostPose& ghost_pose : ghost_poses) {
+        append_viewport_pose_geometry(
+            layout,
+            ghost_pose.bones,
+            layout.render_joint_radius * 0.9f,
+            std::nullopt,
+            std::nullopt,
+            ghost_pose.line_color,
+            ghost_pose.line_color,
+            ghost_pose.line_color,
+            ghost_pose.fill_color,
+            ghost_pose.fill_color,
+            ghost_pose.fill_color,
+            ghost_pose.fill_color,
             line_vertices,
-            local_viewport_position(layout, parent.screen_position),
-            local_viewport_position(layout, node.screen_position),
-            line_color);
+            triangle_vertices);
     }
 
-    for (const BoneCanvasNode& node : layout.bones) {
-        const bool selected =
-            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
-        const bool hovered_selection =
-            hovered_bone.has_value() && *hovered_bone == node.bone_index;
-        const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
-        const ImU32 fill_color = selected
-            ? IM_COL32(247, 204, 114, 255)
-            : hovered_selection ? IM_COL32(226, 186, 97, 240)
-                                : node.active ? IM_COL32(208, 134, 57, 230)
-                                              : IM_COL32(98, 103, 110, 200);
-        append_filled_circle(
+    if (mesh_weight_overlay != nullptr) {
+        append_mesh_weight_overlay_geometry(
+            layout,
+            *mesh_weight_overlay,
             triangle_vertices,
-            local_viewport_position(layout, node.screen_position),
-            radius,
-            fill_color);
+            line_vertices);
+    }
+
+    const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
+    append_debug_overlay_geometry(layout, debug_overlay, line_vertices, triangle_vertices);
+
+    if (state.viewport.debug_overlay.bones) {
+        append_viewport_pose_geometry(
+            layout,
+            layout.bones,
+            layout.render_joint_radius,
+            state.selected_bone_index,
+            hovered_bone,
+            IM_COL32(214, 163, 76, 220),
+            IM_COL32(111, 117, 125, 180),
+            IM_COL32(247, 204, 114, 255),
+            IM_COL32(208, 134, 57, 230),
+            IM_COL32(98, 103, 110, 200),
+            IM_COL32(226, 186, 97, 240),
+            IM_COL32(247, 204, 114, 255),
+            line_vertices,
+            triangle_vertices);
     }
 }
 
 std::optional<std::string> render_viewport_framebuffer(
     const ShellState& state,
     const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     ViewportRenderResources* resources) {
     if (resources == nullptr || !resources->available) {
         return "Viewport renderer is unavailable.";
@@ -4500,12 +6875,14 @@ std::optional<std::string> render_viewport_framebuffer(
 
     std::vector<ViewportRenderVertex> line_vertices;
     std::vector<ViewportRenderVertex> triangle_vertices;
-    line_vertices.reserve((layout.bones.size() * 6U) + 256U);
-    triangle_vertices.reserve(layout.bones.size() * 54U);
+    line_vertices.reserve((layout.bones.size() * 24U) + 2048U);
+    triangle_vertices.reserve(layout.bones.size() * 72U);
     build_viewport_render_geometry(
         state,
         layout,
+        ghost_poses,
         hovered_bone,
+        mesh_weight_overlay,
         &line_vertices,
         &triangle_vertices);
 
@@ -4589,6 +6966,113 @@ std::optional<std::size_t> pick_bone_at_position(
     return best_bone;
 }
 
+bool reload_runtime_source_assets(ShellState* state) {
+    if (!state->load_result || state->load_result.project == nullptr) {
+        return false;
+    }
+
+    std::optional<std::string> previous_selection_name;
+    if (const auto selection_name = selected_bone_name(*state)) {
+        previous_selection_name = std::string(*selection_name);
+    }
+    std::optional<std::string> previous_slot_name;
+    if (state->selected_slot_index.has_value() &&
+        *state->selected_slot_index < state->load_result.skeleton_data->slots().size()) {
+        previous_slot_name =
+            state->load_result.skeleton_data->slots()[*state->selected_slot_index].name;
+    }
+
+    const auto document_result = marrow::runtime::load_skeleton_document(
+        state->load_result.project->resolved_skeleton_path());
+    if (!document_result) {
+        state->error_message = document_result.error->format();
+        state->status_message = "Runtime asset hot-reload failed";
+        return false;
+    }
+
+    std::vector<std::shared_ptr<const marrow::runtime::AtlasData>> atlas_data;
+    atlas_data.reserve(state->load_result.project->resolved_atlas_paths().size());
+    for (const auto& atlas_path : state->load_result.project->resolved_atlas_paths()) {
+        const auto atlas_result = marrow::runtime::AtlasLoader::load(atlas_path);
+        if (!atlas_result) {
+            state->error_message = atlas_result.error->format();
+            state->status_message = "Runtime asset hot-reload failed";
+            return false;
+        }
+        atlas_data.push_back(atlas_result.atlas_data);
+    }
+
+    state->load_result.base_skeleton_document =
+        marrow::allocate_shared<marrow::runtime::json::Document>(
+            std::move(*document_result.document));
+    state->load_result.atlas_data = std::move(atlas_data);
+
+    if (!rebuild_project_runtime(state)) {
+        state->status_message = "Runtime asset hot-reload failed";
+        return false;
+    }
+
+    if (previous_selection_name.has_value()) {
+        state->selected_bone_index =
+            state->load_result.skeleton_data->find_bone_index(*previous_selection_name);
+    }
+    if (previous_slot_name.has_value()) {
+        state->selected_slot_index =
+            state->load_result.skeleton_data->find_slot_index(*previous_slot_name);
+    }
+    if (state->selected_slot_index.has_value()) {
+        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
+    }
+    validate_selected_constraint(state);
+
+    state->status_message =
+        "Hot-reloaded runtime assets: " + join_paths(current_runtime_asset_paths(*state));
+    state->error_message.clear();
+    return true;
+}
+
+RuntimeAssetPollOutcome poll_runtime_asset_changes(ShellState* state) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
+        return RuntimeAssetPollOutcome::Unchanged;
+    }
+
+    const std::vector<std::filesystem::path> current_paths = current_runtime_asset_paths(*state);
+    if (state->runtime_asset_watch_entries.size() != current_paths.size()) {
+        reset_runtime_asset_watch(state);
+        return RuntimeAssetPollOutcome::Unchanged;
+    }
+
+    for (std::size_t index = 0; index < current_paths.size(); ++index) {
+        if (state->runtime_asset_watch_entries[index].path != current_paths[index]) {
+            reset_runtime_asset_watch(state);
+            return RuntimeAssetPollOutcome::Unchanged;
+        }
+    }
+
+    const std::vector<RuntimeAssetWatchEntry> current_entries =
+        capture_runtime_asset_watch_entries(*state);
+    bool changed = false;
+    for (std::size_t index = 0; index < current_entries.size(); ++index) {
+        if (!runtime_asset_watch_entry_equal(
+                current_entries[index],
+                state->runtime_asset_watch_entries[index])) {
+            changed = true;
+            break;
+        }
+    }
+
+    if (!changed) {
+        return RuntimeAssetPollOutcome::Unchanged;
+    }
+
+    if (!reload_runtime_source_assets(state)) {
+        return RuntimeAssetPollOutcome::Failed;
+    }
+
+    reset_runtime_asset_watch(state);
+    return RuntimeAssetPollOutcome::Reloaded;
+}
+
 bool reload_project(ShellState* state) {
     std::optional<std::string> previous_selection_name;
     if (const auto selection_name = selected_bone_name(*state)) {
@@ -4621,6 +7105,7 @@ bool reload_project(ShellState* state) {
     state->timeline_playing = false;
     state->command_stack.clear();
     state->pending_edit_action.reset();
+    reset_weight_paint_stroke(state);
     state->project_dirty = false;
     state->saved_project_snapshot.clear();
     state->error_message.clear();
@@ -4639,9 +7124,10 @@ bool reload_project(ShellState* state) {
     state->saved_project_snapshot =
         marrow::editor::serialize_project(*state->load_result.project);
     state->preview_skeleton =
-        std::make_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
+        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
     state->animation_state =
-        std::make_unique<marrow::runtime::AnimationState>(state->load_result.skeleton_data);
+        marrow::allocate_unique<marrow::runtime::AnimationState>(
+            state->load_result.skeleton_data);
     state->preview_skin_names = normalize_preview_skin_names(
         *state->load_result.skeleton_data,
         state->load_result.project->editor_metadata.preview_skins);
@@ -4698,6 +7184,7 @@ bool reload_project(ShellState* state) {
            << " from "
            << state->project_path.string();
     state->status_message = stream.str();
+    reset_runtime_asset_watch(state);
     return true;
 }
 
@@ -4731,6 +7218,94 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
                 state->command_stack.can_redo())) {
             redo_project_change(state);
         }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("View")) {
+        const bool viewport_settings_available =
+            state->load_result && state->load_result.project != nullptr;
+        const bool onion_skin_enabled = state->viewport.onion_skin.enabled;
+        if (ImGui::MenuItem(
+                "Onion Skinning",
+                nullptr,
+                onion_skin_enabled,
+                viewport_settings_available)) {
+            apply_onion_skin_edit(
+                state,
+                std::string(onion_skin_enabled ? "Disabled" : "Enabled") + " onion skinning",
+                "viewport:onion-skin:enabled",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->enabled = !onion_skin_enabled;
+                });
+        }
+        if (ImGui::MenuItem(
+                "Performance HUD",
+                nullptr,
+                state->hud_overlay_enabled,
+                viewport_settings_available)) {
+            state->hud_overlay_enabled = !state->hud_overlay_enabled;
+            if (!state->hud_overlay_enabled) {
+                state->hud_overlay_frame.reset();
+            }
+        }
+        ImGui::Separator();
+        const auto toggle_debug_overlay_item =
+            [&](const char* label,
+                bool enabled,
+                std::string_view group,
+                auto mutate) {
+                if (ImGui::MenuItem(label, nullptr, enabled, viewport_settings_available)) {
+                    apply_debug_overlay_edit(
+                        state,
+                        std::string(enabled ? "Disabled " : "Enabled ") + label,
+                        std::string(group),
+                        false,
+                        mutate);
+                }
+            };
+        toggle_debug_overlay_item(
+            "Bone Hierarchy",
+            state->viewport.debug_overlay.bones,
+            "viewport:debug-overlay:bones",
+            [](marrow::editor::DebugOverlaySettings* settings) {
+                settings->bones = !settings->bones;
+            });
+        toggle_debug_overlay_item(
+            "IK Constraints",
+            state->viewport.debug_overlay.ik_constraints,
+            "viewport:debug-overlay:ik",
+            [](marrow::editor::DebugOverlaySettings* settings) {
+                settings->ik_constraints = !settings->ik_constraints;
+            });
+        toggle_debug_overlay_item(
+            "Path Constraints",
+            state->viewport.debug_overlay.path_constraints,
+            "viewport:debug-overlay:path",
+            [](marrow::editor::DebugOverlaySettings* settings) {
+                settings->path_constraints = !settings->path_constraints;
+            });
+        toggle_debug_overlay_item(
+            "Physics Constraints",
+            state->viewport.debug_overlay.physics_constraints,
+            "viewport:debug-overlay:physics",
+            [](marrow::editor::DebugOverlaySettings* settings) {
+                settings->physics_constraints = !settings->physics_constraints;
+            });
+        toggle_debug_overlay_item(
+            "Mesh Wireframes",
+            state->viewport.debug_overlay.mesh_wireframes,
+            "viewport:debug-overlay:meshes",
+            [](marrow::editor::DebugOverlaySettings* settings) {
+                settings->mesh_wireframes = !settings->mesh_wireframes;
+            });
+        toggle_debug_overlay_item(
+            "Bounding Boxes",
+            state->viewport.debug_overlay.bounding_boxes,
+            "viewport:debug-overlay:bounds",
+            [](marrow::editor::DebugOverlaySettings* settings) {
+                settings->bounding_boxes = !settings->bounding_boxes;
+            });
         ImGui::EndMenu();
     }
 
@@ -7669,10 +10244,152 @@ void draw_timeline_window(ShellState* state) {
     ImGui::End();
 }
 
+void draw_viewport_pose_fallback(
+    const std::vector<BoneCanvasNode>& bones,
+    float joint_radius,
+    std::optional<std::size_t> selected_bone,
+    std::optional<std::size_t> hovered_bone,
+    ImU32 active_line_color,
+    ImU32 inactive_line_color,
+    ImU32 selected_line_color,
+    ImU32 active_fill_color,
+    ImU32 inactive_fill_color,
+    ImU32 hovered_fill_color,
+    ImU32 selected_fill_color,
+    ImU32 active_outline_color,
+    ImU32 inactive_outline_color,
+    ImDrawList* draw_list) {
+    if (draw_list == nullptr) {
+        return;
+    }
+
+    for (const BoneCanvasNode& node : bones) {
+        if (!node.parent_index.has_value() || *node.parent_index >= bones.size()) {
+            continue;
+        }
+
+        const BoneCanvasNode& parent = bones[*node.parent_index];
+        const bool selected =
+            selected_bone.has_value() && *selected_bone == node.bone_index;
+        const ImU32 line_color = selected
+            ? selected_line_color
+            : node.active ? active_line_color : inactive_line_color;
+        draw_list->AddLine(
+            parent.screen_position,
+            node.screen_position,
+            line_color,
+            selected ? 3.0f : 2.0f);
+    }
+
+    for (const BoneCanvasNode& node : bones) {
+        const bool selected =
+            selected_bone.has_value() && *selected_bone == node.bone_index;
+        const bool hovered_selection =
+            hovered_bone.has_value() && *hovered_bone == node.bone_index;
+        const float radius = joint_radius + (selected ? 2.0f : 0.0f);
+        const ImU32 fill_color = selected
+            ? selected_fill_color
+            : hovered_selection ? hovered_fill_color
+                                : node.active ? active_fill_color : inactive_fill_color;
+        const ImU32 outline_color =
+            node.active ? active_outline_color : inactive_outline_color;
+        draw_list->AddCircleFilled(node.screen_position, radius, fill_color, 18);
+        draw_list->AddCircle(node.screen_position, radius, outline_color, 18, 1.5f);
+    }
+}
+
+ImU32 average_overlay_triangle_color(
+    const MeshWeightOverlayVertex& a,
+    const MeshWeightOverlayVertex& b,
+    const MeshWeightOverlayVertex& c) {
+    const ImVec4 color_a = mesh_weight_heatmap_color(a.weight);
+    const ImVec4 color_b = mesh_weight_heatmap_color(b.weight);
+    const ImVec4 color_c = mesh_weight_heatmap_color(c.weight);
+    const ImVec4 average(
+        (color_a.x + color_b.x + color_c.x) / 3.0f,
+        (color_a.y + color_b.y + color_c.y) / 3.0f,
+        (color_a.z + color_b.z + color_c.z) / 3.0f,
+        (color_a.w + color_b.w + color_c.w) / 3.0f);
+    return ImGui::ColorConvertFloat4ToU32(average);
+}
+
+void draw_mesh_weight_overlay_fallback(
+    const ViewportLayout& layout,
+    const MeshWeightOverlay& overlay,
+    ImDrawList* draw_list) {
+    if (draw_list == nullptr) {
+        return;
+    }
+
+    for (std::size_t triangle_index = 0; triangle_index + 2U < overlay.triangles.size();
+         triangle_index += 3U) {
+        const std::size_t a = overlay.triangles[triangle_index];
+        const std::size_t b = overlay.triangles[triangle_index + 1U];
+        const std::size_t c = overlay.triangles[triangle_index + 2U];
+        if (a >= overlay.vertices.size() ||
+            b >= overlay.vertices.size() ||
+            c >= overlay.vertices.size()) {
+            continue;
+        }
+
+        draw_list->AddTriangleFilled(
+            overlay.vertices[a].screen_position,
+            overlay.vertices[b].screen_position,
+            overlay.vertices[c].screen_position,
+            average_overlay_triangle_color(
+                overlay.vertices[a],
+                overlay.vertices[b],
+                overlay.vertices[c]));
+    }
+
+    for (const MeshWeightOverlayVertex& vertex : overlay.vertices) {
+        const ImU32 fill_color =
+            ImGui::ColorConvertFloat4ToU32(mesh_weight_heatmap_color(vertex.weight, 0.84f));
+        draw_list->AddCircleFilled(
+            vertex.screen_position,
+            std::clamp(layout.render_joint_radius * 0.75f, 4.0f, 8.0f),
+            fill_color,
+            14);
+        draw_list->AddCircle(
+            vertex.screen_position,
+            std::clamp(layout.render_joint_radius * 0.75f, 4.0f, 8.0f),
+            IM_COL32(18, 21, 25, 180),
+            14,
+            1.0f);
+    }
+}
+
+void draw_debug_overlay_fallback(
+    const DebugOverlayGeometry& overlay,
+    ImDrawList* draw_list) {
+    if (draw_list == nullptr) {
+        return;
+    }
+
+    for (const auto& line : overlay.lines) {
+        draw_list->AddLine(line.start, line.end, line.color, line.thickness);
+    }
+    for (const auto& circle : overlay.circles) {
+        if ((circle.fill_color & IM_COL32_A_MASK) != 0U) {
+            draw_list->AddCircleFilled(circle.center, circle.radius, circle.fill_color, 18);
+        }
+        if ((circle.outline_color & IM_COL32_A_MASK) != 0U) {
+            draw_list->AddCircle(
+                circle.center,
+                circle.radius,
+                circle.outline_color,
+                24,
+                circle.outline_thickness);
+        }
+    }
+}
+
 void draw_viewport_fallback_scene(
     const ShellState& state,
     const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     ImDrawList* draw_list) {
     draw_list->AddRectFilled(
         layout.canvas_origin,
@@ -7714,39 +10431,47 @@ void draw_viewport_fallback_scene(
         IM_COL32(204, 177, 110, 255),
         1.5f);
 
-    for (const BoneCanvasNode& node : layout.bones) {
-        if (!node.parent_index.has_value() || *node.parent_index >= layout.bones.size()) {
-            continue;
-        }
-
-        const BoneCanvasNode& parent = layout.bones[*node.parent_index];
-        const bool selected =
-            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
-        const ImU32 line_color = selected
-            ? IM_COL32(247, 204, 114, 255)
-            : node.active ? IM_COL32(214, 163, 76, 220) : IM_COL32(111, 117, 125, 180);
-        draw_list->AddLine(
-            parent.screen_position,
-            node.screen_position,
-            line_color,
-            selected ? 3.0f : 2.0f);
+    for (const OnionSkinGhostPose& ghost_pose : ghost_poses) {
+        draw_viewport_pose_fallback(
+            ghost_pose.bones,
+            layout.render_joint_radius * 0.9f,
+            std::nullopt,
+            std::nullopt,
+            ghost_pose.line_color,
+            ghost_pose.line_color,
+            ghost_pose.line_color,
+            ghost_pose.fill_color,
+            ghost_pose.fill_color,
+            ghost_pose.fill_color,
+            ghost_pose.fill_color,
+            ghost_pose.outline_color,
+            ghost_pose.outline_color,
+            draw_list);
     }
 
-    for (const BoneCanvasNode& node : layout.bones) {
-        const bool selected =
-            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
-        const bool hovered_selection =
-            hovered_bone.has_value() && *hovered_bone == node.bone_index;
-        const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
-        const ImU32 fill_color = selected
-            ? IM_COL32(247, 204, 114, 255)
-            : hovered_selection ? IM_COL32(226, 186, 97, 240)
-                                : node.active ? IM_COL32(208, 134, 57, 230)
-                                              : IM_COL32(98, 103, 110, 200);
-        const ImU32 outline_color =
-            node.active ? IM_COL32(33, 37, 41, 255) : IM_COL32(48, 50, 54, 255);
-        draw_list->AddCircleFilled(node.screen_position, radius, fill_color, 18);
-        draw_list->AddCircle(node.screen_position, radius, outline_color, 18, 1.5f);
+    if (mesh_weight_overlay != nullptr) {
+        draw_mesh_weight_overlay_fallback(layout, *mesh_weight_overlay, draw_list);
+    }
+
+    const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
+    draw_debug_overlay_fallback(debug_overlay, draw_list);
+
+    if (state.viewport.debug_overlay.bones) {
+        draw_viewport_pose_fallback(
+            layout.bones,
+            layout.render_joint_radius,
+            state.selected_bone_index,
+            hovered_bone,
+            IM_COL32(214, 163, 76, 220),
+            IM_COL32(111, 117, 125, 180),
+            IM_COL32(247, 204, 114, 255),
+            IM_COL32(208, 134, 57, 230),
+            IM_COL32(98, 103, 110, 200),
+            IM_COL32(226, 186, 97, 240),
+            IM_COL32(247, 204, 114, 255),
+            IM_COL32(33, 37, 41, 255),
+            IM_COL32(48, 50, 54, 255),
+            draw_list);
     }
 }
 
@@ -7754,23 +10479,26 @@ void draw_viewport_annotations(
     const ShellState& state,
     const ViewportLayout& layout,
     std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
     ImDrawList* draw_list) {
     if (!state.load_result) {
         return;
     }
 
     const auto& bones = state.load_result.skeleton_data->bones();
-    for (const BoneCanvasNode& node : layout.bones) {
-        const bool selected =
-            state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
-        const bool hovered_selection =
-            hovered_bone.has_value() && *hovered_bone == node.bone_index;
-        const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
-        if (selected || hovered_selection || layout.bones.size() <= 12U) {
-            draw_list->AddText(
-                ImVec2(node.screen_position.x + radius + 6.0f, node.screen_position.y - 6.0f),
-                selected ? IM_COL32(247, 232, 191, 255) : IM_COL32(225, 212, 180, 220),
-                bones[node.bone_index].name.c_str());
+    if (state.viewport.debug_overlay.bones) {
+        for (const BoneCanvasNode& node : layout.bones) {
+            const bool selected =
+                state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+            const bool hovered_selection =
+                hovered_bone.has_value() && *hovered_bone == node.bone_index;
+            const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
+            if (selected || hovered_selection || layout.bones.size() <= 12U) {
+                draw_list->AddText(
+                    ImVec2(node.screen_position.x + radius + 6.0f, node.screen_position.y - 6.0f),
+                    selected ? IM_COL32(247, 232, 191, 255) : IM_COL32(225, 212, 180, 220),
+                    bones[node.bone_index].name.c_str());
+            }
         }
     }
 
@@ -7786,16 +10514,91 @@ void draw_viewport_annotations(
             IM_COL32(244, 230, 197, 255),
             selection_stream.str().c_str());
     }
+
+    const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
+    std::vector<const char*> enabled_layers;
+    enabled_layers.reserve(6U);
+    if (state.viewport.debug_overlay.bones) {
+        enabled_layers.push_back("bones");
+    }
+    if (debug_overlay.stats.ik_constraint_count > 0U) {
+        enabled_layers.push_back("ik");
+    }
+    if (debug_overlay.stats.path_constraint_count > 0U) {
+        enabled_layers.push_back("path");
+    }
+    if (debug_overlay.stats.physics_constraint_count > 0U) {
+        enabled_layers.push_back("physics");
+    }
+    if (debug_overlay.stats.mesh_attachment_count > 0U) {
+        enabled_layers.push_back("meshes");
+    }
+    if (debug_overlay.stats.bounding_box_count > 0U) {
+        enabled_layers.push_back("bounds");
+    }
+    if (!enabled_layers.empty()) {
+        std::ostringstream debug_stream;
+        debug_stream << "Debug overlay:";
+        for (const char* layer : enabled_layers) {
+            debug_stream << ' ' << layer;
+        }
+        draw_list->AddText(
+            ImVec2(layout.canvas_origin.x + 14.0f, layout.canvas_origin.y + 30.0f),
+            IM_COL32(210, 221, 232, 220),
+            debug_stream.str().c_str());
+    }
+
+    if (state.hud_overlay_enabled && state.hud_overlay_frame.has_value()) {
+        const std::vector<std::string> hud_lines =
+            marrow::runtime::profiler_hud_lines(*state.hud_overlay_frame);
+        float hud_y = layout.canvas_origin.y + 48.0f;
+        if (!enabled_layers.empty()) {
+            hud_y += 18.0f;
+        }
+        for (const std::string& line : hud_lines) {
+            draw_list->AddText(
+                ImVec2(layout.canvas_origin.x + 14.0f, hud_y),
+                IM_COL32(227, 236, 205, 232),
+                line.c_str());
+            hud_y += 18.0f;
+        }
+    }
+
+    if (mesh_weight_overlay != nullptr) {
+        std::ostringstream overlay_stream;
+        overlay_stream << "Weight heatmap: "
+                       << mesh_weight_overlay->target.display_attachment_name
+                       << " -> " << mesh_weight_overlay->target.source_skin_name
+                       << "/" << mesh_weight_overlay->target.source_attachment_name
+                       << "  " << weight_paint_mode_name(state.weight_paint.mode)
+                       << "  radius " << static_cast<int>(state.weight_paint.radius_pixels)
+                       << "  strength " << std::fixed << std::setprecision(2)
+                       << state.weight_paint.strength;
+        draw_list->AddText(
+            ImVec2(layout.canvas_origin.x + 14.0f, layout.canvas_end.y - 48.0f),
+            IM_COL32(233, 223, 199, 230),
+            overlay_stream.str().c_str());
+    }
 }
 
 void draw_viewport_window(ShellState* state) {
     ImGui::Begin(kViewportWindowTitle);
+    const std::optional<MeshWeightPaintTarget> paint_target =
+        state->load_result ? current_mesh_weight_paint_target(*state) : std::nullopt;
+    const bool weight_tool_ready =
+        state->weight_paint.enabled &&
+        paint_target.has_value() &&
+        state->selected_bone_index.has_value() &&
+        state->load_result &&
+        *state->selected_bone_index < state->load_result.skeleton_data->bones().size();
     const std::string preview_label =
         state->selected_animation_name.empty() ? std::string("Setup pose preview")
                                                : "Animation preview / " + state->selected_animation_name;
     ImGui::TextUnformatted(preview_label.c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled("LMB select  RMB drag pan  Wheel zoom");
+    ImGui::TextDisabled(
+        "%s  RMB drag pan  Wheel zoom",
+        weight_tool_ready ? "LMB brush weights" : "LMB select");
     if (!state->selected_animation_name.empty()) {
         ImGui::TextDisabled(
             "%s / %s",
@@ -7803,6 +10606,265 @@ void draw_viewport_window(ShellState* state) {
             format_time_seconds(timeline_preview_duration(*state)).c_str());
     }
     ImGui::Separator();
+
+    if (state->load_result && state->load_result.project != nullptr &&
+        ImGui::CollapsingHeader("Onion Skin", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& onion_skin = state->viewport.onion_skin;
+        bool onion_enabled = onion_skin.enabled;
+        if (ImGui::Checkbox("Enabled##onion_skin", &onion_enabled)) {
+            apply_onion_skin_edit(
+                state,
+                std::string(onion_enabled ? "Enabled" : "Disabled") + " onion skinning",
+                "viewport:onion-skin:enabled",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->enabled = onion_enabled;
+                });
+        }
+
+        int mode_index = onion_skin.mode == marrow::editor::OnionSkinMode::Frame ? 0 : 1;
+        constexpr const char* kOnionSkinModes[] = {"Frame", "Keyframe"};
+        if (ImGui::Combo(
+                "Mode##onion_skin",
+                &mode_index,
+                kOnionSkinModes,
+                IM_ARRAYSIZE(kOnionSkinModes))) {
+            apply_onion_skin_edit(
+                state,
+                std::string("Set onion skin mode to ") + kOnionSkinModes[mode_index],
+                "viewport:onion-skin:mode",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->mode = mode_index == 0 ? marrow::editor::OnionSkinMode::Frame
+                                                     : marrow::editor::OnionSkinMode::Keyframe;
+                });
+        }
+
+        bool anchor_to_zero = onion_skin.anchor_to_zero;
+        if (mode_index != 0) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Checkbox("Anchor To Frame 0##onion_skin", &anchor_to_zero)) {
+            apply_onion_skin_edit(
+                state,
+                std::string(anchor_to_zero ? "Enabled" : "Disabled") + " onion-skin anchoring",
+                "viewport:onion-skin:anchor",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->anchor_to_zero = anchor_to_zero;
+                });
+        }
+        if (mode_index != 0) {
+            ImGui::EndDisabled();
+        }
+
+        int before_count = onion_skin.before_count;
+        const bool before_changed =
+            ImGui::SliderInt("Before Ghosts##onion_skin", &before_count, 0, 6);
+        apply_coalesced_onion_skin_drag(
+            state,
+            before_changed,
+            "Updated onion-skin before ghost count",
+            "viewport:onion-skin:before",
+            false,
+            [&](marrow::editor::OnionSkinSettings* settings) {
+                settings->before_count = before_count;
+            });
+
+        int after_count = onion_skin.after_count;
+        const bool after_changed =
+            ImGui::SliderInt("After Ghosts##onion_skin", &after_count, 0, 6);
+        apply_coalesced_onion_skin_drag(
+            state,
+            after_changed,
+            "Updated onion-skin after ghost count",
+            "viewport:onion-skin:after",
+            false,
+            [&](marrow::editor::OnionSkinSettings* settings) {
+                settings->after_count = after_count;
+            });
+
+        int step = onion_skin.step;
+        const char* step_label = mode_index == 0 ? "Frame Step##onion_skin"
+                                                 : "Keyframe Stride##onion_skin";
+        const bool step_changed = ImGui::SliderInt(step_label, &step, 1, 12);
+        apply_coalesced_onion_skin_drag(
+            state,
+            step_changed,
+            "Updated onion-skin sampling step",
+            "viewport:onion-skin:step",
+            false,
+            [&](marrow::editor::OnionSkinSettings* settings) {
+                settings->step = step;
+            });
+
+        ImGui::TextDisabled(
+            "Before ghosts render cool blue, after ghosts render warm red, and alpha falls off with distance.");
+        if (state->selected_animation_name.empty()) {
+            ImGui::TextDisabled("Select an animation to preview ghost frames.");
+        }
+        ImGui::Separator();
+    }
+
+    if (state->load_result && state->load_result.project != nullptr &&
+        ImGui::CollapsingHeader("Debug Overlay", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& debug_overlay = state->viewport.debug_overlay;
+        const auto draw_toggle = [&](const char* label,
+                                     const char* status_label,
+                                     bool value,
+                                     std::string_view group,
+                                     auto mutate) {
+            bool edited = value;
+            if (ImGui::Checkbox(label, &edited)) {
+                apply_debug_overlay_edit(
+                    state,
+                    std::string(edited ? "Enabled " : "Disabled ") + status_label,
+                    std::string(group),
+                    false,
+                    [&](marrow::editor::DebugOverlaySettings* settings) {
+                        mutate(settings, edited);
+                    });
+            }
+        };
+
+        draw_toggle(
+            "Bones##debug_overlay",
+            "bones",
+            debug_overlay.bones,
+            "viewport:debug-overlay:bones",
+            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
+                settings->bones = value;
+            });
+        draw_toggle(
+            "IK Constraints##debug_overlay",
+            "IK constraints",
+            debug_overlay.ik_constraints,
+            "viewport:debug-overlay:ik",
+            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
+                settings->ik_constraints = value;
+            });
+        draw_toggle(
+            "Path Constraints##debug_overlay",
+            "path constraints",
+            debug_overlay.path_constraints,
+            "viewport:debug-overlay:path",
+            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
+                settings->path_constraints = value;
+            });
+        draw_toggle(
+            "Physics Constraints##debug_overlay",
+            "physics constraints",
+            debug_overlay.physics_constraints,
+            "viewport:debug-overlay:physics",
+            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
+                settings->physics_constraints = value;
+            });
+        draw_toggle(
+            "Mesh Wireframes##debug_overlay",
+            "mesh wireframes",
+            debug_overlay.mesh_wireframes,
+            "viewport:debug-overlay:meshes",
+            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
+                settings->mesh_wireframes = value;
+            });
+        draw_toggle(
+            "Bounding Boxes##debug_overlay",
+            "bounding boxes",
+            debug_overlay.bounding_boxes,
+            "viewport:debug-overlay:bounds",
+            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
+                settings->bounding_boxes = value;
+            });
+        ImGui::TextDisabled(
+            "Each layer can be toggled independently to inspect authored bones, constraints, meshes, and bounds.");
+        ImGui::Separator();
+    }
+
+    if (state->load_result && state->load_result.project != nullptr &&
+        ImGui::CollapsingHeader("Performance HUD", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool hud_enabled = state->hud_overlay_enabled;
+        if (ImGui::Checkbox("Enabled##performance_hud", &hud_enabled)) {
+            state->hud_overlay_enabled = hud_enabled;
+            if (!hud_enabled) {
+                state->hud_overlay_frame.reset();
+            }
+        }
+        ImGui::TextDisabled(
+            "Profiles animation, transforms, skinning, and render prep for the current preview pose.");
+        ImGui::Separator();
+    }
+
+    if (state->load_result && state->load_result.project != nullptr &&
+        ImGui::CollapsingHeader("Weight Paint", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool tool_enabled = state->weight_paint.enabled;
+        if (ImGui::Checkbox("Enable Tool##weight_paint", &tool_enabled)) {
+            state->weight_paint.enabled = tool_enabled;
+            if (!tool_enabled) {
+                finish_weight_paint_stroke(state);
+            }
+        }
+
+        int mode_index = 0;
+        switch (state->weight_paint.mode) {
+        case WeightPaintMode::Paint:
+            mode_index = 0;
+            break;
+        case WeightPaintMode::Erase:
+            mode_index = 1;
+            break;
+        case WeightPaintMode::Smooth:
+            mode_index = 2;
+            break;
+        }
+        constexpr const char* kWeightPaintModes[] = {"Paint", "Erase", "Smooth"};
+        if (ImGui::Combo(
+                "Mode##weight_paint",
+                &mode_index,
+                kWeightPaintModes,
+                IM_ARRAYSIZE(kWeightPaintModes))) {
+            state->weight_paint.mode =
+                mode_index == 0 ? WeightPaintMode::Paint
+                : mode_index == 1 ? WeightPaintMode::Erase
+                                  : WeightPaintMode::Smooth;
+        }
+
+        ImGui::SliderFloat(
+            "Radius##weight_paint",
+            &state->weight_paint.radius_pixels,
+            8.0f,
+            160.0f,
+            "%.0f px");
+        ImGui::SliderFloat(
+            "Strength##weight_paint",
+            &state->weight_paint.strength,
+            0.05f,
+            1.0f,
+            "%.2f");
+        ImGui::Checkbox("Show Heat Map##weight_paint", &state->weight_paint.show_heatmap);
+
+        if (paint_target.has_value()) {
+            ImGui::Text(
+                "Preview mesh: %s",
+                paint_target->display_attachment_name.c_str());
+            ImGui::Text(
+                "Editing source: %s / %s",
+                paint_target->source_skin_name.c_str(),
+                paint_target->source_attachment_name.c_str());
+        } else {
+            ImGui::TextDisabled(
+                "Select a slot whose preview attachment uses mesh geometry to paint weights.");
+        }
+
+        if (state->selected_bone_index.has_value() &&
+            *state->selected_bone_index < state->load_result.skeleton_data->bones().size()) {
+            ImGui::Text(
+                "Active bone: %s",
+                state->load_result.skeleton_data->bones()[*state->selected_bone_index].name.c_str());
+        } else {
+            ImGui::TextDisabled("Select an active bone for paint, erase, and heat-map preview.");
+        }
+        ImGui::Separator();
+    }
 
     const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
     if (canvas_size.x < 32.0f || canvas_size.y < 32.0f) {
@@ -7852,22 +10914,74 @@ void draw_viewport_window(ShellState* state) {
     }
 
     const auto layout = build_viewport_layout(*state, canvas_origin, canvas_size);
+    state->hud_overlay_frame =
+        state->hud_overlay_enabled ? build_preview_profiler_frame(*state) : std::nullopt;
+    std::optional<MeshWeightOverlay> mesh_weight_overlay =
+        layout.has_value() && (state->weight_paint.enabled || state->weight_paint.show_heatmap)
+            ? build_mesh_weight_overlay(*state, *layout)
+            : std::nullopt;
+    const bool brush_enabled =
+        state->weight_paint.enabled &&
+        mesh_weight_overlay.has_value() &&
+        state->selected_bone_index.has_value() &&
+        state->load_result &&
+        *state->selected_bone_index < state->load_result.skeleton_data->bones().size();
     std::optional<std::size_t> hovered_bone;
     if (hovered && layout.has_value()) {
         hovered_bone = pick_bone_at_position(*layout, ImGui::GetIO().MousePos);
     }
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hovered_bone.has_value()) {
+    const std::vector<OnionSkinGhostPose> ghost_poses =
+        layout.has_value() ? build_onion_skin_ghost_poses(*state, *layout)
+                           : std::vector<OnionSkinGhostPose>{};
+    if (state->weight_paint_stroke.active && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        finish_weight_paint_stroke(state);
+    }
+    if (brush_enabled &&
+        hovered &&
+        mesh_weight_overlay.has_value() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        begin_weight_paint_stroke(state, mesh_weight_overlay->target);
+    }
+    if (brush_enabled &&
+        hovered &&
+        mesh_weight_overlay.has_value() &&
+        state->weight_paint_stroke.active &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const float sample_spacing = std::max(state->weight_paint.radius_pixels * 0.18f, 6.0f);
+        if (!state->weight_paint_stroke.has_last_sample ||
+            std::sqrt(
+                squared_distance(
+                    ImGui::GetIO().MousePos,
+                    state->weight_paint_stroke.last_sample_position)) >= sample_spacing) {
+            if (apply_weight_paint_sample(state, *mesh_weight_overlay, ImGui::GetIO().MousePos) &&
+                layout.has_value()) {
+                state->weight_paint_stroke.last_sample_position = ImGui::GetIO().MousePos;
+                state->weight_paint_stroke.has_last_sample = true;
+                mesh_weight_overlay = build_mesh_weight_overlay(*state, *layout);
+            }
+        }
+    }
+    if (!brush_enabled &&
+        hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        hovered_bone.has_value()) {
         select_bone(state, *hovered_bone, "Viewport", true);
     }
 
     const ImVec2 canvas_end(
         canvas_origin.x + canvas_size.x,
         canvas_origin.y + canvas_size.y);
+    const MeshWeightOverlay* rendered_overlay =
+        state->weight_paint.show_heatmap && mesh_weight_overlay.has_value()
+            ? &(*mesh_weight_overlay)
+            : nullptr;
     if (use_framebuffer && layout.has_value()) {
         if (const auto error = render_viewport_framebuffer(
                 *state,
                 *layout,
+                ghost_poses,
                 hovered_bone,
+                rendered_overlay,
                 &state->viewport_renderer)) {
             state->viewport_renderer.error_message = *error;
             use_framebuffer = false;
@@ -7880,7 +10994,13 @@ void draw_viewport_window(ShellState* state) {
         draw_list->AddRect(canvas_origin, canvas_end, IM_COL32(56, 61, 69, 255), 6.0f);
     } else {
         if (layout.has_value()) {
-            draw_viewport_fallback_scene(*state, *layout, hovered_bone, draw_list);
+            draw_viewport_fallback_scene(
+                *state,
+                *layout,
+                ghost_poses,
+                hovered_bone,
+                rendered_overlay,
+                draw_list);
         } else {
             draw_list->AddRectFilled(
                 canvas_origin,
@@ -7896,7 +11016,15 @@ void draw_viewport_window(ShellState* state) {
     }
 
     if (layout.has_value()) {
-        draw_viewport_annotations(*state, *layout, hovered_bone, draw_list);
+        draw_viewport_annotations(*state, *layout, hovered_bone, rendered_overlay, draw_list);
+        if (brush_enabled && hovered) {
+            draw_list->AddCircle(
+                ImGui::GetIO().MousePos,
+                state->weight_paint.radius_pixels,
+                IM_COL32(248, 236, 211, 210),
+                48,
+                1.5f);
+        }
     } else {
         draw_list->AddText(
             ImVec2(canvas_origin.x + 16.0f, canvas_origin.y + 16.0f),
@@ -8225,6 +11353,7 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    (void)poll_runtime_asset_changes(shell_state);
     advance_timeline_playback(shell_state, ImGui::GetIO().DeltaTime);
     handle_project_history_shortcuts(shell_state);
 
@@ -8255,6 +11384,259 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
+bool read_text_file(
+    const std::filesystem::path& path,
+    std::string* text_out,
+    std::string* error_out) {
+    std::ifstream stream(path);
+    if (!stream) {
+        if (error_out != nullptr) {
+            *error_out = "Failed to open " + path.string();
+        }
+        return false;
+    }
+
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    if (!stream.good() && !stream.eof()) {
+        if (error_out != nullptr) {
+            *error_out = "Failed to read " + path.string();
+        }
+        return false;
+    }
+
+    if (text_out != nullptr) {
+        *text_out = buffer.str();
+    }
+    return true;
+}
+
+bool write_text_file(
+    const std::filesystem::path& path,
+    const std::string& text,
+    std::string* error_out) {
+    std::ofstream stream(path, std::ios::trunc);
+    if (!stream) {
+        if (error_out != nullptr) {
+            *error_out = "Failed to open " + path.string() + " for writing";
+        }
+        return false;
+    }
+
+    stream << text;
+    if (!stream.good()) {
+        if (error_out != nullptr) {
+            *error_out = "Failed to write " + path.string();
+        }
+        return false;
+    }
+
+    std::error_code error;
+    std::filesystem::last_write_time(
+        path,
+        std::filesystem::file_time_type::clock::now() + std::chrono::seconds(1),
+        error);
+    return true;
+}
+
+bool rewrite_attack_peak_for_hot_reload(
+    const std::filesystem::path& skeleton_path,
+    std::string* error_out) {
+    std::string text;
+    if (!read_text_file(skeleton_path, &text, error_out)) {
+        return false;
+    }
+
+    const std::size_t attack_section = text.find("\"attack\"");
+    if (attack_section == std::string::npos) {
+        if (error_out != nullptr) {
+            *error_out = "Hot-reload smoke could not find the attack animation in " +
+                skeleton_path.string();
+        }
+        return false;
+    }
+
+    const std::string before = "\"angle\": 60.0";
+    const std::size_t angle_offset = text.find(before, attack_section);
+    if (angle_offset == std::string::npos) {
+        if (error_out != nullptr) {
+            *error_out = "Hot-reload smoke could not find the attack peak key in " +
+                skeleton_path.string();
+        }
+        return false;
+    }
+
+    text.replace(angle_offset, before.size(), "\"angle\": 90.0");
+    return write_text_file(skeleton_path, text, error_out);
+}
+
+bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "Hot-reload smoke requires a loaded project.\n";
+        return false;
+    }
+
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_editor_hot_reload_smoke";
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(temp_root, filesystem_error);
+    filesystem_error.clear();
+    std::filesystem::create_directories(temp_root, filesystem_error);
+    if (filesystem_error) {
+        std::cerr << "Hot-reload smoke could not create " << temp_root.string() << ".\n";
+        return false;
+    }
+
+    const std::filesystem::path source_skeleton =
+        source_state.load_result.project->resolved_skeleton_path();
+    const std::vector<std::filesystem::path> source_atlases =
+        source_state.load_result.project->resolved_atlas_paths();
+    if (source_atlases.empty()) {
+        std::cerr << "Hot-reload smoke requires at least one atlas.\n";
+        return false;
+    }
+
+    const std::filesystem::path temp_skeleton = temp_root / source_skeleton.filename();
+    const std::filesystem::path temp_atlas = temp_root / source_atlases.front().filename();
+    std::filesystem::copy_file(
+        source_skeleton,
+        temp_skeleton,
+        std::filesystem::copy_options::overwrite_existing,
+        filesystem_error);
+    if (filesystem_error) {
+        std::cerr << "Hot-reload smoke could not copy " << source_skeleton.string() << ".\n";
+        return false;
+    }
+    filesystem_error.clear();
+    std::filesystem::copy_file(
+        source_atlases.front(),
+        temp_atlas,
+        std::filesystem::copy_options::overwrite_existing,
+        filesystem_error);
+    if (filesystem_error) {
+        std::cerr << "Hot-reload smoke could not copy " << source_atlases.front().string() << ".\n";
+        return false;
+    }
+
+    const std::filesystem::path temp_project = temp_root / "hot_reload_smoke.marrow";
+    marrow::editor::MinimalProjectOptions project_options;
+    project_options.project_path = temp_project;
+    project_options.skeleton_path = temp_skeleton;
+    project_options.atlas_paths = {temp_atlas};
+    project_options.name = "Hot Reload Smoke";
+    project_options.active_animation = "attack";
+    project_options.preview_skins = {"default"};
+    project_options.notes = "Generated by marrow_editor_shell hot-reload smoke validation.";
+    const marrow::editor::ProjectData temp_project_data =
+        marrow::editor::create_minimal_project(project_options);
+    const auto save_result = marrow::editor::save_project(temp_project_data, temp_project);
+    if (!save_result) {
+        std::cerr << save_result.error->format() << '\n';
+        return false;
+    }
+
+    ShellState hot_reload_state;
+    hot_reload_state.project_path = temp_project;
+    if (!reload_project(&hot_reload_state)) {
+        std::cerr << hot_reload_state.error_message << '\n';
+        return false;
+    }
+
+    const auto arm_index = hot_reload_state.load_result.skeleton_data->find_bone_index("arm_l");
+    if (!arm_index.has_value()) {
+        std::cerr << "Hot-reload smoke requires the arm_l bone.\n";
+        return false;
+    }
+
+    hot_reload_state.animation_state->clear_tracks();
+    hot_reload_state.animation_state->set_animation(0, "idle", true, 0.0);
+    hot_reload_state.animation_state->update(0.5);
+    hot_reload_state.selected_animation_name = "idle";
+    hot_reload_state.timeline_time_seconds = 0.5;
+    if (!apply_current_animation_state_to_preview(&hot_reload_state)) {
+        std::cerr << hot_reload_state.error_message << '\n';
+        return false;
+    }
+    hot_reload_state.animation_state->set_animation(0, "attack", false, 0.2);
+    hot_reload_state.animation_state->update(0.1);
+    hot_reload_state.selected_animation_name = "attack";
+    hot_reload_state.timeline_time_seconds = 0.1;
+    hot_reload_state.timeline_playing = true;
+
+    if (!apply_current_animation_state_to_preview(&hot_reload_state)) {
+        std::cerr << hot_reload_state.error_message << '\n';
+        return false;
+    }
+
+    std::shared_ptr<marrow::runtime::TrackEntry> current =
+        hot_reload_state.animation_state->get_current(0);
+    if (current == nullptr || current->mixing_from == nullptr ||
+        current->animation_name != "attack" ||
+        current->mixing_from->animation_name != "idle") {
+        std::cerr << "Hot-reload smoke did not build the expected attack<-idle mix chain.\n";
+        return false;
+    }
+
+    const double pre_reload_track_time = current->track_time;
+    const double pre_reload_mix_time = current->mix_time;
+    const double pre_reload_rotation =
+        hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation;
+    if (std::abs(pre_reload_rotation - 15.0) > 1e-3) {
+        std::cerr << "Hot-reload smoke expected the pre-reload mixed attack pose at 15 degrees.\n";
+        return false;
+    }
+
+    std::string rewrite_error;
+    if (!rewrite_attack_peak_for_hot_reload(temp_skeleton, &rewrite_error)) {
+        std::cerr << rewrite_error << '\n';
+        return false;
+    }
+
+    const RuntimeAssetPollOutcome poll_outcome =
+        poll_runtime_asset_changes(&hot_reload_state);
+    if (poll_outcome != RuntimeAssetPollOutcome::Reloaded) {
+        std::cerr << "Hot-reload smoke did not detect the modified skeleton file.\n";
+        if (!hot_reload_state.error_message.empty()) {
+            std::cerr << hot_reload_state.error_message << '\n';
+        }
+        return false;
+    }
+
+    current = hot_reload_state.animation_state->get_current(0);
+    if (current == nullptr || current->mixing_from == nullptr ||
+        current->animation_name != "attack" ||
+        current->mixing_from->animation_name != "idle") {
+        std::cerr << "Hot-reload smoke lost the active mix chain after reload.\n";
+        return false;
+    }
+    if (std::abs(current->track_time - pre_reload_track_time) > 1e-6 ||
+        std::abs(current->mix_time - pre_reload_mix_time) > 1e-6) {
+        std::cerr << "Hot-reload smoke did not preserve track and mix time across reload.\n";
+        return false;
+    }
+
+    const double post_reload_rotation =
+        hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation;
+    if (std::abs(post_reload_rotation - 22.5) > 1e-3) {
+        std::cerr << "Hot-reload smoke did not sample the updated attack pose after reload.\n";
+        return false;
+    }
+
+    hot_reload_state.animation_state->update(1.0 / 60.0);
+    hot_reload_state.timeline_time_seconds =
+        hot_reload_state.animation_state->get_current(0)->track_time;
+    if (!apply_current_animation_state_to_preview(&hot_reload_state)) {
+        std::cerr << hot_reload_state.error_message << '\n';
+        return false;
+    }
+    if (hot_reload_state.animation_state->get_current(0)->track_time <= pre_reload_track_time) {
+        std::cerr << "Hot-reload smoke playback did not continue after reload.\n";
+        return false;
+    }
+
+    return true;
+}
+
 int run_headless_smoke(const Options& options) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -8277,6 +11659,11 @@ int run_headless_smoke(const Options& options) {
     shell_state.project_path = options.project_path;
     if (!reload_project(&shell_state)) {
         std::cerr << shell_state.error_message;
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!validate_runtime_asset_hot_reload_smoke(shell_state)) {
         ImGui::DestroyContext();
         return 1;
     }
@@ -8439,6 +11826,351 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
+
+    const auto find_onion_ghost =
+        [](const std::vector<OnionSkinGhostPose>& ghosts,
+           double time_seconds,
+           bool before_current) -> const OnionSkinGhostPose* {
+            const auto iterator = std::find_if(
+                ghosts.begin(),
+                ghosts.end(),
+                [&](const OnionSkinGhostPose& ghost) {
+                    return ghost.before_current == before_current &&
+                        std::abs(ghost.time_seconds - time_seconds) <= 1e-6;
+                });
+            return iterator != ghosts.end() ? &(*iterator) : nullptr;
+        };
+
+    shell_state.viewport.onion_skin.enabled = true;
+    shell_state.viewport.onion_skin.mode = marrow::editor::OnionSkinMode::Frame;
+    shell_state.viewport.onion_skin.anchor_to_zero = false;
+    shell_state.viewport.onion_skin.before_count = 2;
+    shell_state.viewport.onion_skin.after_count = 2;
+    shell_state.viewport.onion_skin.step = 15;
+    if (!scrub_timeline_time(&shell_state, 0.5, "Smoke", false)) {
+        std::cerr << "Onion-skin smoke could not scrub the idle clip to 0.5s.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const auto onion_layout = build_viewport_layout(
+        shell_state,
+        ImVec2(0.0f, 0.0f),
+        ImVec2(1280.0f, 720.0f));
+    if (!onion_layout.has_value()) {
+        std::cerr << "Onion-skin smoke could not build a viewport layout.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const std::vector<OnionSkinGhostPose> frame_ghosts =
+        build_onion_skin_ghost_poses(shell_state, *onion_layout);
+    const OnionSkinGhostPose* frame_before_near = find_onion_ghost(frame_ghosts, 0.25, true);
+    const OnionSkinGhostPose* frame_before_far = find_onion_ghost(frame_ghosts, 0.0, true);
+    const OnionSkinGhostPose* frame_after_near = find_onion_ghost(frame_ghosts, 0.75, false);
+    const OnionSkinGhostPose* frame_after_far = find_onion_ghost(frame_ghosts, 1.0, false);
+    if (frame_ghosts.size() != 4U ||
+        frame_before_near == nullptr ||
+        frame_before_far == nullptr ||
+        frame_after_near == nullptr ||
+        frame_after_far == nullptr) {
+        std::cerr << "Frame onion-skin smoke did not generate the expected 2+2 ghost samples.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const ImVec4 before_near_color = ImGui::ColorConvertU32ToFloat4(frame_before_near->line_color);
+    const ImVec4 before_far_color = ImGui::ColorConvertU32ToFloat4(frame_before_far->line_color);
+    const ImVec4 after_near_color = ImGui::ColorConvertU32ToFloat4(frame_after_near->line_color);
+    const ImVec4 after_far_color = ImGui::ColorConvertU32ToFloat4(frame_after_far->line_color);
+    if (!(before_near_color.z > before_near_color.x) ||
+        !(after_near_color.x > after_near_color.z) ||
+        !(before_near_color.w > before_far_color.w) ||
+        !(after_near_color.w > after_far_color.w)) {
+        std::cerr << "Frame onion-skin smoke did not apply the expected blue/red tint and alpha falloff.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    std::vector<ViewportRenderVertex> baseline_line_vertices;
+    std::vector<ViewportRenderVertex> baseline_triangle_vertices;
+    build_viewport_render_geometry(
+        shell_state,
+        *onion_layout,
+        {},
+        std::nullopt,
+        nullptr,
+        &baseline_line_vertices,
+        &baseline_triangle_vertices);
+    std::vector<ViewportRenderVertex> onion_line_vertices;
+    std::vector<ViewportRenderVertex> onion_triangle_vertices;
+    build_viewport_render_geometry(
+        shell_state,
+        *onion_layout,
+        frame_ghosts,
+        std::nullopt,
+        nullptr,
+        &onion_line_vertices,
+        &onion_triangle_vertices);
+    if (onion_line_vertices.size() <= baseline_line_vertices.size() ||
+        onion_triangle_vertices.size() <= baseline_triangle_vertices.size()) {
+        std::cerr << "Viewport onion-skin smoke did not add ghost geometry to the render pass.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    shell_state.viewport.onion_skin.anchor_to_zero = true;
+    shell_state.viewport.onion_skin.before_count = 1;
+    shell_state.viewport.onion_skin.after_count = 1;
+    if (!scrub_timeline_time(&shell_state, 0.55, "Smoke", false)) {
+        std::cerr << "Onion-skin anchor smoke could not scrub the idle clip to 0.55s.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const std::vector<OnionSkinGhostPose> anchored_ghosts =
+        build_onion_skin_ghost_poses(shell_state, *onion_layout);
+    if (anchored_ghosts.size() != 2U ||
+        find_onion_ghost(anchored_ghosts, 0.5, true) == nullptr ||
+        find_onion_ghost(anchored_ghosts, 0.75, false) == nullptr) {
+        std::cerr << "Anchor onion-skin smoke did not snap samples to frame-0 intervals.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    shell_state.viewport.onion_skin.mode = marrow::editor::OnionSkinMode::Keyframe;
+    shell_state.viewport.onion_skin.anchor_to_zero = false;
+    shell_state.viewport.onion_skin.before_count = 2;
+    shell_state.viewport.onion_skin.after_count = 2;
+    shell_state.viewport.onion_skin.step = 1;
+    if (!scrub_timeline_time(&shell_state, 0.6, "Smoke", false)) {
+        std::cerr << "Onion-skin keyframe smoke could not scrub the idle clip to 0.6s.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const std::vector<OnionSkinGhostPose> keyframe_ghosts =
+        build_onion_skin_ghost_poses(shell_state, *onion_layout);
+    if (keyframe_ghosts.size() != 4U ||
+        find_onion_ghost(keyframe_ghosts, 0.5, true) == nullptr ||
+        find_onion_ghost(keyframe_ghosts, 0.25, true) == nullptr ||
+        find_onion_ghost(keyframe_ghosts, 0.8, false) == nullptr ||
+        find_onion_ghost(keyframe_ghosts, 1.0, false) == nullptr) {
+        std::cerr << "Keyframe onion-skin smoke did not sample the expected authored key positions.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    shell_state.viewport.onion_skin = {};
+    if (!scrub_timeline_time(&shell_state, 0.5, "Smoke", false)) {
+        std::cerr << "Onion-skin smoke could not restore the idle playhead.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    const auto require_debug_overlay_stats =
+        [](const DebugOverlayStats& stats,
+           std::size_t ik_constraints,
+           std::size_t path_constraints,
+           std::size_t physics_constraints,
+           std::size_t mesh_attachments,
+           std::size_t bounding_boxes,
+           std::string_view label) {
+            if (stats.ik_constraint_count != ik_constraints ||
+                stats.path_constraint_count != path_constraints ||
+                stats.physics_constraint_count != physics_constraints ||
+                stats.mesh_attachment_count != mesh_attachments ||
+                stats.bounding_box_count != bounding_boxes) {
+                std::cerr << label
+                          << " expected counts IK=" << ik_constraints
+                          << ", Path=" << path_constraints
+                          << ", Physics=" << physics_constraints
+                          << ", Meshes=" << mesh_attachments
+                          << ", Bounds=" << bounding_boxes
+                          << " but observed IK=" << stats.ik_constraint_count
+                          << ", Path=" << stats.path_constraint_count
+                          << ", Physics=" << stats.physics_constraint_count
+                          << ", Meshes=" << stats.mesh_attachment_count
+                          << ", Bounds=" << stats.bounding_box_count << ".\n";
+                return false;
+            }
+            return true;
+        };
+
+    if (!shell_state.viewport.debug_overlay.bones ||
+        !shell_state.viewport.debug_overlay.ik_constraints ||
+        !shell_state.viewport.debug_overlay.path_constraints ||
+        !shell_state.viewport.debug_overlay.physics_constraints ||
+        !shell_state.viewport.debug_overlay.mesh_wireframes ||
+        !shell_state.viewport.debug_overlay.bounding_boxes) {
+        std::cerr << "Debug overlay smoke expected the fixture viewport toggles to load as enabled.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    const auto debug_warrior_skin_index =
+        shell_state.load_result.skeleton_data->find_skin_index("warrior");
+    if (!debug_warrior_skin_index.has_value() ||
+        !set_preview_skin_enabled(&shell_state, *debug_warrior_skin_index, true, false)) {
+        std::cerr << "Debug overlay smoke could not enable the warrior linked-mesh preview.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    const marrow::editor::DebugOverlaySettings baseline_debug_overlay =
+        shell_state.viewport.debug_overlay;
+    const DebugOverlayGeometry baseline_debug_geometry =
+        build_debug_overlay_geometry(shell_state, *onion_layout);
+    if (!require_debug_overlay_stats(
+            baseline_debug_geometry.stats,
+            1U,
+            1U,
+            1U,
+            1U,
+            1U,
+            "Debug overlay smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    std::vector<ViewportRenderVertex> debug_on_line_vertices;
+    std::vector<ViewportRenderVertex> debug_on_triangle_vertices;
+    build_viewport_render_geometry(
+        shell_state,
+        *onion_layout,
+        {},
+        std::nullopt,
+        nullptr,
+        &debug_on_line_vertices,
+        &debug_on_triangle_vertices);
+
+    shell_state.viewport.debug_overlay.bones = false;
+    const DebugOverlayGeometry bones_hidden_geometry =
+        build_debug_overlay_geometry(shell_state, *onion_layout);
+    if (!require_debug_overlay_stats(
+            bones_hidden_geometry.stats,
+            1U,
+            1U,
+            1U,
+            1U,
+            1U,
+            "Debug overlay bones-off smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    std::vector<ViewportRenderVertex> debug_without_bones_line_vertices;
+    std::vector<ViewportRenderVertex> debug_without_bones_triangle_vertices;
+    build_viewport_render_geometry(
+        shell_state,
+        *onion_layout,
+        {},
+        std::nullopt,
+        nullptr,
+        &debug_without_bones_line_vertices,
+        &debug_without_bones_triangle_vertices);
+    if (debug_without_bones_line_vertices.size() >= debug_on_line_vertices.size() ||
+        debug_without_bones_triangle_vertices.size() >= debug_on_triangle_vertices.size()) {
+        std::cerr << "Debug overlay smoke expected hiding bones to remove viewport geometry.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.viewport.debug_overlay = baseline_debug_overlay;
+
+    shell_state.viewport.debug_overlay.ik_constraints = false;
+    if (!require_debug_overlay_stats(
+            build_debug_overlay_geometry(shell_state, *onion_layout).stats,
+            0U,
+            1U,
+            1U,
+            1U,
+            1U,
+            "Debug overlay IK toggle smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.viewport.debug_overlay = baseline_debug_overlay;
+
+    shell_state.viewport.debug_overlay.path_constraints = false;
+    if (!require_debug_overlay_stats(
+            build_debug_overlay_geometry(shell_state, *onion_layout).stats,
+            1U,
+            0U,
+            1U,
+            1U,
+            1U,
+            "Debug overlay path toggle smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.viewport.debug_overlay = baseline_debug_overlay;
+
+    shell_state.viewport.debug_overlay.physics_constraints = false;
+    if (!require_debug_overlay_stats(
+            build_debug_overlay_geometry(shell_state, *onion_layout).stats,
+            1U,
+            1U,
+            0U,
+            1U,
+            1U,
+            "Debug overlay physics toggle smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.viewport.debug_overlay = baseline_debug_overlay;
+
+    shell_state.viewport.debug_overlay.mesh_wireframes = false;
+    if (!require_debug_overlay_stats(
+            build_debug_overlay_geometry(shell_state, *onion_layout).stats,
+            1U,
+            1U,
+            1U,
+            0U,
+            1U,
+            "Debug overlay mesh toggle smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.viewport.debug_overlay = baseline_debug_overlay;
+
+    shell_state.viewport.debug_overlay.bounding_boxes = false;
+    if (!require_debug_overlay_stats(
+            build_debug_overlay_geometry(shell_state, *onion_layout).stats,
+            1U,
+            1U,
+            1U,
+            1U,
+            0U,
+            "Debug overlay bounds toggle smoke")) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.viewport.debug_overlay = baseline_debug_overlay;
+
+    shell_state.hud_overlay_enabled = true;
+    shell_state.hud_overlay_frame = build_preview_profiler_frame(shell_state);
+    if (!shell_state.hud_overlay_frame.has_value()) {
+        std::cerr << "Performance HUD smoke could not build a preview profiler frame.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const marrow::runtime::ProfilerFrame hud_frame = *shell_state.hud_overlay_frame;
+    if (hud_frame.skeleton_count != 1U ||
+        hud_frame.draw_calls == 0U ||
+        hud_frame.vertices == 0U ||
+        hud_frame.total_us == 0U ||
+        hud_frame.render_us == 0U) {
+        std::cerr << "Performance HUD smoke did not report the expected skeleton, draw, vertex, and frame counters.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const std::vector<std::string> hud_lines =
+        marrow::runtime::profiler_hud_lines(hud_frame);
+    if (hud_lines.size() != 3U ||
+        hud_lines[0].find("SKELS 1") == std::string::npos ||
+        hud_lines[0].find("DRAWS ") == std::string::npos ||
+        hud_lines[1].find("FRAME ") == std::string::npos ||
+        hud_lines[2].find("BREAKS T") == std::string::npos) {
+        std::cerr << "Performance HUD smoke did not emit the expected overlay text.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.hud_overlay_enabled = false;
+    shell_state.hud_overlay_frame.reset();
 
     const auto draw_order_track = std::find_if(
         idle_tracks.begin(),
@@ -9179,6 +12911,382 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
+
+        const auto arm_index = shell_state.load_result.skeleton_data->find_bone_index("arm_l");
+        if (!arm_index.has_value()) {
+            std::cerr << "Weight paint smoke could not resolve arm_l.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        if (!set_selected_animation(&shell_state, "attack", "Smoke", false, true) ||
+            !scrub_timeline_time(&shell_state, 0.2, "Smoke", false)) {
+            std::cerr << "Weight paint smoke could not scrub the attack preview pose.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        select_bone(&shell_state, *arm_index, "Smoke", false);
+        shell_state.weight_paint.enabled = true;
+        shell_state.weight_paint.show_heatmap = true;
+        shell_state.weight_paint.radius_pixels = 20.0f;
+        shell_state.weight_paint.strength = 1.0f;
+        shell_state.weight_paint.mode = WeightPaintMode::Paint;
+
+        const auto require_weight_near =
+            [](double actual, double expected, double epsilon, std::string_view label) {
+                if (std::abs(actual - expected) <= epsilon) {
+                    return true;
+                }
+
+                std::cerr << label << " expected " << expected << " but was " << actual << '\n';
+                return false;
+            };
+        const auto build_weight_overlay = [&]() -> std::optional<MeshWeightOverlay> {
+            const auto layout = build_viewport_layout(
+                shell_state,
+                ImVec2(0.0f, 0.0f),
+                ImVec2(1280.0f, 720.0f));
+            if (!layout.has_value()) {
+                return std::nullopt;
+            }
+            return build_mesh_weight_overlay(shell_state, *layout);
+        };
+        const auto current_weight_target = [&]() -> std::optional<MeshWeightPaintTarget> {
+            return current_mesh_weight_paint_target(shell_state);
+        };
+        const auto current_arm_weight = [&](std::size_t vertex_index) -> std::optional<double> {
+            const std::optional<MeshWeightPaintTarget> target = current_weight_target();
+            if (!target.has_value() ||
+                target->source_attachment == nullptr ||
+                target->source_attachment->mesh_geometry == nullptr ||
+                vertex_index >= target->source_attachment->mesh_geometry->weights.size()) {
+                return std::nullopt;
+            }
+
+            return weight_for_bone(
+                target->source_attachment->mesh_geometry->weights[vertex_index],
+                *arm_index);
+        };
+        const auto current_vertex_weight_total = [&](std::size_t vertex_index) -> std::optional<double> {
+            const std::optional<MeshWeightPaintTarget> target = current_weight_target();
+            if (!target.has_value() ||
+                target->source_attachment == nullptr ||
+                target->source_attachment->mesh_geometry == nullptr ||
+                vertex_index >= target->source_attachment->mesh_geometry->weights.size()) {
+                return std::nullopt;
+            }
+
+            double total = 0.0;
+            for (const auto& influence :
+                 target->source_attachment->mesh_geometry->weights[vertex_index].influences) {
+                total += influence.weight;
+            }
+            return total;
+        };
+        const auto current_body_pose = [&]() -> std::optional<marrow::runtime::MeshAttachmentPose> {
+            return shell_state.preview_skeleton->evaluate_current_mesh_attachment(*body_slot_index);
+        };
+
+        const EditorHistorySnapshot weight_paint_baseline =
+            capture_history_snapshot(shell_state);
+        shell_state.command_stack.clear();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        const std::optional<MeshWeightOverlay> baseline_overlay = build_weight_overlay();
+        const std::optional<marrow::runtime::MeshAttachmentPose> baseline_pose =
+            current_body_pose();
+        if (!baseline_overlay.has_value() ||
+            !baseline_pose.has_value() ||
+            baseline_overlay->target.source_skin_name != "mesh_base" ||
+            baseline_overlay->target.source_attachment_name != "body_mesh" ||
+            baseline_overlay->target.display_attachment_name != "warrior_body" ||
+            baseline_overlay->vertices.size() != 4U ||
+            !require_weight_near(baseline_overlay->vertices[0].weight, 0.0, 1e-6, "baseline vertex0 arm weight") ||
+            !require_weight_near(baseline_overlay->vertices[1].weight, 0.25, 1e-6, "baseline vertex1 arm weight") ||
+            !require_weight_near(baseline_overlay->vertices[2].weight, 0.75, 1e-6, "baseline vertex2 arm weight")) {
+            std::cerr << "Weight paint smoke did not resolve the expected linked-mesh paint target.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const ImVec4 heat_blue = mesh_weight_heatmap_color(0.0, 1.0f);
+        const ImVec4 heat_green = mesh_weight_heatmap_color(1.0 / 3.0, 1.0f);
+        const ImVec4 heat_yellow = mesh_weight_heatmap_color(2.0 / 3.0, 1.0f);
+        const ImVec4 heat_red = mesh_weight_heatmap_color(1.0, 1.0f);
+        if (!(heat_blue.z > heat_blue.y && heat_blue.z > heat_blue.x) ||
+            !(heat_green.y > heat_green.x && heat_green.y > heat_green.z) ||
+            !(heat_yellow.x > 0.8f && heat_yellow.y > 0.7f && heat_yellow.z < 0.4f) ||
+            !(heat_red.x > heat_red.y && heat_red.x > heat_red.z)) {
+            std::cerr << "Weight paint smoke did not expose the expected blue/green/yellow/red heat-map ramp.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        begin_weight_paint_stroke(&shell_state, baseline_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *baseline_overlay,
+                baseline_overlay->vertices[1].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Weight paint smoke could not apply a paint stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const std::optional<MeshWeightOverlay> painted_overlay = build_weight_overlay();
+        const std::optional<marrow::runtime::MeshAttachmentPose> painted_pose =
+            current_body_pose();
+        const std::optional<double> painted_arm_weight = current_arm_weight(1U);
+        const std::optional<double> painted_total_weight = current_vertex_weight_total(1U);
+        if (shell_state.command_stack.undo_count() != 1U ||
+            shell_state.command_stack.redo_count() != 0U ||
+            shell_state.load_result.project->mesh_weight_attachment_edits.size() != 1U ||
+            !painted_overlay.has_value() ||
+            !painted_pose.has_value() ||
+            !painted_arm_weight.has_value() ||
+            !painted_total_weight.has_value() ||
+            !require_weight_near(*painted_arm_weight, 0.625, 1e-6, "painted vertex1 arm weight") ||
+            !require_weight_near(*painted_total_weight, 1.0, 1e-6, "painted vertex1 total weight") ||
+            !require_weight_near(painted_overlay->vertices[1].weight, 0.625, 1e-6, "painted overlay vertex1 arm weight") ||
+            !(std::abs(painted_pose->vertices[1].x - baseline_pose->vertices[1].x) > 1e-3 ||
+              std::abs(painted_pose->vertices[1].y - baseline_pose->vertices[1].y) > 1e-3)) {
+            std::cerr << "Weight paint smoke did not apply the painted weight, normalization, or live preview deformation.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!undo_project_change(&shell_state)) {
+            std::cerr << "Weight paint smoke could not undo the paint stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const std::optional<double> undone_paint_weight = current_arm_weight(1U);
+        const std::optional<marrow::runtime::MeshAttachmentPose> undone_paint_pose =
+            current_body_pose();
+        if (shell_state.command_stack.undo_count() != 0U ||
+            shell_state.command_stack.redo_count() != 1U ||
+            !undone_paint_weight.has_value() ||
+            !undone_paint_pose.has_value() ||
+            !require_weight_near(*undone_paint_weight, 0.25, 1e-6, "undone painted vertex1 arm weight") ||
+            !require_weight_near(undone_paint_pose->vertices[1].x, baseline_pose->vertices[1].x, 1e-6, "undone painted vertex1 x") ||
+            !require_weight_near(undone_paint_pose->vertices[1].y, baseline_pose->vertices[1].y, 1e-6, "undone painted vertex1 y")) {
+            std::cerr << "Weight paint smoke undo did not restore the baseline mesh state.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!redo_project_change(&shell_state)) {
+            std::cerr << "Weight paint smoke could not redo the paint stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const std::optional<double> redone_paint_weight = current_arm_weight(1U);
+        const std::optional<marrow::runtime::MeshAttachmentPose> redone_paint_pose =
+            current_body_pose();
+        if (shell_state.command_stack.undo_count() != 1U ||
+            shell_state.command_stack.redo_count() != 0U ||
+            !redone_paint_weight.has_value() ||
+            !redone_paint_pose.has_value() ||
+            !require_weight_near(*redone_paint_weight, 0.625, 1e-6, "redone painted vertex1 arm weight") ||
+            !require_weight_near(redone_paint_pose->vertices[1].x, painted_pose->vertices[1].x, 1e-6, "redone painted vertex1 x") ||
+            !require_weight_near(redone_paint_pose->vertices[1].y, painted_pose->vertices[1].y, 1e-6, "redone painted vertex1 y")) {
+            std::cerr << "Weight paint smoke redo did not restore the painted mesh state.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        shell_state.weight_paint.mode = WeightPaintMode::Erase;
+        const std::optional<MeshWeightOverlay> erase_overlay = build_weight_overlay();
+        if (!erase_overlay.has_value()) {
+            std::cerr << "Weight paint smoke could not build the erase overlay.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        begin_weight_paint_stroke(&shell_state, erase_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *erase_overlay,
+                erase_overlay->vertices[1].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Weight paint smoke could not apply an erase stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const std::optional<double> erased_arm_weight = current_arm_weight(1U);
+        const std::optional<double> erased_total_weight = current_vertex_weight_total(1U);
+        if (shell_state.command_stack.undo_count() != 2U ||
+            shell_state.command_stack.redo_count() != 0U ||
+            !erased_arm_weight.has_value() ||
+            !erased_total_weight.has_value() ||
+            !require_weight_near(*erased_arm_weight, 0.0, 1e-6, "erased vertex1 arm weight") ||
+            !require_weight_near(*erased_total_weight, 1.0, 1e-6, "erased vertex1 total weight")) {
+            std::cerr << "Weight paint smoke did not erase the active bone influence.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!undo_project_change(&shell_state)) {
+            std::cerr << "Weight paint smoke could not undo the erase stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const std::optional<double> undone_erase_weight = current_arm_weight(1U);
+        if (!undone_erase_weight.has_value() ||
+            !require_weight_near(*undone_erase_weight, 0.625, 1e-6, "undone erased vertex1 arm weight")) {
+            std::cerr << "Weight paint smoke undo did not restore the painted influence.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!redo_project_change(&shell_state)) {
+            std::cerr << "Weight paint smoke could not redo the erase stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const std::optional<double> redone_erase_weight = current_arm_weight(1U);
+        if (!redone_erase_weight.has_value() ||
+            !require_weight_near(*redone_erase_weight, 0.0, 1e-6, "redone erased vertex1 arm weight")) {
+            std::cerr << "Weight paint smoke redo did not restore the erased influence.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!apply_history_snapshot(&shell_state, weight_paint_baseline)) {
+            std::cerr << "Weight paint smoke could not restore the baseline mesh state.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        shell_state.command_stack.clear();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        shell_state.weight_paint.mode = WeightPaintMode::Smooth;
+        const std::optional<MeshWeightOverlay> smooth_overlay = build_weight_overlay();
+        if (!smooth_overlay.has_value()) {
+            std::cerr << "Weight paint smoke could not build the smooth overlay.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        begin_weight_paint_stroke(&shell_state, smooth_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *smooth_overlay,
+                smooth_overlay->vertices[0].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Weight paint smoke could not apply a smooth stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const std::optional<double> smoothed_arm_weight = current_arm_weight(0U);
+        const std::optional<double> smoothed_total_weight = current_vertex_weight_total(0U);
+        if (shell_state.command_stack.undo_count() != 1U ||
+            shell_state.command_stack.redo_count() != 0U ||
+            !smoothed_arm_weight.has_value() ||
+            !smoothed_total_weight.has_value() ||
+            !require_weight_near(*smoothed_arm_weight, 0.3125, 1e-6, "smoothed vertex0 arm weight") ||
+            !require_weight_near(*smoothed_total_weight, 1.0, 1e-6, "smoothed vertex0 total weight")) {
+            std::cerr << "Weight paint smoke did not smooth the neighboring influences.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        marrow::editor::ProjectData temp_project = *shell_state.load_result.project;
+        temp_project.source_path = "/tmp/marrow_editor_shell_weight_paint_smoke.marrow";
+        materialize_temp_project_runtime_assets(shell_state, &temp_project);
+        const auto save_result =
+            marrow::editor::save_project(temp_project, temp_project.source_path);
+        if (!save_result) {
+            std::cerr << save_result.error->format() << '\n';
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const auto export_result = marrow::editor::export_runtime_skeleton(
+            *save_result.project,
+            *shell_state.load_result.base_skeleton_document,
+            "/tmp/marrow_editor_shell_weight_paint_smoke.mskl");
+        if (!export_result) {
+            std::cerr << export_result.error->format() << '\n';
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        const auto exported_skeleton =
+            marrow::runtime::load_skeleton_data(export_result.path);
+        if (!exported_skeleton) {
+            std::cerr << exported_skeleton.error->format();
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const auto exported_body_slot_index =
+            exported_skeleton.skeleton_data->find_slot_index("body");
+        const auto exported_arm_index =
+            exported_skeleton.skeleton_data->find_bone_index("arm_l");
+        const auto* exported_attachment =
+            exported_body_slot_index.has_value()
+                ? exported_skeleton.skeleton_data->find_attachment(
+                      "mesh_base",
+                      *exported_body_slot_index,
+                      "body_mesh")
+                : nullptr;
+        if (!exported_body_slot_index.has_value() ||
+            !exported_arm_index.has_value() ||
+            exported_attachment == nullptr ||
+            exported_attachment->mesh_geometry == nullptr ||
+            exported_attachment->mesh_geometry->weights.size() <= 0U ||
+            !require_weight_near(
+                weight_for_bone(
+                    exported_attachment->mesh_geometry->weights[0],
+                    *exported_arm_index),
+                0.3125,
+                1e-6,
+                "exported smoothed vertex0 arm weight")) {
+            std::cerr << "Weight paint smoke export did not round-trip the authored mesh weights.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!undo_project_change(&shell_state) ||
+            shell_state.command_stack.undo_count() != 0U ||
+            shell_state.command_stack.redo_count() != 1U) {
+            std::cerr << "Weight paint smoke could not undo the smooth stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const std::optional<double> undone_smooth_weight = current_arm_weight(0U);
+        if (!undone_smooth_weight.has_value() ||
+            !require_weight_near(*undone_smooth_weight, 0.0, 1e-6, "undone smoothed vertex0 arm weight")) {
+            std::cerr << "Weight paint smoke undo did not restore the unsmoothed mesh weights.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!redo_project_change(&shell_state) ||
+            shell_state.command_stack.undo_count() != 1U ||
+            shell_state.command_stack.redo_count() != 0U) {
+            std::cerr << "Weight paint smoke could not redo the smooth stroke.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        const std::optional<double> redone_smooth_weight = current_arm_weight(0U);
+        if (!redone_smooth_weight.has_value() ||
+            !require_weight_near(*redone_smooth_weight, 0.3125, 1e-6, "redone smoothed vertex0 arm weight")) {
+            std::cerr << "Weight paint smoke redo did not restore the smoothed mesh weights.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+
+        if (!apply_history_snapshot(&shell_state, weight_paint_baseline)) {
+            std::cerr << "Weight paint smoke could not restore the baseline state after export validation.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        reset_weight_paint_stroke(&shell_state);
+        shell_state.weight_paint.enabled = false;
+        shell_state.command_stack.clear();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
     }
 
     if (!set_selected_animation(&shell_state, "attack", "Smoke", false, true)) {
@@ -9983,6 +14091,7 @@ int run_headless_smoke(const Options& options) {
     for (int frame_index = 0; frame_index < frame_count; ++frame_index) {
         io.DeltaTime = 1.0f / 60.0f;
         ImGui::NewFrame();
+        (void)poll_runtime_asset_changes(&shell_state);
         advance_timeline_playback(&shell_state, io.DeltaTime);
         handle_project_history_shortcuts(&shell_state);
 

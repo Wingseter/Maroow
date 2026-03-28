@@ -1,4 +1,5 @@
 #include "marrow/editor/project.hpp"
+#include "atlas_packer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +8,8 @@
 #include <system_error>
 #include <tuple>
 #include <utility>
+
+#include "marrow/allocator.hpp"
 
 namespace marrow::editor {
 namespace {
@@ -159,6 +162,9 @@ std::optional<LoadError> read_optional_integer(
     *value_out = static_cast<int>(rounded_value);
     return std::nullopt;
 }
+
+std::string_view onion_skin_mode_json_key(OnionSkinMode mode);
+std::optional<OnionSkinMode> onion_skin_mode_from_key(std::string_view key);
 
 std::optional<LoadError> parse_string_array(
     const Document& document,
@@ -334,9 +340,390 @@ std::optional<LoadError> parse_editor_metadata(
                 "$.editor.viewport.zoom",
                 "zoom must be greater than zero");
         }
+
+        if (const Value* onion_skin = find_optional_member(*viewport, "onion_skin")) {
+            if (const auto error = marrow::runtime::json::require_type(
+                    document,
+                    *onion_skin,
+                    Value::Type::Object,
+                    "$.editor.viewport.onion_skin")) {
+                return error;
+            }
+
+            std::string mode_name;
+            if (const auto error = read_optional_string(
+                    document,
+                    *onion_skin,
+                    "mode",
+                    "$.editor.viewport.onion_skin",
+                    &mode_name)) {
+                return error;
+            }
+            if (!mode_name.empty()) {
+                const auto mode = onion_skin_mode_from_key(mode_name);
+                if (!mode.has_value()) {
+                    return validation_error(
+                        document,
+                        onion_skin->location(),
+                        "$.editor.viewport.onion_skin.mode",
+                        "mode must be 'frame' or 'keyframe'");
+                }
+                metadata.viewport.onion_skin.mode = *mode;
+            }
+
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *onion_skin,
+                    "enabled",
+                    "$.editor.viewport.onion_skin",
+                    &metadata.viewport.onion_skin.enabled)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *onion_skin,
+                    "anchor",
+                    "$.editor.viewport.onion_skin",
+                    &metadata.viewport.onion_skin.anchor_to_zero)) {
+                return error;
+            }
+            if (const auto error = read_optional_integer(
+                    document,
+                    *onion_skin,
+                    "before",
+                    "$.editor.viewport.onion_skin",
+                    &metadata.viewport.onion_skin.before_count)) {
+                return error;
+            }
+            if (const auto error = read_optional_integer(
+                    document,
+                    *onion_skin,
+                    "after",
+                    "$.editor.viewport.onion_skin",
+                    &metadata.viewport.onion_skin.after_count)) {
+                return error;
+            }
+            if (const auto error = read_optional_integer(
+                    document,
+                    *onion_skin,
+                    "step",
+                    "$.editor.viewport.onion_skin",
+                    &metadata.viewport.onion_skin.step)) {
+                return error;
+            }
+
+            if (metadata.viewport.onion_skin.before_count < 0 ||
+                metadata.viewport.onion_skin.before_count > 6) {
+                return validation_error(
+                    document,
+                    onion_skin->location(),
+                    "$.editor.viewport.onion_skin.before",
+                    "before must stay within [0, 6]");
+            }
+            if (metadata.viewport.onion_skin.after_count < 0 ||
+                metadata.viewport.onion_skin.after_count > 6) {
+                return validation_error(
+                    document,
+                    onion_skin->location(),
+                    "$.editor.viewport.onion_skin.after",
+                    "after must stay within [0, 6]");
+            }
+            if (metadata.viewport.onion_skin.step <= 0) {
+                return validation_error(
+                    document,
+                    onion_skin->location(),
+                    "$.editor.viewport.onion_skin.step",
+                    "step must be greater than zero");
+            }
+        }
+
+        if (const Value* debug_overlay = find_optional_member(*viewport, "debug_overlay")) {
+            if (const auto error = marrow::runtime::json::require_type(
+                    document,
+                    *debug_overlay,
+                    Value::Type::Object,
+                    "$.editor.viewport.debug_overlay")) {
+                return error;
+            }
+
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *debug_overlay,
+                    "bones",
+                    "$.editor.viewport.debug_overlay",
+                    &metadata.viewport.debug_overlay.bones)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *debug_overlay,
+                    "ik",
+                    "$.editor.viewport.debug_overlay",
+                    &metadata.viewport.debug_overlay.ik_constraints)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *debug_overlay,
+                    "path",
+                    "$.editor.viewport.debug_overlay",
+                    &metadata.viewport.debug_overlay.path_constraints)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *debug_overlay,
+                    "physics",
+                    "$.editor.viewport.debug_overlay",
+                    &metadata.viewport.debug_overlay.physics_constraints)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *debug_overlay,
+                    "meshes",
+                    "$.editor.viewport.debug_overlay",
+                    &metadata.viewport.debug_overlay.mesh_wireframes)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document,
+                    *debug_overlay,
+                    "bounds",
+                    "$.editor.viewport.debug_overlay",
+                    &metadata.viewport.debug_overlay.bounding_boxes)) {
+                return error;
+            }
+        }
     }
 
     *metadata_out = std::move(metadata);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_atlas_pack_sprites(
+    const Document& document,
+    const Value& sprites_value,
+    std::string_view json_path,
+    std::vector<AtlasPackSprite>* sprites_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, sprites_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+    if (sprites_value.as_array().empty()) {
+        return validation_error(
+            document,
+            sprites_value.location(),
+            std::string(json_path),
+            "atlas pack sprite arrays must not be empty");
+    }
+
+    std::vector<AtlasPackSprite> sprites;
+    sprites.reserve(sprites_value.as_array().size());
+    for (std::size_t index = 0; index < sprites_value.as_array().size(); ++index) {
+        const Value& sprite_value = sprites_value.as_array()[index];
+        const std::string sprite_path =
+            std::string(json_path) + "[" + std::to_string(index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, sprite_value, Value::Type::Object, sprite_path)) {
+            return error;
+        }
+
+        AtlasPackSprite sprite;
+        if (const auto error = read_required_string(
+                document, sprite_value, "name", sprite_path, &sprite.region_name)) {
+            return error;
+        }
+        if (sprite.region_name.empty()) {
+            return validation_error(
+                document,
+                sprite_value.location(),
+                sprite_path + ".name",
+                "atlas pack sprite names must not be empty");
+        }
+
+        std::string image_path;
+        if (const auto error = read_required_string(
+                document, sprite_value, "image", sprite_path, &image_path)) {
+            return error;
+        }
+        if (image_path.empty()) {
+            return validation_error(
+                document,
+                sprite_value.location(),
+                sprite_path + ".image",
+                "atlas pack sprite image paths must not be empty");
+        }
+        sprite.image_path = std::filesystem::path(image_path);
+
+        double origin_x = 0.0;
+        if (const auto error = read_optional_number(
+                document, sprite_value, "origin_x", sprite_path, &origin_x)) {
+            return error;
+        }
+        if (find_optional_member(sprite_value, "origin_x") != nullptr) {
+            sprite.origin_x = origin_x;
+        }
+
+        double origin_y = 0.0;
+        if (const auto error = read_optional_number(
+                document, sprite_value, "origin_y", sprite_path, &origin_y)) {
+            return error;
+        }
+        if (find_optional_member(sprite_value, "origin_y") != nullptr) {
+            sprite.origin_y = origin_y;
+        }
+
+        const auto duplicate = std::find_if(
+            sprites.begin(),
+            sprites.end(),
+            [&](const AtlasPackSprite& existing) {
+                return existing.region_name == sprite.region_name;
+            });
+        if (duplicate != sprites.end()) {
+            return validation_error(
+                document,
+                sprite_value.location(),
+                sprite_path + ".name",
+                "atlas pack sprite names must be unique");
+        }
+
+        sprites.push_back(std::move(sprite));
+    }
+
+    *sprites_out = std::move(sprites);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_atlas_pack_definitions(
+    const Document& document,
+    const Value& root,
+    std::vector<AtlasPackDefinition>* atlas_pack_definitions_out) {
+    const Value* atlas_packs = find_optional_member(root, "atlas_packs");
+    if (atlas_packs == nullptr) {
+        atlas_pack_definitions_out->clear();
+        return std::nullopt;
+    }
+
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *atlas_packs, Value::Type::Array, "$.atlas_packs")) {
+        return error;
+    }
+
+    std::vector<AtlasPackDefinition> atlas_pack_definitions;
+    atlas_pack_definitions.reserve(atlas_packs->as_array().size());
+    for (std::size_t index = 0; index < atlas_packs->as_array().size(); ++index) {
+        const Value& definition_value = atlas_packs->as_array()[index];
+        const std::string definition_path = "$.atlas_packs[" + std::to_string(index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, definition_value, Value::Type::Object, definition_path)) {
+            return error;
+        }
+
+        AtlasPackDefinition definition;
+        std::string atlas_path;
+        if (const auto error = read_required_string(
+                document, definition_value, "atlas", definition_path, &atlas_path)) {
+            return error;
+        }
+        if (atlas_path.empty()) {
+            return validation_error(
+                document,
+                definition_value.location(),
+                definition_path + ".atlas",
+                "atlas pack output paths must not be empty");
+        }
+        definition.atlas_path = std::filesystem::path(atlas_path);
+
+        if (const auto error = read_optional_string(
+                document,
+                definition_value,
+                "atlas_name",
+                definition_path,
+                &definition.atlas_name)) {
+            return error;
+        }
+        if (const auto error = read_optional_string(
+                document,
+                definition_value,
+                "filter_min",
+                definition_path,
+                &definition.filter_min)) {
+            return error;
+        }
+        if (const auto error = read_optional_string(
+                document,
+                definition_value,
+                "filter_mag",
+                definition_path,
+                &definition.filter_mag)) {
+            return error;
+        }
+        if (const auto error = read_optional_string(
+                document, definition_value, "wrap_x", definition_path, &definition.wrap_x)) {
+            return error;
+        }
+        if (const auto error = read_optional_string(
+                document, definition_value, "wrap_y", definition_path, &definition.wrap_y)) {
+            return error;
+        }
+        if (const auto error = read_optional_boolean(
+                document,
+                definition_value,
+                "premultiplied_alpha",
+                definition_path,
+                &definition.premultiplied_alpha)) {
+            return error;
+        }
+        if (const auto error = read_optional_integer(
+                document, definition_value, "padding", definition_path, &definition.padding)) {
+            return error;
+        }
+        if (const auto error = read_optional_boolean(
+                document, definition_value, "trim", definition_path, &definition.trim)) {
+            return error;
+        }
+        if (const auto error = read_optional_integer(
+                document, definition_value, "bleed", definition_path, &definition.bleed)) {
+            return error;
+        }
+
+        const Value* sprites_value = nullptr;
+        if (const auto error = marrow::runtime::json::require_member(
+                document,
+                definition_value,
+                "sprites",
+                Value::Type::Array,
+                definition_path,
+                &sprites_value)) {
+            return error;
+        }
+        if (const auto error = parse_atlas_pack_sprites(
+                document,
+                *sprites_value,
+                definition_path + ".sprites",
+                &definition.sprites)) {
+            return error;
+        }
+
+        const auto duplicate = std::find_if(
+            atlas_pack_definitions.begin(),
+            atlas_pack_definitions.end(),
+            [&](const AtlasPackDefinition& existing) {
+                return existing.atlas_path == definition.atlas_path;
+            });
+        if (duplicate != atlas_pack_definitions.end()) {
+            return validation_error(
+                document,
+                definition_value.location(),
+                definition_path + ".atlas",
+                "atlas pack output paths must be unique");
+        }
+
+        atlas_pack_definitions.push_back(std::move(definition));
+    }
+
+    *atlas_pack_definitions_out = std::move(atlas_pack_definitions);
     return std::nullopt;
 }
 
@@ -424,6 +811,28 @@ std::optional<TransformTimelineChannel> transform_channel_from_key(std::string_v
     }
     if (key == "shear") {
         return TransformTimelineChannel::Shear;
+    }
+
+    return std::nullopt;
+}
+
+std::string_view onion_skin_mode_json_key(OnionSkinMode mode) {
+    switch (mode) {
+    case OnionSkinMode::Frame:
+        return "frame";
+    case OnionSkinMode::Keyframe:
+        return "keyframe";
+    }
+
+    return "frame";
+}
+
+std::optional<OnionSkinMode> onion_skin_mode_from_key(std::string_view key) {
+    if (key == "frame") {
+        return OnionSkinMode::Frame;
+    }
+    if (key == "keyframe") {
+        return OnionSkinMode::Keyframe;
     }
 
     return std::nullopt;
@@ -951,6 +1360,226 @@ std::optional<LoadError> parse_mesh_deform_timeline_edits(
                 edits.push_back(std::move(edit));
             }
         }
+    }
+
+    *edits_out = std::move(edits);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_mesh_weight_vertices(
+    const Document& document,
+    const Value& weights_value,
+    std::string_view json_path,
+    std::vector<MeshWeightVertexEdit>* vertices_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, weights_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+
+    if (weights_value.as_array().empty()) {
+        return validation_error(
+            document,
+            weights_value.location(),
+            std::string(json_path),
+            "mesh weight edits must contain one vertex influence list per vertex");
+    }
+
+    std::vector<MeshWeightVertexEdit> vertices;
+    vertices.reserve(weights_value.as_array().size());
+
+    for (std::size_t vertex_index = 0;
+         vertex_index < weights_value.as_array().size();
+         ++vertex_index) {
+        const Value& vertex_value = weights_value.as_array()[vertex_index];
+        const std::string vertex_path =
+            std::string(json_path) + "[" + std::to_string(vertex_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, vertex_value, Value::Type::Array, vertex_path)) {
+            return error;
+        }
+        if (vertex_value.as_array().empty()) {
+            return validation_error(
+                document,
+                vertex_value.location(),
+                vertex_path,
+                "mesh weight edit vertices must preserve at least one bone influence");
+        }
+        if (vertex_value.as_array().size() > 4U) {
+            return validation_error(
+                document,
+                vertex_value.location(),
+                vertex_path,
+                "mesh weight edit vertices support at most 4 bone influences");
+        }
+
+        MeshWeightVertexEdit vertex;
+        vertex.influences.reserve(vertex_value.as_array().size());
+        std::vector<std::string> seen_bones;
+        double total_weight = 0.0;
+
+        for (std::size_t influence_index = 0;
+             influence_index < vertex_value.as_array().size();
+             ++influence_index) {
+            const Value& influence_value = vertex_value.as_array()[influence_index];
+            const std::string influence_path =
+                vertex_path + "[" + std::to_string(influence_index) + "]";
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, influence_value, Value::Type::Object, influence_path)) {
+                return error;
+            }
+
+            MeshWeightInfluenceEdit influence;
+            if (const auto error = read_required_string(
+                    document,
+                    influence_value,
+                    "bone",
+                    influence_path,
+                    &influence.bone_name)) {
+                return error;
+            }
+            if (influence.bone_name.empty()) {
+                return validation_error(
+                    document,
+                    influence_value.location(),
+                    influence_path + ".bone",
+                    "mesh weight edit bone names must not be empty");
+            }
+            if (std::find(seen_bones.begin(), seen_bones.end(), influence.bone_name) !=
+                seen_bones.end()) {
+                return validation_error(
+                    document,
+                    influence_value.location(),
+                    influence_path + ".bone",
+                    "mesh weight edit vertices must not repeat the same bone");
+            }
+            if (const auto error = read_required_number(
+                    document,
+                    influence_value,
+                    "x",
+                    influence_path,
+                    &influence.x)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document,
+                    influence_value,
+                    "y",
+                    influence_path,
+                    &influence.y)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document,
+                    influence_value,
+                    "weight",
+                    influence_path,
+                    &influence.weight)) {
+                return error;
+            }
+            if (influence.weight <= 0.0) {
+                return validation_error(
+                    document,
+                    influence_value.location(),
+                    influence_path + ".weight",
+                    "mesh weight edit bone weights must be positive");
+            }
+
+            total_weight += influence.weight;
+            seen_bones.push_back(influence.bone_name);
+            vertex.influences.push_back(std::move(influence));
+        }
+
+        if (total_weight <= 0.0) {
+            return validation_error(
+                document,
+                vertex_value.location(),
+                vertex_path,
+                "mesh weight edit vertices must sum to a positive weight");
+        }
+
+        vertices.push_back(std::move(vertex));
+    }
+
+    *vertices_out = std::move(vertices);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_mesh_weight_attachment_edits(
+    const Document& document,
+    const Value& root,
+    std::vector<MeshWeightAttachmentEdit>* edits_out) {
+    const Value* mesh_edits = find_optional_member(root, "mesh_edits");
+    if (mesh_edits == nullptr) {
+        edits_out->clear();
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *mesh_edits, Value::Type::Object, "$.mesh_edits")) {
+        return error;
+    }
+
+    const Value* weights_value = find_optional_member(*mesh_edits, "weights");
+    if (weights_value == nullptr) {
+        edits_out->clear();
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *weights_value, Value::Type::Array, "$.mesh_edits.weights")) {
+        return error;
+    }
+
+    std::vector<MeshWeightAttachmentEdit> edits;
+    edits.reserve(weights_value->as_array().size());
+
+    for (std::size_t edit_index = 0; edit_index < weights_value->as_array().size(); ++edit_index) {
+        const Value& edit_value = weights_value->as_array()[edit_index];
+        const std::string edit_path =
+            "$.mesh_edits.weights[" + std::to_string(edit_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, edit_value, Value::Type::Object, edit_path)) {
+            return error;
+        }
+
+        MeshWeightAttachmentEdit edit;
+        if (const auto error = read_required_string(
+                document, edit_value, "skin", edit_path, &edit.skin_name)) {
+            return error;
+        }
+        if (const auto error = read_required_string(
+                document, edit_value, "slot", edit_path, &edit.slot_name)) {
+            return error;
+        }
+        if (const auto error = read_required_string(
+                document, edit_value, "attachment", edit_path, &edit.attachment_name)) {
+            return error;
+        }
+        if (edit.skin_name.empty() || edit.slot_name.empty() || edit.attachment_name.empty()) {
+            return validation_error(
+                document,
+                edit_value.location(),
+                edit_path,
+                "mesh weight edits require non-empty skin, slot, and attachment names");
+        }
+
+        const Value* attachment_weights = nullptr;
+        if (const auto error = marrow::runtime::json::require_member(
+                document,
+                edit_value,
+                "weights",
+                Value::Type::Array,
+                edit_path,
+                &attachment_weights)) {
+            return error;
+        }
+        if (const auto error = parse_mesh_weight_vertices(
+                document,
+                *attachment_weights,
+                edit_path + ".weights",
+                &edit.vertices)) {
+            return error;
+        }
+
+        edits.push_back(std::move(edit));
     }
 
     *edits_out = std::move(edits);
@@ -2057,6 +2686,26 @@ Value build_deform_keyframes_value(const MeshDeformTimelineEdit& edit) {
     return make_array_value(std::move(keyframes));
 }
 
+Value build_mesh_weight_vertices_value(const MeshWeightAttachmentEdit& edit) {
+    Value::Array vertices;
+    vertices.reserve(edit.vertices.size());
+    for (const MeshWeightVertexEdit& vertex : edit.vertices) {
+        Value::Array influences;
+        influences.reserve(vertex.influences.size());
+        for (const MeshWeightInfluenceEdit& influence : vertex.influences) {
+            Value::Object influence_object;
+            influence_object.emplace("bone", make_string_value(influence.bone_name));
+            influence_object.emplace("x", make_number_value(influence.x));
+            influence_object.emplace("y", make_number_value(influence.y));
+            influence_object.emplace("weight", make_number_value(influence.weight));
+            influences.push_back(make_object_value(std::move(influence_object)));
+        }
+        vertices.push_back(make_array_value(std::move(influences)));
+    }
+
+    return make_array_value(std::move(vertices));
+}
+
 Value build_draw_order_keyframes_value(const DrawOrderTimelineEdit& edit) {
     Value::Array keyframes;
     keyframes.reserve(edit.keyframes.size());
@@ -2307,6 +2956,68 @@ Value build_constraint_edits_value(
     return make_object_value(std::move(constraint_edits));
 }
 
+Value build_atlas_pack_definitions_value(
+    const std::vector<AtlasPackDefinition>& atlas_pack_definitions) {
+    Value::Array definitions;
+    definitions.reserve(atlas_pack_definitions.size());
+    for (const AtlasPackDefinition& definition : atlas_pack_definitions) {
+        Value::Object definition_object;
+        definition_object.emplace(
+            "atlas",
+            make_string_value(definition.atlas_path.generic_string()));
+        if (!definition.atlas_name.empty()) {
+            definition_object.emplace("atlas_name", make_string_value(definition.atlas_name));
+        }
+        definition_object.emplace("filter_min", make_string_value(definition.filter_min));
+        definition_object.emplace("filter_mag", make_string_value(definition.filter_mag));
+        definition_object.emplace("wrap_x", make_string_value(definition.wrap_x));
+        definition_object.emplace("wrap_y", make_string_value(definition.wrap_y));
+        definition_object.emplace(
+            "premultiplied_alpha",
+            make_boolean_value(definition.premultiplied_alpha));
+        definition_object.emplace("padding", make_number_value(definition.padding));
+        definition_object.emplace("trim", make_boolean_value(definition.trim));
+        definition_object.emplace("bleed", make_number_value(definition.bleed));
+
+        Value::Array sprites;
+        sprites.reserve(definition.sprites.size());
+        for (const AtlasPackSprite& sprite : definition.sprites) {
+            Value::Object sprite_object;
+            sprite_object.emplace("name", make_string_value(sprite.region_name));
+            sprite_object.emplace("image", make_string_value(sprite.image_path.generic_string()));
+            if (sprite.origin_x.has_value()) {
+                sprite_object.emplace("origin_x", make_number_value(*sprite.origin_x));
+            }
+            if (sprite.origin_y.has_value()) {
+                sprite_object.emplace("origin_y", make_number_value(*sprite.origin_y));
+            }
+            sprites.push_back(make_object_value(std::move(sprite_object)));
+        }
+        definition_object.emplace("sprites", make_array_value(std::move(sprites)));
+        definitions.push_back(make_object_value(std::move(definition_object)));
+    }
+
+    return make_array_value(std::move(definitions));
+}
+
+Value build_mesh_weight_edits_value(
+    const std::vector<MeshWeightAttachmentEdit>& mesh_weight_attachment_edits) {
+    Value::Array weights;
+    weights.reserve(mesh_weight_attachment_edits.size());
+    for (const MeshWeightAttachmentEdit& edit : mesh_weight_attachment_edits) {
+        Value::Object edit_object;
+        edit_object.emplace("skin", make_string_value(edit.skin_name));
+        edit_object.emplace("slot", make_string_value(edit.slot_name));
+        edit_object.emplace("attachment", make_string_value(edit.attachment_name));
+        edit_object.emplace("weights", build_mesh_weight_vertices_value(edit));
+        weights.push_back(make_object_value(std::move(edit_object)));
+    }
+
+    Value::Object mesh_edits;
+    mesh_edits.emplace("weights", make_array_value(std::move(weights)));
+    return make_object_value(std::move(mesh_edits));
+}
+
 Value build_project_value(const ProjectData& project) {
     Value::Object root;
     root.emplace("marrow", make_string_value(project.marrow_version));
@@ -2342,6 +3053,49 @@ Value build_project_value(const ProjectData& project) {
     viewport_object.emplace("pan_x", make_number_value(project.editor_metadata.viewport.pan_x));
     viewport_object.emplace("pan_y", make_number_value(project.editor_metadata.viewport.pan_y));
     viewport_object.emplace("zoom", make_number_value(project.editor_metadata.viewport.zoom));
+    Value::Object onion_skin_object;
+    onion_skin_object.emplace(
+        "enabled",
+        make_boolean_value(project.editor_metadata.viewport.onion_skin.enabled));
+    onion_skin_object.emplace(
+        "mode",
+        make_string_value(
+            std::string(onion_skin_mode_json_key(project.editor_metadata.viewport.onion_skin.mode))));
+    onion_skin_object.emplace(
+        "anchor",
+        make_boolean_value(project.editor_metadata.viewport.onion_skin.anchor_to_zero));
+    onion_skin_object.emplace(
+        "before",
+        make_number_value(project.editor_metadata.viewport.onion_skin.before_count));
+    onion_skin_object.emplace(
+        "after",
+        make_number_value(project.editor_metadata.viewport.onion_skin.after_count));
+    onion_skin_object.emplace(
+        "step",
+        make_number_value(project.editor_metadata.viewport.onion_skin.step));
+    viewport_object.emplace("onion_skin", make_object_value(std::move(onion_skin_object)));
+    Value::Object debug_overlay_object;
+    debug_overlay_object.emplace(
+        "bones",
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bones));
+    debug_overlay_object.emplace(
+        "ik",
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.ik_constraints));
+    debug_overlay_object.emplace(
+        "path",
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.path_constraints));
+    debug_overlay_object.emplace(
+        "physics",
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.physics_constraints));
+    debug_overlay_object.emplace(
+        "meshes",
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.mesh_wireframes));
+    debug_overlay_object.emplace(
+        "bounds",
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bounding_boxes));
+    viewport_object.emplace(
+        "debug_overlay",
+        make_object_value(std::move(debug_overlay_object)));
     editor_object.emplace("viewport", make_object_value(std::move(viewport_object)));
     root.emplace("editor", make_object_value(std::move(editor_object)));
 
@@ -2357,6 +3111,11 @@ Value build_project_value(const ProjectData& project) {
                 project.draw_order_timeline_edits,
                 project.event_timeline_edits));
     }
+    if (!project.mesh_weight_attachment_edits.empty()) {
+        root.emplace(
+            "mesh_edits",
+            build_mesh_weight_edits_value(project.mesh_weight_attachment_edits));
+    }
     if (!project.ik_constraint_edits.empty() ||
         !project.path_constraint_edits.empty() ||
         !project.transform_constraint_edits.empty() ||
@@ -2368,6 +3127,11 @@ Value build_project_value(const ProjectData& project) {
                 project.path_constraint_edits,
                 project.transform_constraint_edits,
                 project.physics_constraint_edits));
+    }
+    if (!project.atlas_pack_definitions.empty()) {
+        root.emplace(
+            "atlas_packs",
+            build_atlas_pack_definitions_value(project.atlas_pack_definitions));
     }
 
     return make_object_value(std::move(root));
@@ -2423,12 +3187,88 @@ void merge_named_object_array_member(
     }
 }
 
+Value* find_skin_attachment_value(
+    Value* root,
+    std::string_view skin_name,
+    std::string_view slot_name,
+    std::string_view attachment_name) {
+    if (root == nullptr || !root->is_object()) {
+        return nullptr;
+    }
+
+    Value* skins_value = marrow::runtime::json::find_member(*root, "skins");
+    if (skins_value == nullptr || !skins_value->is_object()) {
+        return nullptr;
+    }
+
+    Value* skin_value = marrow::runtime::json::find_member(*skins_value, skin_name);
+    if (skin_value == nullptr || !skin_value->is_object()) {
+        return nullptr;
+    }
+
+    Value* attachments_root = marrow::runtime::json::find_member(*skin_value, "attachments");
+    Value* slot_source =
+        attachments_root != nullptr && attachments_root->is_object() ? attachments_root : skin_value;
+    if (slot_source == nullptr || !slot_source->is_object()) {
+        return nullptr;
+    }
+
+    Value* slot_value = marrow::runtime::json::find_member(*slot_source, slot_name);
+    if (slot_value == nullptr || !slot_value->is_object()) {
+        return nullptr;
+    }
+
+    if (attachments_root != nullptr && attachments_root->is_object()) {
+        Value* nested_attachment = marrow::runtime::json::find_member(*slot_value, attachment_name);
+        if (nested_attachment != nullptr && nested_attachment->is_object()) {
+            return nested_attachment;
+        }
+
+        for (auto& [candidate_name, candidate_value] : slot_value->as_object()) {
+            if (!candidate_value.is_object()) {
+                continue;
+            }
+
+            const Value* authored_name = find_optional_member(candidate_value, "attachment");
+            if (candidate_name == attachment_name ||
+                (authored_name != nullptr &&
+                 authored_name->is_string() &&
+                 authored_name->as_string() == attachment_name)) {
+                return &candidate_value;
+            }
+        }
+        return nullptr;
+    }
+
+    const Value* authored_name = find_optional_member(*slot_value, "attachment");
+    if (authored_name != nullptr &&
+        authored_name->is_string() &&
+        authored_name->as_string() == attachment_name) {
+        return slot_value;
+    }
+
+    return attachment_name == slot_name ? slot_value : nullptr;
+}
+
 Document build_runtime_document(
     const ProjectData& project,
     const Document& base_skeleton_document) {
     Document document = base_skeleton_document;
     if (!document.root.is_object()) {
         return document;
+    }
+
+    for (const MeshWeightAttachmentEdit& edit : project.mesh_weight_attachment_edits) {
+        Value* attachment_value = find_skin_attachment_value(
+            &document.root,
+            edit.skin_name,
+            edit.slot_name,
+            edit.attachment_name);
+        if (attachment_value == nullptr || !attachment_value->is_object()) {
+            continue;
+        }
+
+        attachment_value->as_object()["weights"] = build_mesh_weight_vertices_value(edit);
     }
 
     Value* animations = marrow::runtime::json::find_member(document.root, "animations");
@@ -2520,6 +3360,20 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
     }
     if (project.editor_metadata.viewport.zoom <= 0.0) {
         error_out->message = "editor viewport zoom must be greater than zero";
+        return false;
+    }
+    if (project.editor_metadata.viewport.onion_skin.before_count < 0 ||
+        project.editor_metadata.viewport.onion_skin.before_count > 6) {
+        error_out->message = "editor onion-skin before count must stay within [0, 6]";
+        return false;
+    }
+    if (project.editor_metadata.viewport.onion_skin.after_count < 0 ||
+        project.editor_metadata.viewport.onion_skin.after_count > 6) {
+        error_out->message = "editor onion-skin after count must stay within [0, 6]";
+        return false;
+    }
+    if (project.editor_metadata.viewport.onion_skin.step <= 0) {
+        error_out->message = "editor onion-skin step must be greater than zero";
         return false;
     }
 
@@ -2616,6 +3470,72 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
 
             previous_time = keyframe.time;
             has_previous_time = true;
+        }
+    }
+
+    std::vector<std::tuple<std::string, std::string, std::string>> seen_mesh_weight_edits;
+    for (const MeshWeightAttachmentEdit& edit : project.mesh_weight_attachment_edits) {
+        if (edit.skin_name.empty() || edit.slot_name.empty() || edit.attachment_name.empty()) {
+            error_out->message =
+                "mesh weight edits require skin, slot, and attachment names";
+            return false;
+        }
+        if (edit.vertices.empty()) {
+            error_out->message = "mesh weight edits must contain at least one vertex";
+            return false;
+        }
+        const auto duplicate = std::find(
+            seen_mesh_weight_edits.begin(),
+            seen_mesh_weight_edits.end(),
+            std::make_tuple(edit.skin_name, edit.slot_name, edit.attachment_name));
+        if (duplicate != seen_mesh_weight_edits.end()) {
+            error_out->message = "duplicate mesh weight edits are not allowed";
+            return false;
+        }
+        seen_mesh_weight_edits.push_back(
+            std::make_tuple(edit.skin_name, edit.slot_name, edit.attachment_name));
+
+        for (const MeshWeightVertexEdit& vertex : edit.vertices) {
+            if (vertex.influences.empty()) {
+                error_out->message =
+                    "mesh weight edit vertices must contain at least one influence";
+                return false;
+            }
+            if (vertex.influences.size() > 4U) {
+                error_out->message =
+                    "mesh weight edit vertices must not exceed four influences";
+                return false;
+            }
+
+            std::vector<std::string> seen_bones;
+            double total_weight = 0.0;
+            for (const MeshWeightInfluenceEdit& influence : vertex.influences) {
+                if (influence.bone_name.empty()) {
+                    error_out->message =
+                        "mesh weight edit influences require non-empty bone names";
+                    return false;
+                }
+                if (influence.weight <= 0.0) {
+                    error_out->message =
+                        "mesh weight edit influences must preserve positive weights";
+                    return false;
+                }
+                if (std::find(seen_bones.begin(), seen_bones.end(), influence.bone_name) !=
+                    seen_bones.end()) {
+                    error_out->message =
+                        "mesh weight edit vertices must not repeat the same bone";
+                    return false;
+                }
+
+                seen_bones.push_back(influence.bone_name);
+                total_weight += influence.weight;
+            }
+
+            if (total_weight <= 0.0) {
+                error_out->message =
+                    "mesh weight edit vertices must sum to a positive weight";
+                return false;
+            }
         }
     }
 
@@ -2829,6 +3749,77 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
         }
     }
 
+    std::vector<std::filesystem::path> seen_packed_atlas_paths;
+    for (const AtlasPackDefinition& definition : project.atlas_pack_definitions) {
+        if (definition.atlas_path.empty()) {
+            error_out->message = "atlas pack output paths must not be empty";
+            return false;
+        }
+        const std::filesystem::path resolved_definition_path =
+            project.resolve_path(definition.atlas_path);
+        const auto referenced_atlas = std::find_if(
+            project.runtime_assets.atlas_paths.begin(),
+            project.runtime_assets.atlas_paths.end(),
+            [&](const std::filesystem::path& atlas_path) {
+                return project.resolve_path(atlas_path) == resolved_definition_path;
+            });
+        if (referenced_atlas == project.runtime_assets.atlas_paths.end()) {
+            error_out->message =
+                "atlas pack outputs must also appear in runtime atlas paths";
+            return false;
+        }
+        const auto duplicate_atlas = std::find(
+            seen_packed_atlas_paths.begin(),
+            seen_packed_atlas_paths.end(),
+            resolved_definition_path);
+        if (duplicate_atlas != seen_packed_atlas_paths.end()) {
+            error_out->message = "atlas pack output paths must be unique";
+            return false;
+        }
+        seen_packed_atlas_paths.push_back(resolved_definition_path);
+
+        if (definition.filter_min.empty() ||
+            definition.filter_mag.empty() ||
+            definition.wrap_x.empty() ||
+            definition.wrap_y.empty()) {
+            error_out->message = "atlas pack filter and wrap settings must not be empty";
+            return false;
+        }
+        if (definition.padding < 0) {
+            error_out->message = "atlas pack padding must be zero or greater";
+            return false;
+        }
+        if (definition.bleed < 0) {
+            error_out->message = "atlas pack bleed must be zero or greater";
+            return false;
+        }
+        if (definition.bleed > definition.padding) {
+            error_out->message = "atlas pack bleed must not exceed padding";
+            return false;
+        }
+        if (definition.sprites.empty()) {
+            error_out->message = "atlas pack definitions require at least one sprite";
+            return false;
+        }
+
+        std::vector<std::string> seen_region_names;
+        for (const AtlasPackSprite& sprite : definition.sprites) {
+            if (sprite.region_name.empty() || sprite.image_path.empty()) {
+                error_out->message =
+                    "atlas pack sprites require a region name and image path";
+                return false;
+            }
+            if (std::find(
+                    seen_region_names.begin(),
+                    seen_region_names.end(),
+                    sprite.region_name) != seen_region_names.end()) {
+                error_out->message = "atlas pack sprite region names must be unique";
+                return false;
+            }
+            seen_region_names.push_back(sprite.region_name);
+        }
+    }
+
     return true;
 }
 
@@ -2883,6 +3874,35 @@ bool write_text_file(
     }
 
     output << contents;
+    if (!output) {
+        error_out->path = path;
+        error_out->message = "failed to write the output file";
+        return false;
+    }
+
+    return true;
+}
+
+bool write_binary_file(
+    const std::filesystem::path& path,
+    const std::vector<std::uint8_t>& contents,
+    ProjectExportError* error_out) {
+    if (!ensure_output_directory(path, error_out)) {
+        return false;
+    }
+
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        error_out->path = path;
+        error_out->message = "failed to open the output file";
+        return false;
+    }
+
+    if (!contents.empty()) {
+        output.write(
+            reinterpret_cast<const char*>(contents.data()),
+            static_cast<std::streamsize>(contents.size()));
+    }
     if (!output) {
         error_out->path = path;
         error_out->message = "failed to write the output file";
@@ -2997,6 +4017,43 @@ bool export_atlas_asset(
     }
 
     *exported_atlas_path_out = exported_atlas_path;
+    return true;
+}
+
+bool export_packed_atlas_asset(
+    const ProjectData& project,
+    const AtlasPackDefinition& definition,
+    const std::filesystem::path& output_directory,
+    std::filesystem::path* exported_atlas_path_out,
+    std::vector<std::filesystem::path>* exported_texture_paths_out,
+    ProjectExportError* error_out) {
+    const std::filesystem::path exported_atlas_path =
+        (output_directory / definition.atlas_path.filename()).lexically_normal();
+    const auto artifact_result = detail::build_packed_atlas_artifact(
+        project,
+        definition,
+        exported_atlas_path);
+    if (!artifact_result) {
+        error_out->path = exported_atlas_path;
+        error_out->message = artifact_result.error_message;
+        return false;
+    }
+
+    if (!write_binary_file(
+            artifact_result.artifact->image_path,
+            artifact_result.artifact->image_bytes,
+            error_out)) {
+        return false;
+    }
+    if (!write_text_file(
+            artifact_result.artifact->atlas_path,
+            artifact_result.artifact->atlas_text,
+            error_out)) {
+        return false;
+    }
+
+    exported_texture_paths_out->push_back(artifact_result.artifact->image_path);
+    *exported_atlas_path_out = artifact_result.artifact->atlas_path;
     return true;
 }
 
@@ -3171,6 +4228,36 @@ MeshDeformTimelineEdit* ProjectData::find_mesh_deform_timeline_edit(
     return iterator == mesh_deform_timeline_edits.end() ? nullptr : &(*iterator);
 }
 
+const MeshWeightAttachmentEdit* ProjectData::find_mesh_weight_attachment_edit(
+    std::string_view skin_name,
+    std::string_view slot_name,
+    std::string_view attachment_name) const {
+    const auto iterator = std::find_if(
+        mesh_weight_attachment_edits.begin(),
+        mesh_weight_attachment_edits.end(),
+        [&](const MeshWeightAttachmentEdit& edit) {
+            return edit.skin_name == skin_name &&
+                edit.slot_name == slot_name &&
+                edit.attachment_name == attachment_name;
+        });
+    return iterator == mesh_weight_attachment_edits.end() ? nullptr : &(*iterator);
+}
+
+MeshWeightAttachmentEdit* ProjectData::find_mesh_weight_attachment_edit(
+    std::string_view skin_name,
+    std::string_view slot_name,
+    std::string_view attachment_name) {
+    const auto iterator = std::find_if(
+        mesh_weight_attachment_edits.begin(),
+        mesh_weight_attachment_edits.end(),
+        [&](const MeshWeightAttachmentEdit& edit) {
+            return edit.skin_name == skin_name &&
+                edit.slot_name == slot_name &&
+                edit.attachment_name == attachment_name;
+        });
+    return iterator == mesh_weight_attachment_edits.end() ? nullptr : &(*iterator);
+}
+
 const DrawOrderTimelineEdit* ProjectData::find_draw_order_timeline_edit(
     std::string_view animation_name) const {
     const auto iterator = std::find_if(
@@ -3296,6 +4383,30 @@ PhysicsConstraintEdit* ProjectData::find_physics_constraint_edit(std::string_vie
     return iterator == physics_constraint_edits.end() ? nullptr : &(*iterator);
 }
 
+const AtlasPackDefinition* ProjectData::find_atlas_pack_definition(
+    const std::filesystem::path& atlas_path) const {
+    const std::filesystem::path resolved_path = resolve_path(atlas_path);
+    const auto iterator = std::find_if(
+        atlas_pack_definitions.begin(),
+        atlas_pack_definitions.end(),
+        [&](const AtlasPackDefinition& definition) {
+            return resolve_path(definition.atlas_path) == resolved_path;
+        });
+    return iterator == atlas_pack_definitions.end() ? nullptr : &(*iterator);
+}
+
+AtlasPackDefinition* ProjectData::find_atlas_pack_definition(
+    const std::filesystem::path& atlas_path) {
+    const std::filesystem::path resolved_path = resolve_path(atlas_path);
+    const auto iterator = std::find_if(
+        atlas_pack_definitions.begin(),
+        atlas_pack_definitions.end(),
+        [&](const AtlasPackDefinition& definition) {
+            return resolve_path(definition.atlas_path) == resolved_path;
+        });
+    return iterator == atlas_pack_definitions.end() ? nullptr : &(*iterator);
+}
+
 std::string ProjectSaveError::format() const {
     if (path.empty()) {
         return "Failed to save project: " + message;
@@ -3384,6 +4495,11 @@ ProjectLoadResult load_project(const Document& document) {
         result.error = error;
         return result;
     }
+    if (const auto error = parse_mesh_weight_attachment_edits(
+            document, document.root, &project.mesh_weight_attachment_edits)) {
+        result.error = error;
+        return result;
+    }
     if (const auto error = parse_draw_order_timeline_edits(
             document, document.root, &project.draw_order_timeline_edits)) {
         result.error = error;
@@ -3414,6 +4530,33 @@ ProjectLoadResult load_project(const Document& document) {
         result.error = error;
         return result;
     }
+    if (const auto error = parse_atlas_pack_definitions(
+            document, document.root, &project.atlas_pack_definitions)) {
+        result.error = error;
+        return result;
+    }
+
+    for (std::size_t definition_index = 0;
+         definition_index < project.atlas_pack_definitions.size();
+         ++definition_index) {
+        const AtlasPackDefinition& definition = project.atlas_pack_definitions[definition_index];
+        const std::filesystem::path resolved_definition_path =
+            project.resolve_path(definition.atlas_path);
+        const auto matching_atlas = std::find_if(
+            project.runtime_assets.atlas_paths.begin(),
+            project.runtime_assets.atlas_paths.end(),
+            [&](const std::filesystem::path& atlas_path) {
+                return project.resolve_path(atlas_path) == resolved_definition_path;
+            });
+        if (matching_atlas == project.runtime_assets.atlas_paths.end()) {
+            result.error = validation_error(
+                document,
+                document.root.location(),
+                "$.atlas_packs[" + std::to_string(definition_index) + "].atlas",
+                "atlas pack outputs must also appear in runtime.atlases");
+            return result;
+        }
+    }
 
     auto project_ptr = std::make_shared<ProjectData>(std::move(project));
     const auto document_result =
@@ -3424,7 +4567,7 @@ ProjectLoadResult load_project(const Document& document) {
     }
 
     result.base_skeleton_document =
-        std::make_shared<Document>(std::move(*document_result.document));
+        marrow::allocate_shared<Document>(std::move(*document_result.document));
     const ProjectRuntimeResult runtime_result =
         build_project_runtime(*project_ptr, *result.base_skeleton_document);
     if (!runtime_result) {
@@ -3545,12 +4688,24 @@ ProjectExportResult export_runtime_assets(
         result.path.has_parent_path() ? result.path.parent_path() : std::filesystem::path(".");
     for (const auto& atlas_path : project.resolved_atlas_paths()) {
         std::filesystem::path exported_atlas_path;
-        if (!export_atlas_asset(
-                atlas_path,
-                output_directory,
-                &exported_atlas_path,
-                &result.texture_paths,
-                &export_error)) {
+        const AtlasPackDefinition* atlas_pack_definition =
+            project.find_atlas_pack_definition(atlas_path);
+        const bool exported =
+            atlas_pack_definition != nullptr
+                ? export_packed_atlas_asset(
+                      project,
+                      *atlas_pack_definition,
+                      output_directory,
+                      &exported_atlas_path,
+                      &result.texture_paths,
+                      &export_error)
+                : export_atlas_asset(
+                      atlas_path,
+                      output_directory,
+                      &exported_atlas_path,
+                      &result.texture_paths,
+                      &export_error);
+        if (!exported) {
             result.error = std::move(export_error);
             return result;
         }
