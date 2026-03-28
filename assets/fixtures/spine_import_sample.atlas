@@ -1,0 +1,26 @@
+hero_page.png
+size: 256, 128
+format: RGBA8888
+filter: Linear, Nearest
+repeat: x
+pma: true
+hero_body
+  bounds: 0, 0, 64, 32
+  origin: 20, 12
+weighted_region
+  bounds: 64, 0, 48, 96
+  rotate: true
+  origin: 16, 40
+
+fx_page.png
+size: 128, 128
+format: RGBA8888
+filter: Nearest, Linear
+repeat: y
+plain_region
+  bounds: 0, 0, 32, 24
+  origin: 8, 6
+spark_fx_0
+  index: -1
+  bounds: 32, 0, 16, 16
+  rotate: false

@@ -1,0 +1,41 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "atlas_pack_fixture",
+    "width": 512,
+    "height": 512
+  },
+  "bones": [
+    { "name": "root" }
+  ],
+  "slots": [
+    { "name": "slot_0", "bone": "root", "attachment": "sprite_0" },
+    { "name": "slot_1", "bone": "root", "attachment": "sprite_1" },
+    { "name": "slot_2", "bone": "root", "attachment": "sprite_2" },
+    { "name": "slot_3", "bone": "root", "attachment": "sprite_3" },
+    { "name": "slot_4", "bone": "root", "attachment": "sprite_4" },
+    { "name": "slot_5", "bone": "root", "attachment": "sprite_5" },
+    { "name": "slot_6", "bone": "root", "attachment": "sprite_6" },
+    { "name": "slot_7", "bone": "root", "attachment": "sprite_7" },
+    { "name": "slot_8", "bone": "root", "attachment": "sprite_8" },
+    { "name": "slot_9", "bone": "root", "attachment": "sprite_9" },
+    { "name": "slot_10", "bone": "root", "attachment": "sprite_10" },
+    { "name": "slot_11", "bone": "root", "attachment": "sprite_11" },
+    { "name": "slot_12", "bone": "root", "attachment": "sprite_12" },
+    { "name": "slot_13", "bone": "root", "attachment": "sprite_13" },
+    { "name": "slot_14", "bone": "root", "attachment": "sprite_14" },
+    { "name": "slot_15", "bone": "root", "attachment": "sprite_15" },
+    { "name": "slot_16", "bone": "root", "attachment": "sprite_16" },
+    { "name": "slot_17", "bone": "root", "attachment": "sprite_17" },
+    { "name": "slot_18", "bone": "root", "attachment": "sprite_18" },
+    { "name": "slot_19", "bone": "root", "attachment": "sprite_19" },
+    { "name": "slot_20", "bone": "root", "attachment": "sprite_20" },
+    { "name": "slot_21", "bone": "root", "attachment": "sprite_21" },
+    { "name": "slot_22", "bone": "root", "attachment": "sprite_22" },
+    { "name": "slot_23", "bone": "root", "attachment": "sprite_23" }
+  ],
+  "animations": {
+    "idle": {}
+  }
+}

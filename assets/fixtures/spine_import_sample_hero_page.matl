@@ -1,0 +1,36 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "atlas": {
+    "name": "hero_page",
+    "image": "hero_page.png",
+    "width": 256,
+    "height": 128,
+    "filter_min": "linear",
+    "filter_mag": "nearest",
+    "wrap_x": "repeat",
+    "wrap_y": "clamp_to_edge",
+    "premultiplied_alpha": true
+  },
+  "regions": [
+    {
+      "name": "hero_body",
+      "x": 0,
+      "y": 0,
+      "width": 64,
+      "height": 32,
+      "origin_x": 20,
+      "origin_y": 12
+    },
+    {
+      "name": "weighted_region",
+      "x": 64,
+      "y": 0,
+      "width": 48,
+      "height": 96,
+      "origin_x": 16,
+      "origin_y": 40,
+      "rotate": 90
+    }
+  ]
+}

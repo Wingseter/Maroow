@@ -1,0 +1,233 @@
+{
+  "atlas": {
+    "filter_mag": "linear",
+    "filter_min": "linear",
+    "height": 289,
+    "image": "packed_sprites.png",
+    "name": "packed_sprites",
+    "premultiplied_alpha": false,
+    "width": 59,
+    "wrap_x": "clamp_to_edge",
+    "wrap_y": "clamp_to_edge"
+  },
+  "marrow": "1.0",
+  "regions": [
+    {
+      "height": 13,
+      "name": "sprite_0",
+      "origin_x": 8,
+      "origin_y": 6,
+      "width": 14,
+      "x": 42,
+      "y": 268
+    },
+    {
+      "height": 16,
+      "name": "sprite_1",
+      "origin_x": 11,
+      "origin_y": 7.5,
+      "width": 23,
+      "x": 33,
+      "y": 178
+    },
+    {
+      "height": 22,
+      "name": "sprite_2",
+      "origin_x": 13,
+      "origin_y": 12,
+      "width": 27,
+      "x": 2,
+      "y": 159
+    },
+    {
+      "height": 29,
+      "name": "sprite_3",
+      "origin_x": 9.5,
+      "origin_y": 14,
+      "width": 17,
+      "x": 38,
+      "y": 2
+    },
+    {
+      "height": 15,
+      "name": "sprite_4",
+      "origin_x": 11.5,
+      "origin_y": 7,
+      "width": 24,
+      "x": 33,
+      "y": 159
+    },
+    {
+      "height": 21,
+      "name": "sprite_5",
+      "origin_x": 14.5,
+      "origin_y": 11.5,
+      "width": 30,
+      "x": 2,
+      "y": 81
+    },
+    {
+      "height": 26,
+      "name": "sprite_6",
+      "origin_x": 10,
+      "origin_y": 12.5,
+      "width": 18,
+      "x": 37,
+      "y": 66
+    },
+    {
+      "height": 12,
+      "name": "sprite_7",
+      "origin_x": 13,
+      "origin_y": 5.5,
+      "width": 27,
+      "x": 2,
+      "y": 185
+    },
+    {
+      "height": 18,
+      "name": "sprite_8",
+      "origin_x": 15,
+      "origin_y": 10,
+      "width": 31,
+      "x": 2,
+      "y": 59
+    },
+    {
+      "height": 25,
+      "name": "sprite_9",
+      "origin_x": 11.5,
+      "origin_y": 12,
+      "width": 21,
+      "x": 36,
+      "y": 96
+    },
+    {
+      "height": 28,
+      "name": "sprite_10",
+      "origin_x": 13.5,
+      "origin_y": 13.5,
+      "width": 28,
+      "x": 2,
+      "y": 127
+    },
+    {
+      "height": 17,
+      "name": "sprite_11",
+      "origin_x": 7,
+      "origin_y": 9.5,
+      "width": 15,
+      "x": 23,
+      "y": 268
+    },
+    {
+      "height": 22,
+      "name": "sprite_12",
+      "origin_x": 12,
+      "origin_y": 10.5,
+      "width": 22,
+      "x": 2,
+      "y": 223
+    },
+    {
+      "height": 25,
+      "name": "sprite_13",
+      "origin_x": 15,
+      "origin_y": 12,
+      "width": 31,
+      "x": 2,
+      "y": 30
+    },
+    {
+      "height": 14,
+      "name": "sprite_14",
+      "origin_x": 7.5,
+      "origin_y": 8,
+      "width": 16,
+      "x": 2,
+      "y": 273
+    },
+    {
+      "height": 21,
+      "name": "sprite_15",
+      "origin_x": 13.5,
+      "origin_y": 10,
+      "width": 25,
+      "x": 32,
+      "y": 201
+    },
+    {
+      "height": 24,
+      "name": "sprite_16",
+      "origin_x": 15.5,
+      "origin_y": 11.5,
+      "width": 32,
+      "x": 2,
+      "y": 2
+    },
+    {
+      "height": 13,
+      "name": "sprite_17",
+      "origin_x": 9,
+      "origin_y": 7.5,
+      "width": 19,
+      "x": 23,
+      "y": 251
+    },
+    {
+      "height": 18,
+      "name": "sprite_18",
+      "origin_x": 14,
+      "origin_y": 8.5,
+      "width": 26,
+      "x": 2,
+      "y": 201
+    },
+    {
+      "height": 21,
+      "name": "sprite_19",
+      "origin_x": 7.5,
+      "origin_y": 10,
+      "width": 16,
+      "x": 28,
+      "y": 226
+    },
+    {
+      "height": 27,
+      "name": "sprite_20",
+      "origin_x": 9.5,
+      "origin_y": 14.5,
+      "width": 20,
+      "x": 37,
+      "y": 35
+    },
+    {
+      "height": 17,
+      "name": "sprite_21",
+      "origin_x": 15.5,
+      "origin_y": 8,
+      "width": 29,
+      "x": 2,
+      "y": 106
+    },
+    {
+      "height": 20,
+      "name": "sprite_22",
+      "origin_x": 8,
+      "origin_y": 9.5,
+      "width": 17,
+      "x": 2,
+      "y": 249
+    },
+    {
+      "height": 26,
+      "name": "sprite_23",
+      "origin_x": 11,
+      "origin_y": 14,
+      "width": 23,
+      "x": 34,
+      "y": 127
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,491 @@
+{
+  "animations": {
+    "idle": {
+      "bones": {
+        "scaler": {
+          "rotate": [
+            {
+              "angle": 0,
+              "curve": "linear",
+              "time": 0
+            },
+            {
+              "angle": 15,
+              "curve": [
+                0.25,
+                0.1,
+                0.75,
+                0.9
+              ],
+              "time": 0.5
+            }
+          ],
+          "scale": [
+            {
+              "curve": "linear",
+              "time": 0,
+              "x": 1.1,
+              "y": 0.9
+            },
+            {
+              "curve": "linear",
+              "time": 0.5,
+              "x": 1.32,
+              "y": 0.72
+            }
+          ],
+          "translate": [
+            {
+              "curve": "linear",
+              "time": 0,
+              "x": 30,
+              "y": 15
+            },
+            {
+              "curve": "linear",
+              "time": 0.5,
+              "x": 35,
+              "y": 13
+            }
+          ]
+        }
+      },
+      "slots": {
+        "body_slot": {
+          "color": [
+            {
+              "a": 1,
+              "b": 1,
+              "curve": "linear",
+              "g": 1,
+              "r": 1,
+              "time": 0
+            },
+            {
+              "a": 1,
+              "b": 0,
+              "curve": "linear",
+              "g": 0,
+              "r": 1,
+              "time": 0.5
+            }
+          ]
+        },
+        "mesh_slot": {
+          "attachment": [
+            {
+              "attachment": "weighted_mesh",
+              "time": 0
+            },
+            {
+              "attachment": "plain_mesh",
+              "time": 0.75
+            }
+          ]
+        }
+      }
+    }
+  },
+  "bones": [
+    {
+      "name": "root"
+    },
+    {
+      "name": "hip",
+      "parent": "root",
+      "x": 10,
+      "y": 20
+    },
+    {
+      "name": "chest",
+      "parent": "hip",
+      "x": 40,
+      "y": 5
+    },
+    {
+      "name": "scaler",
+      "parent": "root",
+      "rotation": 5,
+      "scaleX": 1.1,
+      "scaleY": 0.9,
+      "x": 30,
+      "y": 15
+    },
+    {
+      "name": "ik_upper",
+      "parent": "root",
+      "y": 100
+    },
+    {
+      "name": "ik_lower",
+      "parent": "ik_upper",
+      "x": 30
+    },
+    {
+      "name": "ik_target",
+      "parent": "root",
+      "x": 70,
+      "y": 110
+    },
+    {
+      "name": "path_a",
+      "parent": "root",
+      "y": -50
+    },
+    {
+      "name": "path_b",
+      "parent": "path_a",
+      "x": 20
+    },
+    {
+      "name": "transform_source",
+      "parent": "root",
+      "rotation": 20,
+      "scaleX": 1.25,
+      "scaleY": 0.9,
+      "shearY": 5,
+      "x": 90,
+      "y": 10
+    },
+    {
+      "name": "transform_follower",
+      "parent": "root",
+      "x": 120,
+      "y": 20
+    }
+  ],
+  "ik": [
+    {
+      "bendPositive": false,
+      "bones": [
+        "ik_upper",
+        "ik_lower"
+      ],
+      "compress": false,
+      "mix": 0.75,
+      "name": "arm_ik",
+      "softness": 2,
+      "stretch": false,
+      "target": "ik_target"
+    }
+  ],
+  "marrow": "1.0",
+  "path": [
+    {
+      "bones": [
+        "path_a",
+        "path_b"
+      ],
+      "name": "guide_follow",
+      "position": 0.25,
+      "rotateMix": 1,
+      "slot": "path_slot",
+      "spacing": 0.35,
+      "spacingMode": "percent",
+      "translateMix": 0.5
+    }
+  ],
+  "skeleton": {
+    "height": 256,
+    "name": "spine_import_sample",
+    "width": 256
+  },
+  "skins": {
+    "default": {
+      "attachments": {
+        "body_slot": {
+          "hero_region": {
+            "attachment": "hero_region",
+            "region": "hero_body",
+            "triangles": [
+              0,
+              1,
+              2,
+              2,
+              3,
+              0
+            ],
+            "type": "mesh",
+            "uvs": [
+              0,
+              0,
+              1,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "vertices": [
+              -7.32050807568877,
+              -20.6602540378444,
+              27.3205080756888,
+              -0.660254037844388,
+              17.3205080756888,
+              16.6602540378444,
+              -17.3205080756888,
+              -3.33974596215561
+            ],
+            "weights": [
+              [
+                {
+                  "bone": "hip",
+                  "weight": 1,
+                  "x": -7.32050807568877,
+                  "y": -20.6602540378444
+                }
+              ],
+              [
+                {
+                  "bone": "hip",
+                  "weight": 1,
+                  "x": 27.3205080756888,
+                  "y": -0.660254037844388
+                }
+              ],
+              [
+                {
+                  "bone": "hip",
+                  "weight": 1,
+                  "x": 17.3205080756888,
+                  "y": 16.6602540378444
+                }
+              ],
+              [
+                {
+                  "bone": "hip",
+                  "weight": 1,
+                  "x": -17.3205080756888,
+                  "y": -3.33974596215561
+                }
+              ]
+            ]
+          }
+        },
+        "mesh_slot": {
+          "plain_mesh": {
+            "attachment": "plain_mesh",
+            "region": "plain_region",
+            "triangles": [
+              0,
+              1,
+              2,
+              2,
+              3,
+              0
+            ],
+            "type": "mesh",
+            "uvs": [
+              0,
+              0,
+              1,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "vertices": [
+              -16,
+              -12,
+              16,
+              -12,
+              16,
+              12,
+              -16,
+              12
+            ],
+            "weights": [
+              [
+                {
+                  "bone": "chest",
+                  "weight": 1,
+                  "x": -16,
+                  "y": -12
+                }
+              ],
+              [
+                {
+                  "bone": "chest",
+                  "weight": 1,
+                  "x": 16,
+                  "y": -12
+                }
+              ],
+              [
+                {
+                  "bone": "chest",
+                  "weight": 1,
+                  "x": 16,
+                  "y": 12
+                }
+              ],
+              [
+                {
+                  "bone": "chest",
+                  "weight": 1,
+                  "x": -16,
+                  "y": 12
+                }
+              ]
+            ]
+          },
+          "weighted_mesh": {
+            "attachment": "weighted_mesh",
+            "region": "weighted_region",
+            "triangles": [
+              0,
+              1,
+              2,
+              2,
+              3,
+              0
+            ],
+            "type": "mesh",
+            "uvs": [
+              0,
+              0,
+              1,
+              0,
+              1,
+              1,
+              0,
+              1
+            ],
+            "vertices": [
+              -35,
+              -10,
+              -5,
+              -10,
+              -5,
+              10,
+              -35,
+              10
+            ],
+            "weights": [
+              [
+                {
+                  "bone": "hip",
+                  "weight": 0.5,
+                  "x": -10,
+                  "y": -5
+                },
+                {
+                  "bone": "chest",
+                  "weight": 0.5,
+                  "x": -20,
+                  "y": -10
+                }
+              ],
+              [
+                {
+                  "bone": "hip",
+                  "weight": 0.25,
+                  "x": 20,
+                  "y": -5
+                },
+                {
+                  "bone": "chest",
+                  "weight": 0.75,
+                  "x": 0,
+                  "y": -10
+                }
+              ],
+              [
+                {
+                  "bone": "hip",
+                  "weight": 0.25,
+                  "x": 20,
+                  "y": 15
+                },
+                {
+                  "bone": "chest",
+                  "weight": 0.75,
+                  "x": 0,
+                  "y": 10
+                }
+              ],
+              [
+                {
+                  "bone": "hip",
+                  "weight": 0.5,
+                  "x": -10,
+                  "y": 15
+                },
+                {
+                  "bone": "chest",
+                  "weight": 0.5,
+                  "x": -20,
+                  "y": 10
+                }
+              ]
+            ]
+          }
+        },
+        "path_slot": {
+          "guide_path": {
+            "attachment": "guide_path",
+            "points": [
+              0,
+              0,
+              20,
+              0,
+              40,
+              0,
+              60,
+              0,
+              80,
+              0,
+              100,
+              0,
+              120,
+              0
+            ],
+            "type": "path"
+          }
+        }
+      }
+    }
+  },
+  "slots": [
+    {
+      "attachment": "hero_region",
+      "bone": "hip",
+      "name": "body_slot"
+    },
+    {
+      "attachment": "weighted_mesh",
+      "bone": "chest",
+      "name": "mesh_slot"
+    },
+    {
+      "attachment": "guide_path",
+      "bone": "root",
+      "name": "path_slot"
+    }
+  ],
+  "transform": [
+    {
+      "bones": [
+        "transform_follower"
+      ],
+      "name": "follow_source",
+      "offset": {
+        "rotation": 10,
+        "scaleX": 0.2,
+        "scaleY": -0.1,
+        "shearX": 0,
+        "shearY": 3,
+        "x": -5,
+        "y": 6
+      },
+      "rotateMix": 0.6,
+      "scaleMix": 0.8,
+      "shearMix": 0.9,
+      "source": "transform_source",
+      "translateMix": 0.7
+    }
+  ],
+  "version": 1
+}
+
