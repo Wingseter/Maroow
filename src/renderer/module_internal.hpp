@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -49,5 +51,15 @@ std::size_t count_software_stencil_visible_pixels(
     const SoftwareStencilBuffer& buffer,
     const std::vector<RenderPoint>& polygon,
     std::optional<std::uint8_t> required_reference);
+
+using BackendFrameCallback = std::function<std::optional<std::string>(const BackendFrameInfo&)>;
+
+std::unique_ptr<Backend> make_sokol_backend();
+
+std::optional<std::string> run_sokol_app(
+    const BackendCreateInfo& create_info,
+    Backend* backend,
+    const BackendFrameCallback& render_callback,
+    std::optional<int> auto_close_frames);
 
 } // namespace marrow::renderer::internal

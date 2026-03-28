@@ -1,6 +1,7 @@
 #include "marrow/renderer/module.hpp"
 
 #include "module_internal.hpp"
+#include "marrow/runtime/profiler.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,20 +12,12 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
-
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-
-#if defined(__APPLE__)
-#include <OpenGL/gl3.h>
-#else
-#include <GL/glcorearb.h>
-#endif
 
 #include <zlib.h>
 
@@ -34,157 +27,14 @@ namespace {
 
 constexpr std::array<std::uint32_t, 6> kQuadIndices{{0, 1, 2, 0, 2, 3}};
 constexpr std::array<std::uint8_t, 4> kWhiteTexel{{255, 255, 255, 255}};
-constexpr std::size_t kStreamingVertexBufferBytes = 2U * 1024U * 1024U;
-constexpr std::size_t kStreamingIndexBufferBytes = 512U * 1024U;
-constexpr std::size_t kClipVertexBufferBytes = 8U * 1024U;
 constexpr std::size_t kIdentityBoneCount = 1U;
 constexpr std::size_t kMaxRendererBoneUniforms = 128U;
-
-constexpr const char* kSingleColorVertexShaderSource = R"(#version 150
-in vec2 a_local_position0;
-in vec2 a_local_position1;
-in vec2 a_local_position2;
-in vec2 a_local_position3;
-in vec2 a_uv;
-in vec4 a_bone_indices;
-in vec4 a_bone_weights;
-in vec4 a_light_color;
-
-uniform mat4 u_projection;
-uniform mat3x2 u_bones[128];
-
-out vec2 v_uv;
-out vec4 v_light_color;
-
-void main() {
-    vec2 world_position =
-        (u_bones[int(a_bone_indices.x)] * vec3(a_local_position0, 1.0)) * a_bone_weights.x +
-        (u_bones[int(a_bone_indices.y)] * vec3(a_local_position1, 1.0)) * a_bone_weights.y +
-        (u_bones[int(a_bone_indices.z)] * vec3(a_local_position2, 1.0)) * a_bone_weights.z +
-        (u_bones[int(a_bone_indices.w)] * vec3(a_local_position3, 1.0)) * a_bone_weights.w;
-    v_uv = a_uv;
-    v_light_color = a_light_color;
-    gl_Position = u_projection * vec4(world_position, 0.0, 1.0);
-}
-)";
-
-constexpr const char* kTwoColorTintVertexShaderSource = R"(#version 150
-in vec2 a_local_position0;
-in vec2 a_local_position1;
-in vec2 a_local_position2;
-in vec2 a_local_position3;
-in vec2 a_uv;
-in vec4 a_bone_indices;
-in vec4 a_bone_weights;
-in vec4 a_light_color;
-in vec4 a_dark_color;
-
-uniform mat4 u_projection;
-uniform mat3x2 u_bones[128];
-
-out vec2 v_uv;
-out vec4 v_light_color;
-out vec4 v_dark_color;
-
-void main() {
-    vec2 world_position =
-        (u_bones[int(a_bone_indices.x)] * vec3(a_local_position0, 1.0)) * a_bone_weights.x +
-        (u_bones[int(a_bone_indices.y)] * vec3(a_local_position1, 1.0)) * a_bone_weights.y +
-        (u_bones[int(a_bone_indices.z)] * vec3(a_local_position2, 1.0)) * a_bone_weights.z +
-        (u_bones[int(a_bone_indices.w)] * vec3(a_local_position3, 1.0)) * a_bone_weights.w;
-    v_uv = a_uv;
-    v_light_color = a_light_color;
-    v_dark_color = a_dark_color;
-    gl_Position = u_projection * vec4(world_position, 0.0, 1.0);
-}
-)";
-
-constexpr GLuint kLocalPosition0AttributeLocation = 0;
-constexpr GLuint kLocalPosition1AttributeLocation = 1;
-constexpr GLuint kLocalPosition2AttributeLocation = 2;
-constexpr GLuint kLocalPosition3AttributeLocation = 3;
-constexpr GLuint kUvAttributeLocation = 4;
-constexpr GLuint kBoneIndicesAttributeLocation = 5;
-constexpr GLuint kBoneWeightsAttributeLocation = 6;
-constexpr GLuint kLightColorAttributeLocation = 7;
-constexpr GLuint kDarkColorAttributeLocation = 8;
-
-constexpr const char* kSingleColorFragmentShaderSource = R"(#version 150
-in vec2 v_uv;
-in vec4 v_light_color;
-
-uniform sampler2D u_texture;
-uniform float u_pma;
-
-out vec4 frag_color;
-
-void main() {
-    vec4 tex_color = texture(u_texture, v_uv);
-    vec4 output_color = tex_color * v_light_color;
-    if (u_pma < 0.5) {
-        output_color.rgb *= v_light_color.a;
-    }
-    frag_color = output_color;
-}
-)";
-
-constexpr const char* kTwoColorTintFragmentShaderSource = R"(#version 150
-in vec2 v_uv;
-in vec4 v_light_color;
-in vec4 v_dark_color;
-
-uniform sampler2D u_texture;
-uniform float u_pma;
-
-out vec4 frag_color;
-
-void main() {
-    vec4 tex_color = texture(u_texture, v_uv);
-    vec3 tint_rgb =
-        ((u_pma + ((1.0 - u_pma) * tex_color.a)) - tex_color.rgb) * v_dark_color.rgb +
-        (tex_color.rgb * v_light_color.rgb);
-    frag_color = vec4(tint_rgb, tex_color.a * v_light_color.a);
-}
-)";
 
 struct SceneBounds {
     double min_x{0.0};
     double min_y{0.0};
     double max_x{0.0};
     double max_y{0.0};
-};
-
-struct GlStreamVertex {
-    float local_position[4][2];
-    float uv[2];
-    float bone_indices[4];
-    float bone_weights[4];
-    float light_color[4];
-    std::uint8_t dark_color[4];
-};
-
-struct GlShaderProgram {
-    GLuint program{0};
-    GLuint vertex_shader{0};
-    GLuint fragment_shader{0};
-    GLint projection_location{-1};
-    GLint bone_palette_location{-1};
-    GLint texture_location{-1};
-    GLint pma_location{-1};
-};
-
-struct GlRenderResources {
-    GlShaderProgram single_color_program;
-    GlShaderProgram two_color_program;
-    GLuint vao{0};
-    GLuint vbo{0};
-    GLuint ebo{0};
-    GLuint clip_vao{0};
-    GLuint clip_vbo{0};
-    GLuint texture{0};
-    std::size_t vbo_capacity_bytes{0};
-    std::size_t ebo_capacity_bytes{0};
-    std::size_t clip_vbo_capacity_bytes{0};
 };
 
 struct PreparedStreamBatch {
@@ -200,7 +50,7 @@ struct PreparedStreamBatch {
 };
 
 struct StreamBuildResult {
-    std::vector<GlStreamVertex> vertices;
+    std::vector<RenderCommandVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<PreparedStreamBatch> batches;
     std::optional<std::string> error_message;
@@ -215,21 +65,14 @@ enum class GeometryClipMode {
     UseOriginalGeometry,
 };
 
-struct DrawBatchState {
-    std::vector<const PreparedDrawCommand*> commands;
-    std::string texture_name;
-    runtime::BlendMode blend_mode{runtime::BlendMode::Normal};
-    ColorShaderVariant shader_variant{ColorShaderVariant::SingleColor};
-    std::uint8_t stencil_reference{0};
-    bool stencil_enabled{false};
-};
+using GlyphRows = std::array<std::uint8_t, 7>;
 
-struct ActiveStencilClip {
-    std::size_t clip_attachment_index{0};
-    std::uint8_t reference_value{0};
-    std::uint8_t parent_reference_value{0};
-    std::uint8_t invert_mask{0};
-};
+RenderCommandVertex rigid_stream_vertex(
+    const RenderPoint& position,
+    const RenderPoint& uv,
+    std::size_t bone_index,
+    const runtime::SlotColor& light_color,
+    const std::optional<runtime::SlotColor>& dark_color);
 
 TextureImage fallback_white_texture() {
     TextureImage image;
@@ -237,6 +80,290 @@ TextureImage fallback_white_texture() {
     image.height = 1;
     image.rgba8.assign(kWhiteTexel.begin(), kWhiteTexel.end());
     return image;
+}
+
+const GlyphRows* glyph_rows(char character) {
+    static constexpr GlyphRows kGlyph0{{0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}};
+    static constexpr GlyphRows kGlyph1{{0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}};
+    static constexpr GlyphRows kGlyph2{{0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}};
+    static constexpr GlyphRows kGlyph3{{0x1E, 0x01, 0x01, 0x06, 0x01, 0x01, 0x1E}};
+    static constexpr GlyphRows kGlyph4{{0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}};
+    static constexpr GlyphRows kGlyph5{{0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}};
+    static constexpr GlyphRows kGlyph6{{0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}};
+    static constexpr GlyphRows kGlyph7{{0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}};
+    static constexpr GlyphRows kGlyph8{{0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}};
+    static constexpr GlyphRows kGlyph9{{0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}};
+    static constexpr GlyphRows kGlyphA{{0x04, 0x0A, 0x11, 0x11, 0x1F, 0x11, 0x11}};
+    static constexpr GlyphRows kGlyphB{{0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}};
+    static constexpr GlyphRows kGlyphC{{0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F}};
+    static constexpr GlyphRows kGlyphD{{0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}};
+    static constexpr GlyphRows kGlyphE{{0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}};
+    static constexpr GlyphRows kGlyphF{{0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}};
+    static constexpr GlyphRows kGlyphG{{0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F}};
+    static constexpr GlyphRows kGlyphI{{0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}};
+    static constexpr GlyphRows kGlyphK{{0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}};
+    static constexpr GlyphRows kGlyphL{{0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}};
+    static constexpr GlyphRows kGlyphM{{0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}};
+    static constexpr GlyphRows kGlyphN{{0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}};
+    static constexpr GlyphRows kGlyphO{{0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}};
+    static constexpr GlyphRows kGlyphR{{0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}};
+    static constexpr GlyphRows kGlyphS{{0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}};
+    static constexpr GlyphRows kGlyphT{{0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}};
+    static constexpr GlyphRows kGlyphU{{0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}};
+    static constexpr GlyphRows kGlyphV{{0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}};
+    static constexpr GlyphRows kGlyphW{{0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}};
+    static constexpr GlyphRows kGlyphX{{0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}};
+
+    switch (character) {
+    case '0':
+        return &kGlyph0;
+    case '1':
+        return &kGlyph1;
+    case '2':
+        return &kGlyph2;
+    case '3':
+        return &kGlyph3;
+    case '4':
+        return &kGlyph4;
+    case '5':
+        return &kGlyph5;
+    case '6':
+        return &kGlyph6;
+    case '7':
+        return &kGlyph7;
+    case '8':
+        return &kGlyph8;
+    case '9':
+        return &kGlyph9;
+    case 'A':
+        return &kGlyphA;
+    case 'B':
+        return &kGlyphB;
+    case 'C':
+        return &kGlyphC;
+    case 'D':
+        return &kGlyphD;
+    case 'E':
+        return &kGlyphE;
+    case 'F':
+        return &kGlyphF;
+    case 'G':
+        return &kGlyphG;
+    case 'I':
+        return &kGlyphI;
+    case 'K':
+        return &kGlyphK;
+    case 'L':
+        return &kGlyphL;
+    case 'M':
+        return &kGlyphM;
+    case 'N':
+        return &kGlyphN;
+    case 'O':
+        return &kGlyphO;
+    case 'R':
+        return &kGlyphR;
+    case 'S':
+        return &kGlyphS;
+    case 'T':
+        return &kGlyphT;
+    case 'U':
+        return &kGlyphU;
+    case 'V':
+        return &kGlyphV;
+    case 'W':
+        return &kGlyphW;
+    case 'X':
+        return &kGlyphX;
+    default:
+        return nullptr;
+    }
+}
+
+runtime::ProfilerDrawStats profiler_draw_stats(
+    const PreparedSceneBatchSummary& summary) {
+    runtime::ProfilerDrawStats draw_stats;
+    draw_stats.skeleton_count = summary.skeleton_count;
+    draw_stats.draw_calls = summary.draw_call_count;
+    draw_stats.vertices = summary.vertex_count;
+    draw_stats.batch_merges = summary.merged_draw_calls;
+    draw_stats.break_reasons.texture_changes = summary.break_reasons.texture_changes;
+    draw_stats.break_reasons.blend_changes = summary.break_reasons.blend_changes;
+    draw_stats.break_reasons.clip_changes = summary.break_reasons.clip_changes;
+    draw_stats.break_reasons.shader_changes = summary.break_reasons.shader_changes;
+    return draw_stats;
+}
+
+void append_hud_rect(
+    RenderCommand* command,
+    double min_x,
+    double min_y,
+    double max_x,
+    double max_y,
+    const runtime::SlotColor& color,
+    std::size_t identity_bone_index) {
+    if (command == nullptr) {
+        return;
+    }
+
+    const std::uint32_t base_index = static_cast<std::uint32_t>(command->vertices.size());
+    command->vertices.push_back(rigid_stream_vertex(
+        {min_x, min_y},
+        {0.5, 0.5},
+        identity_bone_index,
+        color,
+        std::nullopt));
+    command->vertices.push_back(rigid_stream_vertex(
+        {max_x, min_y},
+        {0.5, 0.5},
+        identity_bone_index,
+        color,
+        std::nullopt));
+    command->vertices.push_back(rigid_stream_vertex(
+        {max_x, max_y},
+        {0.5, 0.5},
+        identity_bone_index,
+        color,
+        std::nullopt));
+    command->vertices.push_back(rigid_stream_vertex(
+        {min_x, max_y},
+        {0.5, 0.5},
+        identity_bone_index,
+        color,
+        std::nullopt));
+
+    for (const std::uint32_t index : kQuadIndices) {
+        command->indices.push_back(base_index + index);
+    }
+}
+
+void append_hud_text(
+    RenderCommand* command,
+    std::string_view text,
+    double origin_x,
+    double origin_y,
+    double pixel_width,
+    double pixel_height,
+    const runtime::SlotColor& color,
+    std::size_t identity_bone_index) {
+    if (command == nullptr) {
+        return;
+    }
+
+    constexpr double kGlyphColumns = 5.0;
+    constexpr double kGlyphAdvance = 6.0;
+    double cursor_x = origin_x;
+    for (const char character : text) {
+        if (character == ' ') {
+            cursor_x += pixel_width * kGlyphAdvance;
+            continue;
+        }
+
+        const GlyphRows* glyph = glyph_rows(character);
+        if (glyph == nullptr) {
+            cursor_x += pixel_width * kGlyphAdvance;
+            continue;
+        }
+
+        for (std::size_t row = 0; row < glyph->size(); ++row) {
+            for (std::size_t column = 0; column < static_cast<std::size_t>(kGlyphColumns); ++column) {
+                const std::uint8_t bit = static_cast<std::uint8_t>(1U << (4U - column));
+                if (((*glyph)[row] & bit) == 0U) {
+                    continue;
+                }
+
+                const double min_x = cursor_x + (static_cast<double>(column) * pixel_width);
+                const double max_x = min_x + pixel_width;
+                const double max_y = origin_y - (static_cast<double>(row) * pixel_height);
+                const double min_y = max_y - pixel_height;
+                append_hud_rect(
+                    command,
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                    color,
+                    identity_bone_index);
+            }
+        }
+
+        cursor_x += pixel_width * kGlyphAdvance;
+    }
+}
+
+std::optional<RenderCommand> build_profiler_hud_overlay_command(
+    const runtime::ProfilerFrame& frame,
+    const SceneBounds& bounds,
+    int framebuffer_width,
+    int framebuffer_height,
+    std::size_t identity_bone_index) {
+    const std::vector<std::string> lines = runtime::profiler_hud_lines(frame);
+    if (lines.empty()) {
+        return std::nullopt;
+    }
+
+    const double world_width = std::max(bounds.max_x - bounds.min_x, 1.0);
+    const double world_height = std::max(bounds.max_y - bounds.min_y, 1.0);
+    const double pixel_width = world_width / std::max(framebuffer_width, 1);
+    const double pixel_height = world_height / std::max(framebuffer_height, 1);
+    const double scale = framebuffer_width >= 960 ? 2.0 : 1.0;
+    const double glyph_pixel_width = pixel_width * scale;
+    const double glyph_pixel_height = pixel_height * scale;
+    const double char_advance = glyph_pixel_width * 6.0;
+    const double line_height = glyph_pixel_height * 10.0;
+    const double margin_x = pixel_width * 16.0;
+    const double margin_y = pixel_height * 16.0;
+    const double padding_x = pixel_width * 8.0;
+    const double padding_y = pixel_height * 8.0;
+
+    std::size_t max_columns = 0;
+    for (const std::string& line : lines) {
+        max_columns = std::max(max_columns, line.size());
+    }
+
+    const double panel_width =
+        padding_x * 2.0 + (static_cast<double>(max_columns) * char_advance);
+    const double panel_height =
+        padding_y * 2.0 + (static_cast<double>(lines.size()) * line_height);
+    const double panel_min_x = bounds.min_x + margin_x;
+    const double panel_max_x = panel_min_x + panel_width;
+    const double panel_max_y = bounds.max_y - margin_y;
+    const double panel_min_y = panel_max_y - panel_height;
+
+    RenderCommand command;
+    command.texture_name = "__hud_white__";
+    command.texture_handle = kSolidWhiteTextureHandle;
+    command.blend_mode = runtime::BlendMode::Normal;
+    command.shader_variant = ColorShaderVariant::SingleColor;
+    command.source_draw_command_offset = 0U;
+    command.source_draw_command_count = 0U;
+
+    append_hud_rect(
+        &command,
+        panel_min_x,
+        panel_min_y,
+        panel_max_x,
+        panel_max_y,
+        runtime::SlotColor{0.05, 0.07, 0.09, 0.80},
+        identity_bone_index);
+
+    const runtime::SlotColor text_color{0.93, 0.95, 0.88, 1.0};
+    for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
+        const double line_x = panel_min_x + padding_x;
+        const double line_y =
+            panel_max_y - padding_y - (static_cast<double>(line_index) * line_height);
+        append_hud_text(
+            &command,
+            lines[line_index],
+            line_x,
+            line_y,
+            glyph_pixel_width,
+            glyph_pixel_height,
+            text_color,
+            identity_bone_index);
+    }
+
+    return command.vertices.empty() ? std::nullopt : std::optional<RenderCommand>(std::move(command));
 }
 
 TextureImageLoadResult fallback_texture_result(
@@ -541,20 +668,6 @@ std::optional<std::string> decode_png_rgba8(
     return std::nullopt;
 }
 
-GLint gl_texture_filter(std::string_view filter_name) {
-    return filter_name == "nearest" ? GL_NEAREST : GL_LINEAR;
-}
-
-GLint gl_texture_wrap(std::string_view wrap_name) {
-    if (wrap_name == "repeat") {
-        return GL_REPEAT;
-    }
-    if (wrap_name == "mirrored_repeat") {
-        return GL_MIRRORED_REPEAT;
-    }
-    return GL_CLAMP_TO_EDGE;
-}
-
 SceneBounds attachment_bounds(const RegionAttachmentDrawCommand& attachment) {
     const bool use_masked_geometry =
         !attachment.masked_vertices.empty() && !attachment.masked_indices.empty();
@@ -689,64 +802,6 @@ std::array<float, 16> orthographic_projection(const SceneBounds& bounds) {
     }};
 }
 
-std::optional<std::string> shader_log(GLuint shader) {
-    GLint log_length = 0;
-    glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
-    if (log_length <= 1) {
-        return std::nullopt;
-    }
-
-    std::string log(static_cast<std::size_t>(log_length), '\0');
-    glGetShaderInfoLog(shader, log_length, nullptr, log.data());
-    if (!log.empty() && log.back() == '\0') {
-        log.pop_back();
-    }
-    return log;
-}
-
-std::optional<std::string> program_log(GLuint program) {
-    GLint log_length = 0;
-    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_length);
-    if (log_length <= 1) {
-        return std::nullopt;
-    }
-
-    std::string log(static_cast<std::size_t>(log_length), '\0');
-    glGetProgramInfoLog(program, log_length, nullptr, log.data());
-    if (!log.empty() && log.back() == '\0') {
-        log.pop_back();
-    }
-    return log;
-}
-
-std::optional<std::string> compile_shader(
-    GLenum shader_type,
-    const char* source,
-    GLuint* shader_out) {
-    GLuint shader = glCreateShader(shader_type);
-    if (shader == 0) {
-        return "Failed to create OpenGL shader object.";
-    }
-
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint compile_status = GL_FALSE;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &compile_status);
-    if (compile_status == GL_TRUE) {
-        *shader_out = shader;
-        return std::nullopt;
-    }
-
-    std::string error_message = "OpenGL shader compilation failed.";
-    if (const std::optional<std::string> log = shader_log(shader)) {
-        error_message += " ";
-        error_message += *log;
-    }
-    glDeleteShader(shader);
-    return error_message;
-}
-
 std::string_view color_shader_variant_name(ColorShaderVariant shader_variant) {
     switch (shader_variant) {
     case ColorShaderVariant::SingleColor:
@@ -757,279 +812,6 @@ std::string_view color_shader_variant_name(ColorShaderVariant shader_variant) {
 
     return "unknown";
 }
-
-std::optional<std::string> link_program(
-    GlShaderProgram* program_out,
-    ColorShaderVariant shader_variant) {
-    program_out->program = glCreateProgram();
-    if (program_out->program == 0) {
-        return "Failed to create OpenGL shader program.";
-    }
-
-    glAttachShader(program_out->program, program_out->vertex_shader);
-    glAttachShader(program_out->program, program_out->fragment_shader);
-    glBindAttribLocation(program_out->program, kLocalPosition0AttributeLocation, "a_local_position0");
-    glBindAttribLocation(program_out->program, kLocalPosition1AttributeLocation, "a_local_position1");
-    glBindAttribLocation(program_out->program, kLocalPosition2AttributeLocation, "a_local_position2");
-    glBindAttribLocation(program_out->program, kLocalPosition3AttributeLocation, "a_local_position3");
-    glBindAttribLocation(program_out->program, kUvAttributeLocation, "a_uv");
-    glBindAttribLocation(program_out->program, kBoneIndicesAttributeLocation, "a_bone_indices");
-    glBindAttribLocation(program_out->program, kBoneWeightsAttributeLocation, "a_bone_weights");
-    glBindAttribLocation(program_out->program, kLightColorAttributeLocation, "a_light_color");
-    if (shader_variant == ColorShaderVariant::TwoColorTint) {
-        glBindAttribLocation(program_out->program, kDarkColorAttributeLocation, "a_dark_color");
-    }
-    glLinkProgram(program_out->program);
-
-    GLint link_status = GL_FALSE;
-    glGetProgramiv(program_out->program, GL_LINK_STATUS, &link_status);
-    if (link_status == GL_TRUE) {
-        program_out->projection_location =
-            glGetUniformLocation(program_out->program, "u_projection");
-        program_out->bone_palette_location =
-            glGetUniformLocation(program_out->program, "u_bones[0]");
-        program_out->texture_location =
-            glGetUniformLocation(program_out->program, "u_texture");
-        program_out->pma_location =
-            glGetUniformLocation(program_out->program, "u_pma");
-        if (program_out->projection_location < 0 ||
-            program_out->bone_palette_location < 0 ||
-            program_out->texture_location < 0 ||
-            program_out->pma_location < 0) {
-            return "OpenGL shader did not expose the expected uniform locations.";
-        }
-        return std::nullopt;
-    }
-
-    std::string error_message = "OpenGL shader link failed.";
-    if (const std::optional<std::string> log = program_log(program_out->program)) {
-        error_message += " ";
-        error_message += *log;
-    }
-    return error_message;
-}
-
-std::optional<std::string> compile_program(
-    ColorShaderVariant shader_variant,
-    const char* vertex_source,
-    const char* fragment_source,
-    GlShaderProgram* program_out) {
-    if (const std::optional<std::string> error =
-            compile_shader(GL_VERTEX_SHADER, vertex_source, &program_out->vertex_shader)) {
-        return error;
-    }
-    if (const std::optional<std::string> error =
-            compile_shader(GL_FRAGMENT_SHADER, fragment_source, &program_out->fragment_shader)) {
-        return error;
-    }
-    if (const std::optional<std::string> error = link_program(program_out, shader_variant)) {
-        return error;
-    }
-    return std::nullopt;
-}
-
-void configure_stream_vertex_array(GLuint vao, GLuint vbo, GLuint ebo) {
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-
-    const auto bind_attribute = [](GLuint location, GLint component_count, std::size_t offset) {
-        glEnableVertexAttribArray(location);
-        glVertexAttribPointer(
-            location,
-            component_count,
-            GL_FLOAT,
-            GL_FALSE,
-            sizeof(GlStreamVertex),
-            reinterpret_cast<const void*>(offset));
-    };
-    bind_attribute(
-        kLocalPosition0AttributeLocation,
-        2,
-        offsetof(GlStreamVertex, local_position));
-    bind_attribute(
-        kLocalPosition1AttributeLocation,
-        2,
-        offsetof(GlStreamVertex, local_position) + (sizeof(float) * 2U));
-    bind_attribute(
-        kLocalPosition2AttributeLocation,
-        2,
-        offsetof(GlStreamVertex, local_position) + (sizeof(float) * 4U));
-    bind_attribute(
-        kLocalPosition3AttributeLocation,
-        2,
-        offsetof(GlStreamVertex, local_position) + (sizeof(float) * 6U));
-    bind_attribute(kUvAttributeLocation, 2, offsetof(GlStreamVertex, uv));
-    bind_attribute(kBoneIndicesAttributeLocation, 4, offsetof(GlStreamVertex, bone_indices));
-    bind_attribute(kBoneWeightsAttributeLocation, 4, offsetof(GlStreamVertex, bone_weights));
-    bind_attribute(kLightColorAttributeLocation, 4, offsetof(GlStreamVertex, light_color));
-    glEnableVertexAttribArray(kDarkColorAttributeLocation);
-    glVertexAttribPointer(
-        kDarkColorAttributeLocation,
-        4,
-        GL_UNSIGNED_BYTE,
-        GL_TRUE,
-        sizeof(GlStreamVertex),
-        reinterpret_cast<const void*>(offsetof(GlStreamVertex, dark_color)));
-}
-
-std::optional<std::string> initialize_resources(
-    const PreparedScene& scene,
-    const TextureImage& texture_image,
-    GlRenderResources* resources) {
-    std::size_t expected_rgba_bytes = 0;
-    if (texture_image.width <= 0 || texture_image.height <= 0 ||
-        !checked_multiply(
-            static_cast<std::size_t>(texture_image.width),
-            static_cast<std::size_t>(texture_image.height),
-            &expected_rgba_bytes) ||
-        !checked_multiply(expected_rgba_bytes, 4U, &expected_rgba_bytes) ||
-        texture_image.rgba8.size() != expected_rgba_bytes) {
-        return "Atlas texture image data was invalid.";
-    }
-
-    if (const std::optional<std::string> error = compile_program(
-            ColorShaderVariant::SingleColor,
-            kSingleColorVertexShaderSource,
-            kSingleColorFragmentShaderSource,
-            &resources->single_color_program)) {
-        return error;
-    }
-    if (const std::optional<std::string> error = compile_program(
-            ColorShaderVariant::TwoColorTint,
-            kTwoColorTintVertexShaderSource,
-            kTwoColorTintFragmentShaderSource,
-            &resources->two_color_program)) {
-        return error;
-    }
-
-    glGenVertexArrays(1, &resources->vao);
-    glGenBuffers(1, &resources->vbo);
-    glGenBuffers(1, &resources->ebo);
-    glGenVertexArrays(1, &resources->clip_vao);
-    glGenBuffers(1, &resources->clip_vbo);
-    glGenTextures(1, &resources->texture);
-    if (resources->vao == 0 || resources->vbo == 0 || resources->ebo == 0 ||
-        resources->clip_vao == 0 || resources->clip_vbo == 0 || resources->texture == 0) {
-        return "Failed to allocate OpenGL render resources.";
-    }
-
-    configure_stream_vertex_array(resources->vao, resources->vbo, resources->ebo);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(kStreamingVertexBufferBytes),
-        nullptr,
-        GL_STREAM_DRAW);
-    glBufferData(
-        GL_ELEMENT_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(kStreamingIndexBufferBytes),
-        nullptr,
-        GL_STREAM_DRAW);
-    resources->vbo_capacity_bytes = kStreamingVertexBufferBytes;
-    resources->ebo_capacity_bytes = kStreamingIndexBufferBytes;
-
-    configure_stream_vertex_array(resources->clip_vao, resources->clip_vbo, 0);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(kClipVertexBufferBytes),
-        nullptr,
-        GL_STREAM_DRAW);
-    resources->clip_vbo_capacity_bytes = kClipVertexBufferBytes;
-
-    glBindTexture(GL_TEXTURE_2D, resources->texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_texture_filter(scene.atlas_filter_min));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_texture_filter(scene.atlas_filter_mag));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_texture_wrap(scene.atlas_wrap_x));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_texture_wrap(scene.atlas_wrap_y));
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGBA,
-        texture_image.width,
-        texture_image.height,
-        0,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        texture_image.rgba8.data());
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-    return std::nullopt;
-}
-
-void destroy_program(GlShaderProgram* program) {
-    if (program->program != 0) {
-        glDeleteProgram(program->program);
-        program->program = 0;
-    }
-    if (program->vertex_shader != 0) {
-        glDeleteShader(program->vertex_shader);
-        program->vertex_shader = 0;
-    }
-    if (program->fragment_shader != 0) {
-        glDeleteShader(program->fragment_shader);
-        program->fragment_shader = 0;
-    }
-    program->projection_location = -1;
-    program->bone_palette_location = -1;
-    program->texture_location = -1;
-    program->pma_location = -1;
-}
-
-void destroy_resources(GlRenderResources* resources) {
-    if (resources->texture != 0) {
-        glDeleteTextures(1, &resources->texture);
-        resources->texture = 0;
-    }
-    if (resources->clip_vbo != 0) {
-        glDeleteBuffers(1, &resources->clip_vbo);
-        resources->clip_vbo = 0;
-    }
-    if (resources->clip_vao != 0) {
-        glDeleteVertexArrays(1, &resources->clip_vao);
-        resources->clip_vao = 0;
-    }
-    if (resources->ebo != 0) {
-        glDeleteBuffers(1, &resources->ebo);
-        resources->ebo = 0;
-    }
-    if (resources->vbo != 0) {
-        glDeleteBuffers(1, &resources->vbo);
-        resources->vbo = 0;
-    }
-    if (resources->vao != 0) {
-        glDeleteVertexArrays(1, &resources->vao);
-        resources->vao = 0;
-    }
-    resources->vbo_capacity_bytes = 0;
-    resources->ebo_capacity_bytes = 0;
-    resources->clip_vbo_capacity_bytes = 0;
-    destroy_program(&resources->single_color_program);
-    destroy_program(&resources->two_color_program);
-}
-
-GLenum gl_blend_factor(BlendFactor factor) {
-    switch (factor) {
-    case BlendFactor::Zero:
-        return GL_ZERO;
-    case BlendFactor::One:
-        return GL_ONE;
-    case BlendFactor::SrcAlpha:
-        return GL_SRC_ALPHA;
-    case BlendFactor::OneMinusSrcAlpha:
-        return GL_ONE_MINUS_SRC_ALPHA;
-    case BlendFactor::DstColor:
-        return GL_DST_COLOR;
-    case BlendFactor::OneMinusSrcColor:
-        return GL_ONE_MINUS_SRC_COLOR;
-    }
-
-    return GL_ZERO;
-}
-
 BlendState compute_blend_state(runtime::BlendMode blend_mode, bool premultiplied_alpha) {
     switch (blend_mode) {
     case runtime::BlendMode::Additive:
@@ -1050,20 +832,13 @@ BlendState compute_blend_state(runtime::BlendMode blend_mode, bool premultiplied
     }
 }
 
-void apply_blend_mode(runtime::BlendMode blend_mode, bool premultiplied_alpha) {
-    const BlendState blend_state = compute_blend_state(blend_mode, premultiplied_alpha);
-    glBlendFunc(
-        gl_blend_factor(blend_state.src_factor),
-        gl_blend_factor(blend_state.dst_factor));
-}
-
 std::uint8_t color_component_byte(double component) {
     const double clamped = std::clamp(component, 0.0, 1.0);
     return static_cast<std::uint8_t>(std::lround(clamped * 255.0));
 }
 
 void set_stream_vertex_colors(
-    GlStreamVertex* vertex,
+    RenderCommandVertex* vertex,
     const runtime::SlotColor& color,
     const std::optional<runtime::SlotColor>& dark_color) {
     vertex->light_color[0] = static_cast<float>(color.r);
@@ -1078,23 +853,6 @@ void set_stream_vertex_colors(
     vertex->dark_color[3] = color_component_byte(dark.a);
 }
 
-const GlShaderProgram& shader_program_for_variant(
-    const GlRenderResources& resources,
-    ColorShaderVariant shader_variant) {
-    switch (shader_variant) {
-    case ColorShaderVariant::TwoColorTint:
-        return resources.two_color_program;
-    case ColorShaderVariant::SingleColor:
-    default:
-        return resources.single_color_program;
-    }
-}
-
-float pma_uniform_value(bool premultiplied_alpha) {
-    // Spine's published toggle formula uses 0 for PMA textures and 1 for straight-alpha textures.
-    return premultiplied_alpha ? 0.0f : 1.0f;
-}
-
 ColorShaderVariant command_shader_variant(const PreparedDrawCommand& command) {
     return std::visit(
         [](const auto& attachment) {
@@ -1105,15 +863,15 @@ ColorShaderVariant command_shader_variant(const PreparedDrawCommand& command) {
         command);
 }
 
-GlStreamVertex rigid_stream_vertex(
+RenderCommandVertex rigid_stream_vertex(
     const RenderPoint& position,
     const RenderPoint& uv,
     std::size_t bone_index,
     const runtime::SlotColor& color,
     const std::optional<runtime::SlotColor>& dark_color) {
-    GlStreamVertex vertex{};
-    vertex.local_position[0][0] = static_cast<float>(position.x);
-    vertex.local_position[0][1] = static_cast<float>(position.y);
+    RenderCommandVertex vertex{};
+    vertex.local_positions[0][0] = static_cast<float>(position.x);
+    vertex.local_positions[0][1] = static_cast<float>(position.y);
     vertex.uv[0] = static_cast<float>(uv.x);
     vertex.uv[1] = static_cast<float>(uv.y);
     vertex.bone_indices[0] = static_cast<float>(bone_index);
@@ -1122,18 +880,18 @@ GlStreamVertex rigid_stream_vertex(
     return vertex;
 }
 
-GlStreamVertex weighted_stream_vertex(
+RenderCommandVertex weighted_stream_vertex(
     const GpuSkinningVertexPayload& payload,
     const runtime::SlotColor& color,
     const std::optional<runtime::SlotColor>& dark_color) {
-    GlStreamVertex vertex{};
+    RenderCommandVertex vertex{};
     vertex.uv[0] = static_cast<float>(payload.uv.x);
     vertex.uv[1] = static_cast<float>(payload.uv.y);
     for (std::size_t influence_index = 0; influence_index < payload.influence_count;
          ++influence_index) {
-        vertex.local_position[influence_index][0] =
+        vertex.local_positions[influence_index][0] =
             static_cast<float>(payload.bone_local_positions[influence_index].x);
-        vertex.local_position[influence_index][1] =
+        vertex.local_positions[influence_index][1] =
             static_cast<float>(payload.bone_local_positions[influence_index].y);
         vertex.bone_indices[influence_index] =
             static_cast<float>(payload.bone_indices[influence_index]);
@@ -1161,7 +919,7 @@ std::optional<std::string> append_region_stream_geometry(
     std::size_t identity_bone_index,
     std::size_t bone_count,
     GeometryClipMode geometry_clip_mode,
-    std::vector<GlStreamVertex>* vertices_out,
+    std::vector<RenderCommandVertex>* vertices_out,
     std::vector<std::uint32_t>* indices_out) {
     const std::size_t base_vertex = vertices_out->size();
     if (base_vertex > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -1223,7 +981,7 @@ std::optional<std::string> append_dynamic_mesh_stream_geometry(
     std::size_t identity_bone_index,
     std::size_t bone_count,
     GeometryClipMode geometry_clip_mode,
-    std::vector<GlStreamVertex>* vertices_out,
+    std::vector<RenderCommandVertex>* vertices_out,
     std::vector<std::uint32_t>* indices_out) {
     const std::size_t base_vertex = vertices_out->size();
     if (base_vertex > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -1364,28 +1122,6 @@ StreamBuildResult build_stream_batches(
     return result;
 }
 
-void ensure_stream_buffer_capacity(
-    GLenum target,
-    GLuint buffer,
-    std::size_t required_bytes,
-    std::size_t initial_capacity,
-    std::size_t* capacity_bytes) {
-    std::size_t capacity = *capacity_bytes;
-    if (capacity == 0) {
-        capacity = initial_capacity;
-    }
-    while (capacity < required_bytes) {
-        capacity *= 2U;
-    }
-    if (capacity == *capacity_bytes) {
-        return;
-    }
-
-    glBindBuffer(target, buffer);
-    glBufferData(target, static_cast<GLsizeiptr>(capacity), nullptr, GL_STREAM_DRAW);
-    *capacity_bytes = capacity;
-}
-
 std::vector<float> bone_uniform_payload(const PreparedScene& scene) {
     std::vector<float> payload;
     if (scene.draw_commands.empty()) {
@@ -1416,7 +1152,7 @@ std::optional<std::string> append_draw_command_stream_geometry(
     std::size_t identity_bone_index,
     std::size_t bone_count,
     GeometryClipMode geometry_clip_mode,
-    std::vector<GlStreamVertex>* vertices_out,
+    std::vector<RenderCommandVertex>* vertices_out,
     std::vector<std::uint32_t>* indices_out) {
     return std::visit(
         [&](const auto& attachment) {
@@ -1442,344 +1178,186 @@ std::optional<std::string> append_draw_command_stream_geometry(
         command);
 }
 
-bool draw_batch_matches(
-    const DrawBatchState& batch,
-    const PreparedDrawCommand& command,
-    std::uint8_t stencil_reference,
-    bool stencil_enabled) {
-    if (batch.commands.empty()) {
-        return false;
-    }
-
-    return
-        batch.texture_name == command_texture_name(command) &&
+bool render_batch_matches(const RenderCommand& batch, const PreparedDrawCommand& command) {
+    return batch.texture_name == command_texture_name(command) &&
         batch.blend_mode == command_blend_mode(command) &&
-        batch.shader_variant == command_shader_variant(command) &&
-        batch.stencil_reference == stencil_reference &&
-        batch.stencil_enabled == stencil_enabled;
+        batch.shader_variant == command_shader_variant(command);
 }
 
-void reset_draw_batch(DrawBatchState* batch) {
-    batch->commands.clear();
-    batch->texture_name.clear();
-    batch->blend_mode = runtime::BlendMode::Normal;
-    batch->shader_variant = ColorShaderVariant::SingleColor;
-    batch->stencil_reference = 0;
-    batch->stencil_enabled = false;
-}
-
-void set_stencil_test_for_reference(std::optional<std::uint8_t> stencil_reference) {
-    if (stencil_reference.has_value()) {
-        glEnable(GL_STENCIL_TEST);
-        glStencilMask(0x00);
-        glStencilFunc(GL_EQUAL, static_cast<GLint>(*stencil_reference), 0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        return;
+std::optional<std::string> append_clip_command_geometry(
+    const ClipAttachmentDrawCommand& clip_attachment,
+    std::size_t identity_bone_index,
+    std::size_t source_clip_attachment_index,
+    RenderClipCommand* clip_command_out) {
+    if (clip_command_out == nullptr) {
+        return "Render clip command output must not be null.";
+    }
+    if (clip_attachment.polygon.size() < 3U) {
+        return "Clip attachment '" + clip_attachment.attachment_name +
+            "' requires at least 3 points.";
+    }
+    if (clip_attachment.polygon.size() >
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return "Clip attachment '" + clip_attachment.attachment_name +
+            "' exceeded the 32-bit index range.";
     }
 
-    glDisable(GL_STENCIL_TEST);
-    glStencilMask(0xFF);
-    glStencilFunc(GL_ALWAYS, 0, 0xFF);
-    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-}
-
-std::vector<GlStreamVertex> clip_polygon_vertices(
-    const ClipAttachmentDrawCommand& clip,
-    std::size_t identity_bone_index) {
-    std::vector<GlStreamVertex> vertices;
-    vertices.reserve(clip.polygon.size());
-    for (const RenderPoint& point : clip.polygon) {
-        vertices.push_back(rigid_stream_vertex(
+    RenderClipCommand clip_command;
+    clip_command.attachment_name = clip_attachment.attachment_name;
+    clip_command.source_clip_attachment_index = source_clip_attachment_index;
+    clip_command.vertices.reserve(clip_attachment.polygon.size());
+    for (const RenderPoint& point : clip_attachment.polygon) {
+        clip_command.vertices.push_back(rigid_stream_vertex(
             point,
             RenderPoint{},
             identity_bone_index,
             runtime::SlotColor{1.0, 1.0, 1.0, 1.0},
             std::nullopt));
     }
-    return vertices;
-}
-
-std::optional<std::string> render_clip_polygon_to_stencil(
-    const ClipAttachmentDrawCommand& clip,
-    const ActiveStencilClip& stencil_clip,
-    bool restoring_parent_reference,
-    bool premultiplied_alpha,
-    const std::array<float, 16>& projection,
-    const std::vector<float>& bone_payload,
-    GlRenderResources* resources) {
-    if (clip.polygon.size() < 3) {
-        return "Clip attachment '" + clip.attachment_name + "' requires at least 3 points.";
+    clip_command.indices.reserve((clip_attachment.polygon.size() - 2U) * 3U);
+    for (std::size_t index = 1; index + 1 < clip_attachment.polygon.size(); ++index) {
+        clip_command.indices.push_back(0U);
+        clip_command.indices.push_back(static_cast<std::uint32_t>(index));
+        clip_command.indices.push_back(static_cast<std::uint32_t>(index + 1U));
     }
 
-    const std::vector<GlStreamVertex> vertices =
-        clip_polygon_vertices(clip, bone_payload.size() / 6U - 1U);
-    const std::size_t vertex_bytes = vertices.size() * sizeof(GlStreamVertex);
-    ensure_stream_buffer_capacity(
-        GL_ARRAY_BUFFER,
-        resources->clip_vbo,
-        vertex_bytes,
-        kClipVertexBufferBytes,
-        &resources->clip_vbo_capacity_bytes);
-
-    glBindVertexArray(resources->clip_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, resources->clip_vbo);
-    glBufferSubData(
-        GL_ARRAY_BUFFER,
-        0,
-        static_cast<GLsizeiptr>(vertex_bytes),
-        vertices.data());
-
-    const GlShaderProgram& program = resources->single_color_program;
-    glUseProgram(program.program);
-    glUniformMatrix4fv(program.projection_location, 1, GL_FALSE, projection.data());
-    glUniform1i(program.texture_location, 0);
-    glUniform1f(program.pma_location, pma_uniform_value(premultiplied_alpha));
-    glUniformMatrix3x2fv(
-        program.bone_palette_location,
-        static_cast<GLsizei>(bone_payload.size() / 6U),
-        GL_FALSE,
-        bone_payload.data());
-
-    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-    glDisable(GL_BLEND);
-    glEnable(GL_STENCIL_TEST);
-    glStencilMask(stencil_clip.invert_mask);
-    glStencilFunc(
-        GL_EQUAL,
-        static_cast<GLint>(
-            restoring_parent_reference
-                ? stencil_clip.reference_value
-                : stencil_clip.parent_reference_value),
-        0xFF);
-    glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, static_cast<GLsizei>(vertices.size()));
-    glStencilMask(0x00);
-    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glEnable(GL_BLEND);
+    *clip_command_out = std::move(clip_command);
     return std::nullopt;
 }
 
-std::optional<std::string> flush_draw_batch(
-    DrawBatchState* batch,
+RenderCommandListResult build_render_command_list_impl(
     const PreparedScene& scene,
-    const std::array<float, 16>& projection,
-    const std::vector<float>& bone_payload,
-    GlRenderResources* resources) {
-    if (batch->commands.empty()) {
-        return std::nullopt;
-    }
-
-    std::vector<GlStreamVertex> vertices;
-    std::vector<std::uint32_t> indices;
+    const std::array<float, 16>& projection) {
+    RenderCommandListResult result;
     const std::size_t bone_count = scene.bone_palette.size();
+    if (bone_count + kIdentityBoneCount > kMaxRendererBoneUniforms) {
+        result.error_message =
+            "Prepared scene requires " + std::to_string(bone_count + kIdentityBoneCount) +
+            " bone uniforms, but the batch renderer supports at most " +
+            std::to_string(kMaxRendererBoneUniforms) + ".";
+        return result;
+    }
+
+    RenderCommandList command_list;
+    command_list.projection = projection;
+    command_list.premultiplied_alpha = scene.premultiplied_alpha;
+    command_list.bone_palette = bone_uniform_payload(scene);
+    command_list.commands.reserve(scene.draw_commands.size());
+    command_list.clip_commands.reserve(scene.clip_attachments.size());
+    command_list.ordered_events.reserve(scene.ordered_events.size());
+
     const std::size_t identity_bone_index = bone_count;
-    for (const PreparedDrawCommand* command : batch->commands) {
-        if (const std::optional<std::string> error = append_draw_command_stream_geometry(
-                *command,
+    for (std::size_t clip_index = 0; clip_index < scene.clip_attachments.size(); ++clip_index) {
+        RenderClipCommand clip_command;
+        if (const std::optional<std::string> error = append_clip_command_geometry(
+                scene.clip_attachments[clip_index],
                 identity_bone_index,
-                bone_count,
-                GeometryClipMode::UseOriginalGeometry,
-                &vertices,
-                &indices)) {
-            reset_draw_batch(batch);
-            return error;
+                clip_index,
+                &clip_command)) {
+            result.error_message = *error;
+            return result;
         }
+        command_list.clip_commands.push_back(std::move(clip_command));
     }
 
-    const runtime::BlendMode blend_mode = batch->blend_mode;
-    const ColorShaderVariant shader_variant = batch->shader_variant;
-    const std::uint8_t stencil_reference = batch->stencil_reference;
-    const bool stencil_enabled = batch->stencil_enabled;
-    reset_draw_batch(batch);
-    if (vertices.empty() || indices.empty()) {
-        return std::nullopt;
-    }
-
-    const std::size_t vertex_bytes = vertices.size() * sizeof(GlStreamVertex);
-    const std::size_t index_bytes = indices.size() * sizeof(std::uint32_t);
-    ensure_stream_buffer_capacity(
-        GL_ARRAY_BUFFER,
-        resources->vbo,
-        vertex_bytes,
-        kStreamingVertexBufferBytes,
-        &resources->vbo_capacity_bytes);
-    ensure_stream_buffer_capacity(
-        GL_ELEMENT_ARRAY_BUFFER,
-        resources->ebo,
-        index_bytes,
-        kStreamingIndexBufferBytes,
-        &resources->ebo_capacity_bytes);
-
-    glBindVertexArray(resources->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, resources->ebo);
-    glBufferSubData(
-        GL_ARRAY_BUFFER,
-        0,
-        static_cast<GLsizeiptr>(vertex_bytes),
-        vertices.data());
-    glBufferSubData(
-        GL_ELEMENT_ARRAY_BUFFER,
-        0,
-        static_cast<GLsizeiptr>(index_bytes),
-        indices.data());
-
-    const GlShaderProgram& program = shader_program_for_variant(*resources, shader_variant);
-    glUseProgram(program.program);
-    glUniformMatrix4fv(program.projection_location, 1, GL_FALSE, projection.data());
-    glUniform1i(program.texture_location, 0);
-    glUniform1f(program.pma_location, pma_uniform_value(scene.premultiplied_alpha));
-    glUniformMatrix3x2fv(
-        program.bone_palette_location,
-        static_cast<GLsizei>(bone_payload.size() / 6U),
-        GL_FALSE,
-        bone_payload.data());
-    glEnable(GL_BLEND);
-    apply_blend_mode(blend_mode, scene.premultiplied_alpha);
-    set_stencil_test_for_reference(
-        stencil_enabled ? std::optional<std::uint8_t>{stencil_reference} : std::nullopt);
-    glDrawElements(
-        GL_TRIANGLES,
-        static_cast<GLsizei>(indices.size()),
-        GL_UNSIGNED_INT,
-        nullptr);
-    return std::nullopt;
-}
-
-std::optional<std::string> render_scene_frame(
-    const PreparedScene& scene,
-    GlRenderResources* resources,
-    const SceneBounds& base_bounds,
-    int framebuffer_width,
-    int framebuffer_height) {
-    glViewport(0, 0, framebuffer_width, framebuffer_height);
-    glClearColor(0.08f, 0.09f, 0.12f, 1.0f);
-    glClearStencil(0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
-    const SceneBounds framed_bounds =
-        fit_bounds_to_aspect(base_bounds, framebuffer_width, framebuffer_height);
-    const std::array<float, 16> projection = orthographic_projection(framed_bounds);
-    const std::vector<float> bone_payload = bone_uniform_payload(scene);
-    if (bone_payload.empty()) {
-        return std::nullopt;
-    }
-
-    DrawBatchState batch;
-    std::vector<ActiveStencilClip> active_clips;
+    std::optional<RenderCommand> pending_batch;
+    auto flush_pending_batch = [&]() {
+        if (!pending_batch.has_value()) {
+            return;
+        }
+        const std::size_t draw_index = command_list.commands.size();
+        command_list.commands.push_back(std::move(*pending_batch));
+        command_list.ordered_events.push_back({RenderCommandEventKind::Draw, draw_index});
+        pending_batch.reset();
+    };
 
     for (const PreparedSceneEventRef& event : scene.ordered_events) {
         switch (event.kind) {
-        case PreparedSceneEventKind::ClipStart: {
-            if (event.index >= scene.clip_attachments.size()) {
-                return "Prepared scene clip start event referenced a missing clip attachment.";
+        case PreparedSceneEventKind::ClipStart:
+            if (pending_batch.has_value()) {
+                command_list.batch_break_reasons.clip_changes += 1U;
             }
-            if (const std::optional<std::string> error =
-                    flush_draw_batch(&batch, scene, projection, bone_payload, resources)) {
-                return error;
+            flush_pending_batch();
+            if (event.index >= command_list.clip_commands.size()) {
+                result.error_message =
+                    "Prepared scene clip start event referenced a missing clip attachment.";
+                return result;
             }
-            if (active_clips.size() >= 255U) {
-                return "Clip nesting exceeded the 8-bit stencil reference range.";
-            }
-
-            const std::optional<internal::SoftwareStencilClipState> stencil_state =
-                internal::stencil_clip_state_for_depth(active_clips.size() + 1U);
-            if (!stencil_state.has_value()) {
-                return "Failed to allocate a valid stencil reference for the clip stack.";
-            }
-
-            ActiveStencilClip active_clip;
-            active_clip.clip_attachment_index = event.index;
-            active_clip.reference_value = stencil_state->reference_value;
-            active_clip.parent_reference_value = stencil_state->parent_reference_value;
-            active_clip.invert_mask = stencil_state->invert_mask;
-            active_clips.push_back(active_clip);
-
-            if (const std::optional<std::string> error = render_clip_polygon_to_stencil(
-                    scene.clip_attachments[event.index],
-                    active_clips.back(),
-                    false,
-                    scene.premultiplied_alpha,
-                    projection,
-                    bone_payload,
-                    resources)) {
-                return error;
-            }
-            set_stencil_test_for_reference(
-                std::optional<std::uint8_t>{active_clips.back().reference_value});
+            command_list.ordered_events.push_back({RenderCommandEventKind::ClipStart, event.index});
             break;
-        }
         case PreparedSceneEventKind::Draw: {
             if (event.index >= scene.draw_commands.size()) {
-                return "Prepared scene draw event referenced a missing draw command.";
+                result.error_message =
+                    "Prepared scene draw event referenced a missing draw command.";
+                return result;
             }
-            const PreparedDrawCommand& command = scene.draw_commands[event.index];
-            const bool stencil_enabled = !active_clips.empty();
-            const std::uint8_t stencil_reference =
-                stencil_enabled ? active_clips.back().reference_value : 0;
-            if (!draw_batch_matches(batch, command, stencil_reference, stencil_enabled)) {
-                if (const std::optional<std::string> error =
-                        flush_draw_batch(&batch, scene, projection, bone_payload, resources)) {
-                    return error;
-                }
-                batch.texture_name = command_texture_name(command);
-                batch.blend_mode = command_blend_mode(command);
-                batch.shader_variant = command_shader_variant(command);
-                batch.stencil_reference = stencil_reference;
-                batch.stencil_enabled = stencil_enabled;
+
+            const PreparedDrawCommand& source_command = scene.draw_commands[event.index];
+            if (!pending_batch.has_value()) {
+                flush_pending_batch();
+                RenderCommand batch;
+                batch.texture_name = command_texture_name(source_command);
+                batch.texture_handle = kAtlasTextureHandle;
+                batch.blend_mode = command_blend_mode(source_command);
+                batch.shader_variant = command_shader_variant(source_command);
+                batch.source_draw_command_offset = event.index;
+                batch.source_draw_command_count = 0U;
+                pending_batch = std::move(batch);
+            } else if (!render_batch_matches(*pending_batch, source_command)) {
+                command_list.batch_break_reasons.texture_changes +=
+                    pending_batch->texture_name != command_texture_name(source_command) ? 1U : 0U;
+                command_list.batch_break_reasons.blend_changes +=
+                    pending_batch->blend_mode != command_blend_mode(source_command) ? 1U : 0U;
+                command_list.batch_break_reasons.shader_changes +=
+                    pending_batch->shader_variant != command_shader_variant(source_command) ? 1U : 0U;
+                flush_pending_batch();
+                RenderCommand batch;
+                batch.texture_name = command_texture_name(source_command);
+                batch.texture_handle = kAtlasTextureHandle;
+                batch.blend_mode = command_blend_mode(source_command);
+                batch.shader_variant = command_shader_variant(source_command);
+                batch.source_draw_command_offset = event.index;
+                batch.source_draw_command_count = 0U;
+                pending_batch = std::move(batch);
             }
-            batch.commands.push_back(&command);
+
+            const std::size_t previous_vertex_count = pending_batch->vertices.size();
+            const std::size_t previous_index_count = pending_batch->indices.size();
+            if (const std::optional<std::string> error = append_draw_command_stream_geometry(
+                    source_command,
+                    identity_bone_index,
+                    bone_count,
+                    GeometryClipMode::UseOriginalGeometry,
+                    &pending_batch->vertices,
+                    &pending_batch->indices)) {
+                result.error_message = *error;
+                return result;
+            }
+
+            if (pending_batch->vertices.size() != previous_vertex_count &&
+                pending_batch->indices.size() != previous_index_count) {
+                pending_batch->source_draw_command_count += 1U;
+            }
             break;
         }
-        case PreparedSceneEventKind::ClipEnd: {
-            if (event.index >= scene.clip_attachments.size()) {
-                return "Prepared scene clip end event referenced a missing clip attachment.";
+        case PreparedSceneEventKind::ClipEnd:
+            if (pending_batch.has_value()) {
+                command_list.batch_break_reasons.clip_changes += 1U;
             }
-            if (const std::optional<std::string> error =
-                    flush_draw_batch(&batch, scene, projection, bone_payload, resources)) {
-                return error;
+            flush_pending_batch();
+            if (event.index >= command_list.clip_commands.size()) {
+                result.error_message =
+                    "Prepared scene clip end event referenced a missing clip attachment.";
+                return result;
             }
-            if (active_clips.empty()) {
-                return "Prepared scene clip end event underflowed the stencil stack.";
-            }
-
-            const ActiveStencilClip active_clip = active_clips.back();
-            active_clips.pop_back();
-            if (active_clip.clip_attachment_index != event.index) {
-                return "Prepared scene clip end event did not match the active clip stack.";
-            }
-            if (const std::optional<std::string> error = render_clip_polygon_to_stencil(
-                    scene.clip_attachments[event.index],
-                    active_clip,
-                    true,
-                    scene.premultiplied_alpha,
-                    projection,
-                    bone_payload,
-                    resources)) {
-                return error;
-            }
-            if (active_clips.empty()) {
-                set_stencil_test_for_reference(std::nullopt);
-            } else {
-                set_stencil_test_for_reference(
-                    std::optional<std::uint8_t>{active_clips.back().reference_value});
-            }
+            command_list.ordered_events.push_back({RenderCommandEventKind::ClipEnd, event.index});
             break;
         }
-        }
     }
 
-    if (const std::optional<std::string> error =
-            flush_draw_batch(&batch, scene, projection, bone_payload, resources)) {
-        return error;
-    }
-    if (!active_clips.empty()) {
-        return "Prepared scene finished rendering with an unterminated clip stack.";
-    }
-
-    set_stencil_test_for_reference(std::nullopt);
-    return std::nullopt;
+    flush_pending_batch();
+    result.command_list = std::move(command_list);
+    return result;
 }
 
 RenderPoint transform_point(
@@ -2546,6 +2124,21 @@ PreparedSceneResult prepare_setup_pose_scene(
     const runtime::AtlasData& atlas) {
     PreparedSceneResult result;
 
+    if (!skeleton.visible()) {
+        PreparedScene scene;
+        scene.atlas_name = atlas.info().name;
+        scene.atlas_image = atlas.info().image;
+        scene.atlas_filter_min = atlas.info().filter_min;
+        scene.atlas_filter_mag = atlas.info().filter_mag;
+        scene.atlas_wrap_x = atlas.info().wrap_x;
+        scene.atlas_wrap_y = atlas.info().wrap_y;
+        scene.premultiplied_alpha = atlas.info().premultiplied_alpha;
+        scene.skeleton_name = skeleton.data()->info().name;
+        scene.skeleton_count = 1U;
+        result.scene = std::move(scene);
+        return result;
+    }
+
     const auto& data = skeleton.data();
     const auto& slots = data->slots();
     const auto& slot_states = skeleton.slot_states();
@@ -2570,6 +2163,7 @@ PreparedSceneResult prepare_setup_pose_scene(
     scene.atlas_wrap_y = atlas.info().wrap_y;
     scene.premultiplied_alpha = atlas.info().premultiplied_alpha;
     scene.skeleton_name = data->info().name;
+    scene.skeleton_count = 1U;
     scene.bone_palette = bone_world_transforms;
     scene.clip_attachments.reserve(draw_order.size());
     scene.draw_commands.reserve(draw_order.size());
@@ -2753,50 +2347,64 @@ GpuSkinningEvaluationResult evaluate_gpu_skinned_vertices(
 }
 
 PreparedSceneBatchSummary summarize_prepared_scene_batches(const PreparedScene& scene) {
-    PreparedSceneBatchSummary summary;
-    const StreamBuildResult stream =
-        build_stream_batches(scene, GeometryClipMode::UsePreparedMaskedGeometry);
-    if (!stream) {
-        summary.error_message = stream.error_message;
+    const RenderCommandListResult command_list_result =
+        build_render_command_list(scene, orthographic_projection(scene_bounds(scene)));
+    if (!command_list_result) {
+        PreparedSceneBatchSummary summary;
+        summary.error_message = command_list_result.error_message;
         return summary;
     }
 
+    return summarize_render_command_list(scene, *command_list_result.command_list);
+}
+
+PreparedSceneBatchSummary summarize_render_command_list(
+    const PreparedScene& scene,
+    const RenderCommandList& command_list) {
+    PreparedSceneBatchSummary summary;
+    summary.skeleton_count = scene.skeleton_count;
+
     summary.draw_command_count = 0;
-    for (const PreparedStreamBatch& batch : stream.batches) {
+    for (const RenderCommand& command : command_list.commands) {
         PreparedDrawBatch public_batch;
-        public_batch.texture_name = batch.texture_name;
-        public_batch.blend_mode = batch.blend_mode;
-        public_batch.shader_variant = batch.shader_variant;
-        public_batch.draw_command_offset = batch.draw_command_offset;
-        public_batch.draw_command_count = batch.draw_command_count;
-        public_batch.vertex_count = batch.vertex_count;
-        public_batch.index_count = batch.index_count;
-        summary.draw_command_count += batch.draw_command_count;
+        public_batch.texture_name = command.texture_name;
+        public_batch.blend_mode = command.blend_mode;
+        public_batch.shader_variant = command.shader_variant;
+        public_batch.draw_command_offset = command.source_draw_command_offset;
+        public_batch.draw_command_count = command.source_draw_command_count;
+        public_batch.vertex_count = command.vertices.size();
+        public_batch.index_count = command.indices.size();
+        summary.draw_command_count += command.source_draw_command_count;
         summary.batches.push_back(std::move(public_batch));
     }
 
-    summary.vertex_count = stream.vertices.size();
-    summary.index_count = stream.indices.size();
-    summary.draw_call_count = stream.batches.size();
+    summary.vertex_count = 0;
+    summary.index_count = 0;
+    for (const RenderCommand& command : command_list.commands) {
+        summary.vertex_count += command.vertices.size();
+        summary.index_count += command.indices.size();
+    }
+    summary.draw_call_count = command_list.commands.size();
     summary.merged_draw_calls =
         summary.draw_command_count >= summary.draw_call_count
             ? (summary.draw_command_count - summary.draw_call_count)
             : 0;
-    summary.bone_uniform_count = scene.draw_commands.empty()
-        ? 0
-        : scene.bone_palette.size() + kIdentityBoneCount;
-    summary.vertex_buffer_bytes = summary.vertex_count * sizeof(GlStreamVertex);
+    summary.bone_uniform_count = command_list.bone_palette.size() / 6U;
+    summary.vertex_buffer_bytes = summary.vertex_count * sizeof(RenderCommandVertex);
     summary.index_buffer_bytes = summary.index_count * sizeof(std::uint32_t);
+    summary.break_reasons = command_list.batch_break_reasons;
     return summary;
 }
 
 DemoShell::DemoShell(
     SampleAppWindow window,
     PreparedScene scene,
-    std::filesystem::path atlas_image_path)
+    std::filesystem::path atlas_image_path,
+    bool hud_overlay_enabled)
     : window_(std::move(window)),
       scene_(std::move(scene)),
-      atlas_image_path_(std::move(atlas_image_path)) {}
+      atlas_image_path_(std::move(atlas_image_path)),
+      hud_overlay_enabled_(hud_overlay_enabled) {}
 
 std::string DemoShell::launch_report() const {
     std::size_t region_attachment_count = 0;
@@ -2817,6 +2425,7 @@ std::string DemoShell::launch_report() const {
            << "window: " << window_.title << " (" << window_.width << "x"
            << window_.height << ")\n"
            << "prepared scene: skeleton=" << scene_.skeleton_name
+           << ", skeletons=" << scene_.skeleton_count
            << ", atlas=" << scene_.atlas_name
            << ", image=" << scene_.atlas_image
            << ", filter=(" << scene_.atlas_filter_min << ", " << scene_.atlas_filter_mag << ")"
@@ -2830,13 +2439,17 @@ std::string DemoShell::launch_report() const {
            << "clip attachments: " << scene_.clip_attachments.size() << '\n'
            << "region attachments: " << region_attachment_count << '\n'
            << "dynamic mesh attachments: " << dynamic_mesh_attachment_count << '\n'
-           << "draw commands: " << scene_.draw_commands.size();
+           << "draw commands: " << scene_.draw_commands.size() << '\n'
+           << "hud overlay: " << (hud_overlay_enabled_ ? "enabled" : "disabled");
     if (batch_summary) {
         stream << '\n'
                << "streaming batches: drawCalls=" << batch_summary.draw_call_count
                << ", mergedCommands=" << batch_summary.merged_draw_calls
                << ", streamedVertices=" << batch_summary.vertex_count
                << ", streamedIndices=" << batch_summary.index_count
+               << ", breakTexture=" << batch_summary.break_reasons.texture_changes
+               << ", breakBlend=" << batch_summary.break_reasons.blend_changes
+               << ", breakClip=" << batch_summary.break_reasons.clip_changes
                << ", vertexBytes=" << batch_summary.vertex_buffer_bytes
                << ", indexBytes=" << batch_summary.index_buffer_bytes
                << ", mat3x2Bones=" << batch_summary.bone_uniform_count;
@@ -2951,114 +2564,95 @@ std::optional<std::string> DemoShell::run(std::optional<int> auto_close_frames) 
         return "Prepared scene does not contain any attachments to render.";
     }
 
-    glfwSetErrorCallback([](int error_code, const char* description) {
-        std::cerr << "GLFW error " << error_code << ": " << description << '\n';
-    });
-    glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
-    glfwInitHint(GLFW_COCOA_MENUBAR, GLFW_FALSE);
-    if (!glfwInit()) {
-        return "Failed to initialize GLFW.";
-    }
-
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#if defined(__APPLE__)
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#endif
-    glfwWindowHint(GLFW_STENCIL_BITS, 8);
-    glfwWindowHint(GLFW_VISIBLE, auto_close_frames.has_value() ? GLFW_FALSE : GLFW_TRUE);
-
-    GLFWwindow* window = glfwCreateWindow(
-        window_.width,
-        window_.height,
-        window_.title.c_str(),
-        nullptr,
-        nullptr);
-    if (window == nullptr) {
-        glfwTerminate();
-        return "Failed to create GLFW window.";
-    }
-
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(auto_close_frames.has_value() ? 0 : 1);
-
-    const int stencil_bits = glfwGetWindowAttrib(window, GLFW_STENCIL_BITS);
-    if (stencil_bits < 8) {
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return "OpenGL context did not expose the required 8-bit stencil buffer.";
-    }
-
     const TextureImageLoadResult texture_image = load_png_texture_or_white(atlas_image_path_);
     if (!texture_image.loaded_from_file && !texture_image.message.empty()) {
         std::cerr << texture_image.message << '\n';
     }
 
-    GlRenderResources resources;
-    if (const std::optional<std::string> error =
-            initialize_resources(scene_, texture_image.image, &resources)) {
-        destroy_resources(&resources);
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return error;
-    }
+    BackendCreateInfo create_info;
+    create_info.window = window_;
+    create_info.atlas_texture = texture_image.image;
+    create_info.atlas_filter_min = scene_.atlas_filter_min;
+    create_info.atlas_filter_mag = scene_.atlas_filter_mag;
+    create_info.atlas_wrap_x = scene_.atlas_wrap_x;
+    create_info.atlas_wrap_y = scene_.atlas_wrap_y;
+    create_info.hidden_window = auto_close_frames.has_value();
 
-    glBindVertexArray(resources.vao);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, resources.texture);
-    glEnable(GL_BLEND);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
+    std::unique_ptr<Backend> backend = internal::make_sokol_backend();
 
     const SceneBounds base_bounds = scene_bounds(scene_);
-    if (auto_close_frames.has_value()) {
-        for (int frame_index = 0; frame_index < *auto_close_frames; ++frame_index) {
-            int framebuffer_width = 0;
-            int framebuffer_height = 0;
-            glfwPollEvents();
-            glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
-            if (const std::optional<std::string> error = render_scene_frame(
-                    scene_,
-                    &resources,
-                    base_bounds,
-                    framebuffer_width,
-                    framebuffer_height)) {
-                destroy_resources(&resources);
-                glfwDestroyWindow(window);
-                glfwTerminate();
-                return error;
-            }
-            glfwSwapBuffers(window);
+    const auto render_frame = [&](const BackendFrameInfo& frame_info) -> std::optional<std::string> {
+        const SceneBounds framed_bounds = fit_bounds_to_aspect(
+            base_bounds,
+            frame_info.framebuffer_width,
+            frame_info.framebuffer_height);
+        runtime::ProfilerCapture profiler(hud_overlay_enabled_);
+        if (hud_overlay_enabled_) {
+            profiler.begin_frame();
         }
-    } else {
-        while (!glfwWindowShouldClose(window)) {
-            int framebuffer_width = 0;
-            int framebuffer_height = 0;
-            glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
-            glfwPollEvents();
-            if (const std::optional<std::string> error = render_scene_frame(
-                    scene_,
-                    &resources,
-                    base_bounds,
-                    framebuffer_width,
-                    framebuffer_height)) {
-                destroy_resources(&resources);
-                glfwDestroyWindow(window);
-                glfwTerminate();
-                return error;
-            }
-            glfwSwapBuffers(window);
-        }
-    }
 
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glBindVertexArray(0);
-    glUseProgram(0);
-    destroy_resources(&resources);
-    glfwDestroyWindow(window);
-    glfwTerminate();
-    return std::nullopt;
+        const RenderCommandListResult command_list_result =
+            runtime::profile_phase(&profiler, runtime::ProfilerPhase::Render, [&]() {
+                return build_render_command_list(scene_, orthographic_projection(framed_bounds));
+            });
+        if (!command_list_result) {
+            return command_list_result.error_message;
+        }
+
+        RenderCommandList command_list = std::move(*command_list_result.command_list);
+        if (hud_overlay_enabled_) {
+            const PreparedSceneBatchSummary batch_summary =
+                summarize_render_command_list(scene_, command_list);
+            profiler.add_draw_stats(profiler_draw_stats(batch_summary));
+            profiler.end_frame();
+
+            if (const auto hud_command = build_profiler_hud_overlay_command(
+                    runtime::marrow_profiler_frame(profiler),
+                    framed_bounds,
+                    frame_info.framebuffer_width,
+                    frame_info.framebuffer_height,
+                    scene_.bone_palette.size())) {
+                const std::size_t draw_index = command_list.commands.size();
+                command_list.commands.push_back(*hud_command);
+                command_list.ordered_events.push_back({RenderCommandEventKind::Draw, draw_index});
+            }
+        }
+
+        return backend->submit_commands(command_list);
+    };
+
+#if defined(__APPLE__)
+    if (auto_close_frames.has_value()) {
+        if (const std::optional<std::string> error = backend->create(create_info)) {
+            backend->destroy();
+            return error;
+        }
+
+        for (int frame_index = 0; frame_index < *auto_close_frames; ++frame_index) {
+            BackendFrameInfo frame_info;
+            if (const std::optional<std::string> error = backend->begin_frame(&frame_info)) {
+                backend->destroy();
+                return error;
+            }
+            if (const std::optional<std::string> error = render_frame(frame_info)) {
+                backend->destroy();
+                return error;
+            }
+            backend->end_frame();
+        }
+
+        backend->destroy();
+        return std::nullopt;
+    }
+#endif
+
+    return internal::run_sokol_app(create_info, backend.get(), render_frame, auto_close_frames);
+}
+
+RenderCommandListResult build_render_command_list(
+    const PreparedScene& scene,
+    const std::array<float, 16>& projection) {
+    return build_render_command_list_impl(scene, projection);
 }
 
 std::string_view component_name() {
