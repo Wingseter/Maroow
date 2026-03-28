@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -9,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "marrow/allocator.hpp"
 #include "marrow/runtime/animation_state.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/atlas.hpp"
@@ -171,7 +173,7 @@ std::shared_ptr<const SkeletonData> make_rotation_mixing_test_data(double setup_
     animations.push_back(make_rotate_animation("arc", {{0.0, 0.0}, {0.5, 170.0}, {1.0, -170.0}}));
     animations.push_back(make_rotate_animation("relative", {{0.0, 10.0}, {1.0, -10.0}}));
 
-    return std::make_shared<SkeletonData>(
+    return marrow::allocate_shared<SkeletonData>(
         std::move(info),
         std::move(bones),
         std::vector<marrow::runtime::IkConstraintData>{},
@@ -181,6 +183,52 @@ std::shared_ptr<const SkeletonData> make_rotation_mixing_test_data(double setup_
         std::vector<marrow::runtime::SlotData>{},
         std::vector<marrow::runtime::EventDefinition>{},
         std::move(animations),
+        std::vector<marrow::runtime::SkinData>{},
+        0.0,
+        std::vector<marrow::runtime::AnimationMixDefinition>{});
+}
+
+std::shared_ptr<const SkeletonData> make_visibility_throttle_test_data() {
+    marrow::runtime::SkeletonInfo info;
+    info.name = "visibility_throttle";
+
+    std::vector<marrow::runtime::BoneData> bones;
+    marrow::runtime::BoneData root_bone;
+    root_bone.name = "root";
+    bones.push_back(root_bone);
+
+    marrow::runtime::AnimationData animation;
+    animation.name = "move";
+    animation.targeted_bone_indices.push_back(0);
+
+    marrow::runtime::BoneTranslateTimeline translate_timeline;
+    translate_timeline.bone_index = 0;
+    translate_timeline.keyframes = {
+        marrow::runtime::VectorKeyframe{
+            0.0,
+            0.0,
+            0.0,
+            marrow::runtime::Interpolation::linear(),
+        },
+        marrow::runtime::VectorKeyframe{
+            0.9,
+            90.0,
+            0.0,
+            marrow::runtime::Interpolation::linear(),
+        },
+    };
+    animation.bone_translate_timelines.push_back(std::move(translate_timeline));
+
+    return marrow::allocate_shared<SkeletonData>(
+        std::move(info),
+        std::move(bones),
+        std::vector<marrow::runtime::IkConstraintData>{},
+        std::vector<marrow::runtime::PathConstraintData>{},
+        std::vector<marrow::runtime::TransformConstraintData>{},
+        std::vector<marrow::runtime::PhysicsConstraintData>{},
+        std::vector<marrow::runtime::SlotData>{},
+        std::vector<marrow::runtime::EventDefinition>{},
+        std::vector<marrow::runtime::AnimationData>{std::move(animation)},
         std::vector<marrow::runtime::SkinData>{},
         0.0,
         std::vector<marrow::runtime::AnimationMixDefinition>{});
@@ -3086,7 +3134,7 @@ bool validate_runtime_error_reporting(const std::shared_ptr<const SkeletonData>&
         std::vector<marrow::runtime::AnimationData> animations = skeleton_data->animations();
         std::vector<marrow::runtime::SkinData> skins = skeleton_data->skins();
         mutate(&animations, &skins);
-        return std::make_shared<SkeletonData>(
+        return marrow::allocate_shared<SkeletonData>(
             skeleton_data->info(),
             skeleton_data->bones(),
             skeleton_data->ik_constraints(),
@@ -3199,7 +3247,7 @@ bool validate_runtime_error_reporting(const std::shared_ptr<const SkeletonData>&
                     continue;
                 }
 
-                invalid_geometry = std::make_shared<marrow::runtime::MeshGeometry>(
+                invalid_geometry = marrow::allocate_shared<marrow::runtime::MeshGeometry>(
                     *slot_attachment.attachment.mesh_geometry);
                 invalid_geometry->weights[0].influences[0].bone_index =
                     skeleton_data->bones().size();
@@ -3820,6 +3868,155 @@ bool validate_runtime_reverse_playback_and_root_motion(
     return true;
 }
 
+bool validate_runtime_visibility_and_throttling(
+    const std::shared_ptr<const SkeletonData>& fixture_data,
+    const Document& atlas_document) {
+    const auto throttle_data = make_visibility_throttle_test_data();
+    const auto root_index = throttle_data->find_bone_index("root");
+    if (!root_index.has_value() || throttle_data->find_animation("move") == nullptr) {
+        std::cerr << "Visibility/throttle validation lost the synthetic move animation.\n";
+        return false;
+    }
+
+    Skeleton hidden_apply_skeleton(throttle_data);
+    AnimationState hidden_apply_state(throttle_data);
+    std::shared_ptr<TrackEntry> hidden_apply_track =
+        hidden_apply_state.set_animation(0, "move", false);
+    hidden_apply_state.update(0.2);
+    hidden_apply_skeleton.set_visible(false);
+    hidden_apply_state.apply(hidden_apply_skeleton);
+    hidden_apply_skeleton.bone_poses()[*root_index].local_pose.x = 25.0;
+    hidden_apply_skeleton.update_world_transforms();
+    if (hidden_apply_track == nullptr ||
+        !require_near(hidden_apply_track->track_time, 0.2, "hidden apply track time") ||
+        !require_near(
+            hidden_apply_skeleton.bone_poses()[*root_index].local_pose.x,
+            25.0,
+            "hidden apply pose preserved") ||
+        !require_near(
+            hidden_apply_skeleton.bone_world_transforms()[*root_index].world_x,
+            0.0,
+            "hidden world transform skipped")) {
+        std::cerr << "Hidden skeleton did not skip direct animation apply/world-transform work.\n";
+        return false;
+    }
+
+    hidden_apply_skeleton.set_visible(true);
+    hidden_apply_skeleton.update_world_transforms();
+    if (!require_near(
+            hidden_apply_skeleton.bone_world_transforms()[*root_index].world_x,
+            25.0,
+            "visible world transform resumes")) {
+        std::cerr << "World transforms did not resume after restoring visibility.\n";
+        return false;
+    }
+
+    Skeleton culled_skeleton(throttle_data);
+    AnimationState culled_state(throttle_data);
+    std::shared_ptr<TrackEntry> culled_track =
+        culled_state.set_animation(0, "move", false);
+    culled_skeleton.set_visible(false);
+    for (std::size_t frame = 0; frame < 3U; ++frame) {
+        marrow::runtime::update_instance(culled_skeleton, culled_state, 0.1);
+    }
+    if (culled_track == nullptr ||
+        !require_near(culled_track->track_time, 0.0, "culled track time")) {
+        std::cerr << "Invisible update_instance should pause AnimationState advancement entirely.\n";
+        return false;
+    }
+
+    culled_skeleton.set_visible(true);
+    marrow::runtime::update_instance(culled_skeleton, culled_state, 0.1);
+    if (!require_near(culled_track->track_time, 0.1, "restored track time") ||
+        !require_near(
+            culled_skeleton.bone_poses()[*root_index].local_pose.x,
+            10.0,
+            "restored pose x") ||
+        !require_near(
+            culled_skeleton.bone_world_transforms()[*root_index].world_x,
+            10.0,
+            "restored world x")) {
+        std::cerr << "Visibility restoration did not resume instance updates from the paused pose.\n";
+        return false;
+    }
+
+    Skeleton full_rate_skeleton(throttle_data);
+    AnimationState full_rate_state(throttle_data);
+    std::shared_ptr<TrackEntry> full_rate_track =
+        full_rate_state.set_animation(0, "move", false);
+    Skeleton throttled_skeleton(throttle_data);
+    throttled_skeleton.set_update_interval(3);
+    AnimationState throttled_state(throttle_data);
+    std::shared_ptr<TrackEntry> throttled_track =
+        throttled_state.set_animation(0, "move", false);
+
+    double max_pose_error = 0.0;
+    double max_world_error = 0.0;
+    for (std::size_t frame = 0; frame < 6U; ++frame) {
+        marrow::runtime::update_instance(full_rate_skeleton, full_rate_state, 0.1);
+        marrow::runtime::update_instance(throttled_skeleton, throttled_state, 0.1);
+
+        max_pose_error = std::max(
+            max_pose_error,
+            std::abs(
+                throttled_skeleton.bone_poses()[*root_index].local_pose.x -
+                full_rate_skeleton.bone_poses()[*root_index].local_pose.x));
+        max_world_error = std::max(
+            max_world_error,
+            std::abs(
+                throttled_skeleton.bone_world_transforms()[*root_index].world_x -
+                full_rate_skeleton.bone_world_transforms()[*root_index].world_x));
+        if (frame == 2U &&
+            !require_near(throttled_track->track_time, 0.1, "throttled track time @frame3")) {
+            std::cerr << "Interval=3 should defer authoritative animation-state advancement until every third frame.\n";
+            return false;
+        }
+    }
+
+    if (full_rate_track == nullptr || throttled_track == nullptr ||
+        throttled_skeleton.update_interval() != 3U ||
+        !require_near(full_rate_track->track_time, 0.6, "full track time @frame6") ||
+        !require_near(throttled_track->track_time, 0.4, "throttled track time @frame6") ||
+        max_pose_error > 1e-6 ||
+        max_world_error > 1e-6) {
+        std::cerr << "Interval=3 throttling did not preserve the expected interpolated pose quality"
+                  << " (fullTrack=" << (full_rate_track != nullptr ? full_rate_track->track_time : -1.0)
+                  << ", throttledTrack="
+                  << (throttled_track != nullptr ? throttled_track->track_time : -1.0)
+                  << ", poseError=" << max_pose_error
+                  << ", worldError=" << max_world_error << ").\n";
+        return false;
+    }
+
+    const auto atlas_result = AtlasLoader::load(atlas_document);
+    if (!atlas_result) {
+        return print_error(*atlas_result.error);
+    }
+
+    Skeleton hidden_render_skeleton(fixture_data);
+    hidden_render_skeleton.set_visible(false);
+    const marrow::renderer::PreparedSceneResult hidden_scene_result =
+        marrow::renderer::prepare_setup_pose_scene(
+            hidden_render_skeleton,
+            *atlas_result.atlas_data);
+    if (!hidden_scene_result ||
+        !hidden_scene_result.scene->draw_commands.empty() ||
+        !hidden_scene_result.scene->ordered_events.empty() ||
+        !hidden_scene_result.scene->clip_attachments.empty() ||
+        !hidden_scene_result.scene->bone_palette.empty()) {
+        std::cerr << "Hidden renderer scene preparation should skip all draw and clip output.\n";
+        return false;
+    }
+
+    std::cout << "Loaded runtime visibility + throttling: hiddenTrack="
+              << culled_track->track_time
+              << ", throttledTrack=" << throttled_track->track_time << '\n'
+              << "  interval=3 maxPoseError=" << max_pose_error
+              << ", maxWorldError=" << max_world_error
+              << ", hiddenSceneDraws=" << hidden_scene_result.scene->draw_commands.size() << '\n';
+    return true;
+}
+
 bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) {
     const std::optional<Document> document = load_document_or_print(fixture_path);
     if (!document.has_value()) {
@@ -4358,7 +4555,7 @@ bool validate_runtime_path_transform_constraints(const std::filesystem::path& fi
             std::vector<marrow::runtime::TransformConstraintData> transform_constraints =
                 skeleton_result.skeleton_data->transform_constraints();
             mutate_constraints(&transform_constraints);
-            return std::make_shared<SkeletonData>(
+            return marrow::allocate_shared<SkeletonData>(
                 skeleton_result.skeleton_data->info(),
                 skeleton_result.skeleton_data->bones(),
                 skeleton_result.skeleton_data->ik_constraints(),
@@ -4472,7 +4669,7 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
         std::vector<marrow::runtime::PhysicsConstraintData> physics_constraints =
             skeleton_result.skeleton_data->physics_constraints();
         modify_physics(&physics_constraints);
-        return std::make_shared<SkeletonData>(
+        return marrow::allocate_shared<SkeletonData>(
             skeleton_result.skeleton_data->info(),
             skeleton_result.skeleton_data->bones(),
             skeleton_result.skeleton_data->ik_constraints(),
@@ -4900,6 +5097,10 @@ int main(int argc, char** argv) {
     const bool runtime_reverse_and_root_motion_ok =
         validate_runtime_reverse_playback_and_root_motion(
             skeleton_result.skeleton_data);
+    const bool runtime_visibility_and_throttling_ok =
+        validate_runtime_visibility_and_throttling(
+            skeleton_result.skeleton_data,
+            *atlas_document);
     const bool runtime_ik_ok =
         validate_runtime_ik_constraints("assets/fixtures/ik_constraints.mskl");
     const bool runtime_path_transform_ok =
@@ -4924,6 +5125,7 @@ int main(int argc, char** argv) {
         !runtime_animation_state_ok ||
         !runtime_rotation_mixing_ok ||
         !runtime_reverse_and_root_motion_ok ||
+        !runtime_visibility_and_throttling_ok ||
         !runtime_ik_ok || !runtime_path_transform_ok || !runtime_physics_ok ||
         !runtime_atlas_ok || !runtime_atlas_version_rejection_ok) {
         return 1;

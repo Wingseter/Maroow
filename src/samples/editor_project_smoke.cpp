@@ -197,14 +197,30 @@ bool create_project(const Options& options) {
 }
 
 void print_summary(const marrow::editor::ProjectLoadResult& result, const std::filesystem::path& path) {
+    const auto& onion_skin = result.project->editor_metadata.viewport.onion_skin;
+    const auto& debug_overlay = result.project->editor_metadata.viewport.debug_overlay;
     std::cout << "Project: " << path.string() << '\n'
               << "Name: " << result.project->editor_metadata.name << '\n'
               << "Runtime skeleton: " << result.project->resolved_skeleton_path().string() << '\n'
               << "Runtime atlases: " << join_paths(result.project->resolved_atlas_paths()) << '\n'
               << "Preview animation: " << result.project->editor_metadata.active_animation << '\n'
               << "Preview skins: " << join_strings(result.project->editor_metadata.preview_skins) << '\n'
+              << "Onion skin: " << (onion_skin.enabled ? "on" : "off")
+              << " / " << (onion_skin.mode == marrow::editor::OnionSkinMode::Frame ? "frame"
+                                                                                     : "keyframe")
+              << " / before " << onion_skin.before_count
+              << " / after " << onion_skin.after_count
+              << " / step " << onion_skin.step
+              << " / anchor " << (onion_skin.anchor_to_zero ? "on" : "off") << '\n'
+              << "Debug overlay: bones " << (debug_overlay.bones ? "on" : "off")
+              << " / ik " << (debug_overlay.ik_constraints ? "on" : "off")
+              << " / path " << (debug_overlay.path_constraints ? "on" : "off")
+              << " / physics " << (debug_overlay.physics_constraints ? "on" : "off")
+              << " / meshes " << (debug_overlay.mesh_wireframes ? "on" : "off")
+              << " / bounds " << (debug_overlay.bounding_boxes ? "on" : "off") << '\n'
               << "Edited transform tracks: " << result.project->transform_timeline_edits.size() << '\n'
               << "Edited deform tracks: " << result.project->mesh_deform_timeline_edits.size() << '\n'
+              << "Edited mesh weights: " << result.project->mesh_weight_attachment_edits.size() << '\n'
               << "Edited draw-order tracks: " << result.project->draw_order_timeline_edits.size() << '\n'
               << "Edited event tracks: " << result.project->event_timeline_edits.size() << '\n'
               << "Edited constraints: IK " << result.project->ik_constraint_edits.size()
@@ -222,6 +238,42 @@ void print_summary(const marrow::editor::ProjectLoadResult& result, const std::f
         atlas_names.push_back(atlas->info().name);
     }
     std::cout << "Loaded atlases: " << join_strings(atlas_names) << '\n';
+}
+
+bool validate_viewport_settings(const marrow::editor::ProjectLoadResult& result) {
+    if (result.project == nullptr) {
+        std::cerr << "Viewport validation requires a loaded project.\n";
+        return false;
+    }
+
+    const auto& viewport = result.project->editor_metadata.viewport;
+    const auto& onion_skin = viewport.onion_skin;
+    const auto& debug_overlay = viewport.debug_overlay;
+    if (viewport.zoom <= 0.0) {
+        std::cerr << "Viewport validation expected a positive zoom level.\n";
+        return false;
+    }
+    if (onion_skin.enabled ||
+        onion_skin.mode != marrow::editor::OnionSkinMode::Frame ||
+        onion_skin.anchor_to_zero ||
+        onion_skin.before_count != 3 ||
+        onion_skin.after_count != 3 ||
+        onion_skin.step != 1) {
+        std::cerr << "Viewport validation expected the default 3+3 frame-based onion-skin settings.\n";
+        return false;
+    }
+    if (!debug_overlay.bones ||
+        !debug_overlay.ik_constraints ||
+        !debug_overlay.path_constraints ||
+        !debug_overlay.physics_constraints ||
+        !debug_overlay.mesh_wireframes ||
+        !debug_overlay.bounding_boxes) {
+        std::cerr << "Viewport validation expected the fixture debug overlay toggles to be enabled.\n";
+        return false;
+    }
+
+    std::cout << "Viewport metadata validated.\n";
+    return true;
 }
 
 bool require_near(double actual, double expected, std::string_view label) {
@@ -314,6 +366,7 @@ bool validate_export_round_trip(
 
     if (project_result.project->transform_timeline_edits.empty() &&
         project_result.project->mesh_deform_timeline_edits.empty() &&
+        project_result.project->mesh_weight_attachment_edits.empty() &&
         project_result.project->draw_order_timeline_edits.empty() &&
         project_result.project->event_timeline_edits.empty() &&
         project_result.project->ik_constraint_edits.empty() &&
@@ -346,6 +399,85 @@ bool validate_export_round_trip(
 
         return true;
     };
+
+    const auto validate_mesh_weight_attachment =
+        [&](const marrow::editor::MeshWeightAttachmentEdit& edit) {
+            const auto authored_slot_index =
+                project_result.skeleton_data->find_slot_index(edit.slot_name);
+            const auto exported_slot_index =
+                export_result.skeleton_data->find_slot_index(edit.slot_name);
+            const auto authored_attachment =
+                authored_slot_index.has_value()
+                    ? project_result.skeleton_data->find_attachment(
+                          edit.skin_name,
+                          *authored_slot_index,
+                          edit.attachment_name)
+                    : nullptr;
+            const auto exported_attachment =
+                exported_slot_index.has_value()
+                    ? export_result.skeleton_data->find_attachment(
+                          edit.skin_name,
+                          *exported_slot_index,
+                          edit.attachment_name)
+                    : nullptr;
+            if (!authored_slot_index.has_value() || !exported_slot_index.has_value() ||
+                authored_attachment == nullptr || exported_attachment == nullptr ||
+                authored_attachment->mesh_geometry == nullptr ||
+                exported_attachment->mesh_geometry == nullptr) {
+                std::cerr << "Mesh-weight export validation could not resolve the edited attachment.\n";
+                return false;
+            }
+
+            const auto& authored_weights = authored_attachment->mesh_geometry->weights;
+            const auto& exported_weights = exported_attachment->mesh_geometry->weights;
+            if (authored_weights.size() != exported_weights.size()) {
+                std::cerr << "Mesh-weight export did not preserve the edited vertex count.\n";
+                return false;
+            }
+
+            const auto influence_bone_name =
+                [](const auto& skeleton_data, const auto& influence) -> std::optional<std::string> {
+                    if (influence.bone_index >= skeleton_data->bones().size()) {
+                        return std::nullopt;
+                    }
+                    return skeleton_data->bones()[influence.bone_index].name;
+                };
+
+            for (std::size_t vertex_index = 0; vertex_index < authored_weights.size(); ++vertex_index) {
+                const auto& authored_vertex = authored_weights[vertex_index];
+                const auto& exported_vertex = exported_weights[vertex_index];
+                if (authored_vertex.influences.size() != exported_vertex.influences.size()) {
+                    std::cerr << "Mesh-weight export did not preserve the authored influence count.\n";
+                    return false;
+                }
+
+                for (std::size_t influence_index = 0;
+                     influence_index < authored_vertex.influences.size();
+                     ++influence_index) {
+                    const auto& authored_influence = authored_vertex.influences[influence_index];
+                    const auto& exported_influence = exported_vertex.influences[influence_index];
+                    if (influence_bone_name(project_result.skeleton_data, authored_influence) !=
+                            influence_bone_name(export_result.skeleton_data, exported_influence) ||
+                        !require_near(
+                            exported_influence.x,
+                            authored_influence.x,
+                            "mesh weight bind x") ||
+                        !require_near(
+                            exported_influence.y,
+                            authored_influence.y,
+                            "mesh weight bind y") ||
+                        !require_near(
+                            exported_influence.weight,
+                            authored_influence.weight,
+                            "mesh weight value")) {
+                        std::cerr << "Mesh-weight export did not preserve the authored vertex influences.\n";
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        };
 
     if (!project_result.project->transform_timeline_edits.empty()) {
         const auto& edit = project_result.project->transform_timeline_edits.front();
@@ -457,6 +589,12 @@ bool validate_export_round_trip(
                 std::cerr << "Deform timeline export did not preserve the authored offsets.\n";
                 return false;
             }
+        }
+    }
+
+    for (const auto& edit : project_result.project->mesh_weight_attachment_edits) {
+        if (!validate_mesh_weight_attachment(edit)) {
+            return false;
         }
     }
 
@@ -863,7 +1001,11 @@ bool validate_exported_atlas_bundle(
                 !require_near(exported_region->width, source_region.width, "atlas region width") ||
                 !require_near(exported_region->height, source_region.height, "atlas region height") ||
                 !require_near(exported_region->origin_x, source_region.origin_x, "atlas region origin_x") ||
-                !require_near(exported_region->origin_y, source_region.origin_y, "atlas region origin_y")) {
+                !require_near(exported_region->origin_y, source_region.origin_y, "atlas region origin_y") ||
+                !require_near(
+                    exported_region->rotate_degrees,
+                    source_region.rotate_degrees,
+                    "atlas region rotate")) {
                 std::cerr << "Exported atlas region data did not preserve the source geometry.\n";
                 return false;
             }
@@ -973,6 +1115,9 @@ int main(int argc, char** argv) {
     }
 
     print_summary(result, parse_result.options.project_path);
+    if (!validate_viewport_settings(result)) {
+        return 1;
+    }
     if (!validate_undo_redo_cycle(result)) {
         return 1;
     }

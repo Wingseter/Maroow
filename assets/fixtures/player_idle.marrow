@@ -17,7 +17,23 @@
     "viewport": {
       "pan_x": 0,
       "pan_y": 0,
-      "zoom": 1
+      "zoom": 1,
+      "onion_skin": {
+        "enabled": false,
+        "mode": "frame",
+        "anchor": false,
+        "before": 3,
+        "after": 3,
+        "step": 1
+      },
+      "debug_overlay": {
+        "bones": true,
+        "ik": true,
+        "path": true,
+        "physics": true,
+        "meshes": true,
+        "bounds": true
+      }
     }
   },
     "timeline_edits": {
@@ -158,6 +174,9 @@
         ]
         }
     }
+  },
+  "mesh_edits": {
+    "weights": []
   },
   "constraint_edits": {
         "ik": [

@@ -11,6 +11,7 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 ## Editor project fixture
 
 - `assets/fixtures/player_idle.marrow`
+- `assets/fixtures/atlas_pack_smoke/atlas_pack_project.marrow`
 
 ## Focused runtime fixtures
 
@@ -18,6 +19,19 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 - `assets/fixtures/skin_inherit_constraints.mskl`
 - `assets/fixtures/path_transform_constraints.mskl`
 - `assets/fixtures/physics_constraints.mskl`
+
+## Spine import fixtures
+
+- `assets/fixtures/spine_import_sample.json`
+- `assets/fixtures/spine_import_sample.mskl`
+- `assets/fixtures/spine_import_sample.atlas`
+- `assets/fixtures/spine_import_sample_hero_page.matl`
+- `assets/fixtures/spine_import_sample_fx_page.matl`
+
+## PSD import fixtures
+
+- `assets/fixtures/psd_import_sample.psd`
+- `assets/fixtures/psd_import_sample_reimport.psd`
 
 ## Mapping to `docs/discription.md`
 
@@ -97,16 +111,37 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
   - named regions that match both the setup-pose attachments, the alternate skin attachments, and the sequence frames referenced by `spark_fx`
 - Region names `body`, `arm_l`, `warrior_body`, `mage_body`, `mage_arm_l`, and `spark_fx_0` through `spark_fx_3` are the canonical bridge between the fixture skeleton and fixture atlas metadata.
 
+### `spine_import_sample.atlas` and imported `.matl` pages
+
+- The Spine import fixtures now cover both importer directions:
+  - `spine_import_sample.json` -> `spine_import_sample.mskl`
+  - `spine_import_sample.atlas` -> `spine_import_sample_hero_page.matl` and `spine_import_sample_fx_page.matl`
+- The atlas source fixture intentionally uses two pages so the importer has to emit multiple `.matl` files from one `.atlas` input.
+- `hero_page` preserves a rotated `weighted_region` entry with `rotate: 90`, plus explicit `origin` metadata for `hero_body` and `weighted_region`.
+- `fx_page` preserves a second-page `plain_region` entry plus a sequential `spark_fx_0` region, which gives the smoke test stable cross-page lookup coverage against imported Spine attachment region names.
+
+### `psd_import_sample.psd` and `psd_import_sample_reimport.psd`
+
+- These fixtures exercise the Photoshop-style art import path without introducing a new checked-in runtime bundle:
+  - `psd_import_sample.psd` contains three visible paint layers: `body`, `arm_l`, and `shadow`.
+  - The `body` and `arm_l` layers live inside a `torso` folder so the importer can emit a parent `torso` bone hint above the generated slots.
+  - `shadow` stays at the root of the PSD stack so the smoke test covers both grouped and ungrouped layers.
+- `marrow_psd_import_smoke` imports the first PSD into a temporary `.mskl` + `.matl` bundle, validates slot creation and renderer placement, injects a small authored `idle` animation, then re-imports `psd_import_sample_reimport.psd` over the same skeleton.
+- The re-import fixture only moves the `body` layer from `(16, 12)` to `(20, 14)`, which keeps names stable while proving the importer updates attachment placement and preserves the pre-existing animation payload.
+
 ### `player_idle.marrow`
 
 - The minimal `.marrow` fixture covers the editor-side project split implied by sections 4 and 9 in [docs/discription.md](discription.md):
   - the root `runtime` object points at the canonical `player_idle.mskl` and `player_idle.matl` files without embedding any exported runtime payload inline.
   - the root `editor` object keeps authoring-only metadata such as the project name, preview animation, preview skin set, export directory, free-form notes, and viewport framing.
+  - `editor.viewport.onion_skin` persists the editor-only ghost-frame preview state: the on/off toggle, frame-vs-keyframe mode, frame-0 anchoring, before/after counts, and the sampling step.
   - the root `timeline_edits` object now mirrors the `.mskl` animation layout for editor-authored overrides that have not been exported yet:
     - `bones` stores transform track edits by animation and bone name.
     - `deform` stores FFD track edits by animation, slot, and mesh attachment name using the same per-key `vertices` payload the runtime `.mskl` format consumes.
     - `drawOrder` stores full slot-stack overrides per keyframe so editor-authored presentation reordering round-trips through the runtime `drawOrder` array.
     - `events` stores named event keys plus optional int/float/string/audio/volume/balance overrides using the same payload fields as runtime event timelines.
+  - the root `mesh_edits` object stores authoring-time weighted-mesh overrides that have not been exported yet:
+    - `weights` stores per-skin/per-slot mesh influence edits, including per-vertex bone names, bind-space offsets, and normalized weights for brush-based painting.
   - the root `constraint_edits` object mirrors the runtime root-level constraint arrays for project-authored overrides that have not been exported yet:
     - `ik` stores editor-authored IK chains by constraint name, constrained bones, target, mix, and bend direction.
     - `path` stores editor-authored slot binding, constrained chain, position/spacing, and rotate/translate mixes.
@@ -115,7 +150,7 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 - the checked-in fixture overrides `idle.bones.spine.rotate`, `idle.deform.body.body_mesh`, `idle.drawOrder`, and `idle.events`, so the editor shell and project smoke validation can prove that project-authored transform, FFD, draw-order, and event edits supersede the referenced runtime skeleton until export time.
 - the authored `idle.drawOrder[1]` key intentionally reorders the visible slots to `body -> fx_mask -> spark_fx -> arm_l` so the sample project still proves draw-order authoring while keeping the exported clipping setup render-valid for the end-to-end renderer smoke path.
 - The checked-in fixture also persists one authored IK, path, transform, and physics constraint edit so the editor shell and project smoke validation can prove that project-authored constraints preview on the helper rig, export into root-level runtime arrays, and round-trip back through the exported `.mskl`.
-- `marrow_project_smoke` uses this fixture to prove that the editor-side loader resolves relative asset references, applies the stored transform, deform, draw-order, event, and constraint edits on top of the referenced runtime assets, round-trips those edits through an exported `.mskl`, and still replays the exported weighted mesh deform pose and authored constraint data at runtime.
+- `marrow_project_smoke` uses this fixture to prove that the editor-side loader resolves relative asset references, applies the stored transform, deform, mesh-weight, draw-order, event, and constraint edits on top of the referenced runtime assets, round-trips those edits through an exported `.mskl`, and still replays the exported weighted mesh deform pose and authored constraint data at runtime.
 
 ## End-to-end sample project checklist
 
@@ -135,6 +170,24 @@ Why this is the preferred contributor flow:
 
 - `player_idle.marrow` is the only checked-in asset that exercises editor-authored timeline overrides, constraint edits, runtime export, atlas bundle copy, binary export, runtime reload, and renderer preparation as one vertical slice.
 - `marrow_project_smoke` validates that the exported `.mskl` and copied `.matl` files are loadable without manual patching, and `marrow_renderer_sample` closes the loop by preparing the exported runtime data for rendering with the atlas bundle that the export step emitted into `/tmp`.
+
+### `atlas_pack_smoke/`
+
+- `atlas_pack_project.marrow` is the checked-in editor-project fixture for the atlas packer path:
+  - the root `runtime` section points at `atlas_pack_source.mskl` and the generated `packed_sprites.matl`.
+  - the root `atlas_packs` array captures the new editor-side atlas authoring metadata: output atlas path, padding, trim, bleed, filter/wrap state, and the 24 source sprite PNG paths.
+- `atlas_pack_source.mskl` is intentionally minimal:
+  - one `root` bone drives 24 slots so each source image maps directly to one region attachment without unrelated animation or constraint data.
+  - the fixture keeps an empty `idle` clip so the standard runtime loader path stays valid.
+- `sprites/sprite_*.png` are the individual authored source images used by the atlas packer smoke:
+  - each sprite includes transparent whitespace around an opaque body so trim/offset behavior is explicit and repeatable.
+  - the images are small but varied in size, which keeps the checked-in atlas compact while still exercising non-trivial rectangle placement.
+- `packed_sprites.matl` and `packed_sprites.png` are the generated reference outputs for that project:
+  - the `.matl` records trimmed region sizes plus origin offsets derived from the untrimmed source image centers.
+  - the `.png` preserves 1px edge bleed inside the default 2px padding band, which is the seam-prevention behavior the smoke test validates.
+- Preferred validation paths for this fixture:
+  - `./build/marrow_atlas_packer_smoke`
+  - `./build/marrow_project_smoke assets/fixtures/atlas_pack_smoke/atlas_pack_project.marrow --export-runtime /tmp/atlas_pack_project_export.mskl`
 
 ### `ik_constraints.mskl`
 

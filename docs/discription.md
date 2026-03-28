@@ -34,7 +34,7 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 |---|---|---|
 | 에디터 언어 | **C++** | molga-engine과 동일 스택, 학습 비용 없음 |
 | 에디터 UI | **Dear ImGui** | Mac 지원, MIT 라이센스, C++ 친화적 |
-| 렌더링 | **GLFW + OpenGL** | molga-engine 기존 구조 |
+| 렌더링 | **sokol_app + sokol_gfx** | 단일 셰이더/렌더링 코드로 Metal(macOS)과 OpenGL(Linux) 지원 |
 | 스키닝 방식 | **GPU 스키닝 (Vertex Shader)** | 성능 우위, 쉐이더 커스텀 가능 |
 
 ---
@@ -52,6 +52,7 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 > 개발 초기에는 JSON으로 시작, 디버깅 안정화 후 바이너리 컴파일러 추가
 > `.mskl` / `.matl` 루트에는 정수 `version` 필드가 포함되며, 현재 런타임은 `version: 1`만 로드한다.
 > `.matl.atlas.premultiplied_alpha` 불리언으로 straight alpha와 PMA 텍스처를 구분하며, 렌더러는 이 값을 기준으로 셰이더/블렌드 경로를 전환한다.
+> `.matl.regions[].rotate`는 선택적인 아틀라스 내 회전 각도(도 단위)를 보존하며, Spine `.atlas` 멀티페이지 import는 페이지당 하나의 `.matl` 파일로 변환한다.
 > `.mbin`은 검증된 런타임 문서를 그대로 보존하면서 회전/이동 키프레임에 대해 16-bit 시간/채널 인덱스 + 양자화 payload를 추가 저장해, 내보내기 시 키 감소와 런타임 quantized playback을 지원한다.
 
 ---
@@ -91,6 +92,8 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
   }
 }
 ```
+
+> `skins`는 기존처럼 슬롯별 단일 어태치먼트를 바로 둘 수도 있고, 여러 어태치먼트가 필요한 경우 `attachments -> slot -> attachment` 중첩 맵을 사용할 수 있다. Spine JSON importer는 이 중첩 형식을 출력한다.
 
 ---
 

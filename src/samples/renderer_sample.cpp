@@ -13,6 +13,7 @@
 
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/atlas.hpp"
+#include "marrow/runtime/profiler.hpp"
 #include "marrow/runtime/skeleton.hpp"
 
 namespace {
@@ -296,6 +297,50 @@ bool require_event_sequence(
     return true;
 }
 
+bool require_render_command_event_sequence(
+    const marrow::renderer::RenderCommandList& command_list,
+    const std::vector<marrow::renderer::RenderCommandEventKind>& expected_kinds,
+    std::string_view label) {
+    if (command_list.ordered_events.size() != expected_kinds.size()) {
+        std::cerr << label << " expected " << expected_kinds.size()
+                  << " ordered events but got " << command_list.ordered_events.size() << ".\n";
+        return false;
+    }
+
+    for (std::size_t index = 0; index < expected_kinds.size(); ++index) {
+        if (command_list.ordered_events[index].kind != expected_kinds[index]) {
+            std::cerr << label << " event[" << index << "] did not match the expected type.\n";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool require_primary_bone_index(
+    const std::vector<marrow::renderer::RenderCommandVertex>& vertices,
+    std::size_t expected_bone_index,
+    std::string_view label) {
+    if (vertices.empty()) {
+        std::cerr << label << " expected at least one streamed vertex.\n";
+        return false;
+    }
+
+    const std::size_t actual_bone_index =
+        static_cast<std::size_t>(std::lround(vertices.front().bone_indices[0]));
+    if (actual_bone_index != expected_bone_index) {
+        std::cerr << label << " expected primary bone index " << expected_bone_index
+                  << " but got " << actual_bone_index << ".\n";
+        return false;
+    }
+    if (std::abs(vertices.front().bone_weights[0] - 1.0f) > 1e-6f) {
+        std::cerr << label << " expected a rigid primary bone weight of 1.0.\n";
+        return false;
+    }
+
+    return true;
+}
+
 void translate_prepared_scene(
     marrow::renderer::PreparedScene* scene,
     double offset_x,
@@ -343,6 +388,7 @@ bool append_scene_instance(
         destination->atlas_wrap_y = source.atlas_wrap_y;
         destination->premultiplied_alpha = source.premultiplied_alpha;
         destination->skeleton_name = "batch_demo";
+        destination->skeleton_count = 0U;
     } else if (destination->atlas_image != source.atlas_image) {
         std::cerr << "Cross-skeleton batching demo requires a shared atlas texture.\n";
         return false;
@@ -359,6 +405,7 @@ bool append_scene_instance(
         destination->bone_palette.end(),
         source.bone_palette.begin(),
         source.bone_palette.end());
+    destination->skeleton_count += source.skeleton_count;
 
     for (const auto& source_clip : source.clip_attachments) {
         marrow::renderer::ClipAttachmentDrawCommand adjusted = source_clip;
@@ -732,6 +779,7 @@ struct Options {
     std::filesystem::path atlas_path{"assets/fixtures/player_idle.matl"};
     std::optional<int> auto_close_frames;
     bool skip_render{false};
+    bool hud_overlay{false};
 };
 
 std::optional<Options> parse_options(int argc, char** argv) {
@@ -742,6 +790,14 @@ std::optional<Options> parse_options(int argc, char** argv) {
         const std::string_view argument(argv[index]);
         if (argument == "--skip-render") {
             options.skip_render = true;
+            continue;
+        }
+        if (argument == "--hud") {
+            options.hud_overlay = true;
+            continue;
+        }
+        if (argument == "--no-hud") {
+            options.hud_overlay = false;
             continue;
         }
         if (argument == "--auto-close") {
@@ -979,20 +1035,82 @@ int main(int argc, char** argv) {
     }
     std::cout << "Setup-pose atlas texture sampling validation passed.\n";
 
+    constexpr std::array<float, 16> kIdentityProjection{{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    const marrow::renderer::RenderCommandListResult command_list_result =
+        marrow::renderer::build_render_command_list(scene, kIdentityProjection);
+    if (!command_list_result) {
+        std::cerr << command_list_result.error_message << '\n';
+        return 1;
+    }
+
+    const marrow::renderer::RenderCommandList& command_list =
+        *command_list_result.command_list;
+    if (command_list.commands.size() != 3 ||
+        command_list.clip_commands.size() != 1 ||
+        !require_render_command_event_sequence(
+            command_list,
+            {
+                marrow::renderer::RenderCommandEventKind::Draw,
+                marrow::renderer::RenderCommandEventKind::Draw,
+                marrow::renderer::RenderCommandEventKind::ClipStart,
+                marrow::renderer::RenderCommandEventKind::Draw,
+                marrow::renderer::RenderCommandEventKind::ClipEnd,
+            },
+            "setup render command ordering") ||
+        command_list.commands[0].blend_mode != marrow::runtime::BlendMode::Screen ||
+        command_list.commands[0].shader_variant !=
+            marrow::renderer::ColorShaderVariant::TwoColorTint ||
+        command_list.commands[0].source_draw_command_offset != 0 ||
+        command_list.commands[0].source_draw_command_count != 1 ||
+        command_list.commands[1].blend_mode != marrow::runtime::BlendMode::Normal ||
+        command_list.commands[1].shader_variant !=
+            marrow::renderer::ColorShaderVariant::SingleColor ||
+        command_list.commands[1].source_draw_command_offset != 1 ||
+        command_list.commands[1].source_draw_command_count != 1 ||
+        command_list.commands[2].blend_mode != marrow::runtime::BlendMode::Normal ||
+        command_list.commands[2].shader_variant !=
+            marrow::renderer::ColorShaderVariant::SingleColor ||
+        command_list.commands[2].source_draw_command_offset != 2 ||
+        command_list.commands[2].source_draw_command_count != 1 ||
+        command_list.clip_commands[0].attachment_name != "fx_mask" ||
+        command_list.clip_commands[0].source_clip_attachment_index != 0 ||
+        !require_primary_bone_index(
+            command_list.commands[2].vertices,
+            setup_spark->bone_index,
+            "setup spark render batch bone") ||
+        !require_primary_bone_index(
+            command_list.clip_commands[0].vertices,
+            scene.bone_palette.size(),
+            "setup clip render batch identity bone")) {
+        std::cerr << "Render command list batching did not preserve the GPU clip event stream.\n";
+        return 1;
+    }
+    std::cout << "Render command list clip batching validation passed.\n";
+
     marrow::renderer::SampleAppWindow window;
     window.title = "Marrow Render Validation";
     window.width = 1280;
     window.height = 720;
 
-    const marrow::renderer::DemoShell shell(window, scene, atlas_image_path);
+    const marrow::renderer::DemoShell shell(
+        window,
+        scene,
+        atlas_image_path,
+        options->hud_overlay);
 
     std::cout << shell.launch_report() << '\n';
     std::cout << "Setup-pose region attachment validation passed.\n";
     std::cout << "Interactive renderer sample includes a screen-blended body slot for visual blend-mode validation.\n";
     const marrow::renderer::PreparedSceneBatchSummary setup_batch_summary =
         marrow::renderer::summarize_prepared_scene_batches(scene);
-    if (!require_batch_summary(setup_batch_summary, 3, 2, 1, "setup scene batching") ||
-        setup_batch_summary.batches.size() != 2 ||
+    if (!require_batch_summary(setup_batch_summary, 3, 3, 0, "setup scene batching") ||
+        setup_batch_summary.skeleton_count != 1U ||
+        setup_batch_summary.batches.size() != 3 ||
         setup_batch_summary.batches[0].blend_mode != marrow::runtime::BlendMode::Screen ||
         setup_batch_summary.batches[0].shader_variant !=
             marrow::renderer::ColorShaderVariant::TwoColorTint ||
@@ -1000,12 +1118,19 @@ int main(int argc, char** argv) {
         setup_batch_summary.batches[1].blend_mode != marrow::runtime::BlendMode::Normal ||
         setup_batch_summary.batches[1].shader_variant !=
             marrow::renderer::ColorShaderVariant::SingleColor ||
-        setup_batch_summary.batches[1].draw_command_count != 2 ||
+        setup_batch_summary.batches[1].draw_command_count != 1 ||
+        setup_batch_summary.break_reasons.texture_changes != 0U ||
+        setup_batch_summary.break_reasons.blend_changes != 1U ||
+        setup_batch_summary.break_reasons.clip_changes != 2U ||
+        setup_batch_summary.batches[2].blend_mode != marrow::runtime::BlendMode::Normal ||
+        setup_batch_summary.batches[2].shader_variant !=
+            marrow::renderer::ColorShaderVariant::SingleColor ||
+        setup_batch_summary.batches[2].draw_command_count != 1 ||
         setup_batch_summary.bone_uniform_count != scene.bone_palette.size() + 1) {
-        std::cerr << "Setup-pose batch summary did not match the expected merged draw-call layout.\n";
+        std::cerr << "Setup-pose batch summary did not match the expected clip-aware draw-call layout.\n";
         return 1;
     }
-    std::cout << "Setup-pose batch merge validation passed: 3 draw commands -> "
+    std::cout << "Setup-pose clip-aware batch validation passed: 3 draw commands -> "
               << setup_batch_summary.draw_call_count << " draw calls.\n";
     marrow::renderer::PreparedScene same_blend_variant_scene = scene;
     for (auto& command : same_blend_variant_scene.draw_commands) {
@@ -1019,10 +1144,10 @@ int main(int argc, char** argv) {
     if (!require_batch_summary(
             same_blend_variant_summary,
             3,
-            2,
-            1,
+            3,
+            0,
             "same-blend shader variant batching") ||
-        same_blend_variant_summary.batches.size() != 2 ||
+        same_blend_variant_summary.batches.size() != 3 ||
         same_blend_variant_summary.batches[0].blend_mode != marrow::runtime::BlendMode::Normal ||
         same_blend_variant_summary.batches[0].shader_variant !=
             marrow::renderer::ColorShaderVariant::TwoColorTint ||
@@ -1030,7 +1155,11 @@ int main(int argc, char** argv) {
         same_blend_variant_summary.batches[1].blend_mode != marrow::runtime::BlendMode::Normal ||
         same_blend_variant_summary.batches[1].shader_variant !=
             marrow::renderer::ColorShaderVariant::SingleColor ||
-        same_blend_variant_summary.batches[1].draw_command_count != 2) {
+        same_blend_variant_summary.batches[1].draw_command_count != 1 ||
+        same_blend_variant_summary.batches[2].blend_mode != marrow::runtime::BlendMode::Normal ||
+        same_blend_variant_summary.batches[2].shader_variant !=
+            marrow::renderer::ColorShaderVariant::SingleColor ||
+        same_blend_variant_summary.batches[2].draw_command_count != 1) {
         std::cerr << "Shared-blend batching did not preserve the single-color/two-color shader split.\n";
         return 1;
     }
@@ -1071,7 +1200,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const marrow::renderer::DemoShell sequence_shell(window, sequence_scene, atlas_image_path);
+    const marrow::renderer::DemoShell sequence_shell(
+        window,
+        sequence_scene,
+        atlas_image_path,
+        options->hud_overlay);
     std::cout << sequence_shell.launch_report() << '\n';
     std::cout << "Sequence attachment playback validation passed at t=0.375.\n";
     skeleton.set_attachment_playback_time(0.0);
@@ -1335,11 +1468,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const marrow::renderer::DemoShell animated_shell(window, animated_scene, atlas_image_path);
+    const marrow::renderer::DemoShell animated_shell(
+        window,
+        animated_scene,
+        atlas_image_path,
+        options->hud_overlay);
     std::cout << animated_shell.launch_report() << '\n';
     const marrow::renderer::PreparedSceneBatchSummary animated_batch_summary =
         marrow::renderer::summarize_prepared_scene_batches(animated_scene);
-    if (!require_batch_summary(animated_batch_summary, 3, 3, 0, "animated scene batching")) {
+    if (!require_batch_summary(animated_batch_summary, 3, 3, 0, "animated scene batching") ||
+        animated_batch_summary.skeleton_count != 1U) {
         return 1;
     }
     std::cout << "Animated slot timeline presentation validation passed.\n";
@@ -1375,22 +1513,30 @@ int main(int argc, char** argv) {
     if (!require_batch_summary(
             cross_skeleton_batch_summary,
             6,
-            1,
-            5,
+            6,
+            0,
             "cross-skeleton batching") ||
-        cross_skeleton_batch_summary.batches.size() != 1 ||
+        cross_skeleton_batch_summary.skeleton_count != kBatchSkeletonCount ||
+        cross_skeleton_batch_summary.batches.size() != 6 ||
         cross_skeleton_batch_summary.batches.front().blend_mode !=
             marrow::runtime::BlendMode::Normal ||
-        cross_skeleton_batch_summary.batches.front().draw_command_count != 6 ||
+        cross_skeleton_batch_summary.batches.front().draw_command_count != 1 ||
+        cross_skeleton_batch_summary.batches.back().blend_mode !=
+            marrow::runtime::BlendMode::Normal ||
+        cross_skeleton_batch_summary.batches.back().draw_command_count != 1 ||
         cross_skeleton_batch_summary.vertex_buffer_bytes == 0 ||
         cross_skeleton_batch_summary.index_buffer_bytes == 0) {
-        std::cerr << "Cross-skeleton batch summary did not produce the expected single merged draw call.\n";
+        std::cerr << "Cross-skeleton batch summary did not preserve clip boundaries across instances.\n";
         return 1;
     }
 
-    const marrow::renderer::DemoShell batching_shell(window, batched_scene, atlas_image_path);
+    const marrow::renderer::DemoShell batching_shell(
+        window,
+        batched_scene,
+        atlas_image_path,
+        options->hud_overlay);
     std::cout << batching_shell.launch_report() << '\n';
-    std::cout << "Cross-skeleton batch merge validation passed: 6 draw commands from 3 skeletons merged into 1 draw call.\n";
+    std::cout << "Cross-skeleton clip-aware batching validation passed: 6 draw commands from 3 skeletons stayed isolated across clip boundaries.\n";
 
     if (options->skip_render) {
         std::cout << "Renderer startup skipped after atlas texture validation.\n";
@@ -1403,7 +1549,7 @@ int main(int argc, char** argv) {
             std::cerr << *render_error << '\n';
             return 1;
         }
-        std::cout << "Auto-close smoke mode completed after loading the atlas texture into OpenGL.\n";
+        std::cout << "Auto-close smoke mode completed after presenting the atlas through sokol_gfx.\n";
         return 0;
     }
 
