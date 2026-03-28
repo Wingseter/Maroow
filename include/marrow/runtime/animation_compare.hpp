@@ -25,6 +25,8 @@ struct AnimationRoundtripComparison {
     AnimationRoundtripMetrics metrics;
     std::optional<std::string> error;
 
+    /// @brief Reports whether the comparison completed without detecting an error.
+    /// @return `true` when no comparison error was produced; otherwise `false`.
     explicit operator bool() const {
         return !error.has_value();
     }
@@ -116,6 +118,13 @@ inline std::vector<double> build_animation_sample_times(
 
 } // namespace detail
 
+/**
+ * @brief Compares original and round-tripped animation payloads across sampled times.
+ * @param original Source skeleton data before round-trip conversion.
+ * @param roundtrip Skeleton data after round-trip conversion.
+ * @param uniform_sample_count Additional evenly spaced samples per animation duration.
+ * @return Error metrics and an optional mismatch description.
+ */
 inline AnimationRoundtripComparison compare_animation_roundtrip(
     const SkeletonData& original,
     const SkeletonData& roundtrip,

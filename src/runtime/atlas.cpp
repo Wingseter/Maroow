@@ -1,3 +1,4 @@
+#include "marrow/allocator.hpp"
 #include "marrow/runtime/atlas.hpp"
 
 #include <algorithm>
@@ -146,6 +147,34 @@ std::optional<LoadError> read_optional_boolean(
     return std::nullopt;
 }
 
+std::optional<LoadError> read_optional_rotation(
+    const Document& document,
+    const Value& object,
+    std::string_view key,
+    std::string_view json_path,
+    double* value_out) {
+    const Value* member = find_optional_member(object, key);
+    if (member == nullptr) {
+        return std::nullopt;
+    }
+
+    const std::string member_path = std::string(json_path) + "." + std::string(key);
+    if (member->is_boolean()) {
+        *value_out = member->as_boolean() ? 90.0 : 0.0;
+        return std::nullopt;
+    }
+    if (member->is_number()) {
+        *value_out = member->as_number();
+        return std::nullopt;
+    }
+
+    return validation_error(
+        document,
+        member->location(),
+        member_path,
+        "expected number or boolean");
+}
+
 std::optional<LoadError> parse_atlas_info(
     const Document& document,
     const Value& root,
@@ -289,6 +318,17 @@ std::optional<LoadError> parse_regions(
                 document, region_value, "origin_y", path, &region.origin_y)) {
             return error;
         }
+        if (const auto error = read_optional_rotation(
+                document, region_value, "rotate", path, &region.rotate_degrees)) {
+            return error;
+        }
+        if (!std::isfinite(region.rotate_degrees)) {
+            return validation_error(
+                document,
+                region_value.location(),
+                path + ".rotate",
+                "rotation must be finite");
+        }
 
         const auto duplicate = std::find_if(
             parsed_regions.begin(),
@@ -372,7 +412,9 @@ AtlasDataResult AtlasLoader::load(const json::Document& document) {
         return result;
     }
 
-    result.atlas_data = std::make_shared<AtlasData>(std::move(info), std::move(regions));
+    result.atlas_data = marrow::allocate_shared<AtlasData>(
+        std::move(info),
+        std::move(regions));
     return result;
 }
 

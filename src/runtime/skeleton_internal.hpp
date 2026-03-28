@@ -10,7 +10,45 @@
 
 namespace marrow::runtime::detail {
 
+enum class BoneTransformPropagationPath {
+    Scalar,
+    SSE2,
+    NEON,
+};
+
+struct BoneLocalTransformBuffers {
+    std::vector<float>* x{nullptr};
+    std::vector<float>* y{nullptr};
+    std::vector<float>* a{nullptr};
+    std::vector<float>* b{nullptr};
+    std::vector<float>* c{nullptr};
+    std::vector<float>* d{nullptr};
+
+    void resize(std::size_t count) const;
+};
+
+struct BoneWorldTransformBuffers {
+    std::vector<float>* a{nullptr};
+    std::vector<float>* b{nullptr};
+    std::vector<float>* c{nullptr};
+    std::vector<float>* d{nullptr};
+    std::vector<float>* world_x{nullptr};
+    std::vector<float>* world_y{nullptr};
+    std::vector<BoneWorldTransform>* aos{nullptr};
+
+    void resize(std::size_t count) const;
+};
+
 std::vector<std::size_t> build_bone_evaluation_order(const std::vector<BoneData>& bones);
+void reorder_topologically(
+    std::vector<BoneData>* bones,
+    std::vector<IkConstraintData>* ik_constraints,
+    std::vector<PathConstraintData>* path_constraints,
+    std::vector<TransformConstraintData>* transform_constraints,
+    std::vector<PhysicsConstraintData>* physics_constraints,
+    std::vector<SlotData>* slots,
+    std::vector<AnimationData>* animations,
+    std::vector<SkinData>* skins);
 
 std::optional<std::size_t> find_bone_index(
     const std::vector<BoneData>& bones,
@@ -68,6 +106,28 @@ MeshWorldVertex transform_mesh_point(
     const BoneWorldTransform& transform,
     double x,
     double y);
+void prepare_local_transform_buffers(
+    const std::vector<BonePose>& poses,
+    const BoneLocalTransformBuffers& buffers);
+void propagate_world_transforms_scalar(
+    const std::vector<BoneData>& bones,
+    const std::vector<BonePose>& poses,
+    double skeleton_scale_x,
+    double skeleton_scale_y,
+    const BoneLocalTransformBuffers& local,
+    const BoneWorldTransformBuffers& world);
+void propagate_world_transforms_optimized(
+    const std::vector<BoneData>& bones,
+    const std::vector<BonePose>& poses,
+    double skeleton_scale_x,
+    double skeleton_scale_y,
+    const BoneLocalTransformBuffers& local,
+    const BoneWorldTransformBuffers& world);
+void sync_world_transform_buffers_from_aos(
+    const std::vector<BoneWorldTransform>& source,
+    const BoneWorldTransformBuffers& destination);
+BoneTransformPropagationPath active_bone_transform_propagation_path();
+std::string_view bone_transform_propagation_path_name(BoneTransformPropagationPath path);
 
 json::LoadResult load_binary_skeleton_document(
     const std::filesystem::path& path,

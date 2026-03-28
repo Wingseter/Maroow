@@ -1,6 +1,9 @@
 #include "skeleton_internal.hpp"
 
+#include "marrow/runtime/animation_state.hpp"
+
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <stdexcept>
 #include <utility>
@@ -22,7 +25,6 @@ SkeletonData::SkeletonData(
     std::vector<AnimationMixDefinition> mix_definitions)
     : info_(std::move(info)),
       bones_(std::move(bones)),
-      bone_evaluation_order_(detail::build_bone_evaluation_order(bones_)),
       ik_constraints_(std::move(ik_constraints)),
       path_constraints_(std::move(path_constraints)),
       transform_constraints_(std::move(transform_constraints)),
@@ -33,7 +35,18 @@ SkeletonData::SkeletonData(
       skins_(std::move(skins)),
       default_skin_index_(detail::find_skin_index(skins_, "default")),
       default_mix_duration_(default_mix_duration),
-      mix_definitions_(std::move(mix_definitions)) {}
+      mix_definitions_(std::move(mix_definitions)) {
+    detail::reorder_topologically(
+        &bones_,
+        &ik_constraints_,
+        &path_constraints_,
+        &transform_constraints_,
+        &physics_constraints_,
+        &slots_,
+        &animations_,
+        &skins_);
+    bone_evaluation_order_ = detail::build_bone_evaluation_order(bones_);
+}
 
 const SkeletonInfo& SkeletonData::info() const {
     return info_;
@@ -127,6 +140,17 @@ const AttachmentData* SkeletonData::find_attachment(
 }
 
 const AttachmentData* SkeletonData::find_attachment(
+    std::size_t skin_index,
+    std::size_t slot_index,
+    std::string_view attachment_name) const {
+    if (skin_index >= skins_.size()) {
+        return nullptr;
+    }
+
+    return skins_[skin_index].find_attachment(slot_index, attachment_name);
+}
+
+const AttachmentData* SkeletonData::find_attachment(
     std::string_view skin_name,
     std::size_t slot_index) const {
     const auto skin_index = find_skin_index(skin_name);
@@ -135,6 +159,18 @@ const AttachmentData* SkeletonData::find_attachment(
     }
 
     return find_attachment(*skin_index, slot_index);
+}
+
+const AttachmentData* SkeletonData::find_attachment(
+    std::string_view skin_name,
+    std::size_t slot_index,
+    std::string_view attachment_name) const {
+    const auto skin_index = find_skin_index(skin_name);
+    if (!skin_index.has_value()) {
+        return nullptr;
+    }
+
+    return find_attachment(*skin_index, slot_index, attachment_name);
 }
 
 const AttachmentData* SkeletonData::find_attachment_source(
@@ -214,6 +250,7 @@ void Skeleton::clear_last_error() {
 void Skeleton::set_scale(double scale_x, double scale_y) {
     scale_x_ = scale_x;
     scale_y_ = scale_y;
+    reset_update_throttle_state();
 }
 
 double Skeleton::scale_x() const {
@@ -222,6 +259,28 @@ double Skeleton::scale_x() const {
 
 double Skeleton::scale_y() const {
     return scale_y_;
+}
+
+void Skeleton::set_visible(bool visible) {
+    if (visible_ == visible) {
+        return;
+    }
+
+    visible_ = visible;
+    reset_update_throttle_state();
+}
+
+bool Skeleton::visible() const {
+    return visible_;
+}
+
+void Skeleton::set_update_interval(std::size_t interval) {
+    update_interval_ = std::max<std::size_t>(1, interval);
+    reset_update_throttle_state();
+}
+
+std::size_t Skeleton::update_interval() const {
+    return update_interval_;
 }
 
 const std::vector<BonePose>& Skeleton::bone_poses() const {
@@ -258,6 +317,223 @@ const std::vector<std::size_t>& Skeleton::draw_order() const {
 
 std::vector<std::size_t>& Skeleton::draw_order() {
     return draw_order_;
+}
+
+void update_instance(
+    Skeleton& skeleton,
+    AnimationState& animation_state,
+    double delta_seconds) {
+    if (delta_seconds < 0.0) {
+        throw std::invalid_argument("update_instance requires a non-negative delta");
+    }
+    if (skeleton.data().get() != animation_state.data().get()) {
+        throw std::invalid_argument(
+            "update_instance requires Skeleton and AnimationState from the same SkeletonData");
+    }
+    if (!skeleton.visible_) {
+        return;
+    }
+
+    Skeleton::UpdateThrottleState& throttle = skeleton.update_throttle_state_;
+    if (skeleton.update_interval_ <= 1U) {
+        throttle.pending_delta_seconds = 0.0;
+        throttle.frames_since_update = 0;
+        throttle.has_prediction = false;
+        throttle.dirty = false;
+        animation_state.update(delta_seconds);
+        animation_state.apply(skeleton);
+        return;
+    }
+
+    throttle.pending_delta_seconds += delta_seconds;
+    const bool perform_full_update =
+        throttle.dirty ||
+        !throttle.has_prediction ||
+        (throttle.frames_since_update + 1U >= skeleton.update_interval_);
+
+    if (perform_full_update) {
+        const double full_update_delta = throttle.pending_delta_seconds;
+        const double predicted_delta = throttle.has_full_update_history
+            ? full_update_delta
+            : delta_seconds * static_cast<double>(skeleton.update_interval_);
+
+        animation_state.update(full_update_delta);
+        animation_state.apply(skeleton);
+
+        throttle.pending_delta_seconds = 0.0;
+        throttle.frames_since_update = 0U;
+        throttle.last_full_update_delta_seconds = full_update_delta;
+        throttle.has_full_update_history = true;
+        throttle.dirty = false;
+
+        skeleton.capture_display_state(&throttle.source_snapshot);
+        skeleton.rebuild_predicted_display_state(animation_state, predicted_delta);
+        return;
+    }
+
+    ++throttle.frames_since_update;
+    skeleton.apply_interpolated_display_state(
+        static_cast<double>(throttle.frames_since_update) /
+        static_cast<double>(skeleton.update_interval_));
+}
+
+void Skeleton::reset_update_throttle_state() {
+    update_throttle_state_.frames_since_update = 0;
+    update_throttle_state_.pending_delta_seconds = 0.0;
+    update_throttle_state_.last_full_update_delta_seconds = 0.0;
+    update_throttle_state_.has_full_update_history = false;
+    update_throttle_state_.has_prediction = false;
+    update_throttle_state_.dirty = true;
+    update_throttle_state_.source_snapshot = {};
+    update_throttle_state_.target_snapshot = {};
+}
+
+void Skeleton::capture_display_state(DisplayStateSnapshot* snapshot) const {
+    if (snapshot == nullptr) {
+        return;
+    }
+
+    snapshot->bone_poses = bone_poses_;
+    snapshot->bone_world_transforms = bone_world_transforms_;
+    snapshot->slot_states = slot_states_;
+    snapshot->mesh_deform_states = mesh_deform_states_;
+    snapshot->draw_order = draw_order_;
+    snapshot->attachment_playback_time = attachment_playback_time_;
+}
+
+void Skeleton::apply_display_state(const DisplayStateSnapshot& snapshot) {
+    bone_poses_ = snapshot.bone_poses;
+    bone_world_transforms_ = snapshot.bone_world_transforms;
+    slot_states_ = snapshot.slot_states;
+    mesh_deform_states_ = snapshot.mesh_deform_states;
+    draw_order_ = snapshot.draw_order;
+    attachment_playback_time_ = std::max(0.0, snapshot.attachment_playback_time);
+}
+
+void Skeleton::apply_interpolated_display_state(double alpha) {
+    if (!update_throttle_state_.has_prediction) {
+        return;
+    }
+
+    const DisplayStateSnapshot& source = update_throttle_state_.source_snapshot;
+    const DisplayStateSnapshot& target = update_throttle_state_.target_snapshot;
+    const double clamped_alpha = std::clamp(alpha, 0.0, 1.0);
+
+    if (bone_poses_.size() != source.bone_poses.size() ||
+        source.bone_poses.size() != target.bone_poses.size()) {
+        bone_poses_ = source.bone_poses;
+    } else {
+        for (std::size_t bone_index = 0; bone_index < bone_poses_.size(); ++bone_index) {
+            BonePose& pose_state = bone_poses_[bone_index];
+            const BonePose& source_pose_state = source.bone_poses[bone_index];
+            const BonePose& target_pose_state = target.bone_poses[bone_index];
+            pose_state.inherit = source_pose_state.inherit;
+
+            BoneTransform& pose = pose_state.local_pose;
+            const BoneTransform& source_pose = source_pose_state.local_pose;
+            const BoneTransform& target_pose = target_pose_state.local_pose;
+            pose.x = detail::mix_scalar(source_pose.x, target_pose.x, clamped_alpha);
+            pose.y = detail::mix_scalar(source_pose.y, target_pose.y, clamped_alpha);
+            pose.rotation =
+                detail::mix_rotation_degrees(source_pose.rotation, target_pose.rotation, clamped_alpha);
+            pose.scale_x = detail::mix_scalar(source_pose.scale_x, target_pose.scale_x, clamped_alpha);
+            pose.scale_y = detail::mix_scalar(source_pose.scale_y, target_pose.scale_y, clamped_alpha);
+            pose.shear_x = detail::mix_scalar(source_pose.shear_x, target_pose.shear_x, clamped_alpha);
+            pose.shear_y = detail::mix_scalar(source_pose.shear_y, target_pose.shear_y, clamped_alpha);
+        }
+    }
+
+    if (bone_world_transforms_.size() != source.bone_world_transforms.size() ||
+        source.bone_world_transforms.size() != target.bone_world_transforms.size()) {
+        bone_world_transforms_ = source.bone_world_transforms;
+    } else {
+        for (std::size_t bone_index = 0; bone_index < bone_world_transforms_.size(); ++bone_index) {
+            BoneWorldTransform& world = bone_world_transforms_[bone_index];
+            const BoneWorldTransform& source_world = source.bone_world_transforms[bone_index];
+            const BoneWorldTransform& target_world = target.bone_world_transforms[bone_index];
+            world.a = detail::mix_scalar(source_world.a, target_world.a, clamped_alpha);
+            world.b = detail::mix_scalar(source_world.b, target_world.b, clamped_alpha);
+            world.c = detail::mix_scalar(source_world.c, target_world.c, clamped_alpha);
+            world.d = detail::mix_scalar(source_world.d, target_world.d, clamped_alpha);
+            world.world_x = detail::mix_scalar(source_world.world_x, target_world.world_x, clamped_alpha);
+            world.world_y = detail::mix_scalar(source_world.world_y, target_world.world_y, clamped_alpha);
+        }
+    }
+
+    if (slot_states_.size() != source.slot_states.size() ||
+        source.slot_states.size() != target.slot_states.size()) {
+        slot_states_ = source.slot_states;
+    } else {
+        for (std::size_t slot_index = 0; slot_index < slot_states_.size(); ++slot_index) {
+            SlotState& slot = slot_states_[slot_index];
+            const SlotState& source_slot = source.slot_states[slot_index];
+            const SlotState& target_slot = target.slot_states[slot_index];
+            slot.attachment_name = source_slot.attachment_name;
+            slot.attachment_skin_index = source_slot.attachment_skin_index;
+            slot.dark_color = source_slot.dark_color;
+            slot.color.r = detail::mix_scalar(source_slot.color.r, target_slot.color.r, clamped_alpha);
+            slot.color.g = detail::mix_scalar(source_slot.color.g, target_slot.color.g, clamped_alpha);
+            slot.color.b = detail::mix_scalar(source_slot.color.b, target_slot.color.b, clamped_alpha);
+            slot.color.a = detail::mix_scalar(source_slot.color.a, target_slot.color.a, clamped_alpha);
+        }
+    }
+
+    if (mesh_deform_states_.size() != source.mesh_deform_states.size() ||
+        source.mesh_deform_states.size() != target.mesh_deform_states.size()) {
+        mesh_deform_states_ = source.mesh_deform_states;
+    } else {
+        for (std::size_t slot_index = 0; slot_index < mesh_deform_states_.size(); ++slot_index) {
+            MeshDeformState& deform = mesh_deform_states_[slot_index];
+            const MeshDeformState& source_deform = source.mesh_deform_states[slot_index];
+            const MeshDeformState& target_deform = target.mesh_deform_states[slot_index];
+            deform.attachment_name = source_deform.attachment_name;
+            if (source_deform.vertex_offsets.size() != target_deform.vertex_offsets.size()) {
+                deform.vertex_offsets = source_deform.vertex_offsets;
+                continue;
+            }
+
+            if (deform.vertex_offsets.size() != source_deform.vertex_offsets.size()) {
+                deform.vertex_offsets.resize(source_deform.vertex_offsets.size());
+            }
+            for (std::size_t component_index = 0;
+                 component_index < deform.vertex_offsets.size();
+                 ++component_index) {
+                deform.vertex_offsets[component_index] = detail::mix_scalar(
+                    source_deform.vertex_offsets[component_index],
+                    target_deform.vertex_offsets[component_index],
+                    clamped_alpha);
+            }
+        }
+    }
+
+    attachment_playback_time_ = detail::mix_scalar(
+        source.attachment_playback_time,
+        target.attachment_playback_time,
+        clamped_alpha);
+    if (draw_order_.size() != source.draw_order.size()) {
+        draw_order_ = source.draw_order;
+    } else {
+        std::copy(source.draw_order.begin(), source.draw_order.end(), draw_order_.begin());
+    }
+}
+
+void Skeleton::rebuild_predicted_display_state(
+    const AnimationState& animation_state,
+    double predicted_delta_seconds) {
+    update_throttle_state_.target_snapshot = update_throttle_state_.source_snapshot;
+
+    if (predicted_delta_seconds <= 0.0) {
+        update_throttle_state_.has_prediction = true;
+        return;
+    }
+
+    Skeleton predicted_skeleton = *this;
+    AnimationState predicted_state(data_);
+    predicted_state.restore_state(animation_state.capture_state());
+    predicted_state.update(predicted_delta_seconds);
+    predicted_state.apply(predicted_skeleton);
+    predicted_skeleton.capture_display_state(&update_throttle_state_.target_snapshot);
+    update_throttle_state_.has_prediction = true;
 }
 
 void SkeletonBounds::update(const Skeleton& skeleton, bool compute_aabb) {

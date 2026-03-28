@@ -377,6 +377,7 @@ void Skeleton::set_to_setup_pose() {
     reset_to_setup_pose_state(true);
     reset_physics_state();
     update_world_transforms();
+    reset_update_throttle_state();
 }
 
 void Skeleton::apply_animation(const AnimationData& animation, double time) {
@@ -388,6 +389,10 @@ void Skeleton::apply_animation(
     double previous_time,
     double time,
     const AnimationEventCallback& event_callback) {
+    if (!visible_) {
+        return;
+    }
+
     reset_to_setup_pose_state(false);
     apply_setup_attachments();
     if (draw_order_.size() != data_->slots().size()) {
@@ -497,6 +502,7 @@ void Skeleton::apply_animation(
     }
 
     update_world_transforms();
+    reset_update_throttle_state();
 }
 
 void Skeleton::set_attachment_playback_time(double time_seconds) {

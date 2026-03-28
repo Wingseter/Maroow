@@ -1,5 +1,6 @@
 #include "skeleton_internal.hpp"
 
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -25,7 +26,29 @@ std::runtime_error invalid_transform_constraint_bone_error(
 
 } // namespace
 
-void Skeleton::update_world_transforms(PhysicsMode physics) {
+void Skeleton::update_world_transforms(
+    PhysicsMode physics,
+    WorldTransformTimingBreakdown* timing_breakdown) {
+    if (timing_breakdown != nullptr) {
+        *timing_breakdown = {};
+    }
+    if (!visible_) {
+        return;
+    }
+
+    using clock = std::chrono::steady_clock;
+    const bool capture_timings = timing_breakdown != nullptr;
+    const auto measure_seconds = [&](const auto& fn, double* seconds_out) {
+        if (seconds_out == nullptr) {
+            fn();
+            return;
+        }
+
+        const auto start = clock::now();
+        fn();
+        *seconds_out += std::chrono::duration<double>(clock::now() - start).count();
+    };
+
     if (bone_world_transforms_.size() != bone_poses_.size()) {
         bone_world_transforms_.resize(bone_poses_.size());
     }
@@ -36,20 +59,32 @@ void Skeleton::update_world_transforms(PhysicsMode physics) {
     };
 
     const auto compute_world_transforms = [&]() {
-        for (const std::size_t bone_index : data_->bone_evaluation_order()) {
-            const BonePose& pose = solved_poses[bone_index];
-            const BoneData& bone_data = data_->bones()[bone_index];
-            if (!bone_data.parent_index.has_value()) {
-                bone_world_transforms_[bone_index] =
-                    detail::root_world_transform(pose.local_pose, scale_x_, scale_y_);
-            } else {
-                bone_world_transforms_[bone_index] = detail::compose_world_transform(
-                    bone_world_transforms_[*bone_data.parent_index],
-                    pose,
-                    scale_x_,
-                    scale_y_);
-            }
-        }
+        detail::BoneLocalTransformBuffers local_buffers{
+            &bone_local_x_,
+            &bone_local_y_,
+            &bone_local_a_,
+            &bone_local_b_,
+            &bone_local_c_,
+            &bone_local_d_,
+        };
+        detail::BoneWorldTransformBuffers world_buffers{
+            &bone_world_a_,
+            &bone_world_b_,
+            &bone_world_c_,
+            &bone_world_d_,
+            &bone_world_x_,
+            &bone_world_y_,
+            &bone_world_transforms_,
+        };
+
+        detail::prepare_local_transform_buffers(solved_poses, local_buffers);
+        detail::propagate_world_transforms_optimized(
+            data_->bones(),
+            solved_poses,
+            scale_x_,
+            scale_y_,
+            local_buffers,
+            world_buffers);
     };
 
     const auto bone_tip_local_vector = [&](std::size_t bone_index) -> AttachmentVertex {
@@ -84,7 +119,10 @@ void Skeleton::update_world_transforms(PhysicsMode physics) {
         return detail::inverse_transform_point(bone_world_transforms_[*parent_index], world_x, world_y);
     };
 
-    compute_world_transforms();
+    measure_seconds(
+        compute_world_transforms,
+        capture_timings ? &timing_breakdown->transform_seconds : nullptr);
+    const auto constraint_start = capture_timings ? clock::now() : clock::time_point{};
 
     constexpr double kEpsilon = 1e-8;
     for (std::size_t constraint_index = 0;
@@ -713,6 +751,21 @@ void Skeleton::update_world_transforms(PhysicsMode physics) {
     }
 
     if (physics == PhysicsMode::None) {
+        detail::sync_world_transform_buffers_from_aos(
+            bone_world_transforms_,
+            detail::BoneWorldTransformBuffers{
+                &bone_world_a_,
+                &bone_world_b_,
+                &bone_world_c_,
+                &bone_world_d_,
+                &bone_world_x_,
+                &bone_world_y_,
+                nullptr,
+            });
+        if (capture_timings) {
+            timing_breakdown->constraint_seconds +=
+                std::chrono::duration<double>(clock::now() - constraint_start).count();
+        }
         return;
     }
     if (physics_constraint_states_.size() != data_->physics_constraints().size()) {
@@ -967,6 +1020,22 @@ void Skeleton::update_world_transforms(PhysicsMode physics) {
             constraint_state.remaining = 0.0;
             constraint_state.reset = false;
         }
+    }
+
+    detail::sync_world_transform_buffers_from_aos(
+        bone_world_transforms_,
+        detail::BoneWorldTransformBuffers{
+            &bone_world_a_,
+            &bone_world_b_,
+            &bone_world_c_,
+            &bone_world_d_,
+            &bone_world_x_,
+            &bone_world_y_,
+            nullptr,
+        });
+    if (capture_timings) {
+        timing_breakdown->constraint_seconds +=
+            std::chrono::duration<double>(clock::now() - constraint_start).count();
     }
 }
 

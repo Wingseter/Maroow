@@ -1,3 +1,4 @@
+#include "marrow/allocator.hpp"
 #include "skeleton_internal.hpp"
 
 #include <algorithm>
@@ -655,8 +656,9 @@ const AttachmentData* find_attachment_source_in_skins(
     }
 
     const auto find_in_skin = [&](std::size_t skin_index) -> const AttachmentData* {
-        const AttachmentData* attachment = skins[skin_index].find_attachment(slot_index);
-        if (attachment != nullptr && attachment->name == attachment_name) {
+        const AttachmentData* attachment =
+            skins[skin_index].find_attachment(slot_index, attachment_name);
+        if (attachment != nullptr) {
             if (skin_index_out != nullptr) {
                 *skin_index_out = skin_index;
             }
@@ -693,7 +695,7 @@ const AttachmentData* find_attachment_source_in_skins(
 }
 
 bool is_skin_reserved_key(std::string_view key) {
-    return key == "bones" || key == "ik" || key == "path" ||
+    return key == "attachments" || key == "bones" || key == "ik" || key == "path" ||
         key == "transform" || key == "physics";
 }
 
@@ -4341,6 +4343,7 @@ std::optional<LoadError> parse_skin_attachment(
     const std::vector<BoneData>& bones,
     const std::vector<SlotData>& slots,
     std::string_view slot_name,
+    std::optional<std::string_view> attachment_key,
     std::string_view json_path,
     SkinSlotData* skin_slot_out) {
     if (const auto error = json::require_type(
@@ -4363,13 +4366,19 @@ std::optional<LoadError> parse_skin_attachment(
     SkinSlotData skin_slot;
     skin_slot.slot_index = *slot_index;
 
-    if (const auto error = read_required_string(
+    std::optional<std::string> attachment_name;
+    if (const auto error = read_optional_string(
             document,
             attachment_value,
             "attachment",
             json_path,
-            &skin_slot.attachment.name)) {
+            &attachment_name)) {
         return error;
+    }
+    if (attachment_name.has_value()) {
+        skin_slot.attachment.name = *attachment_name;
+    } else if (attachment_key.has_value()) {
+        skin_slot.attachment.name = std::string(*attachment_key);
     }
     if (skin_slot.attachment.name.empty()) {
         return validation_error(
@@ -4394,11 +4403,11 @@ std::optional<LoadError> parse_skin_attachment(
         skin_slot.attachment.kind = AttachmentKind::Region;
     } else if (*type_name == "mesh") {
         skin_slot.attachment.kind = AttachmentKind::Mesh;
-    } else if (*type_name == "linked_mesh") {
+    } else if (*type_name == "linked_mesh" || *type_name == "linkedmesh") {
         skin_slot.attachment.kind = AttachmentKind::LinkedMesh;
     } else if (*type_name == "point") {
         skin_slot.attachment.kind = AttachmentKind::Point;
-    } else if (*type_name == "bounding_box") {
+    } else if (*type_name == "bounding_box" || *type_name == "boundingbox") {
         skin_slot.attachment.kind = AttachmentKind::BoundingBox;
     } else if (*type_name == "clipping") {
         skin_slot.attachment.kind = AttachmentKind::Clipping;
@@ -4521,7 +4530,7 @@ std::optional<LoadError> parse_skin_attachment(
             return error;
         }
 
-        auto geometry = std::make_shared<MeshGeometry>();
+        auto geometry = marrow::allocate_shared<MeshGeometry>();
         if (const auto error = parse_number_array(
                 document,
                 *vertices_value,
@@ -4888,20 +4897,80 @@ std::optional<LoadError> parse_skins(
 
         SkinData skin;
         skin.name = skin_name;
-        skin.slot_attachments.reserve(skin_value.as_object().size());
-        for (const auto& [slot_name, attachment_value] : skin_value.as_object()) {
-            if (is_skin_reserved_key(slot_name)) {
+        const Value* attachments_value = find_optional_member(skin_value, "attachments");
+        const Value* slot_attachments_source =
+            attachments_value != nullptr ? attachments_value : &skin_value;
+        const std::string slot_path_root =
+            attachments_value != nullptr ? path + ".attachments" : path;
+        if (attachments_value != nullptr) {
+            if (const auto error = json::require_type(
+                    document,
+                    *attachments_value,
+                    Value::Type::Object,
+                    path + ".attachments")) {
+                return error;
+            }
+        }
+
+        skin.slot_attachments.reserve(slot_attachments_source->as_object().size());
+        for (const auto& [slot_name, slot_value] : slot_attachments_source->as_object()) {
+            if (attachments_value == nullptr && is_skin_reserved_key(slot_name)) {
+                continue;
+            }
+
+            const std::string slot_path = slot_path_root + "." + slot_name;
+            if (attachments_value != nullptr) {
+                if (const auto error = json::require_type(
+                        document,
+                        slot_value,
+                        Value::Type::Object,
+                        slot_path)) {
+                    return error;
+                }
+
+                for (const auto& [attachment_name, attachment_value] : slot_value.as_object()) {
+                    SkinSlotData skin_slot;
+                    if (const auto error = parse_skin_attachment(
+                            document,
+                            attachment_value,
+                            bones,
+                            slots,
+                            slot_name,
+                            attachment_name,
+                            slot_path + "." + attachment_name,
+                            &skin_slot)) {
+                        return error;
+                    }
+
+                    const auto duplicate = std::find_if(
+                        skin.slot_attachments.begin(),
+                        skin.slot_attachments.end(),
+                        [&](const SkinSlotData& existing) {
+                            return existing.slot_index == skin_slot.slot_index &&
+                                existing.attachment.name == skin_slot.attachment.name;
+                        });
+                    if (duplicate != skin.slot_attachments.end()) {
+                        return validation_error(
+                            document,
+                            attachment_value.location(),
+                            slot_path + "." + attachment_name,
+                            "skin attachment names must be unique within a slot");
+                    }
+
+                    skin.slot_attachments.push_back(std::move(skin_slot));
+                }
                 continue;
             }
 
             SkinSlotData skin_slot;
             if (const auto error = parse_skin_attachment(
                     document,
-                    attachment_value,
+                    slot_value,
                     bones,
                     slots,
                     slot_name,
-                    path + "." + slot_name,
+                    std::nullopt,
+                    slot_path,
                     &skin_slot)) {
                 return error;
             }
@@ -4910,14 +4979,15 @@ std::optional<LoadError> parse_skins(
                 skin.slot_attachments.begin(),
                 skin.slot_attachments.end(),
                 [&](const SkinSlotData& existing) {
-                    return existing.attachment.name == skin_slot.attachment.name;
+                    return existing.slot_index == skin_slot.slot_index &&
+                        existing.attachment.name == skin_slot.attachment.name;
                 });
             if (duplicate != skin.slot_attachments.end()) {
                 return validation_error(
                     document,
-                    attachment_value.location(),
-                    path + "." + slot_name,
-                    "skin attachment names must be unique within a skin");
+                    slot_value.location(),
+                    slot_path,
+                    "skin attachment names must be unique within a slot");
             }
 
             skin.slot_attachments.push_back(std::move(skin_slot));
@@ -5643,7 +5713,7 @@ SkeletonDataResult load_skeleton_data(const json::Document& document) {
     const json::SourceLocation bones_location =
         bones_value != nullptr ? bones_value->location() : root.location();
     try {
-        result.skeleton_data = std::make_shared<SkeletonData>(
+        result.skeleton_data = marrow::allocate_shared<SkeletonData>(
             std::move(info),
             std::move(bones),
             std::move(ik_constraints),

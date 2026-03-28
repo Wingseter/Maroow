@@ -32,6 +32,23 @@ const AttachmentData* SkinData::find_attachment(std::size_t slot_index) const {
     return &it->attachment;
 }
 
+const AttachmentData* SkinData::find_attachment(
+    std::size_t slot_index,
+    std::string_view attachment_name) const {
+    const auto it = std::find_if(
+        slot_attachments.begin(),
+        slot_attachments.end(),
+        [&](const SkinSlotData& slot_attachment) {
+            return slot_attachment.slot_index == slot_index &&
+                slot_attachment.attachment.name == attachment_name;
+        });
+    if (it == slot_attachments.end()) {
+        return nullptr;
+    }
+
+    return &it->attachment;
+}
+
 const AttachmentData* SkinData::find_attachment(std::string_view attachment_name) const {
     const auto it = std::find_if(
         slot_attachments.begin(),
@@ -77,14 +94,33 @@ void Skeleton::apply_active_skin_attachments() {
             continue;
         }
 
-        for (const SkinSlotData& slot_attachment : data_->skins()[skin_index].slot_attachments) {
-            if (slot_attachment.slot_index >= slot_states_.size()) {
+        const SkinData& skin = data_->skins()[skin_index];
+        for (std::size_t slot_index = 0; slot_index < slot_states_.size(); ++slot_index) {
+            const AttachmentData* matching_attachment =
+                skin.find_attachment(slot_index, slot_states_[slot_index].attachment_name);
+            if (matching_attachment != nullptr) {
+                slot_states_[slot_index].attachment_skin_index = skin_index;
                 continue;
             }
 
-            slot_states_[slot_attachment.slot_index].attachment_name =
-                slot_attachment.attachment.name;
-            slot_states_[slot_attachment.slot_index].attachment_skin_index = skin_index;
+            const AttachmentData* single_attachment = nullptr;
+            for (const SkinSlotData& slot_attachment : skin.slot_attachments) {
+                if (slot_attachment.slot_index != slot_index) {
+                    continue;
+                }
+                if (single_attachment != nullptr) {
+                    single_attachment = nullptr;
+                    break;
+                }
+
+                single_attachment = &slot_attachment.attachment;
+            }
+            if (single_attachment == nullptr) {
+                continue;
+            }
+
+            slot_states_[slot_index].attachment_name = single_attachment->name;
+            slot_states_[slot_index].attachment_skin_index = skin_index;
         }
     }
 }
@@ -193,6 +229,20 @@ bool Skeleton::apply_slot_attachment_keyframe(
         return false;
     }
 
+    for (auto skin_it = active_skin_indices_.rbegin();
+         skin_it != active_skin_indices_.rend();
+         ++skin_it) {
+        const AttachmentData* attachment =
+            data_->find_attachment(*skin_it, slot_index, *attachment_name);
+        if (attachment == nullptr) {
+            continue;
+        }
+
+        slot_states_[slot_index].attachment_name = attachment->name;
+        slot_states_[slot_index].attachment_skin_index = *skin_it;
+        return true;
+    }
+
     std::optional<std::size_t> attachment_skin_index;
     const AttachmentData* attachment =
         data_->find_attachment_source(slot_index, *attachment_name, &attachment_skin_index);
@@ -217,6 +267,7 @@ bool Skeleton::apply_skin_indices(const std::vector<std::size_t>& skin_indices) 
 
     update_active_skin_scopes(skin_indices);
     apply_setup_attachments();
+    reset_update_throttle_state();
     return true;
 }
 
@@ -275,8 +326,11 @@ const AttachmentData* Skeleton::resolve_current_attachment(
 
     if (slot_state.attachment_skin_index.has_value()) {
         const AttachmentData* attachment =
-            data_->find_attachment(*slot_state.attachment_skin_index, slot_index);
-        if (attachment != nullptr && attachment->name == slot_state.attachment_name) {
+            data_->find_attachment(
+                *slot_state.attachment_skin_index,
+                slot_index,
+                slot_state.attachment_name);
+        if (attachment != nullptr) {
             return attachment;
         }
     }

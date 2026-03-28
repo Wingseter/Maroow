@@ -22,18 +22,40 @@ struct CubicBezierControlPoints {
 
 class Interpolation {
 public:
+    /// @brief Constructs a linear interpolation descriptor.
     Interpolation();
 
+    /// @brief Creates a linear interpolation descriptor.
+    /// @return A linear interpolation value.
     static Interpolation linear();
+    /// @brief Creates a stepped interpolation descriptor.
+    /// @return A stepped interpolation value.
     static Interpolation stepped();
+    /**
+     * @brief Creates a cubic-bezier interpolation descriptor.
+     * @param cx1 First control point x coordinate.
+     * @param cy1 First control point y coordinate.
+     * @param cx2 Second control point x coordinate.
+     * @param cy2 Second control point y coordinate.
+     * @return A cubic-bezier interpolation value.
+     */
     static Interpolation cubic_bezier(
         double cx1,
         double cy1,
         double cx2,
         double cy2);
 
+    /// @brief Returns the interpolation kind.
+    /// @return The active interpolation type.
     InterpolationKind kind() const;
+    /// @brief Returns the stored cubic-bezier control points.
+    /// @return The cubic-bezier payload.
     const CubicBezierControlPoints& cubic_bezier() const;
+    /**
+     * @brief Maps a normalized alpha through the interpolation curve.
+     * @param alpha Normalized interpolation alpha in `[0, 1]`.
+     * @return The transformed alpha.
+     */
     double transform(double alpha) const;
 
 private:
@@ -186,36 +208,98 @@ struct AnimationEvent {
     double balance{0.0};
 };
 
+/**
+ * @brief Interpolates two scalar values using a Marrow interpolation descriptor.
+ * @param from_value Start value.
+ * @param to_value End value.
+ * @param interpolation Interpolation descriptor to apply.
+ * @param alpha Normalized interpolation alpha in `[0, 1]`.
+ * @return The interpolated scalar value.
+ */
 double interpolate_value(
     double from_value,
     double to_value,
     const Interpolation& interpolation,
     double alpha);
 
+/**
+ * @brief Samples a rotate timeline at a specific time.
+ * @param timeline Rotate timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The sampled rotation in degrees, or `std::nullopt` when the timeline is empty.
+ */
 std::optional<double> sample_rotate_timeline(
     const BoneRotateTimeline& timeline,
     double time);
+/**
+ * @brief Samples a bone inherit timeline at a specific time.
+ * @param timeline Inherit timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The active inherit keyframe, or `nullptr` when the timeline is empty.
+ */
 const InheritKeyframe* sample_inherit_timeline(
     const BoneInheritTimeline& timeline,
     double time);
+/**
+ * @brief Samples a translate timeline at a specific time.
+ * @param timeline Translate timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The sampled translation, or `std::nullopt` when the timeline is empty.
+ */
 std::optional<VectorSample> sample_translate_timeline(
     const BoneTranslateTimeline& timeline,
     double time);
+/**
+ * @brief Samples a scale timeline at a specific time.
+ * @param timeline Scale timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The sampled scale, or `std::nullopt` when the timeline is empty.
+ */
 std::optional<VectorSample> sample_scale_timeline(
     const BoneScaleTimeline& timeline,
     double time);
+/**
+ * @brief Samples a shear timeline at a specific time.
+ * @param timeline Shear timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The sampled shear, or `std::nullopt` when the timeline is empty.
+ */
 std::optional<VectorSample> sample_shear_timeline(
     const BoneShearTimeline& timeline,
     double time);
+/**
+ * @brief Samples a slot attachment timeline at a specific time.
+ * @param timeline Attachment timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The active attachment keyframe, or `nullptr` when the timeline is empty.
+ */
 const AttachmentKeyframe* sample_attachment_timeline(
     const SlotAttachmentTimeline& timeline,
     double time);
+/**
+ * @brief Samples a slot color timeline at a specific time.
+ * @param timeline Color timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The sampled slot color, or `std::nullopt` when the timeline is empty.
+ */
 std::optional<SlotColor> sample_color_timeline(
     const SlotColorTimeline& timeline,
     double time);
+/**
+ * @brief Samples a mesh deform timeline at a specific time.
+ * @param timeline Deform timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The sampled vertex offsets, or `std::nullopt` when the timeline is empty.
+ */
 std::optional<std::vector<double>> sample_deform_timeline(
     const MeshDeformTimeline& timeline,
     double time);
+/**
+ * @brief Samples a draw-order timeline at a specific time.
+ * @param timeline Draw-order timeline to sample.
+ * @param time Sample time in seconds.
+ * @return The active draw-order keyframe, or `nullptr` when the timeline is empty.
+ */
 const DrawOrderKeyframe* sample_draw_order_timeline(
     const DrawOrderTimeline& timeline,
     double time);
