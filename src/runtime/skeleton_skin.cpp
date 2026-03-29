@@ -126,6 +126,10 @@ void Skeleton::apply_active_skin_attachments() {
 }
 
 void Skeleton::update_active_skin_scopes(const std::vector<std::size_t>& skin_indices) {
+    if (++constraint_scope_revision_ == 0U) {
+        constraint_scope_revision_ = 1U;
+    }
+
     active_skin_indices_.clear();
     if (const std::optional<std::size_t> default_skin_index = data_->default_skin_index();
         default_skin_index.has_value()) {

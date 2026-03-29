@@ -93,6 +93,12 @@ std::optional<std::string> append_dynamic_mesh_attachment(
     const runtime::AtlasData& atlas,
     const std::vector<runtime::BoneWorldTransform>& bone_palette,
     const std::vector<ActiveClipState>& active_clips);
+void apply_region_mask_geometry(
+    RegionAttachmentDrawCommand* command,
+    const std::vector<ActiveClipState>& active_clips);
+std::optional<std::string> evaluate_dynamic_mesh_bounds(
+    DynamicMeshDrawCommand* attachment,
+    const std::vector<runtime::BoneWorldTransform>& bone_palette);
 
 TextureImage fallback_white_texture() {
     TextureImage image;
@@ -718,14 +724,10 @@ SceneBounds attachment_bounds(const RegionAttachmentDrawCommand& attachment) {
 
 SceneBounds attachment_bounds(const DynamicMeshDrawCommand& attachment) {
     SceneBounds bounds;
-    bounds.min_x = bounds.max_x = attachment.masked_vertices.front().position.x;
-    bounds.min_y = bounds.max_y = attachment.masked_vertices.front().position.y;
-    for (const SkinnedMeshVertex& vertex : attachment.masked_vertices) {
-        bounds.min_x = std::min(bounds.min_x, vertex.position.x);
-        bounds.min_y = std::min(bounds.min_y, vertex.position.y);
-        bounds.max_x = std::max(bounds.max_x, vertex.position.x);
-        bounds.max_y = std::max(bounds.max_y, vertex.position.y);
-    }
+    bounds.min_x = attachment.bounds_min.x;
+    bounds.min_y = attachment.bounds_min.y;
+    bounds.max_x = attachment.bounds_max.x;
+    bounds.max_y = attachment.bounds_max.y;
     return bounds;
 }
 
@@ -738,7 +740,7 @@ SceneBounds scene_bounds(const PreparedScene& scene) {
             [&](const auto& attachment) {
                 using Attachment = std::decay_t<decltype(attachment)>;
                 if constexpr (std::is_same_v<Attachment, DynamicMeshDrawCommand>) {
-                    if (attachment.masked_vertices.empty()) {
+                    if (!attachment.has_bounds) {
                         return;
                     }
                 }
@@ -902,6 +904,7 @@ RenderCommandVertex rigid_stream_vertex(
 
 RenderCommandVertex weighted_stream_vertex(
     const GpuSkinningVertexPayload& payload,
+    const RenderPoint* deform_offset,
     const runtime::SlotColor& color,
     const std::optional<runtime::SlotColor>& dark_color) {
     RenderCommandVertex vertex{};
@@ -909,10 +912,12 @@ RenderCommandVertex weighted_stream_vertex(
     vertex.uv[1] = static_cast<float>(payload.uv.y);
     for (std::size_t influence_index = 0; influence_index < payload.influence_count;
          ++influence_index) {
+        const double offset_x = deform_offset != nullptr ? deform_offset->x : 0.0;
+        const double offset_y = deform_offset != nullptr ? deform_offset->y : 0.0;
         vertex.local_positions[influence_index][0] =
-            static_cast<float>(payload.bone_local_positions[influence_index].x);
+            static_cast<float>(payload.bone_local_positions[influence_index].x + offset_x);
         vertex.local_positions[influence_index][1] =
-            static_cast<float>(payload.bone_local_positions[influence_index].y);
+            static_cast<float>(payload.bone_local_positions[influence_index].y + offset_y);
         vertex.bone_indices[influence_index] =
             static_cast<float>(payload.bone_indices[influence_index]);
         vertex.bone_weights[influence_index] =
@@ -1038,7 +1043,14 @@ std::optional<std::string> append_dynamic_mesh_stream_geometry(
     }
 
     vertices_out->reserve(vertices_out->size() + attachment.vertex_payloads.size());
-    for (const GpuSkinningVertexPayload& payload : attachment.vertex_payloads) {
+    if (!attachment.deform_offsets.empty() &&
+        attachment.deform_offsets.size() != attachment.vertex_payloads.size()) {
+        return "attachment '" + attachment.attachment_name +
+            "' deform offset payload did not match the weighted vertex count";
+    }
+    for (std::size_t vertex_index = 0; vertex_index < attachment.vertex_payloads.size();
+         ++vertex_index) {
+        const GpuSkinningVertexPayload& payload = attachment.vertex_payloads[vertex_index];
         for (std::size_t influence_index = 0; influence_index < payload.influence_count;
              ++influence_index) {
             if (payload.bone_indices[influence_index] >= bone_count) {
@@ -1047,7 +1059,13 @@ std::optional<std::string> append_dynamic_mesh_stream_geometry(
                     std::to_string(payload.bone_indices[influence_index]);
             }
         }
-        vertices_out->push_back(weighted_stream_vertex(payload, attachment.color, attachment.dark_color));
+        const RenderPoint* deform_offset =
+            attachment.deform_offsets.empty() ? nullptr : &attachment.deform_offsets[vertex_index];
+        vertices_out->push_back(weighted_stream_vertex(
+            payload,
+            deform_offset,
+            attachment.color,
+            attachment.dark_color));
     }
     indices_out->reserve(indices_out->size() + attachment.indices.size());
     for (const std::size_t index : attachment.indices) {
@@ -1535,6 +1553,7 @@ std::optional<std::string> build_slot_record(
         return "Prepared scene cache slot-record output must not be null.";
     }
 
+    PreparedSceneCache::SlotRecord previous_record = std::move(*record_out);
     *record_out = {};
     const auto& slots = skeleton.data()->slots();
     const auto& slot_states = skeleton.slot_states();
@@ -1600,27 +1619,77 @@ std::optional<std::string> build_slot_record(
     }
 
     if (attachment->mesh_geometry != nullptr) {
-        PreparedScene temporary_scene;
-        temporary_scene.atlas_image = atlas.info().image;
-        if (const std::optional<std::string> error = append_dynamic_mesh_attachment(
-                &temporary_scene,
-                *attachment,
-                slot,
-                slot_state,
-                0U,
-                slot_index,
-                skeleton.current_mesh_vertex_offsets(slot_index),
-                *region,
-                atlas,
-                bone_world_transforms,
-                {})) {
-            return error;
+        DynamicMeshDrawCommand* reusable_mesh = nullptr;
+        if (previous_record.draw_command.has_value()) {
+            reusable_mesh =
+                std::get_if<DynamicMeshDrawCommand>(&(*previous_record.draw_command));
         }
-        if (temporary_scene.draw_commands.size() != 1U) {
-            return slot_error(slot_index, "failed to build a cached mesh draw command");
-        }
+        const bool reuse_static_payload =
+            reusable_mesh != nullptr &&
+            reusable_mesh->mesh_geometry == attachment->mesh_geometry.get() &&
+            reusable_mesh->attachment_name == attachment->name &&
+            reusable_mesh->atlas_region_name == region->name &&
+            reusable_mesh->texture_name == atlas.info().image;
 
-        record_out->draw_command = std::move(temporary_scene.draw_commands.front());
+        if (!reuse_static_payload) {
+            PreparedScene temporary_scene;
+            temporary_scene.atlas_image = atlas.info().image;
+            if (const std::optional<std::string> error = append_dynamic_mesh_attachment(
+                    &temporary_scene,
+                    *attachment,
+                    slot,
+                    slot_state,
+                    0U,
+                    slot_index,
+                    skeleton.current_mesh_vertex_offsets(slot_index),
+                    *region,
+                    atlas,
+                    bone_world_transforms,
+                    {})) {
+                return error;
+            }
+            if (temporary_scene.draw_commands.size() != 1U) {
+                return slot_error(slot_index, "failed to build a cached mesh draw command");
+            }
+
+            record_out->draw_command = std::move(temporary_scene.draw_commands.front());
+        } else {
+            reusable_mesh->slot_name = slot.name;
+            reusable_mesh->attachment_name = attachment->name;
+            reusable_mesh->atlas_region_name = region->name;
+            reusable_mesh->texture_name = atlas.info().image;
+            reusable_mesh->slot_index = slot_index;
+            reusable_mesh->draw_order_index = 0U;
+            reusable_mesh->blend_mode = slot.blend_mode;
+            reusable_mesh->color = slot_state.color;
+            reusable_mesh->dark_color = slot_state.dark_color;
+            reusable_mesh->clip_attachment_name.reset();
+            reusable_mesh->masked_vertices.clear();
+            reusable_mesh->masked_indices.clear();
+
+            const std::vector<double>* vertex_offsets =
+                skeleton.current_mesh_vertex_offsets(slot_index);
+            reusable_mesh->deform_offsets.clear();
+            if (vertex_offsets != nullptr) {
+                reusable_mesh->deform_offsets.reserve(reusable_mesh->vertex_payloads.size());
+                for (std::size_t vertex_index = 0;
+                     vertex_index < reusable_mesh->vertex_payloads.size();
+                     ++vertex_index) {
+                    reusable_mesh->deform_offsets.push_back({
+                        (*vertex_offsets)[vertex_index * 2],
+                        (*vertex_offsets)[(vertex_index * 2) + 1]});
+                }
+                reusable_mesh->deform_buffer_usage = MeshBufferUsage::Dynamic;
+            } else {
+                reusable_mesh->deform_buffer_usage.reset();
+            }
+            if (const std::optional<std::string> error =
+                    evaluate_dynamic_mesh_bounds(reusable_mesh, bone_world_transforms)) {
+                return slot_error(slot_index, *error);
+            }
+
+            record_out->draw_command = std::move(previous_record.draw_command);
+        }
         if (auto* mesh =
                 std::get_if<DynamicMeshDrawCommand>(&(*record_out->draw_command))) {
             mesh->draw_order_index = 0U;
@@ -1713,6 +1782,7 @@ void rebuild_cached_scene(
             clip_state.clip_attachment_index = clip_attachment_index;
             clip_state.attachment_name = scene.clip_attachments.back().attachment_name;
             clip_state.end_slot_index = scene.clip_attachments.back().end_slot_index;
+            clip_state.polygon = scene.clip_attachments.back().polygon;
             active_clips.push_back(std::move(clip_state));
             clear_clips_if_needed(slot_index);
             continue;
@@ -1726,11 +1796,23 @@ void rebuild_cached_scene(
         PreparedDrawCommand command = *record.draw_command;
         std::visit(
             [&](auto& prepared_attachment) {
+                using Attachment = std::decay_t<decltype(prepared_attachment)>;
                 prepared_attachment.draw_order_index = draw_index;
                 if (!active_clips.empty()) {
                     prepared_attachment.clip_attachment_name = active_clips.back().attachment_name;
                 } else {
                     prepared_attachment.clip_attachment_name.reset();
+                }
+                if constexpr (std::is_same_v<Attachment, RegionAttachmentDrawCommand>) {
+                    if (!active_clips.empty()) {
+                        apply_region_mask_geometry(&prepared_attachment, active_clips);
+                    } else {
+                        prepared_attachment.masked_vertices.clear();
+                        prepared_attachment.masked_indices.clear();
+                    }
+                } else {
+                    prepared_attachment.masked_vertices.clear();
+                    prepared_attachment.masked_indices.clear();
                 }
             },
             command);
@@ -2134,15 +2216,111 @@ std::vector<std::size_t> triangle_fan_indices(const std::vector<Vertex>& vertice
     return indices;
 }
 
+const RenderPoint* dynamic_mesh_deform_offset(
+    const DynamicMeshDrawCommand& attachment,
+    std::size_t vertex_index) {
+    if (attachment.deform_offsets.empty()) {
+        return nullptr;
+    }
+    if (attachment.deform_offsets.size() != attachment.vertex_payloads.size() ||
+        vertex_index >= attachment.deform_offsets.size()) {
+        return nullptr;
+    }
+    return &attachment.deform_offsets[vertex_index];
+}
+
+RenderPoint influenced_local_position(
+    const GpuSkinningVertexPayload& payload,
+    const RenderPoint* deform_offset,
+    std::size_t influence_index) {
+    RenderPoint position = payload.bone_local_positions[influence_index];
+    if (deform_offset != nullptr) {
+        position.x += deform_offset->x;
+        position.y += deform_offset->y;
+    }
+    return position;
+}
+
+std::optional<std::string> evaluate_dynamic_mesh_bounds(
+    DynamicMeshDrawCommand* attachment,
+    const std::vector<runtime::BoneWorldTransform>& bone_palette) {
+    if (attachment == nullptr) {
+        return "Dynamic mesh bounds output must not be null.";
+    }
+    if (!attachment->deform_offsets.empty() &&
+        attachment->deform_offsets.size() != attachment->vertex_payloads.size()) {
+        return "attachment '" + attachment->attachment_name +
+            "' deform offset payload did not match the weighted vertex count";
+    }
+    if (attachment->vertex_payloads.empty()) {
+        attachment->has_bounds = false;
+        attachment->bounds_min = {};
+        attachment->bounds_max = {};
+        return std::nullopt;
+    }
+
+    RenderPoint min_point{};
+    RenderPoint max_point{};
+    bool initialized = false;
+    for (std::size_t vertex_index = 0; vertex_index < attachment->vertex_payloads.size();
+         ++vertex_index) {
+        const GpuSkinningVertexPayload& payload = attachment->vertex_payloads[vertex_index];
+        const RenderPoint* deform_offset = dynamic_mesh_deform_offset(*attachment, vertex_index);
+        RenderPoint world_position{};
+
+        for (std::size_t influence_index = 0; influence_index < payload.influence_count;
+             ++influence_index) {
+            const std::size_t bone_index = payload.bone_indices[influence_index];
+            if (bone_index >= bone_palette.size()) {
+                return "attachment '" + attachment->attachment_name +
+                    "' vertex " + std::to_string(vertex_index) +
+                    " influence " + std::to_string(influence_index) +
+                    " references invalid bone index " + std::to_string(bone_index) +
+                    " (bone palette=" + std::to_string(bone_palette.size()) + ")";
+            }
+
+            const RenderPoint transformed = transform_point(
+                bone_palette[bone_index],
+                influenced_local_position(payload, deform_offset, influence_index));
+            world_position.x += transformed.x * payload.bone_weights[influence_index];
+            world_position.y += transformed.y * payload.bone_weights[influence_index];
+        }
+
+        if (!initialized) {
+            min_point = max_point = world_position;
+            initialized = true;
+            continue;
+        }
+
+        min_point.x = std::min(min_point.x, world_position.x);
+        min_point.y = std::min(min_point.y, world_position.y);
+        max_point.x = std::max(max_point.x, world_position.x);
+        max_point.y = std::max(max_point.y, world_position.y);
+    }
+
+    attachment->bounds_min = min_point;
+    attachment->bounds_max = max_point;
+    attachment->has_bounds = initialized;
+    return std::nullopt;
+}
+
 GpuSkinningEvaluationResult evaluate_skinned_vertices(
     const DynamicMeshDrawCommand& attachment,
     const std::vector<runtime::BoneWorldTransform>& bone_palette) {
     GpuSkinningEvaluationResult result;
+    if (!attachment.deform_offsets.empty() &&
+        attachment.deform_offsets.size() != attachment.vertex_payloads.size()) {
+        result.error_message =
+            "attachment '" + attachment.attachment_name +
+            "' deform offset payload did not match the weighted vertex count";
+        return result;
+    }
     result.vertices.reserve(attachment.vertex_payloads.size());
 
     for (std::size_t vertex_index = 0; vertex_index < attachment.vertex_payloads.size();
          ++vertex_index) {
         const GpuSkinningVertexPayload& payload = attachment.vertex_payloads[vertex_index];
+        const RenderPoint* deform_offset = dynamic_mesh_deform_offset(attachment, vertex_index);
         SkinnedMeshVertex vertex;
         vertex.uv = payload.uv;
 
@@ -2162,7 +2340,7 @@ GpuSkinningEvaluationResult evaluate_skinned_vertices(
 
             const RenderPoint transformed = transform_point(
                 bone_palette[bone_index],
-                payload.bone_local_positions[influence_index]);
+                influenced_local_position(payload, deform_offset, influence_index));
             vertex.position.x += transformed.x * payload.bone_weights[influence_index];
             vertex.position.y += transformed.y * payload.bone_weights[influence_index];
         }
@@ -2205,73 +2383,6 @@ void apply_region_mask_geometry(
     command->masked_indices = triangle_fan_indices(command->masked_vertices);
 }
 
-std::optional<std::string> apply_dynamic_mesh_mask_geometry(
-    DynamicMeshDrawCommand* command,
-    const std::vector<runtime::BoneWorldTransform>& bone_palette,
-    const std::vector<ActiveClipState>& active_clips) {
-    GpuSkinningEvaluationResult skinned = evaluate_skinned_vertices(*command, bone_palette);
-    if (skinned.error_message.has_value()) {
-        return skinned.error_message;
-    }
-
-    command->masked_vertices = std::move(skinned.vertices);
-    command->masked_indices = command->indices;
-
-    if (active_clips.empty()) {
-        return std::nullopt;
-    }
-
-    command->clip_attachment_name = active_clips.back().attachment_name;
-    for (const ActiveClipState& active_clip : active_clips) {
-        if (!polygon_is_convex(active_clip.polygon)) {
-            return std::nullopt;
-        }
-    }
-    std::vector<SkinnedMeshVertex> clipped_vertices;
-    std::vector<std::size_t> clipped_indices;
-    for (std::size_t index = 0; index + 2 < command->indices.size(); index += 3) {
-        if (command->indices[index] >= command->masked_vertices.size() ||
-            command->indices[index + 1] >= command->masked_vertices.size() ||
-            command->indices[index + 2] >= command->masked_vertices.size()) {
-            continue;
-        }
-
-        const std::vector<ClipVertex> subject_triangle{
-            ClipVertex{
-                command->masked_vertices[command->indices[index]].position,
-                command->masked_vertices[command->indices[index]].uv},
-            ClipVertex{
-                command->masked_vertices[command->indices[index + 1]].position,
-                command->masked_vertices[command->indices[index + 1]].uv},
-            ClipVertex{
-                command->masked_vertices[command->indices[index + 2]].position,
-                command->masked_vertices[command->indices[index + 2]].uv},
-        };
-        std::vector<ClipVertex> clipped_triangle = subject_triangle;
-        for (const ActiveClipState& active_clip : active_clips) {
-            clipped_triangle = clip_polygon_against_convex_polygon(
-                clipped_triangle,
-                active_clip.polygon);
-        }
-        if (clipped_triangle.size() < 3) {
-            continue;
-        }
-
-        const std::size_t base_index = clipped_vertices.size();
-        for (const ClipVertex& vertex : clipped_triangle) {
-            clipped_vertices.push_back({vertex.position, vertex.uv});
-        }
-        const std::vector<std::size_t> fan = triangle_fan_indices(clipped_triangle);
-        for (const std::size_t clipped_index : fan) {
-            clipped_indices.push_back(base_index + clipped_index);
-        }
-    }
-
-    command->masked_vertices = std::move(clipped_vertices);
-    command->masked_indices = std::move(clipped_indices);
-    return std::nullopt;
-}
-
 std::optional<std::string> append_dynamic_mesh_attachment(
     PreparedScene* scene,
     const runtime::AttachmentData& attachment,
@@ -2312,6 +2423,7 @@ std::optional<std::string> append_dynamic_mesh_attachment(
     command.attachment_name = attachment.name;
     command.atlas_region_name = region.name;
     command.texture_name = scene->atlas_image;
+    command.mesh_geometry = &geometry;
     command.slot_index = slot_index;
     command.draw_order_index = draw_order_index;
     command.blend_mode = slot.blend_mode;
@@ -2319,6 +2431,12 @@ std::optional<std::string> append_dynamic_mesh_attachment(
     command.dark_color = slot_state.dark_color;
     command.indices = geometry.triangles;
     command.vertex_payloads.reserve(vertex_count);
+    if (vertex_offsets != nullptr) {
+        command.deform_offsets.reserve(vertex_count);
+        command.deform_buffer_usage = MeshBufferUsage::Dynamic;
+    } else {
+        command.deform_buffer_usage.reset();
+    }
 
     for (const std::size_t triangle_index : command.indices) {
         if (triangle_index >= vertex_count) {
@@ -2361,23 +2479,29 @@ std::optional<std::string> append_dynamic_mesh_attachment(
                 return slot_error(slot_index, "mesh influence references a missing bone palette entry");
             }
 
-            const double offset_x = vertex_offsets != nullptr ? (*vertex_offsets)[vertex_index * 2] : 0.0;
-            const double offset_y =
-                vertex_offsets != nullptr ? (*vertex_offsets)[(vertex_index * 2) + 1] : 0.0;
-            payload.bone_local_positions[influence_index] = {
-                influence.x + offset_x,
-                influence.y + offset_y};
+            payload.bone_local_positions[influence_index] = {influence.x, influence.y};
             payload.bone_indices[influence_index] = influence.bone_index;
             payload.bone_weights[influence_index] = influence.weight;
         }
 
+        if (vertex_offsets != nullptr) {
+            command.deform_offsets.push_back({
+                (*vertex_offsets)[vertex_index * 2],
+                (*vertex_offsets)[(vertex_index * 2) + 1]});
+        }
         command.vertex_payloads.push_back(std::move(payload));
     }
 
     if (const std::optional<std::string> error =
-            apply_dynamic_mesh_mask_geometry(&command, bone_palette, active_clips)) {
+            evaluate_dynamic_mesh_bounds(&command, bone_palette)) {
         return slot_error(slot_index, *error);
     }
+    command.masked_vertices.clear();
+    command.masked_indices.clear();
+    command.clip_attachment_name =
+        active_clips.empty()
+            ? std::nullopt
+            : std::optional<std::string>{active_clips.back().attachment_name};
 
     scene->draw_commands.push_back(std::move(command));
     return std::nullopt;

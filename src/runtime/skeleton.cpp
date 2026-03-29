@@ -91,6 +91,10 @@ SkeletonData::SkeletonData(
         &slots_,
         &animations_,
         &skins_);
+    for (AnimationData& animation : animations_) {
+        animation.prune_constant_timelines(bones_, slots_);
+        animation.rebuild_bone_timeline_index(bones_.size());
+    }
     bone_evaluation_order_ = detail::build_bone_evaluation_order(bones_);
     children_map_ = build_children_map(bones_);
     bone_tip_local_vectors_ = build_bone_tip_local_vectors(bones_, children_map_);
@@ -336,6 +340,72 @@ void Skeleton::set_update_interval(std::size_t interval) {
 
 std::size_t Skeleton::update_interval() const {
     return update_interval_;
+}
+
+SamplingContext& Skeleton::standalone_sampling_context(
+    const AnimationData& animation,
+    double sample_time) {
+    animation.prepare_sampling_context(&standalone_sampling_context_, sample_time);
+    return standalone_sampling_context_;
+}
+
+void Skeleton::begin_track_sampling_frame(std::size_t track_count) {
+    ++sampling_generation_;
+    if (track_sampling_states_.size() < track_count) {
+        track_sampling_states_.resize(track_count);
+    }
+}
+
+SamplingContext& Skeleton::track_sampling_context(
+    std::size_t track_index,
+    const void* owner,
+    const AnimationData& animation,
+    double sample_time) {
+    if (track_index >= track_sampling_states_.size()) {
+        track_sampling_states_.resize(track_index + 1);
+    }
+
+    auto& entry_contexts = track_sampling_states_[track_index].entry_contexts;
+    const auto context_it = std::find_if(
+        entry_contexts.begin(),
+        entry_contexts.end(),
+        [&](const TrackSamplingState::EntrySamplingContext& entry_context) {
+            return entry_context.owner == owner;
+        });
+    if (context_it == entry_contexts.end()) {
+        entry_contexts.push_back(TrackSamplingState::EntrySamplingContext{});
+        entry_contexts.back().owner = owner;
+        entry_contexts.back().generation = sampling_generation_;
+        animation.prepare_sampling_context(&entry_contexts.back().sampling, sample_time);
+        return entry_contexts.back().sampling;
+    }
+
+    context_it->generation = sampling_generation_;
+    animation.prepare_sampling_context(&context_it->sampling, sample_time);
+    return context_it->sampling;
+}
+
+void Skeleton::end_track_sampling_frame(std::size_t active_track_count) {
+    if (track_sampling_states_.size() > active_track_count) {
+        for (std::size_t track_index = active_track_count; track_index < track_sampling_states_.size();
+             ++track_index) {
+            track_sampling_states_[track_index].entry_contexts.clear();
+        }
+    }
+
+    for (std::size_t track_index = 0;
+         track_index < std::min(track_sampling_states_.size(), active_track_count);
+         ++track_index) {
+        auto& entry_contexts = track_sampling_states_[track_index].entry_contexts;
+        entry_contexts.erase(
+            std::remove_if(
+                entry_contexts.begin(),
+                entry_contexts.end(),
+                [&](const TrackSamplingState::EntrySamplingContext& entry_context) {
+                    return entry_context.generation != sampling_generation_;
+                }),
+            entry_contexts.end());
+    }
 }
 
 std::size_t Skeleton::constraint_allocation_count() const {

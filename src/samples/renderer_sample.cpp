@@ -1309,7 +1309,8 @@ int main(int argc, char** argv) {
         draw_front->atlas_region_name != "warrior_body" ||
         draw_front->slot_index != *body_slot_index ||
         draw_front->blend_mode != marrow::runtime::BlendMode::Screen ||
-        draw_front->vertex_buffer_usage != marrow::renderer::MeshBufferUsage::Dynamic ||
+        draw_front->vertex_buffer_usage != marrow::renderer::MeshBufferUsage::Static ||
+        draw_front->deform_buffer_usage != marrow::renderer::MeshBufferUsage::Dynamic ||
         draw_front->shader_path != marrow::renderer::MeshShaderPath::GpuSkinning ||
         animated_body_attachment == nullptr ||
         !animated_body_attachment->linked_mesh.has_value() ||
