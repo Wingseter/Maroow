@@ -3,9 +3,15 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace marrow::runtime {
+
+struct AnimationData;
+struct CubicBezierLookupTable;
+
+using AnimationScalar = float;
 
 enum class InterpolationKind {
     Linear,
@@ -14,10 +20,21 @@ enum class InterpolationKind {
 };
 
 struct CubicBezierControlPoints {
-    double cx1{0.0};
-    double cy1{0.0};
-    double cx2{1.0};
-    double cy2{1.0};
+    constexpr CubicBezierControlPoints() = default;
+    constexpr CubicBezierControlPoints(
+        double cx1_in,
+        double cy1_in,
+        double cx2_in,
+        double cy2_in)
+        : cx1(static_cast<AnimationScalar>(cx1_in)),
+          cy1(static_cast<AnimationScalar>(cy1_in)),
+          cx2(static_cast<AnimationScalar>(cx2_in)),
+          cy2(static_cast<AnimationScalar>(cy2_in)) {}
+
+    AnimationScalar cx1{0.0f};
+    AnimationScalar cy1{0.0f};
+    AnimationScalar cx2{1.0f};
+    AnimationScalar cy2{1.0f};
 };
 
 class Interpolation {
@@ -59,22 +76,44 @@ public:
     double transform(double alpha) const;
 
 private:
-    Interpolation(InterpolationKind kind, CubicBezierControlPoints cubic_bezier);
+    AnimationScalar transform_scalar(AnimationScalar alpha) const;
+    Interpolation(
+        InterpolationKind kind,
+        CubicBezierControlPoints cubic_bezier,
+        const CubicBezierLookupTable* cubic_bezier_lut);
 
     InterpolationKind kind_{InterpolationKind::Linear};
     CubicBezierControlPoints cubic_bezier_{};
+    const CubicBezierLookupTable* cubic_bezier_lut_{nullptr};
 };
 
 struct RotateKeyframe {
-    double time{0.0};
-    double angle{0.0};
+    RotateKeyframe() = default;
+    RotateKeyframe(double time_in, double angle_in, Interpolation interpolation_in = {})
+        : time(static_cast<AnimationScalar>(time_in)),
+          angle(static_cast<AnimationScalar>(angle_in)),
+          interpolation(std::move(interpolation_in)) {}
+
+    AnimationScalar time{0.0f};
+    AnimationScalar angle{0.0f};
     Interpolation interpolation{};
 };
 
 struct VectorKeyframe {
-    double time{0.0};
-    double x{0.0};
-    double y{0.0};
+    VectorKeyframe() = default;
+    VectorKeyframe(
+        double time_in,
+        double x_in,
+        double y_in,
+        Interpolation interpolation_in = {})
+        : time(static_cast<AnimationScalar>(time_in)),
+          x(static_cast<AnimationScalar>(x_in)),
+          y(static_cast<AnimationScalar>(y_in)),
+          interpolation(std::move(interpolation_in)) {}
+
+    AnimationScalar time{0.0f};
+    AnimationScalar x{0.0f};
+    AnimationScalar y{0.0f};
     Interpolation interpolation{};
 };
 
@@ -92,37 +131,54 @@ enum class BoneInherit {
 };
 
 struct SlotColor {
-    double r{1.0};
-    double g{1.0};
-    double b{1.0};
-    double a{1.0};
+    constexpr SlotColor() = default;
+    constexpr SlotColor(double r_in, double g_in, double b_in, double a_in)
+        : r(static_cast<AnimationScalar>(r_in)),
+          g(static_cast<AnimationScalar>(g_in)),
+          b(static_cast<AnimationScalar>(b_in)),
+          a(static_cast<AnimationScalar>(a_in)) {}
+
+    AnimationScalar r{1.0f};
+    AnimationScalar g{1.0f};
+    AnimationScalar b{1.0f};
+    AnimationScalar a{1.0f};
 };
 
 struct ColorKeyframe {
-    double time{0.0};
+    AnimationScalar time{0.0f};
     SlotColor color{};
     Interpolation interpolation{};
 };
 
 struct AttachmentKeyframe {
-    double time{0.0};
+    AttachmentKeyframe() = default;
+    AttachmentKeyframe(double time_in, std::optional<std::string> attachment_name_in)
+        : time(static_cast<AnimationScalar>(time_in)),
+          attachment_name(std::move(attachment_name_in)) {}
+
+    AnimationScalar time{0.0f};
     std::optional<std::string> attachment_name;
 };
 
 struct DeformKeyframe {
-    double time{0.0};
-    std::vector<double> vertex_offsets;
+    AnimationScalar time{0.0f};
+    std::vector<AnimationScalar> vertex_offsets;
     Interpolation interpolation{};
 };
 
 struct InheritKeyframe {
-    double time{0.0};
+    InheritKeyframe() = default;
+    InheritKeyframe(double time_in, BoneInherit inherit_in)
+        : time(static_cast<AnimationScalar>(time_in)),
+          inherit(inherit_in) {}
+
+    AnimationScalar time{0.0f};
     BoneInherit inherit{BoneInherit::Normal};
 };
 
 struct BoneRotateTimeline {
     std::size_t bone_index{0};
-    double setup_rotation{0.0};
+    AnimationScalar setup_rotation{0.0f};
     std::vector<RotateKeyframe> keyframes;
 };
 
@@ -163,7 +219,7 @@ struct MeshDeformTimeline {
 };
 
 struct DrawOrderKeyframe {
-    double time{0.0};
+    AnimationScalar time{0.0f};
     std::vector<std::size_t> slot_indices;
 };
 
@@ -182,14 +238,14 @@ struct EventDefinition {
 };
 
 struct EventKeyframe {
-    double time{0.0};
+    AnimationScalar time{0.0f};
     std::size_t event_index{0};
     std::optional<int> int_value;
-    std::optional<double> float_value;
+    std::optional<AnimationScalar> float_value;
     std::optional<std::string> string_value;
     std::optional<std::string> audio_path;
-    std::optional<double> volume;
-    std::optional<double> balance;
+    std::optional<AnimationScalar> volume;
+    std::optional<AnimationScalar> balance;
 };
 
 struct EventTimeline {
@@ -206,6 +262,22 @@ struct AnimationEvent {
     std::optional<std::string> audio_path;
     double volume{1.0};
     double balance{0.0};
+};
+
+struct SamplingContext {
+    const AnimationData* animation{nullptr};
+    double last_sample_time{0.0};
+    std::vector<std::size_t> rotate_last_keyframe_indices;
+    std::vector<std::size_t> inherit_last_keyframe_indices;
+    std::vector<std::size_t> translate_last_keyframe_indices;
+    std::vector<std::size_t> scale_last_keyframe_indices;
+    std::vector<std::size_t> shear_last_keyframe_indices;
+    std::vector<std::size_t> attachment_last_keyframe_indices;
+    std::vector<std::size_t> color_last_keyframe_indices;
+    std::vector<std::size_t> deform_last_keyframe_indices;
+    std::size_t draw_order_last_keyframe_index{0};
+
+    void reset();
 };
 
 /**
@@ -226,82 +298,100 @@ double interpolate_value(
  * @brief Samples a rotate timeline at a specific time.
  * @param timeline Rotate timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The sampled rotation in degrees, or `std::nullopt` when the timeline is empty.
  */
 std::optional<double> sample_rotate_timeline(
     const BoneRotateTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a bone inherit timeline at a specific time.
  * @param timeline Inherit timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The active inherit keyframe, or `nullptr` when the timeline is empty.
  */
 const InheritKeyframe* sample_inherit_timeline(
     const BoneInheritTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a translate timeline at a specific time.
  * @param timeline Translate timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The sampled translation, or `std::nullopt` when the timeline is empty.
  */
 std::optional<VectorSample> sample_translate_timeline(
     const BoneTranslateTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a scale timeline at a specific time.
  * @param timeline Scale timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The sampled scale, or `std::nullopt` when the timeline is empty.
  */
 std::optional<VectorSample> sample_scale_timeline(
     const BoneScaleTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a shear timeline at a specific time.
  * @param timeline Shear timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The sampled shear, or `std::nullopt` when the timeline is empty.
  */
 std::optional<VectorSample> sample_shear_timeline(
     const BoneShearTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a slot attachment timeline at a specific time.
  * @param timeline Attachment timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The active attachment keyframe, or `nullptr` when the timeline is empty.
  */
 const AttachmentKeyframe* sample_attachment_timeline(
     const SlotAttachmentTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a slot color timeline at a specific time.
  * @param timeline Color timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The sampled slot color, or `std::nullopt` when the timeline is empty.
  */
 std::optional<SlotColor> sample_color_timeline(
     const SlotColorTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a mesh deform timeline at a specific time.
  * @param timeline Deform timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The sampled vertex offsets, or `std::nullopt` when the timeline is empty.
  */
 std::optional<std::vector<double>> sample_deform_timeline(
     const MeshDeformTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 /**
  * @brief Samples a draw-order timeline at a specific time.
  * @param timeline Draw-order timeline to sample.
  * @param time Sample time in seconds.
+ * @param last_keyframe_index Optional cache for the last sampled keyframe index.
  * @return The active draw-order keyframe, or `nullptr` when the timeline is empty.
  */
 const DrawOrderKeyframe* sample_draw_order_timeline(
     const DrawOrderTimeline& timeline,
-    double time);
+    double time,
+    std::size_t* last_keyframe_index = nullptr);
 
 } // namespace marrow::runtime

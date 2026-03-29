@@ -17,6 +17,14 @@ double clamp_unit(double value) {
     return std::clamp(value, 0.0, 1.0);
 }
 
+std::size_t* cursor_at(std::vector<std::size_t>* cursors, std::size_t index) {
+    if (cursors == nullptr || index >= cursors->size()) {
+        return nullptr;
+    }
+
+    return &(*cursors)[index];
+}
+
 double entry_transition_time(const TrackEntry& entry) {
     if (entry.is_empty) {
         return entry.mix_duration;
@@ -1278,10 +1286,15 @@ void AnimationState::apply_current_timeline_values(
     auto& slots = skeleton.slot_states();
     auto& mesh_deforms = skeleton.mesh_deform_states();
     const double sample_time = entry.animation_time();
+    SamplingContext& sampling_context =
+        skeleton.track_sampling_context(entry.track_index, &entry, *entry.animation, sample_time);
     const bool additive = track_is_additive(entry);
     std::size_t timeline_index = 0;
 
-    for (const BoneRotateTimeline& timeline : entry.animation->bone_rotate_timelines) {
+    for (std::size_t rotate_timeline_index = 0;
+         rotate_timeline_index < entry.animation->bone_rotate_timelines.size();
+         ++rotate_timeline_index) {
+        const BoneRotateTimeline& timeline = entry.animation->bone_rotate_timelines[rotate_timeline_index];
         if (timeline.bone_index < bones.size() &&
             timeline.bone_index < data_->bones().size() &&
             track_affects_bone(entry, timeline.bone_index)) {
@@ -1291,7 +1304,12 @@ void AnimationState::apply_current_timeline_values(
             const BoneTransform& setup_pose = data_->bones()[timeline.bone_index].setup_pose;
 
             if (const std::optional<double> rotation =
-                    entry.animation->sample_bone_rotation(timeline.bone_index, sample_time)) {
+                    sample_rotate_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.rotate_last_keyframe_indices,
+                            rotate_timeline_index))) {
                 apply_layer_rotation(
                     &bones[timeline.bone_index].local_pose,
                     setup_pose,
@@ -1308,7 +1326,11 @@ void AnimationState::apply_current_timeline_values(
 
     timeline_index += entry.animation->bone_inherit_timelines.size();
 
-    for (const BoneTranslateTimeline& timeline : entry.animation->bone_translate_timelines) {
+    for (std::size_t translate_timeline_index = 0;
+         translate_timeline_index < entry.animation->bone_translate_timelines.size();
+         ++translate_timeline_index) {
+        const BoneTranslateTimeline& timeline =
+            entry.animation->bone_translate_timelines[translate_timeline_index];
         if (timeline.bone_index < bones.size() &&
             timeline.bone_index < data_->bones().size() &&
             track_affects_bone(entry, timeline.bone_index)) {
@@ -1319,7 +1341,12 @@ void AnimationState::apply_current_timeline_values(
             const bool use_current_base = mode_uses_current_base(mode);
 
             if (const std::optional<VectorSample> translation =
-                    entry.animation->sample_bone_translation(timeline.bone_index, sample_time)) {
+                    sample_translate_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.translate_last_keyframe_indices,
+                            translate_timeline_index))) {
                 apply_layer_scalar(
                     &current_pose.x,
                     setup_pose.x,
@@ -1339,7 +1366,10 @@ void AnimationState::apply_current_timeline_values(
         ++timeline_index;
     }
 
-    for (const BoneScaleTimeline& timeline : entry.animation->bone_scale_timelines) {
+    for (std::size_t scale_timeline_index = 0;
+         scale_timeline_index < entry.animation->bone_scale_timelines.size();
+         ++scale_timeline_index) {
+        const BoneScaleTimeline& timeline = entry.animation->bone_scale_timelines[scale_timeline_index];
         if (timeline.bone_index < bones.size() &&
             timeline.bone_index < data_->bones().size() &&
             track_affects_bone(entry, timeline.bone_index)) {
@@ -1350,7 +1380,12 @@ void AnimationState::apply_current_timeline_values(
             const bool use_current_base = mode_uses_current_base(mode);
 
             if (const std::optional<VectorSample> scale =
-                    entry.animation->sample_bone_scale(timeline.bone_index, sample_time)) {
+                    sample_scale_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.scale_last_keyframe_indices,
+                            scale_timeline_index))) {
                 apply_layer_scalar(
                     &current_pose.scale_x,
                     setup_pose.scale_x,
@@ -1370,7 +1405,10 @@ void AnimationState::apply_current_timeline_values(
         ++timeline_index;
     }
 
-    for (const BoneShearTimeline& timeline : entry.animation->bone_shear_timelines) {
+    for (std::size_t shear_timeline_index = 0;
+         shear_timeline_index < entry.animation->bone_shear_timelines.size();
+         ++shear_timeline_index) {
+        const BoneShearTimeline& timeline = entry.animation->bone_shear_timelines[shear_timeline_index];
         if (timeline.bone_index < bones.size() &&
             timeline.bone_index < data_->bones().size() &&
             track_affects_bone(entry, timeline.bone_index)) {
@@ -1381,7 +1419,12 @@ void AnimationState::apply_current_timeline_values(
             const bool use_current_base = mode_uses_current_base(mode);
 
             if (const std::optional<VectorSample> shear =
-                    entry.animation->sample_bone_shear(timeline.bone_index, sample_time)) {
+                    sample_shear_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.shear_last_keyframe_indices,
+                            shear_timeline_index))) {
                 apply_layer_scalar(
                     &current_pose.shear_x,
                     setup_pose.shear_x,
@@ -1403,7 +1446,10 @@ void AnimationState::apply_current_timeline_values(
 
     timeline_index += entry.animation->slot_attachment_timelines.size();
 
-    for (const SlotColorTimeline& timeline : entry.animation->slot_color_timelines) {
+    for (std::size_t color_timeline_index = 0;
+         color_timeline_index < entry.animation->slot_color_timelines.size();
+         ++color_timeline_index) {
+        const SlotColorTimeline& timeline = entry.animation->slot_color_timelines[color_timeline_index];
         if (timeline.slot_index < slots.size() &&
             timeline.slot_index < data_->slots().size()) {
             AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
@@ -1413,7 +1459,12 @@ void AnimationState::apply_current_timeline_values(
             const bool use_current_base = mode_uses_current_base(mode);
 
             if (const std::optional<SlotColor> color =
-                    entry.animation->sample_slot_color(timeline.slot_index, sample_time)) {
+                    sample_color_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.color_last_keyframe_indices,
+                            color_timeline_index))) {
                 current_color.r = blend_timeline_scalar(
                     current_color.r,
                     setup_color.r,
@@ -1443,7 +1494,10 @@ void AnimationState::apply_current_timeline_values(
         ++timeline_index;
     }
 
-    for (const MeshDeformTimeline& timeline : entry.animation->mesh_deform_timelines) {
+    for (std::size_t deform_timeline_index = 0;
+         deform_timeline_index < entry.animation->mesh_deform_timelines.size();
+         ++deform_timeline_index) {
+        const MeshDeformTimeline& timeline = entry.animation->mesh_deform_timelines[deform_timeline_index];
         if (timeline.slot_index < mesh_deforms.size()) {
             AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
             (void)timeline_mode_at(entry, timeline_index, &mode);
@@ -1453,10 +1507,12 @@ void AnimationState::apply_current_timeline_values(
                 attachment->mesh_geometry != nullptr &&
                 attachment_matches_mesh_deform_source(*attachment, timeline.attachment_name)) {
                 const std::optional<std::vector<double>> sampled_offsets =
-                    entry.animation->sample_slot_deform(
-                        timeline.slot_index,
-                        timeline.attachment_name,
-                        sample_time);
+                    sample_deform_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.deform_last_keyframe_indices,
+                            deform_timeline_index));
                 if (sampled_offsets.has_value()) {
                     MeshDeformState& current_deform = mesh_deforms[timeline.slot_index];
                     if (current_deform.attachment_name != timeline.attachment_name ||
@@ -1497,16 +1553,23 @@ void AnimationState::apply_discrete_timelines(
     auto& slots = skeleton.slot_states();
     auto& draw_order = skeleton.draw_order();
     const double sample_time = entry.animation_time();
+    SamplingContext& sampling_context =
+        skeleton.track_sampling_context(entry.track_index, &entry, *entry.animation, sample_time);
 
-    for (const BoneInheritTimeline& timeline : entry.animation->bone_inherit_timelines) {
+    for (std::size_t inherit_timeline_index = 0;
+         inherit_timeline_index < entry.animation->bone_inherit_timelines.size();
+         ++inherit_timeline_index) {
+        const BoneInheritTimeline& timeline = entry.animation->bone_inherit_timelines[inherit_timeline_index];
         if (track_is_additive(entry) ||
             timeline.bone_index >= bones.size() ||
             !track_affects_bone(entry, timeline.bone_index)) {
             continue;
         }
 
-        const InheritKeyframe* keyframe =
-            entry.animation->sample_bone_inherit(timeline.bone_index, sample_time);
+        const InheritKeyframe* keyframe = sample_inherit_timeline(
+            timeline,
+            sample_time,
+            cursor_at(&sampling_context.inherit_last_keyframe_indices, inherit_timeline_index));
         if (keyframe == nullptr) {
             continue;
         }
@@ -1514,13 +1577,21 @@ void AnimationState::apply_discrete_timelines(
         bones[timeline.bone_index].inherit = keyframe->inherit;
     }
 
-    for (const SlotAttachmentTimeline& timeline : entry.animation->slot_attachment_timelines) {
+    for (std::size_t attachment_timeline_index = 0;
+         attachment_timeline_index < entry.animation->slot_attachment_timelines.size();
+         ++attachment_timeline_index) {
+        const SlotAttachmentTimeline& timeline =
+            entry.animation->slot_attachment_timelines[attachment_timeline_index];
         if (timeline.slot_index >= slots.size()) {
             continue;
         }
 
-        const AttachmentKeyframe* keyframe =
-            entry.animation->sample_slot_attachment(timeline.slot_index, sample_time);
+        const AttachmentKeyframe* keyframe = sample_attachment_timeline(
+            timeline,
+            sample_time,
+            cursor_at(
+                &sampling_context.attachment_last_keyframe_indices,
+                attachment_timeline_index));
         if (keyframe == nullptr) {
             continue;
         }
@@ -1528,9 +1599,13 @@ void AnimationState::apply_discrete_timelines(
         skeleton.apply_slot_attachment_keyframe(timeline.slot_index, keyframe->attachment_name);
     }
 
-    if (const DrawOrderKeyframe* draw_order_keyframe =
-            entry.animation->sample_draw_order(sample_time)) {
-        draw_order = draw_order_keyframe->slot_indices;
+    if (const DrawOrderTimeline* draw_order_timeline = entry.animation->find_draw_order_timeline()) {
+        if (const DrawOrderKeyframe* draw_order_keyframe = sample_draw_order_timeline(
+                *draw_order_timeline,
+                sample_time,
+                &sampling_context.draw_order_last_keyframe_index)) {
+            draw_order = draw_order_keyframe->slot_indices;
+        }
     }
 }
 
@@ -1643,13 +1718,19 @@ double AnimationState::apply_mixing_from(
         return mix;
     }
 
+    SamplingContext& sampling_context =
+        skeleton.track_sampling_context(from->track_index, from.get(), *from->animation, sample_time);
+
     auto& bones = skeleton.bone_poses();
     auto& slots = skeleton.slot_states();
     auto& mesh_deforms = skeleton.mesh_deform_states();
     const bool additive = track_is_additive(*from);
     std::size_t timeline_index = 0;
 
-    for (const BoneRotateTimeline& timeline : from->animation->bone_rotate_timelines) {
+    for (std::size_t rotate_timeline_index = 0;
+         rotate_timeline_index < from->animation->bone_rotate_timelines.size();
+         ++rotate_timeline_index) {
+        const BoneRotateTimeline& timeline = from->animation->bone_rotate_timelines[rotate_timeline_index];
         AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
         std::shared_ptr<TrackEntry> hold_mix;
         (void)timeline_mode_at(*from, timeline_index, &mode, &hold_mix);
@@ -1677,7 +1758,12 @@ double AnimationState::apply_mixing_from(
             const bool use_current_base = mode_uses_current_base(mode);
             const BoneTransform& setup_pose = data_->bones()[timeline.bone_index].setup_pose;
             if (const std::optional<double> rotation =
-                    from->animation->sample_bone_rotation(timeline.bone_index, sample_time)) {
+                    sample_rotate_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.rotate_last_keyframe_indices,
+                            rotate_timeline_index))) {
                 apply_layer_rotation(
                     &bones[timeline.bone_index].local_pose,
                     setup_pose,
@@ -1716,7 +1802,11 @@ double AnimationState::apply_mixing_from(
         ++timeline_index;
     }
 
-    for (const BoneTranslateTimeline& timeline : from->animation->bone_translate_timelines) {
+    for (std::size_t translate_timeline_index = 0;
+         translate_timeline_index < from->animation->bone_translate_timelines.size();
+         ++translate_timeline_index) {
+        const BoneTranslateTimeline& timeline =
+            from->animation->bone_translate_timelines[translate_timeline_index];
         AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
         std::shared_ptr<TrackEntry> hold_mix;
         (void)timeline_mode_at(*from, timeline_index, &mode, &hold_mix);
@@ -1744,7 +1834,12 @@ double AnimationState::apply_mixing_from(
             const BoneTransform& setup_pose = data_->bones()[timeline.bone_index].setup_pose;
             const bool use_current_base = mode_uses_current_base(mode);
             if (const std::optional<VectorSample> translation =
-                    from->animation->sample_bone_translation(timeline.bone_index, sample_time)) {
+                    sample_translate_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.translate_last_keyframe_indices,
+                            translate_timeline_index))) {
                 apply_layer_scalar(
                     &current_pose.x,
                     setup_pose.x,
@@ -1764,7 +1859,10 @@ double AnimationState::apply_mixing_from(
         ++timeline_index;
     }
 
-    for (const BoneScaleTimeline& timeline : from->animation->bone_scale_timelines) {
+    for (std::size_t scale_timeline_index = 0;
+         scale_timeline_index < from->animation->bone_scale_timelines.size();
+         ++scale_timeline_index) {
+        const BoneScaleTimeline& timeline = from->animation->bone_scale_timelines[scale_timeline_index];
         AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
         std::shared_ptr<TrackEntry> hold_mix;
         (void)timeline_mode_at(*from, timeline_index, &mode, &hold_mix);
@@ -1792,7 +1890,12 @@ double AnimationState::apply_mixing_from(
             const BoneTransform& setup_pose = data_->bones()[timeline.bone_index].setup_pose;
             const bool use_current_base = mode_uses_current_base(mode);
             if (const std::optional<VectorSample> scale =
-                    from->animation->sample_bone_scale(timeline.bone_index, sample_time)) {
+                    sample_scale_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.scale_last_keyframe_indices,
+                            scale_timeline_index))) {
                 apply_layer_scalar(
                     &current_pose.scale_x,
                     setup_pose.scale_x,
@@ -1812,7 +1915,10 @@ double AnimationState::apply_mixing_from(
         ++timeline_index;
     }
 
-    for (const BoneShearTimeline& timeline : from->animation->bone_shear_timelines) {
+    for (std::size_t shear_timeline_index = 0;
+         shear_timeline_index < from->animation->bone_shear_timelines.size();
+         ++shear_timeline_index) {
+        const BoneShearTimeline& timeline = from->animation->bone_shear_timelines[shear_timeline_index];
         AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
         std::shared_ptr<TrackEntry> hold_mix;
         (void)timeline_mode_at(*from, timeline_index, &mode, &hold_mix);
@@ -1840,7 +1946,12 @@ double AnimationState::apply_mixing_from(
             const BoneTransform& setup_pose = data_->bones()[timeline.bone_index].setup_pose;
             const bool use_current_base = mode_uses_current_base(mode);
             if (const std::optional<VectorSample> shear =
-                    from->animation->sample_bone_shear(timeline.bone_index, sample_time)) {
+                    sample_shear_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.shear_last_keyframe_indices,
+                            shear_timeline_index))) {
                 apply_layer_scalar(
                     &current_pose.shear_x,
                     setup_pose.shear_x,
@@ -1881,7 +1992,10 @@ double AnimationState::apply_mixing_from(
         ++timeline_index;
     }
 
-    for (const SlotColorTimeline& timeline : from->animation->slot_color_timelines) {
+    for (std::size_t color_timeline_index = 0;
+         color_timeline_index < from->animation->slot_color_timelines.size();
+         ++color_timeline_index) {
+        const SlotColorTimeline& timeline = from->animation->slot_color_timelines[color_timeline_index];
         AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
         std::shared_ptr<TrackEntry> hold_mix;
         (void)timeline_mode_at(*from, timeline_index, &mode, &hold_mix);
@@ -1908,7 +2022,12 @@ double AnimationState::apply_mixing_from(
             const SlotColor& setup_color = data_->slots()[timeline.slot_index].color;
             const bool use_current_base = mode_uses_current_base(mode);
             if (const std::optional<SlotColor> color =
-                    from->animation->sample_slot_color(timeline.slot_index, sample_time)) {
+                    sample_color_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.color_last_keyframe_indices,
+                            color_timeline_index))) {
                 current_color.r = blend_timeline_scalar(
                     current_color.r,
                     setup_color.r,
@@ -1938,7 +2057,10 @@ double AnimationState::apply_mixing_from(
         ++timeline_index;
     }
 
-    for (const MeshDeformTimeline& timeline : from->animation->mesh_deform_timelines) {
+    for (std::size_t deform_timeline_index = 0;
+         deform_timeline_index < from->animation->mesh_deform_timelines.size();
+         ++deform_timeline_index) {
+        const MeshDeformTimeline& timeline = from->animation->mesh_deform_timelines[deform_timeline_index];
         AnimationStateTimelineMode mode = AnimationStateTimelineMode::First;
         std::shared_ptr<TrackEntry> hold_mix;
         (void)timeline_mode_at(*from, timeline_index, &mode, &hold_mix);
@@ -1964,10 +2086,12 @@ double AnimationState::apply_mixing_from(
                 attachment->mesh_geometry != nullptr &&
                 attachment_matches_mesh_deform_source(*attachment, timeline.attachment_name)) {
                 const std::optional<std::vector<double>> sampled_offsets =
-                    from->animation->sample_slot_deform(
-                        timeline.slot_index,
-                        timeline.attachment_name,
-                        sample_time);
+                    sample_deform_timeline(
+                        timeline,
+                        sample_time,
+                        cursor_at(
+                            &sampling_context.deform_last_keyframe_indices,
+                            deform_timeline_index));
                 if (sampled_offsets.has_value()) {
                     MeshDeformState& current_deform = mesh_deforms[timeline.slot_index];
                     if (current_deform.attachment_name != timeline.attachment_name ||
@@ -2046,6 +2170,7 @@ void AnimationState::apply_pose(Skeleton& skeleton) {
     }
 
     skeleton.prepare_animation_pose();
+    skeleton.begin_track_sampling_frame(tracks_.size());
 
     for (std::size_t track_index = 0; track_index < tracks_.size(); ++track_index) {
         const std::shared_ptr<TrackEntry>& current = tracks_[track_index];
@@ -2076,6 +2201,8 @@ void AnimationState::apply_pose(Skeleton& skeleton) {
             capture_entry_snapshot(current, skeleton);
         }
     }
+
+    skeleton.end_track_sampling_frame(tracks_.size());
 }
 
 RootMotionDelta AnimationState::extract_root_motion(

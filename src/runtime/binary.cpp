@@ -1069,10 +1069,10 @@ AnimationTranslateBounds compute_translate_bounds(const AnimationData& animation
                 continue;
             }
 
-            bounds.min_x = std::min(bounds.min_x, keyframe.x);
-            bounds.min_y = std::min(bounds.min_y, keyframe.y);
-            bounds.max_x = std::max(bounds.max_x, keyframe.x);
-            bounds.max_y = std::max(bounds.max_y, keyframe.y);
+            bounds.min_x = std::min(bounds.min_x, static_cast<double>(keyframe.x));
+            bounds.min_y = std::min(bounds.min_y, static_cast<double>(keyframe.y));
+            bounds.max_x = std::max(bounds.max_x, static_cast<double>(keyframe.x));
+            bounds.max_y = std::max(bounds.max_y, static_cast<double>(keyframe.y));
         }
     }
     return bounds;

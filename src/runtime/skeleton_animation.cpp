@@ -6,74 +6,365 @@
 
 namespace marrow::runtime {
 
-const BoneRotateTimeline* AnimationData::find_rotate_timeline(std::size_t bone_index) const {
+namespace {
+
+constexpr double kSamplingRewindEpsilon = 1e-6;
+constexpr AnimationScalar kAnimationValueEpsilon = 1e-5f;
+
+template <typename Timeline>
+const Timeline* find_bone_timeline_fallback(
+    const std::vector<Timeline>& timelines,
+    std::size_t bone_index) {
     const auto it = std::find_if(
-        bone_rotate_timelines.begin(),
-        bone_rotate_timelines.end(),
-        [&](const BoneRotateTimeline& timeline) {
+        timelines.begin(),
+        timelines.end(),
+        [&](const Timeline& timeline) {
             return timeline.bone_index == bone_index;
         });
-    if (it == bone_rotate_timelines.end()) {
+    if (it == timelines.end()) {
         return nullptr;
     }
 
     return &(*it);
+}
+
+template <typename Timeline>
+std::size_t timeline_local_index(
+    const std::vector<Timeline>& timelines,
+    const Timeline& timeline) {
+    return static_cast<std::size_t>(&timeline - timelines.data());
+}
+
+std::size_t* cursor_at(std::vector<std::size_t>* cursors, std::size_t index) {
+    if (cursors == nullptr || index >= cursors->size()) {
+        return nullptr;
+    }
+
+    return &(*cursors)[index];
+}
+
+void reset_sampling_cursors(SamplingContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+
+    std::fill(context->rotate_last_keyframe_indices.begin(), context->rotate_last_keyframe_indices.end(), 0);
+    std::fill(context->inherit_last_keyframe_indices.begin(), context->inherit_last_keyframe_indices.end(), 0);
+    std::fill(
+        context->translate_last_keyframe_indices.begin(),
+        context->translate_last_keyframe_indices.end(),
+        0);
+    std::fill(context->scale_last_keyframe_indices.begin(), context->scale_last_keyframe_indices.end(), 0);
+    std::fill(context->shear_last_keyframe_indices.begin(), context->shear_last_keyframe_indices.end(), 0);
+    std::fill(
+        context->attachment_last_keyframe_indices.begin(),
+        context->attachment_last_keyframe_indices.end(),
+        0);
+    std::fill(context->color_last_keyframe_indices.begin(), context->color_last_keyframe_indices.end(), 0);
+    std::fill(context->deform_last_keyframe_indices.begin(), context->deform_last_keyframe_indices.end(), 0);
+    context->draw_order_last_keyframe_index = 0;
+}
+
+void resize_sampling_cursors(const AnimationData& animation, SamplingContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+
+    context->rotate_last_keyframe_indices.assign(animation.bone_rotate_timelines.size(), 0);
+    context->inherit_last_keyframe_indices.assign(animation.bone_inherit_timelines.size(), 0);
+    context->translate_last_keyframe_indices.assign(animation.bone_translate_timelines.size(), 0);
+    context->scale_last_keyframe_indices.assign(animation.bone_scale_timelines.size(), 0);
+    context->shear_last_keyframe_indices.assign(animation.bone_shear_timelines.size(), 0);
+    context->attachment_last_keyframe_indices.assign(animation.slot_attachment_timelines.size(), 0);
+    context->color_last_keyframe_indices.assign(animation.slot_color_timelines.size(), 0);
+    context->deform_last_keyframe_indices.assign(animation.mesh_deform_timelines.size(), 0);
+    context->draw_order_last_keyframe_index = 0;
+}
+
+bool nearly_equal(AnimationScalar actual, double expected) {
+    return std::abs(static_cast<double>(actual) - expected) <=
+        static_cast<double>(kAnimationValueEpsilon);
+}
+
+bool slot_color_matches(const SlotColor& color, const SlotColor& expected) {
+    return nearly_equal(color.r, expected.r) &&
+        nearly_equal(color.g, expected.g) &&
+        nearly_equal(color.b, expected.b) &&
+        nearly_equal(color.a, expected.a);
+}
+
+bool is_zero_offset_vector(const std::vector<AnimationScalar>& vertex_offsets) {
+    return std::all_of(
+        vertex_offsets.begin(),
+        vertex_offsets.end(),
+        [](AnimationScalar offset) {
+            return nearly_equal(offset, 0.0);
+        });
+}
+
+template <typename Timeline, typename Predicate>
+void erase_matching_timelines(std::vector<Timeline>* timelines, Predicate&& predicate) {
+    timelines->erase(
+        std::remove_if(
+            timelines->begin(),
+            timelines->end(),
+            [&](const Timeline& timeline) {
+                return predicate(timeline);
+            }),
+        timelines->end());
+}
+
+void append_targeted_bone(std::vector<std::size_t>* targeted_bones, std::size_t bone_index) {
+    if (targeted_bones == nullptr) {
+        return;
+    }
+    if (std::find(targeted_bones->begin(), targeted_bones->end(), bone_index) != targeted_bones->end()) {
+        return;
+    }
+    targeted_bones->push_back(bone_index);
+}
+
+std::vector<std::size_t> rebuild_targeted_bone_indices(const AnimationData& animation) {
+    std::vector<std::size_t> targeted_bones;
+    targeted_bones.reserve(
+        animation.bone_rotate_timelines.size() +
+        animation.bone_inherit_timelines.size() +
+        animation.bone_translate_timelines.size() +
+        animation.bone_scale_timelines.size() +
+        animation.bone_shear_timelines.size());
+    for (const BoneRotateTimeline& timeline : animation.bone_rotate_timelines) {
+        append_targeted_bone(&targeted_bones, timeline.bone_index);
+    }
+    for (const BoneInheritTimeline& timeline : animation.bone_inherit_timelines) {
+        append_targeted_bone(&targeted_bones, timeline.bone_index);
+    }
+    for (const BoneTranslateTimeline& timeline : animation.bone_translate_timelines) {
+        append_targeted_bone(&targeted_bones, timeline.bone_index);
+    }
+    for (const BoneScaleTimeline& timeline : animation.bone_scale_timelines) {
+        append_targeted_bone(&targeted_bones, timeline.bone_index);
+    }
+    for (const BoneShearTimeline& timeline : animation.bone_shear_timelines) {
+        append_targeted_bone(&targeted_bones, timeline.bone_index);
+    }
+    std::sort(targeted_bones.begin(), targeted_bones.end());
+    return targeted_bones;
+}
+
+} // namespace
+
+AnimationData::AnimationData(const AnimationData& other)
+    : name(other.name),
+      targeted_bone_indices(other.targeted_bone_indices),
+      bone_rotate_timelines(other.bone_rotate_timelines),
+      bone_inherit_timelines(other.bone_inherit_timelines),
+      bone_translate_timelines(other.bone_translate_timelines),
+      bone_scale_timelines(other.bone_scale_timelines),
+      bone_shear_timelines(other.bone_shear_timelines),
+      slot_attachment_timelines(other.slot_attachment_timelines),
+      slot_color_timelines(other.slot_color_timelines),
+      mesh_deform_timelines(other.mesh_deform_timelines),
+      draw_order_timeline_data(other.draw_order_timeline_data),
+      event_timeline_data(other.event_timeline_data),
+      bone_timeline_index(other.bone_timeline_index.size()) {
+    if (!bone_timeline_index.empty()) {
+        rebuild_bone_timeline_index(bone_timeline_index.size());
+    }
+}
+
+AnimationData& AnimationData::operator=(const AnimationData& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    name = other.name;
+    targeted_bone_indices = other.targeted_bone_indices;
+    bone_rotate_timelines = other.bone_rotate_timelines;
+    bone_inherit_timelines = other.bone_inherit_timelines;
+    bone_translate_timelines = other.bone_translate_timelines;
+    bone_scale_timelines = other.bone_scale_timelines;
+    bone_shear_timelines = other.bone_shear_timelines;
+    slot_attachment_timelines = other.slot_attachment_timelines;
+    slot_color_timelines = other.slot_color_timelines;
+    mesh_deform_timelines = other.mesh_deform_timelines;
+    draw_order_timeline_data = other.draw_order_timeline_data;
+    event_timeline_data = other.event_timeline_data;
+    bone_timeline_index.resize(other.bone_timeline_index.size());
+    if (!bone_timeline_index.empty()) {
+        rebuild_bone_timeline_index(bone_timeline_index.size());
+    } else {
+        bone_timeline_index.clear();
+    }
+
+    return *this;
+}
+
+void AnimationData::rebuild_bone_timeline_index(std::size_t bone_count) {
+    bone_timeline_index.assign(bone_count, BoneTimelineIndexEntry{});
+    for (const BoneRotateTimeline& timeline : bone_rotate_timelines) {
+        if (timeline.bone_index < bone_timeline_index.size()) {
+            bone_timeline_index[timeline.bone_index].rotate = &timeline;
+        }
+    }
+    for (const BoneInheritTimeline& timeline : bone_inherit_timelines) {
+        if (timeline.bone_index < bone_timeline_index.size()) {
+            bone_timeline_index[timeline.bone_index].inherit = &timeline;
+        }
+    }
+    for (const BoneTranslateTimeline& timeline : bone_translate_timelines) {
+        if (timeline.bone_index < bone_timeline_index.size()) {
+            bone_timeline_index[timeline.bone_index].translate = &timeline;
+        }
+    }
+    for (const BoneScaleTimeline& timeline : bone_scale_timelines) {
+        if (timeline.bone_index < bone_timeline_index.size()) {
+            bone_timeline_index[timeline.bone_index].scale = &timeline;
+        }
+    }
+    for (const BoneShearTimeline& timeline : bone_shear_timelines) {
+        if (timeline.bone_index < bone_timeline_index.size()) {
+            bone_timeline_index[timeline.bone_index].shear = &timeline;
+        }
+    }
+}
+
+void AnimationData::prepare_sampling_context(SamplingContext* context, double time) const {
+    if (context == nullptr) {
+        return;
+    }
+
+    const bool animation_changed = context->animation != this;
+    const bool cursor_layout_changed =
+        context->rotate_last_keyframe_indices.size() != bone_rotate_timelines.size() ||
+        context->inherit_last_keyframe_indices.size() != bone_inherit_timelines.size() ||
+        context->translate_last_keyframe_indices.size() != bone_translate_timelines.size() ||
+        context->scale_last_keyframe_indices.size() != bone_scale_timelines.size() ||
+        context->shear_last_keyframe_indices.size() != bone_shear_timelines.size() ||
+        context->attachment_last_keyframe_indices.size() != slot_attachment_timelines.size() ||
+        context->color_last_keyframe_indices.size() != slot_color_timelines.size() ||
+        context->deform_last_keyframe_indices.size() != mesh_deform_timelines.size();
+
+    if (animation_changed || cursor_layout_changed) {
+        context->animation = this;
+        resize_sampling_cursors(*this, context);
+    } else if (time + kSamplingRewindEpsilon < context->last_sample_time) {
+        reset_sampling_cursors(context);
+    }
+
+    context->last_sample_time = time;
+}
+
+void AnimationData::prune_constant_timelines(
+    const std::vector<BoneData>& bones,
+    const std::vector<SlotData>& slots) {
+    erase_matching_timelines(&bone_rotate_timelines, [&](const BoneRotateTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.bone_index < bones.size() &&
+            nearly_equal(timeline.keyframes.front().angle, 0.0);
+    });
+    erase_matching_timelines(&bone_inherit_timelines, [&](const BoneInheritTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.bone_index < bones.size() &&
+            timeline.keyframes.front().inherit == bones[timeline.bone_index].inherit;
+    });
+    erase_matching_timelines(&bone_translate_timelines, [&](const BoneTranslateTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.bone_index < bones.size() &&
+            nearly_equal(timeline.keyframes.front().x, bones[timeline.bone_index].setup_pose.x) &&
+            nearly_equal(timeline.keyframes.front().y, bones[timeline.bone_index].setup_pose.y);
+    });
+    erase_matching_timelines(&bone_scale_timelines, [&](const BoneScaleTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.bone_index < bones.size() &&
+            nearly_equal(
+                timeline.keyframes.front().x,
+                bones[timeline.bone_index].setup_pose.scale_x) &&
+            nearly_equal(
+                timeline.keyframes.front().y,
+                bones[timeline.bone_index].setup_pose.scale_y);
+    });
+    erase_matching_timelines(&bone_shear_timelines, [&](const BoneShearTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.bone_index < bones.size() &&
+            nearly_equal(
+                timeline.keyframes.front().x,
+                bones[timeline.bone_index].setup_pose.shear_x) &&
+            nearly_equal(
+                timeline.keyframes.front().y,
+                bones[timeline.bone_index].setup_pose.shear_y);
+    });
+    erase_matching_timelines(&slot_attachment_timelines, [&](const SlotAttachmentTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.slot_index < slots.size() &&
+            timeline.keyframes.front().attachment_name == slots[timeline.slot_index].setup_attachment;
+    });
+    erase_matching_timelines(&slot_color_timelines, [&](const SlotColorTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            timeline.slot_index < slots.size() &&
+            slot_color_matches(timeline.keyframes.front().color, slots[timeline.slot_index].color);
+    });
+    erase_matching_timelines(&mesh_deform_timelines, [&](const MeshDeformTimeline& timeline) {
+        return timeline.keyframes.size() == 1U &&
+            is_zero_offset_vector(timeline.keyframes.front().vertex_offsets);
+    });
+    if (draw_order_timeline_data.has_value() &&
+        draw_order_timeline_data->keyframes.size() == 1U &&
+        draw_order_timeline_data->keyframes.front().slot_indices.size() == slots.size()) {
+        bool draw_order_identity = true;
+        for (std::size_t slot_index = 0;
+             slot_index < draw_order_timeline_data->keyframes.front().slot_indices.size();
+             ++slot_index) {
+            if (draw_order_timeline_data->keyframes.front().slot_indices[slot_index] != slot_index) {
+                draw_order_identity = false;
+                break;
+            }
+        }
+        if (draw_order_identity) {
+            draw_order_timeline_data.reset();
+        }
+    }
+
+    targeted_bone_indices = rebuild_targeted_bone_indices(*this);
+}
+
+const BoneRotateTimeline* AnimationData::find_rotate_timeline(std::size_t bone_index) const {
+    if (bone_index < bone_timeline_index.size()) {
+        return bone_timeline_index[bone_index].rotate;
+    }
+
+    return find_bone_timeline_fallback(bone_rotate_timelines, bone_index);
 }
 
 const BoneInheritTimeline* AnimationData::find_inherit_timeline(std::size_t bone_index) const {
-    const auto it = std::find_if(
-        bone_inherit_timelines.begin(),
-        bone_inherit_timelines.end(),
-        [&](const BoneInheritTimeline& timeline) {
-            return timeline.bone_index == bone_index;
-        });
-    if (it == bone_inherit_timelines.end()) {
-        return nullptr;
+    if (bone_index < bone_timeline_index.size()) {
+        return bone_timeline_index[bone_index].inherit;
     }
 
-    return &(*it);
+    return find_bone_timeline_fallback(bone_inherit_timelines, bone_index);
 }
 
 const BoneTranslateTimeline* AnimationData::find_translate_timeline(std::size_t bone_index) const {
-    const auto it = std::find_if(
-        bone_translate_timelines.begin(),
-        bone_translate_timelines.end(),
-        [&](const BoneTranslateTimeline& timeline) {
-            return timeline.bone_index == bone_index;
-        });
-    if (it == bone_translate_timelines.end()) {
-        return nullptr;
+    if (bone_index < bone_timeline_index.size()) {
+        return bone_timeline_index[bone_index].translate;
     }
 
-    return &(*it);
+    return find_bone_timeline_fallback(bone_translate_timelines, bone_index);
 }
 
 const BoneScaleTimeline* AnimationData::find_scale_timeline(std::size_t bone_index) const {
-    const auto it = std::find_if(
-        bone_scale_timelines.begin(),
-        bone_scale_timelines.end(),
-        [&](const BoneScaleTimeline& timeline) {
-            return timeline.bone_index == bone_index;
-        });
-    if (it == bone_scale_timelines.end()) {
-        return nullptr;
+    if (bone_index < bone_timeline_index.size()) {
+        return bone_timeline_index[bone_index].scale;
     }
 
-    return &(*it);
+    return find_bone_timeline_fallback(bone_scale_timelines, bone_index);
 }
 
 const BoneShearTimeline* AnimationData::find_shear_timeline(std::size_t bone_index) const {
-    const auto it = std::find_if(
-        bone_shear_timelines.begin(),
-        bone_shear_timelines.end(),
-        [&](const BoneShearTimeline& timeline) {
-            return timeline.bone_index == bone_index;
-        });
-    if (it == bone_shear_timelines.end()) {
-        return nullptr;
+    if (bone_index < bone_timeline_index.size()) {
+        return bone_timeline_index[bone_index].shear;
     }
 
-    return &(*it);
+    return find_bone_timeline_fallback(bone_shear_timelines, bone_index);
 }
 
 const SlotAttachmentTimeline* AnimationData::find_attachment_timeline(std::size_t slot_index) const {
@@ -137,100 +428,180 @@ const EventTimeline* AnimationData::find_event_timeline() const {
     return &(*event_timeline_data);
 }
 
-std::optional<double> AnimationData::sample_bone_rotation(std::size_t bone_index, double time) const {
+std::optional<double> AnimationData::sample_bone_rotation(
+    std::size_t bone_index,
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const BoneRotateTimeline* timeline = find_rotate_timeline(bone_index);
     if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    return sample_rotate_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !bone_rotate_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->rotate_last_keyframe_indices,
+            timeline_local_index(bone_rotate_timelines, *timeline));
+    }
+
+    return sample_rotate_timeline(*timeline, time, last_keyframe_index);
 }
 
 const InheritKeyframe* AnimationData::sample_bone_inherit(
     std::size_t bone_index,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const BoneInheritTimeline* timeline = find_inherit_timeline(bone_index);
     if (timeline == nullptr) {
         return nullptr;
     }
 
-    return sample_inherit_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !bone_inherit_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->inherit_last_keyframe_indices,
+            timeline_local_index(bone_inherit_timelines, *timeline));
+    }
+
+    return sample_inherit_timeline(*timeline, time, last_keyframe_index);
 }
 
 std::optional<VectorSample> AnimationData::sample_bone_translation(
     std::size_t bone_index,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const BoneTranslateTimeline* timeline = find_translate_timeline(bone_index);
     if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    return sample_translate_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !bone_translate_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->translate_last_keyframe_indices,
+            timeline_local_index(bone_translate_timelines, *timeline));
+    }
+
+    return sample_translate_timeline(*timeline, time, last_keyframe_index);
 }
 
 std::optional<VectorSample> AnimationData::sample_bone_scale(
     std::size_t bone_index,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const BoneScaleTimeline* timeline = find_scale_timeline(bone_index);
     if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    return sample_scale_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !bone_scale_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->scale_last_keyframe_indices,
+            timeline_local_index(bone_scale_timelines, *timeline));
+    }
+
+    return sample_scale_timeline(*timeline, time, last_keyframe_index);
 }
 
 std::optional<VectorSample> AnimationData::sample_bone_shear(
     std::size_t bone_index,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const BoneShearTimeline* timeline = find_shear_timeline(bone_index);
     if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    return sample_shear_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !bone_shear_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->shear_last_keyframe_indices,
+            timeline_local_index(bone_shear_timelines, *timeline));
+    }
+
+    return sample_shear_timeline(*timeline, time, last_keyframe_index);
 }
 
 const AttachmentKeyframe* AnimationData::sample_slot_attachment(
     std::size_t slot_index,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const SlotAttachmentTimeline* timeline = find_attachment_timeline(slot_index);
     if (timeline == nullptr) {
         return nullptr;
     }
 
-    return sample_attachment_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !slot_attachment_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->attachment_last_keyframe_indices,
+            timeline_local_index(slot_attachment_timelines, *timeline));
+    }
+
+    return sample_attachment_timeline(*timeline, time, last_keyframe_index);
 }
 
 std::optional<SlotColor> AnimationData::sample_slot_color(
     std::size_t slot_index,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const SlotColorTimeline* timeline = find_color_timeline(slot_index);
     if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    return sample_color_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !slot_color_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->color_last_keyframe_indices,
+            timeline_local_index(slot_color_timelines, *timeline));
+    }
+
+    return sample_color_timeline(*timeline, time, last_keyframe_index);
 }
 
 std::optional<std::vector<double>> AnimationData::sample_slot_deform(
     std::size_t slot_index,
     std::string_view attachment_name,
-    double time) const {
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const MeshDeformTimeline* timeline = find_deform_timeline(slot_index, attachment_name);
     if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    return sample_deform_timeline(*timeline, time);
+    std::size_t* last_keyframe_index = nullptr;
+    if (context != nullptr && !mesh_deform_timelines.empty()) {
+        last_keyframe_index = cursor_at(
+            &context->deform_last_keyframe_indices,
+            timeline_local_index(mesh_deform_timelines, *timeline));
+    }
+
+    return sample_deform_timeline(*timeline, time, last_keyframe_index);
 }
 
-const DrawOrderKeyframe* AnimationData::sample_draw_order(double time) const {
+const DrawOrderKeyframe* AnimationData::sample_draw_order(
+    double time,
+    SamplingContext* context) const {
+    prepare_sampling_context(context, time);
     const DrawOrderTimeline* timeline = find_draw_order_timeline();
     if (timeline == nullptr) {
         return nullptr;
     }
 
-    return sample_draw_order_timeline(*timeline, time);
+    return sample_draw_order_timeline(
+        *timeline,
+        time,
+        context != nullptr ? &context->draw_order_last_keyframe_index : nullptr);
 }
 
 namespace {
@@ -405,37 +776,48 @@ void Skeleton::apply_animation(
     }
     std::iota(draw_order_.begin(), draw_order_.end(), 0);
 
+    SamplingContext& sampling_context = standalone_sampling_context(animation, time);
+
     for (const std::size_t bone_index : animation.targeted_bone_indices) {
         BoneTransform& pose = bone_poses_[bone_index].local_pose;
         BoneInherit& inherit = bone_poses_[bone_index].inherit;
 
-        if (const std::optional<double> rotation = animation.sample_bone_rotation(bone_index, time)) {
+        if (const std::optional<double> rotation =
+                animation.sample_bone_rotation(bone_index, time, &sampling_context)) {
             pose.rotation = *rotation;
         }
-        if (const InheritKeyframe* keyframe = animation.sample_bone_inherit(bone_index, time)) {
+        if (const InheritKeyframe* keyframe =
+                animation.sample_bone_inherit(bone_index, time, &sampling_context)) {
             inherit = keyframe->inherit;
         }
         if (const std::optional<VectorSample> translation =
-                animation.sample_bone_translation(bone_index, time)) {
+                animation.sample_bone_translation(bone_index, time, &sampling_context)) {
             pose.x = translation->x;
             pose.y = translation->y;
         }
-        if (const std::optional<VectorSample> scale = animation.sample_bone_scale(bone_index, time)) {
+        if (const std::optional<VectorSample> scale =
+                animation.sample_bone_scale(bone_index, time, &sampling_context)) {
             pose.scale_x = scale->x;
             pose.scale_y = scale->y;
         }
-        if (const std::optional<VectorSample> shear = animation.sample_bone_shear(bone_index, time)) {
+        if (const std::optional<VectorSample> shear =
+                animation.sample_bone_shear(bone_index, time, &sampling_context)) {
             pose.shear_x = shear->x;
             pose.shear_y = shear->y;
         }
     }
 
-    for (const SlotAttachmentTimeline& timeline : animation.slot_attachment_timelines) {
+    for (std::size_t timeline_index = 0; timeline_index < animation.slot_attachment_timelines.size();
+         ++timeline_index) {
+        const SlotAttachmentTimeline& timeline = animation.slot_attachment_timelines[timeline_index];
         if (timeline.slot_index >= slot_states_.size()) {
             continue;
         }
 
-        const AttachmentKeyframe* keyframe = sample_attachment_timeline(timeline, time);
+        const AttachmentKeyframe* keyframe = sample_attachment_timeline(
+            timeline,
+            time,
+            cursor_at(&sampling_context.attachment_last_keyframe_indices, timeline_index));
         if (keyframe == nullptr) {
             continue;
         }
@@ -443,17 +825,24 @@ void Skeleton::apply_animation(
         apply_slot_attachment_keyframe(timeline.slot_index, keyframe->attachment_name);
     }
 
-    for (const SlotColorTimeline& timeline : animation.slot_color_timelines) {
+    for (std::size_t timeline_index = 0; timeline_index < animation.slot_color_timelines.size();
+         ++timeline_index) {
+        const SlotColorTimeline& timeline = animation.slot_color_timelines[timeline_index];
         if (timeline.slot_index >= slot_states_.size()) {
             continue;
         }
 
-        if (const std::optional<SlotColor> color = sample_color_timeline(timeline, time)) {
+        if (const std::optional<SlotColor> color = sample_color_timeline(
+                timeline,
+                time,
+                cursor_at(&sampling_context.color_last_keyframe_indices, timeline_index))) {
             slot_states_[timeline.slot_index].color = *color;
         }
     }
 
-    for (const MeshDeformTimeline& timeline : animation.mesh_deform_timelines) {
+    for (std::size_t timeline_index = 0; timeline_index < animation.mesh_deform_timelines.size();
+         ++timeline_index) {
+        const MeshDeformTimeline& timeline = animation.mesh_deform_timelines[timeline_index];
         if (timeline.slot_index >= mesh_deform_states_.size()) {
             continue;
         }
@@ -465,7 +854,10 @@ void Skeleton::apply_animation(
         }
 
         const std::optional<std::vector<double>> vertex_offsets =
-            sample_deform_timeline(timeline, time);
+            sample_deform_timeline(
+                timeline,
+                time,
+                cursor_at(&sampling_context.deform_last_keyframe_indices, timeline_index));
         if (!vertex_offsets.has_value()) {
             continue;
         }
@@ -474,7 +866,8 @@ void Skeleton::apply_animation(
         mesh_deform_states_[timeline.slot_index].vertex_offsets = *vertex_offsets;
     }
 
-    if (const DrawOrderKeyframe* draw_order_keyframe = animation.sample_draw_order(time)) {
+    if (const DrawOrderKeyframe* draw_order_keyframe =
+            animation.sample_draw_order(time, &sampling_context)) {
         draw_order_ = draw_order_keyframe->slot_indices;
     }
 
