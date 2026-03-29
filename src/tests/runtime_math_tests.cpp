@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,9 @@ using marrow::runtime::AnimationMixDefinition;
 using marrow::runtime::AnimationState;
 using marrow::runtime::AnimationStateSnapshot;
 using marrow::runtime::AnimationStateTrackEntrySnapshot;
+using marrow::runtime::AtlasData;
+using marrow::runtime::AtlasInfo;
+using marrow::runtime::AtlasRegion;
 using marrow::runtime::BoneData;
 using marrow::runtime::BoneInherit;
 using marrow::runtime::BonePose;
@@ -50,6 +54,7 @@ using marrow::runtime::SkeletonInfo;
 using marrow::runtime::SkinData;
 using marrow::runtime::SkinSlotData;
 using marrow::runtime::SlotData;
+using marrow::runtime::TransformConstraintData;
 namespace renderer_internal = marrow::renderer::internal;
 
 constexpr double kPi = 3.14159265358979323846;
@@ -106,12 +111,57 @@ double radians_to_degrees(double radians) {
     return radians * 180.0 / kPi;
 }
 
+double precise_cubic_component(double control_point_1, double control_point_2, double t) {
+    const double inverse_t = 1.0 - t;
+    return 3.0 * inverse_t * inverse_t * t * control_point_1 +
+        3.0 * inverse_t * t * t * control_point_2 + t * t * t;
+}
+
+double precise_cubic_derivative(double control_point_1, double control_point_2, double t) {
+    const double inverse_t = 1.0 - t;
+    return 3.0 * inverse_t * inverse_t * control_point_1 +
+        6.0 * inverse_t * t * (control_point_2 - control_point_1) +
+        3.0 * t * t * (1.0 - control_point_2);
+}
+
+double precise_bezier_transform(const marrow::runtime::Interpolation& interpolation, double alpha) {
+    const auto& bezier = interpolation.cubic_bezier();
+    double t = std::clamp(alpha, 0.0, 1.0);
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const double x =
+            precise_cubic_component(bezier.cx1, bezier.cx2, t) - alpha;
+        if (std::abs(x) <= 1e-7) {
+            break;
+        }
+        const double derivative = precise_cubic_derivative(bezier.cx1, bezier.cx2, t);
+        if (std::abs(derivative) <= 1e-7) {
+            break;
+        }
+        t = std::clamp(t - x / derivative, 0.0, 1.0);
+    }
+    return precise_cubic_component(bezier.cy1, bezier.cy2, t);
+}
+
 double normalize_rotation_degrees(double angle) {
     return angle - (std::ceil(angle / 360.0 - 0.5) * 360.0);
 }
 
 double world_rotation_degrees(const BoneWorldTransform& transform) {
     return radians_to_degrees(std::atan2(transform.c, transform.a));
+}
+
+void expect_less_equal(
+    TestContext& context,
+    double actual,
+    double limit,
+    std::string_view message) {
+    if (actual <= limit) {
+        return;
+    }
+
+    ++context.failures;
+    std::cerr << context.name << ": " << message << " expected <= " << limit
+              << " but got " << actual << ".\n";
 }
 
 BoneData make_bone(
@@ -153,6 +203,36 @@ std::shared_ptr<const SkeletonData> make_skeleton_data(
         std::move(mix_definitions));
 }
 
+std::shared_ptr<const SkeletonData> make_skeleton_data_with_constraints(
+    std::vector<BoneData> bones,
+    std::vector<IkConstraintData> ik_constraints,
+    std::vector<TransformConstraintData> transform_constraints) {
+    SkeletonInfo info;
+    info.name = "constraint_dirty_skip_tests";
+    return marrow::allocate_shared<SkeletonData>(
+        std::move(info),
+        std::move(bones),
+        std::move(ik_constraints),
+        std::vector<marrow::runtime::PathConstraintData>{},
+        std::move(transform_constraints),
+        std::vector<PhysicsConstraintData>{},
+        std::vector<SlotData>{},
+        std::vector<marrow::runtime::EventDefinition>{},
+        std::vector<AnimationData>{},
+        std::vector<SkinData>{},
+        0.0,
+        std::vector<AnimationMixDefinition>{});
+}
+
+std::vector<BoneWorldTransform> collect_world_transforms(const Skeleton& skeleton) {
+    std::vector<BoneWorldTransform> world_transforms;
+    world_transforms.reserve(skeleton.bone_world_transforms().size());
+    for (const BoneWorldTransform world : skeleton.bone_world_transforms()) {
+        world_transforms.push_back(world);
+    }
+    return world_transforms;
+}
+
 AttachmentData make_bounding_box_attachment(
     std::string name,
     std::vector<AttachmentVertex> polygon) {
@@ -161,6 +241,176 @@ AttachmentData make_bounding_box_attachment(
     attachment.kind = AttachmentKind::BoundingBox;
     attachment.bounding_box = BoundingBoxAttachmentData{std::move(polygon)};
     return attachment;
+}
+
+AttachmentData make_region_attachment(
+    std::string name,
+    std::string region_name) {
+    AttachmentData attachment;
+    attachment.name = std::move(name);
+    attachment.kind = AttachmentKind::Region;
+    attachment.region_name = std::move(region_name);
+    return attachment;
+}
+
+AttachmentData make_mesh_attachment(
+    std::string name,
+    std::string region_name) {
+    AttachmentData attachment;
+    attachment.name = std::move(name);
+    attachment.kind = AttachmentKind::Mesh;
+    attachment.region_name = std::move(region_name);
+
+    marrow::runtime::MeshGeometry geometry;
+    geometry.vertices = {
+        -16.0, -16.0,
+        16.0, -16.0,
+        16.0, 16.0,
+        -16.0, 16.0,
+    };
+    geometry.uvs = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+    };
+    geometry.triangles = {0U, 1U, 2U, 0U, 2U, 3U};
+    geometry.weights.resize(4U);
+    geometry.weights[0].influences.push_back({0U, -16.0, -16.0, 1.0});
+    geometry.weights[1].influences.push_back({1U, 4.0, -16.0, 1.0});
+    geometry.weights[2].influences.push_back({1U, 4.0, 16.0, 1.0});
+    geometry.weights[3].influences.push_back({0U, -16.0, 16.0, 1.0});
+    attachment.mesh_geometry =
+        marrow::allocate_shared<marrow::runtime::MeshGeometry>(std::move(geometry));
+    return attachment;
+}
+
+AttachmentData make_clipping_attachment(
+    std::string name,
+    std::string end_slot_name,
+    std::optional<std::size_t> end_slot_index,
+    std::vector<AttachmentVertex> polygon) {
+    AttachmentData attachment;
+    attachment.name = std::move(name);
+    attachment.kind = AttachmentKind::Clipping;
+    attachment.clipping_attachment = marrow::runtime::ClippingAttachmentData{
+        std::move(polygon),
+        end_slot_index,
+        std::move(end_slot_name),
+    };
+    return attachment;
+}
+
+std::shared_ptr<const AtlasData> make_renderer_test_atlas() {
+    AtlasInfo info;
+    info.name = "renderer_cache_test_atlas";
+    info.image = "renderer_cache_test.png";
+    info.width = 256.0;
+    info.height = 256.0;
+    info.filter_min = "linear";
+    info.filter_mag = "linear";
+    info.wrap_x = "clamp";
+    info.wrap_y = "clamp";
+
+    std::vector<AtlasRegion> regions;
+    for (const std::string_view region_name : {
+             std::string_view("body_default"),
+             std::string_view("body_swap"),
+             std::string_view("body_alt"),
+             std::string_view("body_mesh"),
+             std::string_view("arm_default"),
+         }) {
+        AtlasRegion region;
+        region.name = std::string(region_name);
+        region.width = 32.0;
+        region.height = 32.0;
+        region.origin_x = 16.0;
+        region.origin_y = 16.0;
+        regions.push_back(std::move(region));
+    }
+
+    return marrow::allocate_shared<AtlasData>(std::move(info), std::move(regions));
+}
+
+std::shared_ptr<const SkeletonData> make_renderer_cache_test_data() {
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+    bones.push_back(make_bone("arm", 0, BoneTransform{12.0, 4.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    SlotData body_slot;
+    body_slot.name = "body";
+    body_slot.bone_index = 0;
+    body_slot.setup_attachment = "body_default";
+
+    SlotData arm_slot;
+    arm_slot.name = "arm";
+    arm_slot.bone_index = 1;
+    arm_slot.setup_attachment = "arm_default";
+
+    SkinData default_skin;
+    default_skin.name = "default";
+    default_skin.slot_attachments.push_back({0U, make_region_attachment("body_default", "body_default")});
+    default_skin.slot_attachments.push_back({0U, make_region_attachment("body_swap", "body_swap")});
+    default_skin.slot_attachments.push_back({1U, make_region_attachment("arm_default", "arm_default")});
+
+    SkinData alt_skin;
+    alt_skin.name = "alt";
+    alt_skin.slot_attachments.push_back({0U, make_region_attachment("body_alt", "body_alt")});
+
+    return make_skeleton_data(
+        std::move(bones),
+        {},
+        {},
+        {body_slot, arm_slot},
+        {default_skin, alt_skin});
+}
+
+std::shared_ptr<const SkeletonData> make_renderer_mesh_cache_test_data(bool include_clip_slot) {
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+    bones.push_back(make_bone("arm", 0U, BoneTransform{12.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    std::vector<SlotData> slots;
+    if (include_clip_slot) {
+        SlotData clip_slot;
+        clip_slot.name = "mask";
+        clip_slot.bone_index = 0U;
+        clip_slot.setup_attachment = "mesh_mask";
+        slots.push_back(std::move(clip_slot));
+    }
+
+    SlotData body_slot;
+    body_slot.name = "body";
+    body_slot.bone_index = 0U;
+    body_slot.setup_attachment = "body_mesh";
+    slots.push_back(std::move(body_slot));
+
+    SkinData default_skin;
+    default_skin.name = "default";
+    if (include_clip_slot) {
+        default_skin.slot_attachments.push_back({
+            0U,
+            make_clipping_attachment(
+                "mesh_mask",
+                "body",
+                1U,
+                {
+                    {-10.0, -10.0},
+                    {10.0, -10.0},
+                    {10.0, 10.0},
+                    {-10.0, 10.0},
+                })});
+    }
+    default_skin.slot_attachments.push_back({
+        include_clip_slot ? 1U : 0U,
+        make_mesh_attachment("body_mesh", "body_mesh")});
+
+    return make_skeleton_data(
+        std::move(bones),
+        {},
+        {},
+        std::move(slots),
+        {std::move(default_skin)});
 }
 
 BoneWorldTransform reference_local_transform(const BoneTransform& transform) {
@@ -317,6 +567,167 @@ std::shared_ptr<const SkeletonData> make_bounds_test_data() {
             })});
 
     return make_skeleton_data(std::move(bones), {}, {}, {slot}, {default_skin});
+}
+
+std::shared_ptr<const SkeletonData> make_constraint_allocation_test_data() {
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+    bones.push_back(make_bone(
+        "follower_a",
+        0,
+        BoneTransform{6.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "follower_b",
+        1,
+        BoneTransform{6.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    SlotData slot;
+    slot.name = "guide";
+    slot.bone_index = 0U;
+    slot.setup_attachment = "guide_path";
+
+    AttachmentData path_attachment;
+    path_attachment.name = "guide_path";
+    path_attachment.kind = AttachmentKind::Path;
+    path_attachment.path_attachment = marrow::runtime::PathAttachmentData{
+        {
+            {0.0, 0.0},
+            {8.0, 10.0},
+            {16.0, -10.0},
+            {24.0, 0.0},
+            {32.0, 10.0},
+            {40.0, -10.0},
+            {48.0, 0.0},
+        }};
+
+    SkinData default_skin;
+    default_skin.name = "default";
+    default_skin.slot_attachments.push_back({0U, std::move(path_attachment)});
+
+    marrow::runtime::PathConstraintData path_constraint;
+    path_constraint.name = "follow";
+    path_constraint.slot_index = 0U;
+    path_constraint.bone_indices = {1U, 2U};
+    path_constraint.position = 0.05;
+    path_constraint.spacing = 0.35;
+    path_constraint.spacing_mode = marrow::runtime::PathConstraintSpacingMode::Percent;
+    path_constraint.rotate_mix = 1.0;
+    path_constraint.translate_mix = 1.0;
+
+    SkeletonInfo info;
+    info.name = "constraint_allocation_test";
+    return marrow::allocate_shared<SkeletonData>(
+        std::move(info),
+        std::move(bones),
+        std::vector<IkConstraintData>{},
+        std::vector<marrow::runtime::PathConstraintData>{std::move(path_constraint)},
+        std::vector<marrow::runtime::TransformConstraintData>{},
+        std::vector<PhysicsConstraintData>{},
+        std::vector<SlotData>{std::move(slot)},
+        std::vector<marrow::runtime::EventDefinition>{},
+        std::vector<AnimationData>{},
+        std::vector<SkinData>{std::move(default_skin)},
+        0.0,
+        std::vector<AnimationMixDefinition>{});
+}
+
+std::shared_ptr<const SkeletonData> make_constraint_dirty_skip_test_data() {
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+
+    bones.push_back(make_bone("upper_a", 0, BoneTransform{}));
+    bones.push_back(make_bone(
+        "lower_a",
+        1,
+        BoneTransform{5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "hand_a",
+        2,
+        BoneTransform{5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "target_a",
+        0,
+        BoneTransform{6.0, 8.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    bones.push_back(make_bone(
+        "upper_b",
+        0,
+        BoneTransform{0.0, 20.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "lower_b",
+        5,
+        BoneTransform{5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "hand_b",
+        6,
+        BoneTransform{5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "target_b",
+        0,
+        BoneTransform{6.0, 28.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    bones.push_back(make_bone(
+        "source_a",
+        0,
+        BoneTransform{20.0, 0.0, 18.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "target_ta",
+        0,
+        BoneTransform{25.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "target_tb",
+        0,
+        BoneTransform{25.0, 5.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    bones.push_back(make_bone(
+        "source_b",
+        0,
+        BoneTransform{20.0, 20.0, -12.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "target_tc",
+        0,
+        BoneTransform{25.0, 20.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone(
+        "target_td",
+        0,
+        BoneTransform{25.0, 25.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    IkConstraintData ik_a;
+    ik_a.name = "ik_a";
+    ik_a.bone_indices = {1U, 2U};
+    ik_a.target_bone_index = 4U;
+    ik_a.mix = 1.0;
+
+    IkConstraintData ik_b;
+    ik_b.name = "ik_b";
+    ik_b.bone_indices = {5U, 6U};
+    ik_b.target_bone_index = 8U;
+    ik_b.mix = 1.0;
+
+    TransformConstraintData transform_a;
+    transform_a.name = "transform_a";
+    transform_a.source_bone_index = 9U;
+    transform_a.target_bone_indices = {10U, 11U};
+    transform_a.rotate_mix = 1.0;
+    transform_a.translate_mix = 1.0;
+    transform_a.offsets.rotation = 5.0;
+    transform_a.offsets.x = 2.0;
+    transform_a.offsets.y = -1.0;
+
+    TransformConstraintData transform_b;
+    transform_b.name = "transform_b";
+    transform_b.source_bone_index = 12U;
+    transform_b.target_bone_indices = {13U, 14U};
+    transform_b.rotate_mix = 1.0;
+    transform_b.translate_mix = 1.0;
+    transform_b.offsets.rotation = -7.0;
+    transform_b.offsets.x = -1.5;
+    transform_b.offsets.y = 2.5;
+
+    return make_skeleton_data_with_constraints(
+        std::move(bones),
+        std::vector<IkConstraintData>{std::move(ik_a), std::move(ik_b)},
+        std::vector<TransformConstraintData>{std::move(transform_a), std::move(transform_b)});
 }
 
 AnimationData make_rotate_animation(
@@ -776,6 +1187,341 @@ void test_interpolation_edges(TestContext& context) {
     }
 }
 
+void test_animation_float_storage_and_constant_pruning(TestContext& context) {
+    context.expect(
+        (std::is_same_v<decltype(marrow::runtime::CubicBezierControlPoints{}.cx1), float>),
+        "cubic bezier control points should store float32");
+    context.expect(
+        (std::is_same_v<decltype(RotateKeyframe{}.time), float>),
+        "rotate keyframe times should store float32");
+    context.expect(
+        (std::is_same_v<decltype(RotateKeyframe{}.angle), float>),
+        "rotate keyframe values should store float32");
+    context.expect(
+        (std::is_same_v<decltype(marrow::runtime::VectorKeyframe{}.x), float>),
+        "vector keyframe values should store float32");
+    context.expect(
+        (std::is_same_v<decltype(marrow::runtime::ColorKeyframe{}.time), float>),
+        "color keyframe times should store float32");
+    context.expect(
+        (std::is_same_v<
+            decltype(marrow::runtime::DeformKeyframe{}.vertex_offsets)::value_type,
+            float>),
+        "deform keyframe offsets should store float32");
+    context.expect(
+        (std::is_same_v<
+            decltype(marrow::runtime::EventKeyframe{}.float_value)::value_type,
+            float>),
+        "event keyframe float overrides should store float32");
+
+    const Interpolation bezier = Interpolation::cubic_bezier(0.25, 0.10, 0.75, 0.90);
+    for (int index = 0; index <= 32; ++index) {
+        const double alpha = static_cast<double>(index) / 32.0;
+        context.expect_near(
+            bezier.transform(alpha),
+            precise_bezier_transform(bezier, alpha),
+            "cubic bezier LUT should stay close to the precise solver",
+            5e-4);
+    }
+
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+    bones.push_back(make_bone(
+        "arm",
+        0U,
+        BoneTransform{5.0, -2.0, 10.0, 1.5, 0.75, 3.0, -4.0}));
+
+    SlotData slot;
+    slot.name = "body";
+    slot.bone_index = 1U;
+    slot.setup_attachment = "body";
+    slot.color = marrow::runtime::SlotColor{0.8, 0.7, 0.6, 1.0};
+
+    SkinData default_skin;
+    default_skin.name = "default";
+    default_skin.slot_attachments.push_back({0U, make_region_attachment("body", "body")});
+
+    AnimationData animation;
+    animation.name = "pruned";
+    animation.targeted_bone_indices = {0U, 1U};
+    animation.bone_rotate_timelines.push_back(BoneRotateTimeline{
+        0U,
+        0.0,
+        {RotateKeyframe{0.0, 15.0, Interpolation::linear()}}});
+    animation.bone_rotate_timelines.push_back(BoneRotateTimeline{
+        1U,
+        10.0,
+        {RotateKeyframe{0.0, 0.0, Interpolation::linear()}}});
+    animation.bone_inherit_timelines.push_back(marrow::runtime::BoneInheritTimeline{
+        1U,
+        {marrow::runtime::InheritKeyframe{0.0, BoneInherit::Normal}}});
+    animation.bone_translate_timelines.push_back(BoneTranslateTimeline{
+        1U,
+        {marrow::runtime::VectorKeyframe{0.0, 5.0, -2.0, Interpolation::linear()}}});
+    animation.bone_scale_timelines.push_back(marrow::runtime::BoneScaleTimeline{
+        1U,
+        {marrow::runtime::VectorKeyframe{0.0, 1.5, 0.75, Interpolation::linear()}}});
+    animation.bone_shear_timelines.push_back(marrow::runtime::BoneShearTimeline{
+        1U,
+        {marrow::runtime::VectorKeyframe{0.0, 3.0, -4.0, Interpolation::linear()}}});
+
+    marrow::runtime::SlotAttachmentTimeline attachment_timeline;
+    attachment_timeline.slot_index = 0U;
+    attachment_timeline.keyframes.push_back(
+        marrow::runtime::AttachmentKeyframe{0.0, std::optional<std::string>{"body"}});
+    animation.slot_attachment_timelines.push_back(std::move(attachment_timeline));
+
+    marrow::runtime::SlotColorTimeline color_timeline;
+    color_timeline.slot_index = 0U;
+    marrow::runtime::ColorKeyframe color_keyframe;
+    color_keyframe.time = 0.0f;
+    color_keyframe.color = slot.color;
+    color_keyframe.interpolation = Interpolation::linear();
+    color_timeline.keyframes.push_back(color_keyframe);
+    animation.slot_color_timelines.push_back(std::move(color_timeline));
+
+    marrow::runtime::DrawOrderTimeline draw_order_timeline;
+    draw_order_timeline.keyframes.push_back(marrow::runtime::DrawOrderKeyframe{0.0f, {0U}});
+    animation.draw_order_timeline_data = std::move(draw_order_timeline);
+
+    const auto skeleton_data = make_skeleton_data(
+        std::move(bones),
+        {},
+        {},
+        {slot},
+        {default_skin},
+        {animation});
+    const AnimationData* loaded_animation = skeleton_data->find_animation("pruned");
+    context.expect(loaded_animation != nullptr, "constant-track animation should load");
+    if (loaded_animation == nullptr) {
+        return;
+    }
+
+    context.expect(
+        loaded_animation->bone_rotate_timelines.size() == 1U,
+        "identity rotate timeline should prune while active rotate stays");
+    context.expect(
+        loaded_animation->bone_inherit_timelines.empty(),
+        "identity inherit timeline should prune");
+    context.expect(
+        loaded_animation->bone_translate_timelines.empty(),
+        "identity translate timeline should prune");
+    context.expect(
+        loaded_animation->bone_scale_timelines.empty(),
+        "identity scale timeline should prune");
+    context.expect(
+        loaded_animation->bone_shear_timelines.empty(),
+        "identity shear timeline should prune");
+    context.expect(
+        loaded_animation->slot_attachment_timelines.empty(),
+        "identity attachment timeline should prune");
+    context.expect(
+        loaded_animation->slot_color_timelines.empty(),
+        "identity color timeline should prune");
+    context.expect(
+        !loaded_animation->draw_order_timeline_data.has_value(),
+        "identity draw-order timeline should prune");
+    context.expect(
+        loaded_animation->targeted_bone_indices == std::vector<std::size_t>{0U},
+        "targeted bones should rebuild from the remaining active timelines");
+
+    const std::optional<double> sampled_rotation = loaded_animation->sample_bone_rotation(0U, 0.5);
+    context.expect(sampled_rotation.has_value(), "remaining rotate timeline should still sample");
+    if (sampled_rotation.has_value()) {
+        context.expect_near(*sampled_rotation, 15.0, "remaining rotate timeline value");
+    }
+}
+
+void test_animation_timeline_index_and_sampling_cursor(TestContext& context) {
+    AnimationData animation;
+    animation.name = "cached";
+    animation.targeted_bone_indices = {1U};
+    animation.bone_rotate_timelines.push_back(BoneRotateTimeline{
+        1U,
+        0.0,
+        {
+            RotateKeyframe{0.0, 0.0, Interpolation::linear()},
+            RotateKeyframe{0.5, 60.0, Interpolation::linear()},
+            RotateKeyframe{1.0, 120.0, Interpolation::linear()},
+        }});
+    animation.bone_inherit_timelines.push_back(marrow::runtime::BoneInheritTimeline{
+        1U,
+        {
+            marrow::runtime::InheritKeyframe{0.0, BoneInherit::Normal},
+            marrow::runtime::InheritKeyframe{0.5, BoneInherit::OnlyTranslation},
+        }});
+    animation.bone_translate_timelines.push_back(BoneTranslateTimeline{
+        1U,
+        {
+            marrow::runtime::VectorKeyframe{0.0, 0.0, 0.0, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{0.5, 8.0, 4.0, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{1.0, 16.0, 8.0, Interpolation::linear()},
+        }});
+    animation.bone_scale_timelines.push_back(marrow::runtime::BoneScaleTimeline{
+        1U,
+        {
+            marrow::runtime::VectorKeyframe{0.0, 1.0, 1.0, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{1.0, 1.5, 0.75, Interpolation::linear()},
+        }});
+    animation.bone_shear_timelines.push_back(marrow::runtime::BoneShearTimeline{
+        1U,
+        {
+            marrow::runtime::VectorKeyframe{0.0, 0.0, 0.0, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{1.0, 12.0, -6.0, Interpolation::linear()},
+        }});
+
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+    bones.push_back(make_bone("arm", 0U));
+
+    const auto skeleton_data = make_skeleton_data(std::move(bones), {}, {}, {}, {}, {animation});
+    const AnimationData* loaded_animation = skeleton_data->find_animation("cached");
+    context.expect(loaded_animation != nullptr, "cached animation should load into SkeletonData");
+    if (loaded_animation == nullptr) {
+        return;
+    }
+
+    context.expect(
+        loaded_animation->bone_timeline_index.size() == skeleton_data->bones().size(),
+        "bone timeline index should allocate one entry per bone");
+    context.expect(
+        loaded_animation->find_rotate_timeline(1U) == &loaded_animation->bone_rotate_timelines[0],
+        "rotate lookup should hit the indexed timeline entry");
+    context.expect(
+        loaded_animation->find_inherit_timeline(1U) == &loaded_animation->bone_inherit_timelines[0],
+        "inherit lookup should hit the indexed timeline entry");
+    context.expect(
+        loaded_animation->find_translate_timeline(1U) ==
+            &loaded_animation->bone_translate_timelines[0],
+        "translate lookup should hit the indexed timeline entry");
+    context.expect(
+        loaded_animation->find_scale_timeline(1U) == &loaded_animation->bone_scale_timelines[0],
+        "scale lookup should hit the indexed timeline entry");
+    context.expect(
+        loaded_animation->find_shear_timeline(1U) == &loaded_animation->bone_shear_timelines[0],
+        "shear lookup should hit the indexed timeline entry");
+    context.expect(
+        loaded_animation->find_rotate_timeline(0U) == nullptr,
+        "untimed bones should not return indexed transform timelines");
+
+    marrow::runtime::SamplingContext sampling_context;
+    const std::optional<double> early_sample =
+        loaded_animation->sample_bone_rotation(1U, 0.25, &sampling_context);
+    const std::optional<double> late_sample =
+        loaded_animation->sample_bone_rotation(1U, 0.75, &sampling_context);
+    context.expect(early_sample.has_value(), "cached cursor should sample early rotation");
+    context.expect(late_sample.has_value(), "cached cursor should sample late rotation");
+    if (early_sample.has_value()) {
+        context.expect_near(*early_sample, 30.0, "early cached rotation sample");
+    }
+    if (late_sample.has_value()) {
+        context.expect_near(*late_sample, 90.0, "late cached rotation sample");
+    }
+    context.expect(
+        sampling_context.rotate_last_keyframe_indices.size() == 1U &&
+            sampling_context.rotate_last_keyframe_indices[0] == 1U,
+        "forward sampling should advance the cached rotate cursor");
+
+    const std::optional<double> looped_sample =
+        loaded_animation->sample_bone_rotation(1U, 0.10, &sampling_context);
+    context.expect(looped_sample.has_value(), "rewound cached rotation sample should succeed");
+    if (looped_sample.has_value()) {
+        context.expect_near(*looped_sample, 12.0, "rewound cached rotation sample");
+    }
+    context.expect(
+        sampling_context.rotate_last_keyframe_indices.size() == 1U &&
+            sampling_context.rotate_last_keyframe_indices[0] == 0U,
+        "rewinding the sample time should reset the cached rotate cursor");
+}
+
+void test_constraint_fast_math_approximations(TestContext& context) {
+    constexpr float kPiF = 3.14159265358979323846f;
+    constexpr float kTwoPiF = kPiF * 2.0f;
+    constexpr float kAtanToleranceRadians = 0.005f;
+    constexpr float kTrigTolerance = 0.0012f;
+    constexpr float kAcosTolerance = 1e-4f;
+    constexpr float kSqrtRelativeTolerance = 1e-4f;
+
+    const auto normalize_radians = [](float angle) {
+        angle = std::fmod(angle + kPiF, kTwoPiF);
+        if (angle < 0.0f) {
+            angle += kTwoPiF;
+        }
+        return angle - kPiF;
+    };
+
+    float max_atan_error = 0.0f;
+    for (int yi = -256; yi <= 256; ++yi) {
+        for (int xi = -256; xi <= 256; ++xi) {
+            if (xi == 0 && yi == 0) {
+                continue;
+            }
+
+            const float x = static_cast<float>(xi) / 17.0f;
+            const float y = static_cast<float>(yi) / 19.0f;
+            const float error = std::abs(normalize_radians(
+                std::atan2(y, x) - marrow::runtime::detail::fast_atan2f(y, x)));
+            max_atan_error = std::max(max_atan_error, error);
+        }
+    }
+    expect_less_equal(
+        context,
+        max_atan_error,
+        kAtanToleranceRadians,
+        "fast_atan2f max error should stay below 0.005 radians");
+
+    float max_sin_error = 0.0f;
+    float max_cos_error = 0.0f;
+    for (int step = 0; step <= 4096; ++step) {
+        const float angle =
+            -4.0f * kPiF + (8.0f * kPiF * static_cast<float>(step) / 4096.0f);
+        max_sin_error = std::max(
+            max_sin_error,
+            std::abs(std::sin(angle) - marrow::runtime::detail::fast_sinf(angle)));
+        max_cos_error = std::max(
+            max_cos_error,
+            std::abs(std::cos(angle) - marrow::runtime::detail::fast_cosf(angle)));
+    }
+    expect_less_equal(
+        context,
+        max_sin_error,
+        kTrigTolerance,
+        "fast_sinf max error should stay below the sampled tolerance");
+    expect_less_equal(
+        context,
+        max_cos_error,
+        kTrigTolerance,
+        "fast_cosf max error should stay below the sampled tolerance");
+
+    float max_acos_error = 0.0f;
+    for (int step = 0; step <= 4096; ++step) {
+        const float value = -1.0f + (2.0f * static_cast<float>(step) / 4096.0f);
+        max_acos_error = std::max(
+            max_acos_error,
+            std::abs(std::acos(value) - marrow::runtime::detail::fast_acosf(value)));
+    }
+    expect_less_equal(
+        context,
+        max_acos_error,
+        kAcosTolerance,
+        "fast_acosf max error should stay below the sampled tolerance");
+
+    float max_sqrt_relative_error = 0.0f;
+    for (int step = 0; step <= 4096; ++step) {
+        const float value = 1.0e-6f + (1024.0f * static_cast<float>(step) / 4096.0f);
+        const float precise = std::sqrt(value);
+        const float approximate = marrow::runtime::detail::fast_sqrtf(value);
+        max_sqrt_relative_error = std::max(
+            max_sqrt_relative_error,
+            std::abs(approximate - precise) / precise);
+    }
+    expect_less_equal(
+        context,
+        max_sqrt_relative_error,
+        kSqrtRelativeTolerance,
+        "fast_sqrtf relative error should stay below the sampled tolerance");
+}
+
 void test_matrix_composition(TestContext& context) {
     const BoneWorldTransform identity =
         marrow::runtime::detail::root_world_transform(BoneTransform{}, 1.0, 1.0);
@@ -891,6 +1637,49 @@ void test_topological_bone_reorder(TestContext& context) {
     context.expect(
         skeleton_data->slots()[0].bone_index == 2,
         "slot bone index should remap alongside bones");
+    context.expect(
+        skeleton_data->children_map().size() == 3U,
+        "children_map should cache one adjacency list per reordered bone");
+    if (skeleton_data->children_map().size() == 3U) {
+        context.expect(
+            skeleton_data->children_map()[0] == std::vector<std::size_t>{1U},
+            "root children should remap to the reordered arm");
+        context.expect(
+            skeleton_data->children_map()[1] == std::vector<std::size_t>{2U},
+            "arm children should remap to the reordered hand");
+        context.expect(
+            skeleton_data->children_map()[2].empty(),
+            "leaf bones should cache an empty child list");
+    }
+    context.expect(
+        skeleton_data->bone_tip_local_vectors().size() == 3U,
+        "bone tip cache should include one entry per reordered bone");
+    if (skeleton_data->bone_tip_local_vectors().size() == 3U) {
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[0].x,
+            2.0,
+            "root tip cache x should follow the reordered arm");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[0].y,
+            0.0,
+            "root tip cache y should follow the reordered arm");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[1].x,
+            5.0,
+            "arm tip cache x should follow the reordered hand");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[1].y,
+            0.0,
+            "arm tip cache y should follow the reordered hand");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[2].x,
+            0.0,
+            "leaf tip cache x should default to zero");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[2].y,
+            0.0,
+            "leaf tip cache y should default to zero");
+    }
 
     const AnimationData* reordered_animation = skeleton_data->find_animation("wave");
     context.expect(reordered_animation != nullptr, "animation should survive topological reorder");
@@ -913,7 +1702,71 @@ void test_topological_bone_reorder(TestContext& context) {
         "topologically reordered hand world y");
 }
 
+void test_skeleton_data_children_map_and_tip_cache(TestContext& context) {
+    std::vector<BoneData> bones;
+    bones.push_back(make_bone("root", std::nullopt));
+    bones.push_back(make_bone("near", 0, BoneTransform{1.0, 2.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone("far", 0, BoneTransform{-3.0, 4.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+    bones.push_back(make_bone("far_tip", 2, BoneTransform{2.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
+
+    const auto skeleton_data = make_skeleton_data(std::move(bones));
+
+    context.expect(
+        skeleton_data->children_map().size() == 4U,
+        "children_map should size-match the authored bone list");
+    if (skeleton_data->children_map().size() == 4U) {
+        context.expect(
+            skeleton_data->children_map()[0] == std::vector<std::size_t>({1U, 2U}),
+            "root should cache both direct children");
+        context.expect(
+            skeleton_data->children_map()[1].empty(),
+            "near should cache an empty child list");
+        context.expect(
+            skeleton_data->children_map()[2] == std::vector<std::size_t>{3U},
+            "far should cache its grandchild edge");
+        context.expect(
+            skeleton_data->children_map()[3].empty(),
+            "far_tip should cache an empty child list");
+    }
+
+    context.expect(
+        skeleton_data->bone_tip_local_vectors().size() == 4U,
+        "bone tip cache should size-match the authored bone list");
+    if (skeleton_data->bone_tip_local_vectors().size() == 4U) {
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[0].x,
+            -3.0,
+            "root tip cache should prefer the furthest direct child x");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[0].y,
+            4.0,
+            "root tip cache should prefer the furthest direct child y");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[2].x,
+            2.0,
+            "far tip cache should follow its direct child x");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[2].y,
+            1.0,
+            "far tip cache should follow its direct child y");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[3].x,
+            0.0,
+            "leaf tip cache x should default to zero");
+        context.expect_near(
+            skeleton_data->bone_tip_local_vectors()[3].y,
+            0.0,
+            "leaf tip cache y should default to zero");
+    }
+}
+
 void test_simd_world_transform_propagation(TestContext& context) {
+    constexpr double kSkeletonScaleX = 1.37;
+    constexpr double kSkeletonScaleY = 0.83;
+    context.expect(
+        sizeof(BoneWorldTransform) == sizeof(float) * 6U,
+        "world transform storage should pack down to six floats");
+
     std::vector<BoneData> bones;
     bones.push_back(make_bone("root", std::nullopt));
     for (std::size_t parent_index = 0; bones.size() < 17; ++parent_index) {
@@ -974,7 +1827,6 @@ void test_simd_world_transform_propagation(TestContext& context) {
         &scalar_d,
         &scalar_world_x,
         &scalar_world_y,
-        nullptr,
     };
 
     std::vector<float> optimized_a;
@@ -990,21 +1842,20 @@ void test_simd_world_transform_propagation(TestContext& context) {
         &optimized_d,
         &optimized_world_x,
         &optimized_world_y,
-        nullptr,
     };
 
     marrow::runtime::detail::propagate_world_transforms_scalar(
         bones,
         poses,
-        1.0,
-        1.0,
+        kSkeletonScaleX,
+        kSkeletonScaleY,
         local_buffers,
         scalar_world);
     marrow::runtime::detail::propagate_world_transforms_optimized(
         bones,
         poses,
-        1.0,
-        1.0,
+        kSkeletonScaleX,
+        kSkeletonScaleY,
         local_buffers,
         optimized_world);
 
@@ -1026,16 +1877,147 @@ void test_simd_world_transform_propagation(TestContext& context) {
     }
 }
 
+void test_constraint_hot_path_allocations(TestContext& context) {
+    const auto skeleton_data = make_constraint_allocation_test_data();
+    Skeleton skeleton(skeleton_data);
+
+    skeleton.update_world_transforms(PhysicsMode::None);
+    for (std::size_t frame = 0; frame < 5U; ++frame) {
+        skeleton.bone_poses()[0].local_pose.rotation = static_cast<double>(frame) * 4.0;
+        skeleton.bone_poses()[0].local_pose.x = static_cast<double>(frame) * 0.75;
+        const std::size_t allocation_count_before = skeleton.constraint_allocation_count();
+        skeleton.update_world_transforms(PhysicsMode::None);
+        const std::size_t allocation_count_after = skeleton.constraint_allocation_count();
+        context.expect(
+            allocation_count_after == allocation_count_before,
+            "constraint hot path should not grow scratch buffers after warmup");
+    }
+}
+
+void test_constraint_dirty_skip_preserves_output(TestContext& context) {
+    Skeleton skeleton(make_constraint_dirty_skip_test_data());
+
+    marrow::runtime::WorldTransformTimingBreakdown initial_timing;
+    skeleton.update_world_transforms(PhysicsMode::None, &initial_timing);
+    const std::vector<BoneWorldTransform> initial_world = collect_world_transforms(skeleton);
+
+    marrow::runtime::WorldTransformTimingBreakdown skipped_timing;
+    skeleton.update_world_transforms(PhysicsMode::None, &skipped_timing);
+    const std::vector<BoneWorldTransform> skipped_world = collect_world_transforms(skeleton);
+
+    context.expect(
+        skipped_timing.evaluated_ik_constraints == 0U &&
+            skipped_timing.skipped_ik_constraints == 2U,
+        "unchanged IK constraints should reuse the cached solve output");
+    context.expect(
+        skipped_timing.evaluated_transform_constraints == 0U &&
+            skipped_timing.skipped_transform_constraints == 2U,
+        "unchanged transform constraints should reuse the cached solve output");
+    context.expect(
+        initial_world.size() == skipped_world.size(),
+        "constraint dirty skip regression should preserve the world-transform buffer size");
+
+    if (initial_world.size() != skipped_world.size()) {
+        return;
+    }
+
+    for (std::size_t bone_index = 0; bone_index < initial_world.size(); ++bone_index) {
+        expect_world_transform(
+            context,
+            skipped_world[bone_index],
+            initial_world[bone_index],
+            "constraint dirty skip world");
+    }
+}
+
+void test_constraint_dirty_skip_re_evaluates_only_affected_constraints(TestContext& context) {
+    Skeleton skeleton(make_constraint_dirty_skip_test_data());
+    skeleton.update_world_transforms(PhysicsMode::None);
+    const std::vector<BoneWorldTransform> baseline_world = collect_world_transforms(skeleton);
+
+    skeleton.bone_poses()[4].local_pose.y = -6.0;
+    marrow::runtime::WorldTransformTimingBreakdown ik_timing;
+    skeleton.update_world_transforms(PhysicsMode::None, &ik_timing);
+    const std::vector<BoneWorldTransform> ik_world = collect_world_transforms(skeleton);
+
+    context.expect(
+        ik_timing.evaluated_ik_constraints == 1U &&
+            ik_timing.skipped_ik_constraints == 1U,
+        "moving one IK target should only re-evaluate the affected IK constraint");
+    context.expect(
+        ik_timing.evaluated_transform_constraints == 0U &&
+            ik_timing.skipped_transform_constraints == 2U,
+        "moving an IK target should leave transform constraints on the cached skip path");
+    context.expect(
+        std::abs(ik_world[3].world_y - baseline_world[3].world_y) > 0.5,
+        "the affected IK branch should move after its target changes");
+    context.expect_near(
+        ik_world[7].world_x,
+        baseline_world[7].world_x,
+        "the unaffected IK branch should keep its cached world x");
+    context.expect_near(
+        ik_world[7].world_y,
+        baseline_world[7].world_y,
+        "the unaffected IK branch should keep its cached world y");
+
+    skeleton.bone_poses()[12].local_pose.rotation -= 20.0;
+    marrow::runtime::WorldTransformTimingBreakdown transform_timing;
+    skeleton.update_world_transforms(PhysicsMode::None, &transform_timing);
+    const std::vector<BoneWorldTransform> transform_world = collect_world_transforms(skeleton);
+
+    context.expect(
+        transform_timing.evaluated_ik_constraints == 0U &&
+            transform_timing.skipped_ik_constraints == 2U,
+        "changing only a transform source should keep both IK constraints on the cached path");
+    context.expect(
+        transform_timing.evaluated_transform_constraints == 1U &&
+            transform_timing.skipped_transform_constraints == 1U,
+        "changing one transform source should only re-evaluate the affected transform constraint");
+    context.expect(
+        std::abs(transform_world[13].a - ik_world[13].a) > 0.05 ||
+            std::abs(transform_world[13].c - ik_world[13].c) > 0.05 ||
+            std::abs(transform_world[13].world_x - ik_world[13].world_x) > 0.5 ||
+            std::abs(transform_world[13].world_y - ik_world[13].world_y) > 0.5,
+        "the affected transform branch should change after its source changes");
+    context.expect_near(
+        transform_world[10].world_x,
+        ik_world[10].world_x,
+        "the unaffected transform branch should keep its cached world x");
+    context.expect_near(
+        transform_world[10].world_y,
+        ik_world[10].world_y,
+        "the unaffected transform branch should keep its cached world y");
+}
+
 void test_ik_cases(TestContext& context) {
+    constexpr double kConstraintPositionTolerance = 0.05;
+    constexpr double kConstraintAngleToleranceDegrees = 0.3;
+
     Skeleton reachable(make_two_bone_ik_data(6.0, 8.0, true));
     const BoneWorldTransform& reachable_hand = reachable.bone_world_transforms()[3];
-    context.expect_near(reachable_hand.world_x, 6.0, "reachable ik hand x");
-    context.expect_near(reachable_hand.world_y, 8.0, "reachable ik hand y");
+    context.expect_near(
+        reachable_hand.world_x,
+        6.0,
+        "reachable ik hand x",
+        kConstraintPositionTolerance);
+    context.expect_near(
+        reachable_hand.world_y,
+        8.0,
+        "reachable ik hand y",
+        kConstraintPositionTolerance);
 
     Skeleton unreachable(make_two_bone_ik_data(20.0, 0.0, true));
     const BoneWorldTransform& unreachable_hand = unreachable.bone_world_transforms()[3];
-    context.expect_near(unreachable_hand.world_x, 10.0, "unreachable ik hand x");
-    context.expect_near(unreachable_hand.world_y, 0.0, "unreachable ik hand y");
+    context.expect_near(
+        unreachable_hand.world_x,
+        10.0,
+        "unreachable ik hand x",
+        kConstraintPositionTolerance);
+    context.expect_near(
+        unreachable_hand.world_y,
+        0.0,
+        "unreachable ik hand y",
+        kConstraintPositionTolerance);
 
     Skeleton degenerate(make_degenerate_ik_data());
     for (std::size_t bone_index = 0; bone_index < degenerate.bone_world_transforms().size(); ++bone_index) {
@@ -1059,17 +2041,21 @@ void test_ik_cases(TestContext& context) {
     Skeleton wrap(make_one_bone_wrap_ik_data());
     const double wrap_rotation = normalize_rotation_degrees(
         world_rotation_degrees(wrap.bone_world_transforms()[1]));
-    context.expect_near(wrap_rotation, 0.0, "wrap-around one-bone ik uses shortest arc");
+    context.expect_near(
+        wrap_rotation,
+        0.0,
+        "wrap-around one-bone ik uses shortest arc",
+        kConstraintAngleToleranceDegrees);
     context.expect_near(
         wrap.bone_world_transforms()[2].world_x,
         10.0,
         "wrap-around one-bone muzzle x",
-        1e-5);
+        kConstraintPositionTolerance);
     context.expect_near(
         wrap.bone_world_transforms()[2].world_y,
         0.0,
         "wrap-around one-bone muzzle y",
-        1e-5);
+        kConstraintPositionTolerance);
 }
 
 void test_physics_stepping(TestContext& context) {
@@ -1736,16 +2722,402 @@ void test_runtime_profiler_frame(TestContext& context) {
     }
 }
 
+void test_dynamic_mesh_cache_static_payload_and_deform_updates(TestContext& context) {
+    const auto skeleton_data = make_renderer_mesh_cache_test_data(false);
+    const auto atlas_data = make_renderer_test_atlas();
+    Skeleton skeleton(skeleton_data);
+    skeleton.update_world_transforms(PhysicsMode::Pose);
+
+    marrow::renderer::PreparedSceneCache cache;
+    const marrow::renderer::PreparedSceneCacheResult initial_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(initial_result), initial_result.error_message);
+    if (!initial_result) {
+        return;
+    }
+
+    context.expect(
+        cache.slot_records_.size() == 1U,
+        "mesh cache test should create one cached slot record");
+    if (cache.slot_records_.size() != 1U || !cache.slot_records_[0].draw_command.has_value()) {
+        return;
+    }
+
+    auto* initial_mesh = std::get_if<marrow::renderer::DynamicMeshDrawCommand>(
+        &(*cache.slot_records_[0].draw_command));
+    context.expect(initial_mesh != nullptr, "cached slot record should store a mesh draw command");
+    if (initial_mesh == nullptr) {
+        return;
+    }
+
+    const auto* initial_payload_data = initial_mesh->vertex_payloads.data();
+    const double initial_payload_x = initial_mesh->vertex_payloads[0].bone_local_positions[0].x;
+    context.expect(
+        initial_mesh->vertex_buffer_usage == marrow::renderer::MeshBufferUsage::Static,
+        "mesh payload should use a static vertex buffer");
+    context.expect(
+        !initial_mesh->deform_buffer_usage.has_value(),
+        "mesh deform buffer should stay disabled without active offsets");
+    context.expect(
+        initial_mesh->masked_vertices.empty() &&
+            initial_mesh->masked_indices.empty() &&
+            initial_mesh->has_bounds,
+        "unclipped mesh cache entries should skip CPU-skinned masked geometry");
+
+    skeleton.bone_poses()[0].local_pose.x = 18.0;
+    skeleton.update_world_transforms(PhysicsMode::Pose);
+    const marrow::renderer::PreparedSceneCacheResult pose_only_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(pose_only_result), pose_only_result.error_message);
+    context.expect(
+        pose_only_result.update_info != nullptr &&
+            pose_only_result.update_info->cache_hit &&
+            pose_only_result.update_info->bone_palette_only,
+        "pose-only mesh updates should hit the bone-palette-only cache path");
+
+    auto* pose_only_mesh = std::get_if<marrow::renderer::DynamicMeshDrawCommand>(
+        &(*cache.slot_records_[0].draw_command));
+    context.expect(
+        pose_only_mesh != nullptr &&
+            pose_only_mesh->vertex_payloads.data() == initial_payload_data,
+        "pose-only updates should reuse the cached static mesh payload");
+
+    skeleton.mesh_deform_states()[0].attachment_name = "body_mesh";
+    skeleton.mesh_deform_states()[0].vertex_offsets = {
+        1.0, -2.0,
+        2.5, -1.0,
+        2.5, 1.0,
+        1.0, 2.0,
+    };
+    const marrow::renderer::PreparedSceneCacheResult deform_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(deform_result), deform_result.error_message);
+    context.expect(
+        deform_result.update_info != nullptr &&
+            deform_result.update_info->dirty_slot_count == 1U,
+        "deform edits should dirty the cached mesh slot");
+
+    auto* deformed_mesh = std::get_if<marrow::renderer::DynamicMeshDrawCommand>(
+        &(*cache.slot_records_[0].draw_command));
+    context.expect(deformed_mesh != nullptr, "deform rebuild should preserve the cached mesh record");
+    if (deformed_mesh == nullptr) {
+        return;
+    }
+
+    context.expect(
+        deformed_mesh->vertex_payloads.data() == initial_payload_data,
+        "deform-only updates should keep the static vertex payload allocation");
+    context.expect_near(
+        deformed_mesh->vertex_payloads[0].bone_local_positions[0].x,
+        initial_payload_x,
+        "deform-only updates should not rewrite bind-pose mesh payloads");
+    context.expect(
+        deformed_mesh->deform_buffer_usage == marrow::renderer::MeshBufferUsage::Dynamic,
+        "deform-only updates should activate the dynamic deform buffer");
+    context.expect(
+        deformed_mesh->deform_offsets.size() == deformed_mesh->vertex_payloads.size(),
+        "deform offsets should upload one x/y pair per cached mesh vertex");
+    if (deformed_mesh->deform_offsets.size() == deformed_mesh->vertex_payloads.size()) {
+        context.expect_near(
+            deformed_mesh->deform_offsets[0].x,
+            1.0,
+            "deform offsets should preserve the authored x delta");
+        context.expect_near(
+            deformed_mesh->deform_offsets[0].y,
+            -2.0,
+            "deform offsets should preserve the authored y delta");
+    }
+}
+
+void test_dynamic_mesh_clipping_uses_stencil_only(TestContext& context) {
+    const auto skeleton_data = make_renderer_mesh_cache_test_data(true);
+    const auto atlas_data = make_renderer_test_atlas();
+    Skeleton skeleton(skeleton_data);
+    skeleton.update_world_transforms(PhysicsMode::Pose);
+
+    marrow::renderer::PreparedSceneCache cache;
+    const marrow::renderer::PreparedSceneCacheResult cache_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(cache_result), cache_result.error_message);
+    if (!cache_result || cache.scene().draw_commands.empty()) {
+        return;
+    }
+
+    const auto* clipped_mesh = marrow::renderer::dynamic_mesh_attachment_command(
+        cache.scene().draw_commands.back());
+    context.expect(clipped_mesh != nullptr, "clipped mesh cache test should keep a mesh draw command");
+    if (clipped_mesh == nullptr) {
+        return;
+    }
+
+    context.expect(
+        clipped_mesh->clip_attachment_name == std::optional<std::string>{"mesh_mask"},
+        "cached clipped meshes should preserve the active clip attachment name");
+    context.expect(
+        clipped_mesh->masked_vertices.empty() &&
+            clipped_mesh->masked_indices.empty() &&
+            clipped_mesh->has_bounds,
+        "clipped meshes should keep stencil metadata without CPU-clipped geometry");
+
+    constexpr std::array<float, 16> kIdentityProjection{{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    const marrow::renderer::RenderCommandListResult command_list_result =
+        marrow::renderer::build_render_command_list(cache.scene(), kIdentityProjection);
+    context.expect(static_cast<bool>(command_list_result), command_list_result.error_message);
+    if (!command_list_result || cache.scene().clip_attachments.size() != 1U) {
+        return;
+    }
+
+    const marrow::renderer::RenderCommandList& command_list =
+        *command_list_result.command_list;
+    context.expect(
+        command_list.commands.size() == 1U &&
+            command_list.clip_commands.size() == 1U &&
+            command_list.commands[0].vertices.size() == clipped_mesh->vertex_payloads.size() &&
+            command_list.commands[0].indices.size() == clipped_mesh->indices.size(),
+        "render command list should keep the original mesh geometry when clipping");
+    context.expect(
+        command_list.ordered_events.size() == 3U &&
+            command_list.ordered_events[0].kind ==
+                marrow::renderer::RenderCommandEventKind::ClipStart &&
+            command_list.ordered_events[1].kind ==
+                marrow::renderer::RenderCommandEventKind::Draw &&
+            command_list.ordered_events[2].kind ==
+                marrow::renderer::RenderCommandEventKind::ClipEnd,
+        "render command list should use clip start/draw/end events for the clipped mesh");
+
+    const marrow::renderer::GpuSkinningEvaluationResult skinned_result =
+        marrow::renderer::evaluate_gpu_skinned_vertices(
+            *clipped_mesh,
+            cache.scene().bone_palette);
+    context.expect(static_cast<bool>(skinned_result), skinned_result.error_message.value_or(""));
+    if (!skinned_result) {
+        return;
+    }
+
+    renderer_internal::SoftwareStencilBuffer buffer;
+    if (const std::optional<std::string> error =
+            renderer_internal::initialize_software_stencil_buffer(
+                48,
+                48,
+                -24.0,
+                -24.0,
+                1.0,
+                &buffer)) {
+        context.expect(false, *error);
+        return;
+    }
+
+    const std::optional<renderer_internal::SoftwareStencilClipState> clip_state =
+        renderer_internal::stencil_clip_state_for_depth(1U);
+    context.expect(clip_state.has_value(), "mesh clip test should allocate a stencil reference");
+    if (!clip_state.has_value()) {
+        return;
+    }
+
+    if (const std::optional<std::string> error =
+            renderer_internal::apply_software_stencil_clip_push(
+                cache.scene().clip_attachments.front().polygon,
+                *clip_state,
+                &buffer)) {
+        context.expect(false, *error);
+        return;
+    }
+
+    std::size_t visible_pixels = 0U;
+    for (std::size_t index = 0; index + 2U < clipped_mesh->indices.size(); index += 3U) {
+        const std::size_t i0 = clipped_mesh->indices[index];
+        const std::size_t i1 = clipped_mesh->indices[index + 1U];
+        const std::size_t i2 = clipped_mesh->indices[index + 2U];
+        if (i0 >= skinned_result.vertices.size() ||
+            i1 >= skinned_result.vertices.size() ||
+            i2 >= skinned_result.vertices.size()) {
+            continue;
+        }
+
+        visible_pixels += renderer_internal::count_software_stencil_visible_pixels(
+            buffer,
+            {
+                skinned_result.vertices[i0].position,
+                skinned_result.vertices[i1].position,
+                skinned_result.vertices[i2].position,
+            },
+            clip_state->reference_value);
+    }
+    context.expect(
+        visible_pixels == 400U,
+        "stencil-only clipped mesh should preserve the previous visible coverage");
+}
+
+void test_prepared_scene_cache_dirty_updates(TestContext& context) {
+    const auto skeleton_data = make_renderer_cache_test_data();
+    const auto atlas_data = make_renderer_test_atlas();
+    Skeleton skeleton(skeleton_data);
+    skeleton.update_world_transforms(PhysicsMode::Pose);
+
+    marrow::renderer::PreparedSceneCache cache;
+    const auto attachment_names = [](const marrow::renderer::PreparedScene& scene) {
+        std::vector<std::string> names;
+        names.reserve(scene.draw_commands.size());
+        for (const auto& command : scene.draw_commands) {
+            const auto* region = marrow::renderer::region_attachment_command(command);
+            if (region != nullptr) {
+                names.push_back(region->attachment_name);
+            }
+        }
+        return names;
+    };
+
+    const marrow::renderer::PreparedSceneCacheResult initial_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(initial_result), initial_result.error_message);
+    if (!initial_result) {
+        return;
+    }
+
+    const marrow::renderer::PreparedSceneBatchSummary* initial_summary =
+        marrow::renderer::summarize_prepared_scene_batches_cached(&cache);
+    context.expect(initial_summary != nullptr, "prepared scene cache should produce a batch summary");
+    context.expect(
+        initial_summary != nullptr && static_cast<bool>(*initial_summary),
+        initial_summary != nullptr && initial_summary->error_message.has_value()
+            ? *initial_summary->error_message
+            : "prepared scene cache batch summary should succeed");
+    context.expect(
+        initial_result.update_info != nullptr &&
+            initial_result.update_info->rebuilt_slot_count == 2U,
+        "initial prepared scene cache build should rebuild both visible slots");
+    context.expect(
+        attachment_names(*initial_result.scene) ==
+            std::vector<std::string>({"body_default", "arm_default"}),
+        "initial prepared scene cache should preserve setup attachments");
+
+    skeleton.bone_poses()[0].local_pose.x = 24.0;
+    skeleton.update_world_transforms(PhysicsMode::Pose);
+    const marrow::renderer::PreparedSceneCacheResult palette_only_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(palette_only_result), palette_only_result.error_message);
+    context.expect(
+        palette_only_result.update_info != nullptr &&
+            palette_only_result.update_info->cache_hit &&
+            palette_only_result.update_info->bone_palette_only,
+        "bone-only pose changes should hit the prepared-scene cache");
+    context.expect(
+        std::find(cache.slot_dirty_flags().begin(), cache.slot_dirty_flags().end(), true) ==
+            cache.slot_dirty_flags().end(),
+        "bone-only pose changes should leave slot dirty flags clear");
+    context.expect(
+        std::abs(cache.scene().bone_palette[0].world_x - skeleton.bone_world_transforms()[0].world_x) <=
+            kTolerance,
+        "bone-only cache hits should refresh the cached bone palette");
+
+    skeleton.slot_states()[0].attachment_name = "body_swap";
+    skeleton.slot_states()[0].attachment_skin_index = 0U;
+    const marrow::renderer::PreparedSceneCacheResult attachment_swap_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(attachment_swap_result), attachment_swap_result.error_message);
+    context.expect(
+        attachment_swap_result.update_info != nullptr &&
+            attachment_swap_result.update_info->dirty_slot_count == 1U &&
+            cache.slot_dirty_flags().size() >= 1U &&
+            cache.slot_dirty_flags()[0],
+        "attachment swaps should mark the affected slot dirty");
+    context.expect(
+        attachment_names(cache.scene()) == std::vector<std::string>({"body_swap", "arm_default"}),
+        "attachment swaps should rebuild the affected cached slot");
+
+    std::swap(skeleton.draw_order()[0], skeleton.draw_order()[1]);
+    const marrow::renderer::PreparedSceneCacheResult draw_order_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(draw_order_result), draw_order_result.error_message);
+    context.expect(
+        cache.draw_order_dirty() &&
+            draw_order_result.update_info != nullptr &&
+            draw_order_result.update_info->draw_order_dirty,
+        "draw-order edits should mark the prepared-scene cache dirty");
+    context.expect(
+        attachment_names(cache.scene()) == std::vector<std::string>({"arm_default", "body_swap"}),
+        "draw-order cache updates should preserve the new slot order");
+
+    skeleton.draw_order()[0] = 0U;
+    skeleton.draw_order()[1] = 1U;
+    const bool skin_applied = skeleton.set_skin("alt");
+    context.expect(skin_applied, "renderer cache test should activate the alternate skin");
+    const marrow::renderer::PreparedSceneCacheResult skin_swap_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(static_cast<bool>(skin_swap_result), skin_swap_result.error_message);
+    context.expect(
+        cache.skin_swap_dirty() &&
+            skin_swap_result.update_info != nullptr &&
+            skin_swap_result.update_info->skin_swap_dirty,
+        "skin swaps should flag the prepared-scene cache skin dirty state");
+    context.expect(
+        attachment_names(cache.scene()) == std::vector<std::string>({"body_alt", "arm_default"}),
+        "skin swaps should rebuild the affected cached attachment");
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
     failures += run_test("Interpolation Edge Cases", test_interpolation_edges);
+    failures += run_test(
+        "Constraint Fast Math Approximations",
+        test_constraint_fast_math_approximations);
+    failures += run_test(
+        "Animation Float Storage And Constant Pruning",
+        test_animation_float_storage_and_constant_pruning);
+    failures += run_test(
+        "Animation Timeline Index And Sampling Cursor",
+        test_animation_timeline_index_and_sampling_cursor);
     failures += run_test("Matrix Composition", test_matrix_composition);
     failures += run_test("Topological Bone Reorder", test_topological_bone_reorder);
     failures += run_test(
+        "SkeletonData Children Map And Tip Cache",
+        test_skeleton_data_children_map_and_tip_cache);
+    failures += run_test(
         "SIMD World Transform Propagation",
         test_simd_world_transform_propagation);
+    failures += run_test(
+        "Constraint Hot Path Allocations",
+        test_constraint_hot_path_allocations);
+    failures += run_test(
+        "Constraint Dirty Skip Preserves Output",
+        test_constraint_dirty_skip_preserves_output);
+    failures += run_test(
+        "Constraint Dirty Skip Re-evaluates Only Affected Constraints",
+        test_constraint_dirty_skip_re_evaluates_only_affected_constraints);
     failures += run_test("IK Solving", test_ik_cases);
     failures += run_test("Physics Stepping", test_physics_stepping);
     failures += run_test("SkeletonBounds Queries", test_skeleton_bounds_queries);
@@ -1754,6 +3126,15 @@ int main() {
     failures += run_test("Animation Layers", test_animation_layers);
     failures += run_test("Concave Stencil Clipping", test_concave_stencil_clipping);
     failures += run_test("Nested Stencil Restoration", test_nested_stencil_reference_restoration);
+    failures += run_test(
+        "Dynamic Mesh Cache Static Payload And Deform Updates",
+        test_dynamic_mesh_cache_static_payload_and_deform_updates);
+    failures += run_test(
+        "Dynamic Mesh Clipping Uses Stencil Only",
+        test_dynamic_mesh_clipping_uses_stencil_only);
+    failures += run_test(
+        "PreparedScene Cache Dirty Updates",
+        test_prepared_scene_cache_dirty_updates);
     failures += run_test(
         "Binary Key Quantization And Reduction",
         test_binary_key_quantization_and_reduction);

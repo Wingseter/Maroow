@@ -167,6 +167,10 @@ struct WorldTransformTimingBreakdown {
     double transform_seconds{0.0};
     double constraint_seconds{0.0};
     std::size_t full_skeleton_passes{0};
+    std::size_t evaluated_ik_constraints{0};
+    std::size_t skipped_ik_constraints{0};
+    std::size_t evaluated_transform_constraints{0};
+    std::size_t skipped_transform_constraints{0};
 };
 
 struct MeshGeometry {
@@ -271,6 +275,20 @@ struct SkinData {
 };
 
 struct AnimationData {
+    struct BoneTimelineIndexEntry {
+        const BoneRotateTimeline* rotate{nullptr};
+        const BoneInheritTimeline* inherit{nullptr};
+        const BoneTranslateTimeline* translate{nullptr};
+        const BoneScaleTimeline* scale{nullptr};
+        const BoneShearTimeline* shear{nullptr};
+    };
+
+    AnimationData() = default;
+    AnimationData(const AnimationData& other);
+    AnimationData& operator=(const AnimationData& other);
+    AnimationData(AnimationData&& other) noexcept = default;
+    AnimationData& operator=(AnimationData&& other) noexcept = default;
+
     std::string name;
     std::vector<std::size_t> targeted_bone_indices;
     std::vector<BoneRotateTimeline> bone_rotate_timelines;
@@ -283,6 +301,27 @@ struct AnimationData {
     std::vector<MeshDeformTimeline> mesh_deform_timelines;
     std::optional<DrawOrderTimeline> draw_order_timeline_data;
     std::optional<EventTimeline> event_timeline_data;
+    std::vector<BoneTimelineIndexEntry> bone_timeline_index;
+
+    /**
+     * @brief Rebuilds the cached bone-timeline lookup table for one skeleton.
+     * @param bone_count Total number of bones in the owning skeleton.
+     */
+    void rebuild_bone_timeline_index(std::size_t bone_count);
+    /**
+     * @brief Prepares cached keyframe cursors for one sampling step.
+     * @param context Sampling context to prime, or `nullptr` to skip caching.
+     * @param time Sample time in seconds.
+     */
+    void prepare_sampling_context(SamplingContext* context, double time) const;
+    /**
+     * @brief Removes single-key timelines that always resolve to setup or identity values.
+     * @param bones Immutable bone setup data for identity comparisons.
+     * @param slots Immutable slot setup data for identity comparisons.
+     */
+    void prune_constant_timelines(
+        const std::vector<BoneData>& bones,
+        const std::vector<SlotData>& slots);
 
     /**
      * @brief Finds the rotate timeline targeting one bone.
@@ -345,68 +384,101 @@ struct AnimationData {
      * @brief Samples bone rotation from the animation at a given time.
      * @param bone_index Bone index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Rotation in degrees, or `std::nullopt` when no timeline exists.
      */
-    std::optional<double> sample_bone_rotation(std::size_t bone_index, double time) const;
+    std::optional<double> sample_bone_rotation(
+        std::size_t bone_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples bone inherit state from the animation at a given time.
      * @param bone_index Bone index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Active inherit keyframe, or `nullptr` when no timeline exists.
      */
-    const InheritKeyframe* sample_bone_inherit(std::size_t bone_index, double time) const;
+    const InheritKeyframe* sample_bone_inherit(
+        std::size_t bone_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples bone translation from the animation at a given time.
      * @param bone_index Bone index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Translation sample, or `std::nullopt` when no timeline exists.
      */
-    std::optional<VectorSample> sample_bone_translation(std::size_t bone_index, double time) const;
+    std::optional<VectorSample> sample_bone_translation(
+        std::size_t bone_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples bone scale from the animation at a given time.
      * @param bone_index Bone index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Scale sample, or `std::nullopt` when no timeline exists.
      */
-    std::optional<VectorSample> sample_bone_scale(std::size_t bone_index, double time) const;
+    std::optional<VectorSample> sample_bone_scale(
+        std::size_t bone_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples bone shear from the animation at a given time.
      * @param bone_index Bone index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Shear sample, or `std::nullopt` when no timeline exists.
      */
-    std::optional<VectorSample> sample_bone_shear(std::size_t bone_index, double time) const;
+    std::optional<VectorSample> sample_bone_shear(
+        std::size_t bone_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples slot attachment selection at a given time.
      * @param slot_index Slot index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Active attachment keyframe, or `nullptr` when no timeline exists.
      */
-    const AttachmentKeyframe* sample_slot_attachment(std::size_t slot_index, double time) const;
+    const AttachmentKeyframe* sample_slot_attachment(
+        std::size_t slot_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples slot color at a given time.
      * @param slot_index Slot index to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Slot color, or `std::nullopt` when no timeline exists.
      */
-    std::optional<SlotColor> sample_slot_color(std::size_t slot_index, double time) const;
+    std::optional<SlotColor> sample_slot_color(
+        std::size_t slot_index,
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples slot deform offsets at a given time.
      * @param slot_index Slot index to sample.
      * @param attachment_name Attachment name to sample.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Vertex offsets, or `std::nullopt` when no timeline exists.
      */
     std::optional<std::vector<double>> sample_slot_deform(
         std::size_t slot_index,
         std::string_view attachment_name,
-        double time) const;
+        double time,
+        SamplingContext* context = nullptr) const;
     /**
      * @brief Samples draw order at a given time.
      * @param time Sample time in seconds.
+     * @param context Optional cached keyframe cursor state.
      * @return Active draw-order keyframe, or `nullptr` when no timeline exists.
      */
-    const DrawOrderKeyframe* sample_draw_order(double time) const;
+    const DrawOrderKeyframe* sample_draw_order(
+        double time,
+        SamplingContext* context = nullptr) const;
     /// @brief Returns the maximum authored duration of the animation.
     /// @return Animation duration in seconds.
     double duration() const;
@@ -1190,9 +1262,36 @@ private:
     void rebuild_predicted_display_state(
         const AnimationState& animation_state,
         double predicted_delta_seconds);
+    SamplingContext& standalone_sampling_context(
+        const AnimationData& animation,
+        double sample_time);
+    void begin_track_sampling_frame(std::size_t track_count);
+    SamplingContext& track_sampling_context(
+        std::size_t track_index,
+        const void* owner,
+        const AnimationData& animation,
+        double sample_time);
+    void end_track_sampling_frame(std::size_t active_track_count);
+
+    struct TrackSamplingState {
+        struct EntrySamplingContext {
+            const void* owner{nullptr};
+            SamplingContext sampling;
+            std::size_t generation{0};
+        };
+
+        std::vector<EntrySamplingContext> entry_contexts;
+    };
+
+    struct ConstraintInputRevisionState {
+        std::vector<std::size_t> input_world_revisions;
+        std::vector<BoneTransform> output_local_poses;
+        bool valid{false};
+    };
 
     std::shared_ptr<const SkeletonData> data_;
     std::vector<BonePose> bone_poses_;
+    std::vector<BonePose> input_pose_cache_;
     std::vector<float> bone_local_x_;
     std::vector<float> bone_local_y_;
     std::vector<float> bone_local_a_;
@@ -1206,10 +1305,14 @@ private:
     std::vector<float> bone_world_x_;
     std::vector<float> bone_world_y_;
     std::vector<BonePose> solved_poses_;
+    std::vector<BoneWorldTransform> constraint_input_world_cache_;
+    std::vector<std::size_t> constraint_input_world_revisions_;
     std::vector<std::size_t> solved_local_pose_revisions_;
     std::vector<std::size_t> solved_applied_local_pose_revisions_;
     std::vector<std::size_t> solved_world_revisions_;
     std::vector<std::size_t> solved_applied_parent_world_revisions_;
+    std::vector<ConstraintInputRevisionState> ik_constraint_revision_states_;
+    std::vector<ConstraintInputRevisionState> transform_constraint_revision_states_;
     std::vector<AttachmentVertex> path_world_control_points_;
     std::vector<PathDistanceSample> path_distance_samples_;
     std::vector<SlotState> slot_states_;
@@ -1228,7 +1331,15 @@ private:
     std::size_t update_interval_{1};
     double pending_physics_delta_seconds_{0.0};
     double attachment_playback_time_{0.0};
+    SamplingContext standalone_sampling_context_;
+    std::vector<TrackSamplingState> track_sampling_states_;
+    std::size_t sampling_generation_{0};
     UpdateThrottleState update_throttle_state_{};
+    std::size_t constraint_scope_revision_{1};
+    std::size_t solved_constraint_scope_revision_{0};
+    double solved_constraint_scale_x_{1.0};
+    double solved_constraint_scale_y_{1.0};
+    bool has_solved_constraint_state_{false};
     mutable SkeletonErrorCallback error_callback_;
     mutable std::optional<std::string> last_error_;
     std::size_t constraint_allocation_count_{0};

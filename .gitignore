@@ -1,2 +1,4 @@
 .ralph/
 build/
+build-bench/
+build-tsan/

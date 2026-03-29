@@ -75,6 +75,11 @@ double normalize_rotation_degrees(double angle);
 double normalize_rotation_radians(double angle);
 double mix_rotation_degrees(double current, double target, double mix);
 double mix_scalar(double current, double target, double mix);
+float fast_sqrtf(float value);
+float fast_sinf(float angle);
+float fast_cosf(float angle);
+float fast_atan2f(float y, float x);
+float fast_acosf(float value);
 
 AttachmentVertex add_vertices(const AttachmentVertex& lhs, const AttachmentVertex& rhs);
 AttachmentVertex subtract_vertices(const AttachmentVertex& lhs, const AttachmentVertex& rhs);
