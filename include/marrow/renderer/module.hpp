@@ -199,8 +199,10 @@ struct ClipAttachmentDrawCommand {
     std::string attachment_name;
     std::size_t slot_index{0};
     std::size_t draw_order_index{0};
+    std::size_t bone_index{0};
     std::optional<std::size_t> end_slot_index;
     std::string end_slot_name;
+    std::vector<RenderPoint> local_polygon;
     std::vector<RenderPoint> polygon;
 };
 
@@ -275,6 +277,79 @@ struct PreparedSceneResult {
     }
 };
 
+struct PreparedSceneCacheUpdateInfo {
+    bool cache_hit{false};
+    bool bone_palette_only{false};
+    bool draw_order_dirty{false};
+    bool skin_swap_dirty{false};
+    std::size_t dirty_slot_count{0};
+    std::size_t rebuilt_slot_count{0};
+};
+
+struct PreparedSceneCacheResult {
+    const PreparedScene* scene{nullptr};
+    const PreparedSceneCacheUpdateInfo* update_info{nullptr};
+    std::string error_message;
+
+    explicit operator bool() const {
+        return scene != nullptr;
+    }
+};
+
+class PreparedSceneCache {
+public:
+    bool has_scene() const;
+    const PreparedScene& scene() const;
+    bool has_batch_summary() const;
+    const PreparedSceneBatchSummary& batch_summary() const;
+    const PreparedSceneCacheUpdateInfo& last_update() const;
+    const std::vector<bool>& slot_dirty_flags() const;
+    bool draw_order_dirty() const;
+    bool skin_swap_dirty() const;
+
+public:
+    friend PreparedSceneCacheResult prepare_setup_pose_scene_cached(
+        PreparedSceneCache* cache,
+        const runtime::Skeleton& skeleton,
+        const runtime::AtlasData& atlas);
+    friend const PreparedSceneBatchSummary* summarize_prepared_scene_batches_cached(
+        PreparedSceneCache* cache);
+
+    struct SlotSnapshot {
+        bool has_attachment{false};
+        runtime::AttachmentKind attachment_kind{runtime::AttachmentKind::Region};
+        std::string attachment_name;
+        std::optional<std::size_t> attachment_skin_index;
+        std::string region_name;
+        runtime::SlotColor color{};
+        std::optional<runtime::SlotColor> dark_color;
+        std::string mesh_deform_attachment_name;
+        std::vector<double> mesh_vertex_offsets;
+        std::optional<std::size_t> clip_end_slot_index;
+        std::string clip_end_slot_name;
+    };
+
+    struct SlotRecord {
+        std::optional<ClipAttachmentDrawCommand> clip_attachment;
+        std::optional<PreparedDrawCommand> draw_command;
+    };
+
+    const runtime::SkeletonData* skeleton_data_{nullptr};
+    const runtime::AtlasData* atlas_data_{nullptr};
+    bool cached_visible_{true};
+    PreparedScene scene_{};
+    bool has_scene_{false};
+    PreparedSceneBatchSummary batch_summary_{};
+    bool has_batch_summary_{false};
+    PreparedSceneCacheUpdateInfo last_update_{};
+    std::vector<bool> slot_dirty_flags_;
+    bool draw_order_dirty_{false};
+    bool skin_swap_dirty_{false};
+    std::vector<std::size_t> draw_order_snapshot_;
+    std::vector<SlotSnapshot> slot_snapshots_;
+    std::vector<SlotRecord> slot_records_;
+};
+
 struct TextureImage {
     int width{0};
     int height{0};
@@ -342,6 +417,17 @@ PreparedSceneResult prepare_setup_pose_scene(
     const runtime::Skeleton& skeleton,
     const runtime::AtlasData& atlas);
 /**
+ * @brief Updates or reuses a cached prepared scene for one skeleton instance.
+ * @param cache Cache object that persists across frames.
+ * @param skeleton Skeleton instance containing the current pose.
+ * @param atlas Atlas metadata used for region lookup and texture hints.
+ * @return Pointer view into the cache, or an error string.
+ */
+PreparedSceneCacheResult prepare_setup_pose_scene_cached(
+    PreparedSceneCache* cache,
+    const runtime::Skeleton& skeleton,
+    const runtime::AtlasData& atlas);
+/**
  * @brief Converts a prepared scene into packed GPU submission data.
  * @param scene Prepared scene to convert.
  * @param projection Projection matrix applied during rendering.
@@ -374,6 +460,13 @@ GpuSkinningEvaluationResult evaluate_gpu_skinned_vertices(
  * @return Batch summary or an error string.
  */
 PreparedSceneBatchSummary summarize_prepared_scene_batches(const PreparedScene& scene);
+/**
+ * @brief Returns a cached batch summary when the prepared-scene structure has not changed.
+ * @param cache Prepared-scene cache previously updated by `prepare_setup_pose_scene_cached`.
+ * @return Cached batch summary pointer, or `nullptr` when the cache has no valid summary yet.
+ */
+const PreparedSceneBatchSummary* summarize_prepared_scene_batches_cached(
+    PreparedSceneCache* cache);
 /**
  * @brief Returns the region-attachment view of a prepared draw command.
  * @param command Variant draw command to inspect.

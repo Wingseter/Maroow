@@ -346,8 +346,13 @@ void Skeleton::reset_to_setup_pose_state(bool reset_slots_and_draw_order) {
     if (bone_poses_.size() != data_->bones().size()) {
         bone_poses_.resize(data_->bones().size());
     }
-    if (bone_world_transforms_.size() != data_->bones().size()) {
-        bone_world_transforms_.resize(data_->bones().size());
+    if (bone_world_a_.size() != data_->bones().size()) {
+        bone_world_a_.resize(data_->bones().size());
+        bone_world_b_.resize(data_->bones().size());
+        bone_world_c_.resize(data_->bones().size());
+        bone_world_d_.resize(data_->bones().size());
+        bone_world_x_.resize(data_->bones().size());
+        bone_world_y_.resize(data_->bones().size());
     }
     if (mesh_deform_states_.size() != data_->slots().size()) {
         mesh_deform_states_.resize(data_->slots().size());

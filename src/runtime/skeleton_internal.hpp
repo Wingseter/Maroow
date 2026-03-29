@@ -34,7 +34,6 @@ struct BoneWorldTransformBuffers {
     std::vector<float>* d{nullptr};
     std::vector<float>* world_x{nullptr};
     std::vector<float>* world_y{nullptr};
-    std::vector<BoneWorldTransform>* aos{nullptr};
 
     void resize(std::size_t count) const;
 };
@@ -106,9 +105,36 @@ MeshWorldVertex transform_mesh_point(
     const BoneWorldTransform& transform,
     double x,
     double y);
+void prepare_local_transform_buffer(
+    std::size_t bone_index,
+    const BoneTransform& transform,
+    const BoneLocalTransformBuffers& buffers);
 void prepare_local_transform_buffers(
     const std::vector<BonePose>& poses,
     const BoneLocalTransformBuffers& buffers);
+BoneWorldTransform load_world_transform(
+    std::size_t bone_index,
+    const BoneWorldTransformBuffers& world);
+void store_world_transform(
+    std::size_t bone_index,
+    const BoneWorldTransform& transform,
+    const BoneWorldTransformBuffers& world);
+void store_world_components(
+    std::size_t bone_index,
+    float a,
+    float b,
+    float c,
+    float d,
+    float world_x,
+    float world_y,
+    const BoneWorldTransformBuffers& world);
+BoneWorldTransform compose_cached_world_transform(
+    const BoneWorldTransform* parent,
+    const BonePose& pose,
+    const BoneLocalTransformBuffers& local,
+    std::size_t bone_index,
+    double skeleton_scale_x,
+    double skeleton_scale_y);
 void propagate_world_transforms_scalar(
     const std::vector<BoneData>& bones,
     const std::vector<BonePose>& poses,
@@ -123,9 +149,6 @@ void propagate_world_transforms_optimized(
     double skeleton_scale_y,
     const BoneLocalTransformBuffers& local,
     const BoneWorldTransformBuffers& world);
-void sync_world_transform_buffers_from_aos(
-    const std::vector<BoneWorldTransform>& source,
-    const BoneWorldTransformBuffers& destination);
 BoneTransformPropagationPath active_bone_transform_propagation_path();
 std::string_view bone_transform_propagation_path_name(BoneTransformPropagationPath path);
 
@@ -144,12 +167,9 @@ bool attachment_matches_mesh_deform_source(
     const AttachmentData& attachment,
     std::string_view source_attachment_name);
 
-struct PathDistanceSample {
-    double distance{0.0};
-    AttachmentVertex point{};
-    AttachmentVertex tangent{};
-};
-
+void build_path_distance_samples(
+    const std::vector<AttachmentVertex>& control_points,
+    std::vector<PathDistanceSample>* samples_out);
 std::vector<PathDistanceSample> build_path_distance_samples(
     const std::vector<AttachmentVertex>& control_points);
 PathDistanceSample sample_path_distance(

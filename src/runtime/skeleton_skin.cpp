@@ -422,20 +422,22 @@ std::optional<PointAttachmentPose> Skeleton::evaluate_current_point_attachment(
     }
 
     const std::size_t bone_index = data_->slots()[slot_index].bone_index;
-    if (bone_index >= bone_world_transforms_.size()) {
+    const BoneWorldTransformsView world_transforms = bone_world_transforms();
+    if (bone_index >= world_transforms.size()) {
         return std::nullopt;
     }
+    const BoneWorldTransform bone_world = world_transforms[bone_index];
 
     const PointAttachmentData& point_attachment = *attachment->point_attachment;
     PointAttachmentPose pose;
     pose.slot_index = slot_index;
     pose.attachment_name = attachment->name;
     pose.position = detail::transform_attachment_vertex(
-        bone_world_transforms_[bone_index],
+        bone_world,
         point_attachment.local_position.x,
         point_attachment.local_position.y);
     pose.rotation = detail::transform_attachment_rotation(
-        bone_world_transforms_[bone_index],
+        bone_world,
         point_attachment.rotation);
     return pose;
 }
@@ -452,9 +454,11 @@ std::optional<BoundingBoxAttachmentPose> Skeleton::evaluate_current_bounding_box
     }
 
     const std::size_t bone_index = data_->slots()[slot_index].bone_index;
-    if (bone_index >= bone_world_transforms_.size()) {
+    const BoneWorldTransformsView world_transforms = bone_world_transforms();
+    if (bone_index >= world_transforms.size()) {
         return std::nullopt;
     }
+    const BoneWorldTransform bone_world = world_transforms[bone_index];
 
     BoundingBoxAttachmentPose pose;
     pose.slot_index = slot_index;
@@ -463,7 +467,7 @@ std::optional<BoundingBoxAttachmentPose> Skeleton::evaluate_current_bounding_box
 
     for (const AttachmentVertex& vertex : attachment->bounding_box->polygon) {
         pose.polygon.push_back(detail::transform_attachment_vertex(
-            bone_world_transforms_[bone_index],
+            bone_world,
             vertex.x,
             vertex.y));
     }
@@ -483,9 +487,11 @@ std::optional<ClippingAttachmentPose> Skeleton::evaluate_current_clipping_attach
     }
 
     const std::size_t bone_index = data_->slots()[slot_index].bone_index;
-    if (bone_index >= bone_world_transforms_.size()) {
+    const BoneWorldTransformsView world_transforms = bone_world_transforms();
+    if (bone_index >= world_transforms.size()) {
         return std::nullopt;
     }
+    const BoneWorldTransform bone_world = world_transforms[bone_index];
 
     ClippingAttachmentPose pose;
     pose.slot_index = slot_index;
@@ -496,7 +502,7 @@ std::optional<ClippingAttachmentPose> Skeleton::evaluate_current_clipping_attach
 
     for (const AttachmentVertex& vertex : attachment->clipping_attachment->polygon) {
         pose.polygon.push_back(detail::transform_attachment_vertex(
-            bone_world_transforms_[bone_index],
+            bone_world,
             vertex.x,
             vertex.y));
     }
@@ -526,6 +532,7 @@ std::optional<MeshAttachmentPose> Skeleton::evaluate_current_mesh_attachment(
     pose.uvs = geometry.uvs;
 
     const std::vector<double>* vertex_offsets = current_mesh_vertex_offsets(slot_index);
+    const BoneWorldTransformsView world_transforms = bone_world_transforms();
 
     for (std::size_t vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
         const MeshGeometry::VertexWeights& vertex_weights = geometry.weights[vertex_index];
@@ -534,19 +541,19 @@ std::optional<MeshAttachmentPose> Skeleton::evaluate_current_mesh_attachment(
             vertex_offsets != nullptr ? (*vertex_offsets)[(vertex_index * 2) + 1] : 0.0;
         MeshWorldVertex world_vertex;
         for (const MeshGeometry::VertexWeight& influence : vertex_weights.influences) {
-            if (influence.bone_index >= bone_world_transforms_.size()) {
+            if (influence.bone_index >= world_transforms.size()) {
                 report_error(
                     slot_context(*data_, slot_index) +
                     " mesh attachment '" + attachment->name +
                     "' references invalid bone index " +
                     std::to_string(influence.bone_index) +
                     " while evaluating weighted vertices (bone palette=" +
-                    std::to_string(bone_world_transforms_.size()) + ")");
+                    std::to_string(world_transforms.size()) + ")");
                 return std::nullopt;
             }
 
             const MeshWorldVertex transformed = detail::transform_mesh_point(
-                bone_world_transforms_[influence.bone_index],
+                world_transforms[influence.bone_index],
                 influence.x + offset_x,
                 influence.y + offset_y);
             world_vertex.x += transformed.x * influence.weight;

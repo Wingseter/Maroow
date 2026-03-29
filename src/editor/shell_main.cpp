@@ -5681,18 +5681,18 @@ std::optional<ViewportLayout> build_viewport_layout(
         }
 
         has_active_bone = true;
-        min_x = std::min(min_x, world_transforms[bone_index].world_x);
-        min_y = std::min(min_y, world_transforms[bone_index].world_y);
-        max_x = std::max(max_x, world_transforms[bone_index].world_x);
-        max_y = std::max(max_y, world_transforms[bone_index].world_y);
+        min_x = std::min(min_x, static_cast<double>(world_transforms[bone_index].world_x));
+        min_y = std::min(min_y, static_cast<double>(world_transforms[bone_index].world_y));
+        max_x = std::max(max_x, static_cast<double>(world_transforms[bone_index].world_x));
+        max_y = std::max(max_y, static_cast<double>(world_transforms[bone_index].world_y));
     }
 
     if (!has_active_bone) {
         for (const auto& transform : world_transforms) {
-            min_x = std::min(min_x, transform.world_x);
-            min_y = std::min(min_y, transform.world_y);
-            max_x = std::max(max_x, transform.world_x);
-            max_y = std::max(max_y, transform.world_y);
+            min_x = std::min(min_x, static_cast<double>(transform.world_x));
+            min_y = std::min(min_y, static_cast<double>(transform.world_y));
+            max_x = std::max(max_x, static_cast<double>(transform.world_x));
+            max_y = std::max(max_y, static_cast<double>(transform.world_y));
         }
     }
 

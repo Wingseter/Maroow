@@ -769,21 +769,27 @@ AttachmentVertex cubic_bezier_tangent(
             3.0 * t * t * (p3.y - p2.y)};
 }
 
-std::vector<PathDistanceSample> build_path_distance_samples(
-    const std::vector<AttachmentVertex>& control_points) {
+void build_path_distance_samples(
+    const std::vector<AttachmentVertex>& control_points,
+    std::vector<PathDistanceSample>* samples_out) {
     constexpr std::size_t kSubdivisionsPerSegment = 32;
-
-    std::vector<PathDistanceSample> samples;
-    if (control_points.size() < 4) {
-        return samples;
+    if (samples_out == nullptr) {
+        return;
     }
+    samples_out->clear();
+    if (control_points.size() < 4) {
+        return;
+    }
+
+    const std::size_t segment_count = (control_points.size() - 1U) / 3U;
+    samples_out->reserve(1U + segment_count * kSubdivisionsPerSegment);
 
     AttachmentVertex previous_point = control_points.front();
     AttachmentVertex previous_tangent = subtract_vertices(control_points[1], control_points[0]);
     if (vertex_length(previous_tangent) <= 1e-8) {
         previous_tangent = {1.0, 0.0};
     }
-    samples.push_back(PathDistanceSample{0.0, previous_point, previous_tangent});
+    samples_out->push_back(PathDistanceSample{0.0, previous_point, previous_tangent});
 
     double accumulated_distance = 0.0;
     for (std::size_t point_index = 0; point_index + 3 < control_points.size(); point_index += 3) {
@@ -802,11 +808,16 @@ std::vector<PathDistanceSample> build_path_distance_samples(
             }
 
             accumulated_distance += vertex_length(subtract_vertices(point, previous_point));
-            samples.push_back(PathDistanceSample{accumulated_distance, point, tangent});
+            samples_out->push_back(PathDistanceSample{accumulated_distance, point, tangent});
             previous_point = point;
         }
     }
+}
 
+std::vector<PathDistanceSample> build_path_distance_samples(
+    const std::vector<AttachmentVertex>& control_points) {
+    std::vector<PathDistanceSample> samples;
+    build_path_distance_samples(control_points, &samples);
     return samples;
 }
 

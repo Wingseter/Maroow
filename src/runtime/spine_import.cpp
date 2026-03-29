@@ -1818,7 +1818,7 @@ std::optional<LoadError> convert_spine_attachment(
                 point.x,
                 point.y));
         }
-        const std::vector<detail::PathDistanceSample> samples =
+        const std::vector<PathDistanceSample> samples =
             detail::build_path_distance_samples(world_points);
         if (!samples.empty()) {
             record.path_total_length = samples.back().distance;

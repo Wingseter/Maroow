@@ -9,6 +9,52 @@
 #include <utility>
 
 namespace marrow::runtime {
+namespace {
+
+std::vector<std::vector<std::size_t>> build_children_map(const std::vector<BoneData>& bones) {
+    std::vector<std::vector<std::size_t>> children_map(bones.size());
+    for (std::size_t bone_index = 0; bone_index < bones.size(); ++bone_index) {
+        const std::optional<std::size_t> parent_index = bones[bone_index].parent_index;
+        if (!parent_index.has_value() || *parent_index >= children_map.size()) {
+            continue;
+        }
+
+        children_map[*parent_index].push_back(bone_index);
+    }
+
+    return children_map;
+}
+
+std::vector<AttachmentVertex> build_bone_tip_local_vectors(
+    const std::vector<BoneData>& bones,
+    const std::vector<std::vector<std::size_t>>& children_map) {
+    std::vector<AttachmentVertex> bone_tip_local_vectors(bones.size());
+    for (std::size_t bone_index = 0; bone_index < children_map.size(); ++bone_index) {
+        AttachmentVertex tip{};
+        double best_length_squared = 0.0;
+        for (const std::size_t child_index : children_map[bone_index]) {
+            if (child_index >= bones.size()) {
+                continue;
+            }
+
+            const BoneTransform& child_pose = bones[child_index].setup_pose;
+            const double length_squared =
+                (child_pose.x * child_pose.x) + (child_pose.y * child_pose.y);
+            if (length_squared <= best_length_squared) {
+                continue;
+            }
+
+            tip = AttachmentVertex{child_pose.x, child_pose.y};
+            best_length_squared = length_squared;
+        }
+
+        bone_tip_local_vectors[bone_index] = tip;
+    }
+
+    return bone_tip_local_vectors;
+}
+
+} // namespace
 
 SkeletonData::SkeletonData(
     SkeletonInfo info,
@@ -46,6 +92,8 @@ SkeletonData::SkeletonData(
         &animations_,
         &skins_);
     bone_evaluation_order_ = detail::build_bone_evaluation_order(bones_);
+    children_map_ = build_children_map(bones_);
+    bone_tip_local_vectors_ = build_bone_tip_local_vectors(bones_, children_map_);
 }
 
 const SkeletonInfo& SkeletonData::info() const {
@@ -94,6 +142,14 @@ const std::vector<AnimationMixDefinition>& SkeletonData::mix_definitions() const
 
 const std::vector<std::size_t>& SkeletonData::bone_evaluation_order() const {
     return bone_evaluation_order_;
+}
+
+const std::vector<std::vector<std::size_t>>& SkeletonData::children_map() const {
+    return children_map_;
+}
+
+const std::vector<AttachmentVertex>& SkeletonData::bone_tip_local_vectors() const {
+    return bone_tip_local_vectors_;
 }
 
 std::optional<std::size_t> SkeletonData::default_skin_index() const {
@@ -221,7 +277,6 @@ Skeleton::Skeleton(std::shared_ptr<const SkeletonData> data)
     }
 
     bone_poses_.resize(data_->bones().size());
-    bone_world_transforms_.resize(data_->bones().size());
     slot_states_.resize(data_->slots().size());
     mesh_deform_states_.resize(data_->slots().size());
     draw_order_.resize(data_->slots().size());
@@ -283,6 +338,10 @@ std::size_t Skeleton::update_interval() const {
     return update_interval_;
 }
 
+std::size_t Skeleton::constraint_allocation_count() const {
+    return constraint_allocation_count_;
+}
+
 const std::vector<BonePose>& Skeleton::bone_poses() const {
     return bone_poses_;
 }
@@ -291,8 +350,15 @@ std::vector<BonePose>& Skeleton::bone_poses() {
     return bone_poses_;
 }
 
-const std::vector<BoneWorldTransform>& Skeleton::bone_world_transforms() const {
-    return bone_world_transforms_;
+BoneWorldTransformsView Skeleton::bone_world_transforms() const {
+    return BoneWorldTransformsView(
+        &bone_world_a_,
+        &bone_world_b_,
+        &bone_world_c_,
+        &bone_world_d_,
+        &bone_world_x_,
+        &bone_world_y_,
+        bone_world_x_.size());
 }
 
 const std::vector<SlotState>& Skeleton::slot_states() const {
@@ -394,7 +460,12 @@ void Skeleton::capture_display_state(DisplayStateSnapshot* snapshot) const {
     }
 
     snapshot->bone_poses = bone_poses_;
-    snapshot->bone_world_transforms = bone_world_transforms_;
+    snapshot->bone_world_a = bone_world_a_;
+    snapshot->bone_world_b = bone_world_b_;
+    snapshot->bone_world_c = bone_world_c_;
+    snapshot->bone_world_d = bone_world_d_;
+    snapshot->bone_world_x = bone_world_x_;
+    snapshot->bone_world_y = bone_world_y_;
     snapshot->slot_states = slot_states_;
     snapshot->mesh_deform_states = mesh_deform_states_;
     snapshot->draw_order = draw_order_;
@@ -403,7 +474,12 @@ void Skeleton::capture_display_state(DisplayStateSnapshot* snapshot) const {
 
 void Skeleton::apply_display_state(const DisplayStateSnapshot& snapshot) {
     bone_poses_ = snapshot.bone_poses;
-    bone_world_transforms_ = snapshot.bone_world_transforms;
+    bone_world_a_ = snapshot.bone_world_a;
+    bone_world_b_ = snapshot.bone_world_b;
+    bone_world_c_ = snapshot.bone_world_c;
+    bone_world_d_ = snapshot.bone_world_d;
+    bone_world_x_ = snapshot.bone_world_x;
+    bone_world_y_ = snapshot.bone_world_y;
     slot_states_ = snapshot.slot_states;
     mesh_deform_states_ = snapshot.mesh_deform_states;
     draw_order_ = snapshot.draw_order;
@@ -443,20 +519,46 @@ void Skeleton::apply_interpolated_display_state(double alpha) {
         }
     }
 
-    if (bone_world_transforms_.size() != source.bone_world_transforms.size() ||
-        source.bone_world_transforms.size() != target.bone_world_transforms.size()) {
-        bone_world_transforms_ = source.bone_world_transforms;
+    if (bone_world_a_.size() != source.bone_world_a.size() ||
+        source.bone_world_a.size() != target.bone_world_a.size()) {
+        bone_world_a_ = source.bone_world_a;
+        bone_world_b_ = source.bone_world_b;
+        bone_world_c_ = source.bone_world_c;
+        bone_world_d_ = source.bone_world_d;
+        bone_world_x_ = source.bone_world_x;
+        bone_world_y_ = source.bone_world_y;
     } else {
-        for (std::size_t bone_index = 0; bone_index < bone_world_transforms_.size(); ++bone_index) {
-            BoneWorldTransform& world = bone_world_transforms_[bone_index];
-            const BoneWorldTransform& source_world = source.bone_world_transforms[bone_index];
-            const BoneWorldTransform& target_world = target.bone_world_transforms[bone_index];
-            world.a = detail::mix_scalar(source_world.a, target_world.a, clamped_alpha);
-            world.b = detail::mix_scalar(source_world.b, target_world.b, clamped_alpha);
-            world.c = detail::mix_scalar(source_world.c, target_world.c, clamped_alpha);
-            world.d = detail::mix_scalar(source_world.d, target_world.d, clamped_alpha);
-            world.world_x = detail::mix_scalar(source_world.world_x, target_world.world_x, clamped_alpha);
-            world.world_y = detail::mix_scalar(source_world.world_y, target_world.world_y, clamped_alpha);
+        for (std::size_t bone_index = 0; bone_index < bone_world_a_.size(); ++bone_index) {
+            bone_world_a_[bone_index] =
+                static_cast<float>(detail::mix_scalar(
+                    source.bone_world_a[bone_index],
+                    target.bone_world_a[bone_index],
+                    clamped_alpha));
+            bone_world_b_[bone_index] =
+                static_cast<float>(detail::mix_scalar(
+                    source.bone_world_b[bone_index],
+                    target.bone_world_b[bone_index],
+                    clamped_alpha));
+            bone_world_c_[bone_index] =
+                static_cast<float>(detail::mix_scalar(
+                    source.bone_world_c[bone_index],
+                    target.bone_world_c[bone_index],
+                    clamped_alpha));
+            bone_world_d_[bone_index] =
+                static_cast<float>(detail::mix_scalar(
+                    source.bone_world_d[bone_index],
+                    target.bone_world_d[bone_index],
+                    clamped_alpha));
+            bone_world_x_[bone_index] =
+                static_cast<float>(detail::mix_scalar(
+                    source.bone_world_x[bone_index],
+                    target.bone_world_x[bone_index],
+                    clamped_alpha));
+            bone_world_y_[bone_index] =
+                static_cast<float>(detail::mix_scalar(
+                    source.bone_world_y[bone_index],
+                    target.bone_world_y[bone_index],
+                    clamped_alpha));
         }
     }
 

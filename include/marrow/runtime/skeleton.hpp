@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -130,6 +131,12 @@ struct AttachmentVertex {
     double y{0.0};
 };
 
+struct PathDistanceSample {
+    double distance{0.0};
+    AttachmentVertex point{};
+    AttachmentVertex tangent{};
+};
+
 struct PhysicsConstraintData {
     std::string name;
     std::vector<std::size_t> bone_indices;
@@ -159,6 +166,7 @@ enum class PhysicsMode {
 struct WorldTransformTimingBreakdown {
     double transform_seconds{0.0};
     double constraint_seconds{0.0};
+    std::size_t full_skeleton_passes{0};
 };
 
 struct MeshGeometry {
@@ -481,6 +489,12 @@ public:
     /// @brief Returns the cached bone evaluation order for world-transform solving.
     /// @return Bone evaluation order indices.
     const std::vector<std::size_t>& bone_evaluation_order() const;
+    /// @brief Returns the cached child adjacency list for each bone.
+    /// @return Per-parent child index lists.
+    const std::vector<std::vector<std::size_t>>& children_map() const;
+    /// @brief Returns the cached setup-pose tip vectors for each bone.
+    /// @return Per-bone local tip vectors, or `{0, 0}` when a bone has no children.
+    const std::vector<AttachmentVertex>& bone_tip_local_vectors() const;
     /// @brief Returns the default skin index when one exists.
     /// @return Default skin index, or `std::nullopt` when no default skin exists.
     std::optional<std::size_t> default_skin_index() const;
@@ -577,6 +591,8 @@ private:
     SkeletonInfo info_;
     std::vector<BoneData> bones_;
     std::vector<std::size_t> bone_evaluation_order_;
+    std::vector<std::vector<std::size_t>> children_map_;
+    std::vector<AttachmentVertex> bone_tip_local_vectors_;
     std::vector<IkConstraintData> ik_constraints_;
     std::vector<PathConstraintData> path_constraints_;
     std::vector<TransformConstraintData> transform_constraints_;
@@ -596,12 +612,134 @@ struct BonePose {
 };
 
 struct BoneWorldTransform {
-    double a{1.0};
-    double b{0.0};
-    double c{0.0};
-    double d{1.0};
-    double world_x{0.0};
-    double world_y{0.0};
+    float a{1.0f};
+    float b{0.0f};
+    float c{0.0f};
+    float d{1.0f};
+    float world_x{0.0f};
+    float world_y{0.0f};
+};
+static_assert(
+    sizeof(BoneWorldTransform) == sizeof(float) * 6U,
+    "BoneWorldTransform should pack down to six floats.");
+
+class BoneWorldTransformsView {
+public:
+    class Iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = BoneWorldTransform;
+        using difference_type = std::ptrdiff_t;
+        using reference = BoneWorldTransform;
+        using pointer = void;
+
+        BoneWorldTransform operator*() const {
+            return view_->operator[](index_);
+        }
+
+        Iterator& operator++() {
+            ++index_;
+            return *this;
+        }
+
+        Iterator operator++(int) {
+            Iterator copy = *this;
+            ++(*this);
+            return copy;
+        }
+
+        bool operator==(const Iterator& other) const {
+            return view_ == other.view_ && index_ == other.index_;
+        }
+
+        bool operator!=(const Iterator& other) const {
+            return !(*this == other);
+        }
+
+    private:
+        friend class BoneWorldTransformsView;
+
+        Iterator(const BoneWorldTransformsView* view, std::size_t index)
+            : view_(view),
+              index_(index) {}
+
+        const BoneWorldTransformsView* view_{nullptr};
+        std::size_t index_{0};
+    };
+
+    BoneWorldTransform operator[](std::size_t index) const {
+        BoneWorldTransform transform;
+        transform.a = (*a_)[index];
+        transform.b = (*b_)[index];
+        transform.c = (*c_)[index];
+        transform.d = (*d_)[index];
+        transform.world_x = (*world_x_)[index];
+        transform.world_y = (*world_y_)[index];
+        return transform;
+    }
+
+    std::size_t size() const {
+        return size_;
+    }
+
+    bool empty() const {
+        return size_ == 0U;
+    }
+
+    BoneWorldTransform front() const {
+        return (*this)[0U];
+    }
+
+    BoneWorldTransform back() const {
+        return (*this)[size_ - 1U];
+    }
+
+    Iterator begin() const {
+        return Iterator(this, 0U);
+    }
+
+    Iterator end() const {
+        return Iterator(this, size_);
+    }
+
+    std::vector<BoneWorldTransform> materialize() const {
+        std::vector<BoneWorldTransform> transforms(size_);
+        for (std::size_t index = 0; index < size_; ++index) {
+            transforms[index] = (*this)[index];
+        }
+        return transforms;
+    }
+
+    operator std::vector<BoneWorldTransform>() const {
+        return materialize();
+    }
+
+private:
+    friend class Skeleton;
+
+    BoneWorldTransformsView(
+        const std::vector<float>* a,
+        const std::vector<float>* b,
+        const std::vector<float>* c,
+        const std::vector<float>* d,
+        const std::vector<float>* world_x,
+        const std::vector<float>* world_y,
+        std::size_t size)
+        : a_(a),
+          b_(b),
+          c_(c),
+          d_(d),
+          world_x_(world_x),
+          world_y_(world_y),
+          size_(size) {}
+
+    const std::vector<float>* a_{nullptr};
+    const std::vector<float>* b_{nullptr};
+    const std::vector<float>* c_{nullptr};
+    const std::vector<float>* d_{nullptr};
+    const std::vector<float>* world_x_{nullptr};
+    const std::vector<float>* world_y_{nullptr};
+    std::size_t size_{0U};
 };
 
 struct SlotState {
@@ -877,6 +1015,11 @@ public:
     void update_world_transforms(
         PhysicsMode physics = PhysicsMode::Pose,
         WorldTransformTimingBreakdown* timing_breakdown = nullptr);
+    /**
+     * @brief Returns the number of hot-path scratch-buffer growth allocations observed so far.
+     * @return Cumulative hot-path allocation count for this skeleton instance.
+     */
+    std::size_t constraint_allocation_count() const;
     /// @brief Returns mutable-local bone pose state.
     /// @return Immutable bone-pose list.
     const std::vector<BonePose>& bone_poses() const;
@@ -885,7 +1028,7 @@ public:
     std::vector<BonePose>& bone_poses();
     /// @brief Returns computed world transforms.
     /// @return Immutable world-transform list.
-    const std::vector<BoneWorldTransform>& bone_world_transforms() const;
+    BoneWorldTransformsView bone_world_transforms() const;
     /// @brief Returns current slot state.
     /// @return Immutable slot-state list.
     const std::vector<SlotState>& slot_states() const;
@@ -1005,7 +1148,12 @@ private:
 
     struct DisplayStateSnapshot {
         std::vector<BonePose> bone_poses;
-        std::vector<BoneWorldTransform> bone_world_transforms;
+        std::vector<float> bone_world_a;
+        std::vector<float> bone_world_b;
+        std::vector<float> bone_world_c;
+        std::vector<float> bone_world_d;
+        std::vector<float> bone_world_x;
+        std::vector<float> bone_world_y;
         std::vector<SlotState> slot_states;
         std::vector<MeshDeformState> mesh_deform_states;
         std::vector<std::size_t> draw_order;
@@ -1057,7 +1205,13 @@ private:
     std::vector<float> bone_world_d_;
     std::vector<float> bone_world_x_;
     std::vector<float> bone_world_y_;
-    std::vector<BoneWorldTransform> bone_world_transforms_;
+    std::vector<BonePose> solved_poses_;
+    std::vector<std::size_t> solved_local_pose_revisions_;
+    std::vector<std::size_t> solved_applied_local_pose_revisions_;
+    std::vector<std::size_t> solved_world_revisions_;
+    std::vector<std::size_t> solved_applied_parent_world_revisions_;
+    std::vector<AttachmentVertex> path_world_control_points_;
+    std::vector<PathDistanceSample> path_distance_samples_;
     std::vector<SlotState> slot_states_;
     std::vector<MeshDeformState> mesh_deform_states_;
     std::vector<std::size_t> draw_order_;
@@ -1077,6 +1231,7 @@ private:
     UpdateThrottleState update_throttle_state_{};
     mutable SkeletonErrorCallback error_callback_;
     mutable std::optional<std::string> last_error_;
+    std::size_t constraint_allocation_count_{0};
 
     void reset_to_setup_pose_state(bool reset_slots_and_draw_order);
 };

@@ -24,6 +24,40 @@ std::runtime_error invalid_transform_constraint_bone_error(
         ", world=" + std::to_string(world_bone_count) + ")");
 }
 
+template <typename T>
+void ensure_vector_capacity(
+    std::vector<T>* values,
+    std::size_t required,
+    std::size_t* allocation_counter) {
+    if (values == nullptr || values->capacity() >= required) {
+        return;
+    }
+
+    if (allocation_counter != nullptr) {
+        ++(*allocation_counter);
+    }
+    values->reserve(required);
+}
+
+template <typename T>
+void resize_vector_without_reallocation(
+    std::vector<T>* values,
+    std::size_t required,
+    std::size_t* allocation_counter) {
+    ensure_vector_capacity(values, required, allocation_counter);
+    values->resize(required);
+}
+
+bool local_pose_matches(const BoneTransform& lhs, const BoneTransform& rhs) {
+    return lhs.x == rhs.x &&
+        lhs.y == rhs.y &&
+        lhs.rotation == rhs.rotation &&
+        lhs.scale_x == rhs.scale_x &&
+        lhs.scale_y == rhs.scale_y &&
+        lhs.shear_x == rhs.shear_x &&
+        lhs.shear_y == rhs.shear_y;
+}
+
 } // namespace
 
 void Skeleton::update_world_transforms(
@@ -49,64 +83,247 @@ void Skeleton::update_world_transforms(
         *seconds_out += std::chrono::duration<double>(clock::now() - start).count();
     };
 
-    if (bone_world_transforms_.size() != bone_poses_.size()) {
-        bone_world_transforms_.resize(bone_poses_.size());
+    detail::BoneLocalTransformBuffers local_buffers{
+        &bone_local_x_,
+        &bone_local_y_,
+        &bone_local_a_,
+        &bone_local_b_,
+        &bone_local_c_,
+        &bone_local_d_,
+    };
+    detail::BoneWorldTransformBuffers world_buffers{
+        &bone_world_a_,
+        &bone_world_b_,
+        &bone_world_c_,
+        &bone_world_d_,
+        &bone_world_x_,
+        &bone_world_y_,
+    };
+
+    const std::size_t bone_count = bone_poses_.size();
+    const bool solved_pose_size_changed = solved_poses_.size() != bone_count;
+    const bool local_buffer_size_changed =
+        bone_local_x_.size() != bone_count ||
+        bone_local_y_.size() != bone_count ||
+        bone_local_a_.size() != bone_count ||
+        bone_local_b_.size() != bone_count ||
+        bone_local_c_.size() != bone_count ||
+        bone_local_d_.size() != bone_count;
+
+    resize_vector_without_reallocation(
+        &solved_poses_,
+        bone_count,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        &solved_local_pose_revisions_,
+        bone_count,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        &solved_applied_local_pose_revisions_,
+        bone_count,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        &solved_world_revisions_,
+        bone_count,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        &solved_applied_parent_world_revisions_,
+        bone_count,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(local_buffers.x, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(local_buffers.y, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(local_buffers.a, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(local_buffers.b, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(local_buffers.c, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(local_buffers.d, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(world_buffers.a, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(world_buffers.b, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(world_buffers.c, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(world_buffers.d, bone_count, &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        world_buffers.world_x,
+        bone_count,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        world_buffers.world_y,
+        bone_count,
+        &constraint_allocation_count_);
+
+    const auto refresh_cached_local_transform = [&](std::size_t bone_index) {
+        if (bone_index >= solved_poses_.size()) {
+            return;
+        }
+        detail::prepare_local_transform_buffer(
+            bone_index,
+            solved_poses_[bone_index].local_pose,
+            local_buffers);
+    };
+    const bool refresh_all_local_transforms =
+        solved_pose_size_changed || local_buffer_size_changed;
+    for (std::size_t bone_index = 0; bone_index < bone_count; ++bone_index) {
+        const BonePose& input_pose = bone_poses_[bone_index];
+        const bool local_pose_changed =
+            refresh_all_local_transforms ||
+            !local_pose_matches(solved_poses_[bone_index].local_pose, input_pose.local_pose);
+        solved_poses_[bone_index] = input_pose;
+        if (local_pose_changed) {
+            refresh_cached_local_transform(bone_index);
+        }
     }
 
-    std::vector<BonePose> solved_poses = bone_poses_;
     const auto bone_is_active = [&](std::size_t bone_index) {
         return bone_index < active_bones_.size() ? active_bones_[bone_index] : true;
     };
+    const auto load_world_transform = [&](std::size_t bone_index) {
+        return detail::load_world_transform(bone_index, world_buffers);
+    };
+    const auto store_world_transform = [&](std::size_t bone_index, const BoneWorldTransform& world) {
+        detail::store_world_transform(bone_index, world, world_buffers);
+    };
 
     const auto compute_world_transforms = [&]() {
-        detail::BoneLocalTransformBuffers local_buffers{
-            &bone_local_x_,
-            &bone_local_y_,
-            &bone_local_a_,
-            &bone_local_b_,
-            &bone_local_c_,
-            &bone_local_d_,
-        };
-        detail::BoneWorldTransformBuffers world_buffers{
-            &bone_world_a_,
-            &bone_world_b_,
-            &bone_world_c_,
-            &bone_world_d_,
-            &bone_world_x_,
-            &bone_world_y_,
-            &bone_world_transforms_,
-        };
-
-        detail::prepare_local_transform_buffers(solved_poses, local_buffers);
+        if (capture_timings) {
+            ++timing_breakdown->full_skeleton_passes;
+        }
         detail::propagate_world_transforms_optimized(
             data_->bones(),
-            solved_poses,
+            solved_poses_,
             scale_x_,
             scale_y_,
             local_buffers,
             world_buffers);
     };
 
-    const auto bone_tip_local_vector = [&](std::size_t bone_index) -> AttachmentVertex {
-        AttachmentVertex tip;
-        double best_length_squared = 0.0;
-        for (std::size_t child_index = 0; child_index < data_->bones().size(); ++child_index) {
-            if (data_->bones()[child_index].parent_index != std::optional<std::size_t>{bone_index}) {
+    std::fill(solved_local_pose_revisions_.begin(), solved_local_pose_revisions_.end(), 0U);
+    std::fill(
+        solved_applied_local_pose_revisions_.begin(),
+        solved_applied_local_pose_revisions_.end(),
+        0U);
+    std::fill(
+        solved_world_revisions_.begin(),
+        solved_world_revisions_.end(),
+        solved_poses_.empty() ? 0U : 1U);
+    std::fill(
+        solved_applied_parent_world_revisions_.begin(),
+        solved_applied_parent_world_revisions_.end(),
+        0U);
+    const auto& children_map = data_->children_map();
+    const auto& bone_tip_local_vectors = data_->bone_tip_local_vectors();
+    for (std::size_t bone_index = 0; bone_index < data_->bones().size(); ++bone_index) {
+        const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
+        if (parent_index.has_value()) {
+            solved_applied_parent_world_revisions_[bone_index] =
+                solved_world_revisions_[*parent_index];
+        }
+    }
+    std::size_t next_world_revision = solved_poses_.empty() ? 0U : 2U;
+    bool constraint_pose_dirty = false;
+
+    const auto recompute_world_children = [&](const auto& self, std::size_t parent_index) -> void {
+        if (parent_index >= children_map.size()) {
+            return;
+        }
+        const BoneWorldTransform parent_world = load_world_transform(parent_index);
+        for (const std::size_t child_index : children_map[parent_index]) {
+            if (child_index >= solved_poses_.size() || child_index >= bone_count) {
                 continue;
             }
 
-            const BoneTransform& child_pose = solved_poses[child_index].local_pose;
-            const double length_squared =
-                (child_pose.x * child_pose.x) + (child_pose.y * child_pose.y);
-            if (length_squared <= best_length_squared) {
-                continue;
-            }
-
-            tip = AttachmentVertex{child_pose.x, child_pose.y};
-            best_length_squared = length_squared;
+            const BoneWorldTransform child_world = detail::compose_cached_world_transform(
+                &parent_world,
+                solved_poses_[child_index],
+                local_buffers,
+                child_index,
+                scale_x_,
+                scale_y_);
+            store_world_transform(child_index, child_world);
+            self(self, child_index);
+        }
+    };
+    const auto ensure_world_transform = [&](const auto& self, std::size_t bone_index) -> void {
+        if (bone_index >= solved_poses_.size() || bone_index >= bone_count) {
+            return;
         }
 
-        return tip;
+        const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
+        std::size_t parent_world_revision = 0U;
+        std::optional<BoneWorldTransform> parent_world;
+        if (parent_index.has_value()) {
+            self(self, *parent_index);
+            parent_world_revision = solved_world_revisions_[*parent_index];
+            parent_world = load_world_transform(*parent_index);
+        }
+
+        if (solved_applied_local_pose_revisions_[bone_index] ==
+                solved_local_pose_revisions_[bone_index] &&
+            solved_applied_parent_world_revisions_[bone_index] == parent_world_revision) {
+            return;
+        }
+
+        const BoneWorldTransform world_transform = detail::compose_cached_world_transform(
+            parent_world.has_value() ? &(*parent_world) : nullptr,
+            solved_poses_[bone_index],
+            local_buffers,
+            bone_index,
+            scale_x_,
+            scale_y_);
+        store_world_transform(bone_index, world_transform);
+        solved_applied_local_pose_revisions_[bone_index] =
+            solved_local_pose_revisions_[bone_index];
+        solved_applied_parent_world_revisions_[bone_index] = parent_world_revision;
+        solved_world_revisions_[bone_index] = next_world_revision++;
+    };
+    const auto mark_bone_world_dirty = [&](std::size_t bone_index) {
+        if (bone_index >= solved_local_pose_revisions_.size()) {
+            return;
+        }
+
+        refresh_cached_local_transform(bone_index);
+        ++solved_local_pose_revisions_[bone_index];
+        constraint_pose_dirty = true;
+    };
+    const auto recompute_world_from_parent = [&](std::size_t bone_index) {
+        const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
+        std::optional<BoneWorldTransform> parent_world;
+        if (parent_index.has_value()) {
+            parent_world = load_world_transform(*parent_index);
+        }
+        const BoneWorldTransform world_transform = detail::compose_cached_world_transform(
+            parent_world.has_value() ? &(*parent_world) : nullptr,
+            solved_poses_[bone_index],
+            local_buffers,
+            bone_index,
+            scale_x_,
+            scale_y_);
+        store_world_transform(bone_index, world_transform);
+    };
+    const auto ensure_all_world_transforms_current = [&]() {
+        if (!constraint_pose_dirty) {
+            return;
+        }
+
+        for (std::size_t bone_index = 0; bone_index < data_->bones().size(); ++bone_index) {
+            const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
+            const std::size_t parent_world_revision =
+                parent_index.has_value() ? solved_world_revisions_[*parent_index] : 0U;
+            if (solved_applied_local_pose_revisions_[bone_index] ==
+                    solved_local_pose_revisions_[bone_index] &&
+                solved_applied_parent_world_revisions_[bone_index] == parent_world_revision) {
+                continue;
+            }
+
+            recompute_world_from_parent(bone_index);
+            solved_applied_local_pose_revisions_[bone_index] =
+                solved_local_pose_revisions_[bone_index];
+            solved_applied_parent_world_revisions_[bone_index] = parent_world_revision;
+            solved_world_revisions_[bone_index] = next_world_revision++;
+        }
+    };
+    const auto bone_tip_local_vector = [&](std::size_t bone_index) -> AttachmentVertex {
+        if (bone_index >= bone_tip_local_vectors.size()) {
+            return {};
+        }
+        return bone_tip_local_vectors[bone_index];
     };
 
     const auto to_parent_local = [&](std::optional<std::size_t> parent_index,
@@ -116,7 +333,11 @@ void Skeleton::update_world_transforms(
             return {world_x, world_y};
         }
 
-        return detail::inverse_transform_point(bone_world_transforms_[*parent_index], world_x, world_y);
+        ensure_world_transform(ensure_world_transform, *parent_index);
+        return detail::inverse_transform_point(
+            load_world_transform(*parent_index),
+            world_x,
+            world_y);
     };
 
     measure_seconds(
@@ -148,27 +369,41 @@ void Skeleton::update_world_transforms(
         }
 
         const std::size_t path_bone_index = data_->slots()[constraint.slot_index].bone_index;
-        if (path_bone_index >= bone_world_transforms_.size()) {
+        if (path_bone_index >= bone_count) {
             continue;
         }
+        ensure_world_transform(ensure_world_transform, path_bone_index);
 
-        std::vector<AttachmentVertex> world_control_points;
-        world_control_points.reserve(attachment->path_attachment->control_points.size());
-        const BoneWorldTransform& path_bone_transform = bone_world_transforms_[path_bone_index];
-        for (const AttachmentVertex& point : attachment->path_attachment->control_points) {
-            world_control_points.push_back(detail::transform_attachment_vertex(
+        const std::size_t control_point_count =
+            attachment->path_attachment->control_points.size();
+        resize_vector_without_reallocation(
+            &path_world_control_points_,
+            control_point_count,
+            &constraint_allocation_count_);
+        const BoneWorldTransform path_bone_transform = load_world_transform(path_bone_index);
+        for (std::size_t point_index = 0; point_index < control_point_count; ++point_index) {
+            const AttachmentVertex& point =
+                attachment->path_attachment->control_points[point_index];
+            path_world_control_points_[point_index] = detail::transform_attachment_vertex(
                 path_bone_transform,
                 point.x,
-                point.y));
+                point.y);
         }
 
-        const std::vector<detail::PathDistanceSample> path_samples =
-            detail::build_path_distance_samples(world_control_points);
-        if (path_samples.empty()) {
+        const std::size_t segment_count =
+            control_point_count >= 4U ? (control_point_count - 1U) / 3U : 0U;
+        ensure_vector_capacity(
+            &path_distance_samples_,
+            segment_count == 0U ? 0U : 1U + segment_count * 32U,
+            &constraint_allocation_count_);
+        detail::build_path_distance_samples(
+            path_world_control_points_,
+            &path_distance_samples_);
+        if (path_distance_samples_.empty()) {
             continue;
         }
 
-        const double total_length = path_samples.back().distance;
+        const double total_length = path_distance_samples_.back().distance;
         const double spacing_distance =
             constraint.spacing_mode == PathConstraintSpacingMode::Percent
             ? total_length * constraint.spacing
@@ -178,7 +413,7 @@ void Skeleton::update_world_transforms(
              chain_index < constraint.bone_indices.size();
              ++chain_index) {
             const std::size_t bone_index = constraint.bone_indices[chain_index];
-            if (bone_index >= solved_poses.size() || !bone_is_active(bone_index)) {
+            if (bone_index >= solved_poses_.size() || !bone_is_active(bone_index)) {
                 continue;
             }
 
@@ -187,9 +422,9 @@ void Skeleton::update_world_transforms(
                     (spacing_distance * static_cast<double>(chain_index)),
                 0.0,
                 total_length);
-            const detail::PathDistanceSample sample =
-                detail::sample_path_distance(path_samples, sample_distance);
-            BoneTransform& pose = solved_poses[bone_index].local_pose;
+            const PathDistanceSample sample =
+                detail::sample_path_distance(path_distance_samples_, sample_distance);
+            BoneTransform& pose = solved_poses_[bone_index].local_pose;
             const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
 
             if (translate_mix > 0.0) {
@@ -222,7 +457,7 @@ void Skeleton::update_world_transforms(
                 }
             }
 
-            compute_world_transforms();
+            mark_bone_world_dirty(bone_index);
         }
     }
 
@@ -239,8 +474,8 @@ void Skeleton::update_world_transforms(
         const auto require_valid_constraint_bone_index =
             [&](std::size_t bone_index, std::string_view role) {
                 if (bone_index < data_->bones().size() &&
-                    bone_index < solved_poses.size() &&
-                    bone_index < bone_world_transforms_.size()) {
+                    bone_index < solved_poses_.size() &&
+                    bone_index < bone_count) {
                     return;
                 }
 
@@ -249,8 +484,8 @@ void Skeleton::update_world_transforms(
                     role,
                     bone_index,
                     data_->bones().size(),
-                    solved_poses.size(),
-                    bone_world_transforms_.size());
+                    solved_poses_.size(),
+                    bone_count);
             };
         require_valid_constraint_bone_index(constraint.source_bone_index, "source");
         if (!bone_is_active(constraint.source_bone_index)) {
@@ -266,16 +501,18 @@ void Skeleton::update_world_transforms(
             continue;
         }
 
-        const BoneTransform source_pose = solved_poses[constraint.source_bone_index].local_pose;
+        ensure_world_transform(ensure_world_transform, constraint.source_bone_index);
+        const BoneTransform source_pose =
+            solved_poses_[constraint.source_bone_index].local_pose;
         const BoneWorldTransform source_world =
-            bone_world_transforms_[constraint.source_bone_index];
+            load_world_transform(constraint.source_bone_index);
         for (const std::size_t bone_index : constraint.target_bone_indices) {
             require_valid_constraint_bone_index(bone_index, "target");
             if (!bone_is_active(bone_index)) {
                 continue;
             }
 
-            BoneTransform& pose = solved_poses[bone_index].local_pose;
+            BoneTransform& pose = solved_poses_[bone_index].local_pose;
             if (rotate_mix > 0.0) {
                 const double desired_rotation =
                     source_pose.rotation + constraint.offsets.rotation;
@@ -312,9 +549,8 @@ void Skeleton::update_world_transforms(
                     source_pose.shear_y + constraint.offsets.shear_y,
                     shear_mix);
             }
+            mark_bone_world_dirty(bone_index);
         }
-
-        compute_world_transforms();
     }
 
     constexpr double kIkEpsilon = 1e-4;
@@ -333,19 +569,20 @@ void Skeleton::update_world_transforms(
                                        bool compress,
                                        bool stretch,
                                        double alpha) -> bool {
-        if (bone_index >= solved_poses.size() || !bone_is_active(bone_index)) {
+        if (bone_index >= solved_poses_.size() || !bone_is_active(bone_index)) {
             return false;
         }
+        ensure_world_transform(ensure_world_transform, bone_index);
 
         const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
-        if (!parent_index.has_value() || *parent_index >= bone_world_transforms_.size()) {
+        if (!parent_index.has_value() || *parent_index >= bone_count) {
             return false;
         }
 
-        BoneTransform& pose = solved_poses[bone_index].local_pose;
-        const BoneInherit inherit = solved_poses[bone_index].inherit;
-        const BoneWorldTransform& bone_world = bone_world_transforms_[bone_index];
-        const BoneWorldTransform& parent_world = bone_world_transforms_[*parent_index];
+        BoneTransform& pose = solved_poses_[bone_index].local_pose;
+        const BoneInherit inherit = solved_poses_[bone_index].inherit;
+        const BoneWorldTransform bone_world = load_world_transform(bone_index);
+        const BoneWorldTransform parent_world = load_world_transform(*parent_index);
 
         double pa = parent_world.a;
         double pb = parent_world.b;
@@ -427,26 +664,27 @@ void Skeleton::update_world_transforms(
                                        bool stretch,
                                        double softness,
                                        double alpha) -> bool {
-        if (parent_bone_index >= solved_poses.size() ||
-            child_bone_index >= solved_poses.size() ||
+        if (parent_bone_index >= solved_poses_.size() ||
+            child_bone_index >= solved_poses_.size() ||
             !bone_is_active(parent_bone_index) ||
             !bone_is_active(child_bone_index)) {
             return false;
         }
-        if (solved_poses[parent_bone_index].inherit != BoneInherit::Normal ||
-            solved_poses[child_bone_index].inherit != BoneInherit::Normal) {
+        if (solved_poses_[parent_bone_index].inherit != BoneInherit::Normal ||
+            solved_poses_[child_bone_index].inherit != BoneInherit::Normal) {
             return false;
         }
+        ensure_world_transform(ensure_world_transform, parent_bone_index);
 
         const std::optional<std::size_t> grandparent_index =
             data_->bones()[parent_bone_index].parent_index;
         if (!grandparent_index.has_value() ||
-            *grandparent_index >= bone_world_transforms_.size()) {
+            *grandparent_index >= bone_count) {
             return false;
         }
 
-        BoneTransform& parent_pose = solved_poses[parent_bone_index].local_pose;
-        BoneTransform& child_pose = solved_poses[child_bone_index].local_pose;
+        BoneTransform& parent_pose = solved_poses_[parent_bone_index].local_pose;
+        BoneTransform& child_pose = solved_poses_[child_bone_index].local_pose;
 
         double px = parent_pose.x;
         double py = parent_pose.y;
@@ -475,7 +713,7 @@ void Skeleton::update_world_transforms(
 
         const double cx = child_pose.x;
         double cy = child_pose.y;
-        const BoneWorldTransform& parent_world = bone_world_transforms_[parent_bone_index];
+        const BoneWorldTransform parent_world = load_world_transform(parent_bone_index);
         double a = parent_world.a;
         double b = parent_world.b;
         double c = parent_world.c;
@@ -492,7 +730,7 @@ void Skeleton::update_world_transforms(
             child_world_y = c * cx + d * cy + parent_world.world_y;
         }
 
-        const BoneWorldTransform& grandparent_world = bone_world_transforms_[*grandparent_index];
+        const BoneWorldTransform grandparent_world = load_world_transform(*grandparent_index);
         a = grandparent_world.a;
         b = grandparent_world.b;
         c = grandparent_world.c;
@@ -708,16 +946,19 @@ void Skeleton::update_world_transforms(
 
         const IkConstraintData& constraint = data_->ik_constraints()[constraint_index];
         const double mix = detail::clamp_mix(constraint.mix);
-        if (mix <= 0.0 || constraint.target_bone_index >= bone_world_transforms_.size()) {
+        if (mix <= 0.0 || constraint.target_bone_index >= bone_count) {
             continue;
         }
         if (!bone_is_active(constraint.target_bone_index)) {
             continue;
         }
+        ensure_world_transform(ensure_world_transform, constraint.target_bone_index);
+        const BoneWorldTransform target_world_transform =
+            load_world_transform(constraint.target_bone_index);
 
         const AttachmentVertex target_world{
-            bone_world_transforms_[constraint.target_bone_index].world_x,
-            bone_world_transforms_[constraint.target_bone_index].world_y};
+            target_world_transform.world_x,
+            target_world_transform.world_y};
 
         if (constraint.bone_indices.size() == 1) {
             const std::size_t bone_index = constraint.bone_indices.front();
@@ -728,7 +969,7 @@ void Skeleton::update_world_transforms(
                     constraint.compress,
                     constraint.stretch,
                     mix)) {
-                compute_world_transforms();
+                mark_bone_world_dirty(bone_index);
             }
             continue;
         }
@@ -746,22 +987,14 @@ void Skeleton::update_world_transforms(
                 constraint.stretch,
                 constraint.softness,
                 mix)) {
-            compute_world_transforms();
+            mark_bone_world_dirty(constraint.bone_indices[0]);
+            mark_bone_world_dirty(constraint.bone_indices[1]);
         }
     }
 
+    ensure_all_world_transforms_current();
+
     if (physics == PhysicsMode::None) {
-        detail::sync_world_transform_buffers_from_aos(
-            bone_world_transforms_,
-            detail::BoneWorldTransformBuffers{
-                &bone_world_a_,
-                &bone_world_b_,
-                &bone_world_c_,
-                &bone_world_d_,
-                &bone_world_x_,
-                &bone_world_y_,
-                nullptr,
-            });
         if (capture_timings) {
             timing_breakdown->constraint_seconds +=
                 std::chrono::duration<double>(clock::now() - constraint_start).count();
@@ -771,21 +1004,6 @@ void Skeleton::update_world_transforms(
     if (physics_constraint_states_.size() != data_->physics_constraints().size()) {
         physics_constraint_states_.resize(data_->physics_constraints().size());
     }
-
-    const auto recompute_world_subtree = [&](const auto& self, std::size_t parent_index) -> void {
-        for (std::size_t child_index = 0; child_index < data_->bones().size(); ++child_index) {
-            if (data_->bones()[child_index].parent_index != std::optional<std::size_t>{parent_index}) {
-                continue;
-            }
-
-            bone_world_transforms_[child_index] = detail::compose_world_transform(
-                bone_world_transforms_[parent_index],
-                solved_poses[child_index],
-                scale_x_,
-                scale_y_);
-            self(self, child_index);
-        }
-    };
 
     const double physics_delta_seconds =
         physics == PhysicsMode::Update ? std::max(0.0, pending_physics_delta_seconds_) : 0.0;
@@ -838,14 +1056,14 @@ void Skeleton::update_world_transforms(
              chain_index < constraint.bone_indices.size();
              ++chain_index) {
             const std::size_t bone_index = constraint.bone_indices[chain_index];
-            if (bone_index >= solved_poses.size() || !bone_is_active(bone_index)) {
+            if (bone_index >= solved_poses_.size() || !bone_is_active(bone_index)) {
                 continue;
             }
 
             const AttachmentVertex tip_local = bone_tip_local_vector(bone_index);
             const double tip_length = detail::vertex_length(tip_local);
 
-            BoneWorldTransform& bone_world = bone_world_transforms_[bone_index];
+            BoneWorldTransform bone_world = load_world_transform(bone_index);
             PhysicsBoneState& bone_state = constraint_state.bones[chain_index];
             if (constraint_state.reset) {
                 bone_state.ux = bone_world.world_x;
@@ -1010,7 +1228,8 @@ void Skeleton::update_world_transforms(
                 bone_state.cy = bone_world.world_y;
             }
 
-            recompute_world_subtree(recompute_world_subtree, bone_index);
+            store_world_transform(bone_index, bone_world);
+            recompute_world_children(recompute_world_children, bone_index);
         }
 
         if (physics == PhysicsMode::Update) {
@@ -1022,17 +1241,6 @@ void Skeleton::update_world_transforms(
         }
     }
 
-    detail::sync_world_transform_buffers_from_aos(
-        bone_world_transforms_,
-        detail::BoneWorldTransformBuffers{
-            &bone_world_a_,
-            &bone_world_b_,
-            &bone_world_c_,
-            &bone_world_d_,
-            &bone_world_x_,
-            &bone_world_y_,
-            nullptr,
-        });
     if (capture_timings) {
         timing_breakdown->constraint_seconds +=
             std::chrono::duration<double>(clock::now() - constraint_start).count();

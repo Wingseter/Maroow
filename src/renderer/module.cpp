@@ -74,6 +74,26 @@ RenderCommandVertex rigid_stream_vertex(
     const runtime::SlotColor& light_color,
     const std::optional<runtime::SlotColor>& dark_color);
 
+struct ActiveClipState {
+    std::size_t clip_attachment_index{0};
+    std::string attachment_name;
+    std::optional<std::size_t> end_slot_index;
+    std::vector<RenderPoint> polygon;
+};
+
+std::optional<std::string> append_dynamic_mesh_attachment(
+    PreparedScene* scene,
+    const runtime::AttachmentData& attachment,
+    const runtime::SlotData& slot,
+    const runtime::SlotState& slot_state,
+    std::size_t draw_order_index,
+    std::size_t slot_index,
+    const std::vector<double>* vertex_offsets,
+    const runtime::AtlasRegion& region,
+    const runtime::AtlasData& atlas,
+    const std::vector<runtime::BoneWorldTransform>& bone_palette,
+    const std::vector<ActiveClipState>& active_clips);
+
 TextureImage fallback_white_texture() {
     TextureImage image;
     image.width = 1;
@@ -1187,35 +1207,46 @@ bool render_batch_matches(const RenderCommand& batch, const PreparedDrawCommand&
 std::optional<std::string> append_clip_command_geometry(
     const ClipAttachmentDrawCommand& clip_attachment,
     std::size_t identity_bone_index,
+    std::size_t bone_count,
     std::size_t source_clip_attachment_index,
     RenderClipCommand* clip_command_out) {
     if (clip_command_out == nullptr) {
         return "Render clip command output must not be null.";
     }
-    if (clip_attachment.polygon.size() < 3U) {
+    const bool use_local_polygon = !clip_attachment.local_polygon.empty();
+    const std::vector<RenderPoint>& polygon =
+        use_local_polygon ? clip_attachment.local_polygon : clip_attachment.polygon;
+    const std::size_t polygon_bone_index =
+        use_local_polygon ? clip_attachment.bone_index : identity_bone_index;
+
+    if (polygon.size() < 3U) {
         return "Clip attachment '" + clip_attachment.attachment_name +
             "' requires at least 3 points.";
     }
-    if (clip_attachment.polygon.size() >
+    if (polygon.size() >
         static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
         return "Clip attachment '" + clip_attachment.attachment_name +
             "' exceeded the 32-bit index range.";
+    }
+    if (polygon_bone_index >= bone_count + kIdentityBoneCount) {
+        return "Clip attachment '" + clip_attachment.attachment_name +
+            "' references invalid clip bone index " + std::to_string(polygon_bone_index) + ".";
     }
 
     RenderClipCommand clip_command;
     clip_command.attachment_name = clip_attachment.attachment_name;
     clip_command.source_clip_attachment_index = source_clip_attachment_index;
-    clip_command.vertices.reserve(clip_attachment.polygon.size());
-    for (const RenderPoint& point : clip_attachment.polygon) {
+    clip_command.vertices.reserve(polygon.size());
+    for (const RenderPoint& point : polygon) {
         clip_command.vertices.push_back(rigid_stream_vertex(
             point,
             RenderPoint{},
-            identity_bone_index,
+            polygon_bone_index,
             runtime::SlotColor{1.0, 1.0, 1.0, 1.0},
             std::nullopt));
     }
-    clip_command.indices.reserve((clip_attachment.polygon.size() - 2U) * 3U);
-    for (std::size_t index = 1; index + 1 < clip_attachment.polygon.size(); ++index) {
+    clip_command.indices.reserve((polygon.size() - 2U) * 3U);
+    for (std::size_t index = 1; index + 1 < polygon.size(); ++index) {
         clip_command.indices.push_back(0U);
         clip_command.indices.push_back(static_cast<std::uint32_t>(index));
         clip_command.indices.push_back(static_cast<std::uint32_t>(index + 1U));
@@ -1252,6 +1283,7 @@ RenderCommandListResult build_render_command_list_impl(
         if (const std::optional<std::string> error = append_clip_command_geometry(
                 scene.clip_attachments[clip_index],
                 identity_bone_index,
+                bone_count,
                 clip_index,
                 &clip_command)) {
             result.error_message = *error;
@@ -1398,6 +1430,331 @@ double mesh_weight_sum(const runtime::MeshGeometry::VertexWeights& vertex_weight
     return total_weight;
 }
 
+bool slot_color_matches(
+    const runtime::SlotColor& lhs,
+    const runtime::SlotColor& rhs) {
+    return lhs.r == rhs.r &&
+        lhs.g == rhs.g &&
+        lhs.b == rhs.b &&
+        lhs.a == rhs.a;
+}
+
+bool optional_slot_color_matches(
+    const std::optional<runtime::SlotColor>& lhs,
+    const std::optional<runtime::SlotColor>& rhs) {
+    if (!lhs.has_value() || !rhs.has_value()) {
+        return lhs.has_value() == rhs.has_value();
+    }
+
+    return slot_color_matches(*lhs, *rhs);
+}
+
+bool slot_snapshot_matches(
+    const PreparedSceneCache::SlotSnapshot& lhs,
+    const PreparedSceneCache::SlotSnapshot& rhs) {
+    return lhs.has_attachment == rhs.has_attachment &&
+        lhs.attachment_kind == rhs.attachment_kind &&
+        lhs.attachment_name == rhs.attachment_name &&
+        lhs.attachment_skin_index == rhs.attachment_skin_index &&
+        lhs.region_name == rhs.region_name &&
+        slot_color_matches(lhs.color, rhs.color) &&
+        optional_slot_color_matches(lhs.dark_color, rhs.dark_color) &&
+        lhs.mesh_deform_attachment_name == rhs.mesh_deform_attachment_name &&
+        lhs.mesh_vertex_offsets == rhs.mesh_vertex_offsets &&
+        lhs.clip_end_slot_index == rhs.clip_end_slot_index &&
+        lhs.clip_end_slot_name == rhs.clip_end_slot_name;
+}
+
+void assign_scene_metadata(
+    PreparedScene* scene,
+    const runtime::Skeleton& skeleton,
+    const runtime::AtlasData& atlas) {
+    if (scene == nullptr) {
+        return;
+    }
+
+    scene->atlas_name = atlas.info().name;
+    scene->atlas_image = atlas.info().image;
+    scene->atlas_filter_min = atlas.info().filter_min;
+    scene->atlas_filter_mag = atlas.info().filter_mag;
+    scene->atlas_wrap_x = atlas.info().wrap_x;
+    scene->atlas_wrap_y = atlas.info().wrap_y;
+    scene->premultiplied_alpha = atlas.info().premultiplied_alpha;
+    scene->skeleton_name = skeleton.data()->info().name;
+    scene->skeleton_count = 1U;
+}
+
+PreparedSceneCache::SlotSnapshot build_slot_snapshot(
+    const runtime::Skeleton& skeleton,
+    std::size_t slot_index) {
+    PreparedSceneCache::SlotSnapshot snapshot;
+    if (slot_index >= skeleton.slot_states().size()) {
+        return snapshot;
+    }
+
+    const runtime::SlotState& slot_state = skeleton.slot_states()[slot_index];
+    snapshot.attachment_name = slot_state.attachment_name;
+    snapshot.attachment_skin_index = slot_state.attachment_skin_index;
+    snapshot.color = slot_state.color;
+    snapshot.dark_color = slot_state.dark_color;
+
+    const runtime::AttachmentData* attachment = skeleton.current_attachment(slot_index);
+    if (attachment == nullptr) {
+        return snapshot;
+    }
+
+    snapshot.has_attachment = true;
+    snapshot.attachment_kind = attachment->kind;
+    snapshot.region_name = std::string(skeleton.current_region_name(slot_index));
+
+    if (attachment->mesh_geometry != nullptr &&
+        slot_index < skeleton.mesh_deform_states().size()) {
+        const runtime::MeshDeformState& mesh_deform =
+            skeleton.mesh_deform_states()[slot_index];
+        snapshot.mesh_deform_attachment_name = mesh_deform.attachment_name;
+        if (const std::vector<double>* vertex_offsets =
+                skeleton.current_mesh_vertex_offsets(slot_index)) {
+            snapshot.mesh_vertex_offsets = *vertex_offsets;
+        }
+    }
+
+    if (attachment->clipping_attachment.has_value()) {
+        snapshot.clip_end_slot_index = attachment->clipping_attachment->end_slot_index;
+        snapshot.clip_end_slot_name = attachment->clipping_attachment->end_slot_name;
+    }
+
+    return snapshot;
+}
+
+std::optional<std::string> build_slot_record(
+    PreparedSceneCache::SlotRecord* record_out,
+    const runtime::Skeleton& skeleton,
+    const runtime::AtlasData& atlas,
+    std::size_t slot_index) {
+    if (record_out == nullptr) {
+        return "Prepared scene cache slot-record output must not be null.";
+    }
+
+    *record_out = {};
+    const auto& slots = skeleton.data()->slots();
+    const auto& slot_states = skeleton.slot_states();
+    const auto& bone_world_transforms = skeleton.bone_world_transforms();
+    if (slot_index >= slots.size() || slot_index >= slot_states.size()) {
+        return slot_error(slot_index, "is outside the skeleton slot range");
+    }
+
+    const runtime::SlotData& slot = slots[slot_index];
+    const runtime::SlotState& slot_state = slot_states[slot_index];
+    if (slot.bone_index >= bone_world_transforms.size()) {
+        return slot_error(slot_index, "references a bone outside the world transform buffer");
+    }
+    if (slot_state.attachment_name.empty()) {
+        return std::nullopt;
+    }
+
+    const runtime::AttachmentData* attachment = skeleton.current_attachment(slot_index);
+    if (attachment == nullptr) {
+        return slot_error(slot_index, "attachment could not be resolved");
+    }
+
+    if (attachment->kind == runtime::AttachmentKind::Clipping) {
+        const std::optional<runtime::ClippingAttachmentPose> clip_pose =
+            skeleton.evaluate_current_clipping_attachment(slot_index);
+        if (!clip_pose.has_value()) {
+            return slot_error(slot_index, "clipping attachment is missing clipping polygon data");
+        }
+
+        ClipAttachmentDrawCommand command;
+        command.slot_name = slot.name;
+        command.attachment_name = clip_pose->attachment_name;
+        command.slot_index = slot_index;
+        command.bone_index = slot.bone_index;
+        command.end_slot_index = clip_pose->end_slot_index;
+        command.end_slot_name = clip_pose->end_slot_name;
+        command.polygon.reserve(clip_pose->polygon.size());
+        command.local_polygon.reserve(attachment->clipping_attachment->polygon.size());
+
+        for (const runtime::AttachmentVertex& vertex : attachment->clipping_attachment->polygon) {
+            command.local_polygon.push_back({vertex.x, vertex.y});
+        }
+        for (const runtime::AttachmentVertex& vertex : clip_pose->polygon) {
+            command.polygon.push_back({vertex.x, vertex.y});
+        }
+
+        record_out->clip_attachment = std::move(command);
+        return std::nullopt;
+    }
+
+    if (attachment->kind == runtime::AttachmentKind::Point ||
+        attachment->kind == runtime::AttachmentKind::BoundingBox ||
+        attachment->kind == runtime::AttachmentKind::Path) {
+        return std::nullopt;
+    }
+
+    const std::string_view region_name = skeleton.current_region_name(slot_index);
+    const runtime::AtlasRegion* region = atlas.find_region_for_attachment(region_name);
+    if (region == nullptr) {
+        return slot_error(
+            slot_index,
+            "attachment '" + std::string(region_name) + "' does not resolve to an atlas region");
+    }
+
+    if (attachment->mesh_geometry != nullptr) {
+        PreparedScene temporary_scene;
+        temporary_scene.atlas_image = atlas.info().image;
+        if (const std::optional<std::string> error = append_dynamic_mesh_attachment(
+                &temporary_scene,
+                *attachment,
+                slot,
+                slot_state,
+                0U,
+                slot_index,
+                skeleton.current_mesh_vertex_offsets(slot_index),
+                *region,
+                atlas,
+                bone_world_transforms,
+                {})) {
+            return error;
+        }
+        if (temporary_scene.draw_commands.size() != 1U) {
+            return slot_error(slot_index, "failed to build a cached mesh draw command");
+        }
+
+        record_out->draw_command = std::move(temporary_scene.draw_commands.front());
+        if (auto* mesh =
+                std::get_if<DynamicMeshDrawCommand>(&(*record_out->draw_command))) {
+            mesh->draw_order_index = 0U;
+            mesh->clip_attachment_name.reset();
+        }
+        return std::nullopt;
+    }
+
+    const runtime::BoneWorldTransform& bone_world = bone_world_transforms[slot.bone_index];
+    const std::array<RenderPoint, 4> local_corners{{
+        {-region->origin_x, -region->origin_y},
+        {region->width - region->origin_x, -region->origin_y},
+        {region->width - region->origin_x, region->height - region->origin_y},
+        {-region->origin_x, region->height - region->origin_y},
+    }};
+    const std::array<RenderPoint, 4> uv_corners{{
+        normalized_uv(region->x, region->y, atlas),
+        normalized_uv(region->x + region->width, region->y, atlas),
+        normalized_uv(region->x + region->width, region->y + region->height, atlas),
+        normalized_uv(region->x, region->y + region->height, atlas),
+    }};
+
+    RegionAttachmentDrawCommand command;
+    command.slot_name = slot.name;
+    command.attachment_name = slot_state.attachment_name;
+    command.atlas_region_name = region->name;
+    command.texture_name = atlas.info().image;
+    command.slot_index = slot_index;
+    command.bone_index = slot.bone_index;
+    command.blend_mode = slot.blend_mode;
+    command.color = slot_state.color;
+    command.dark_color = slot_state.dark_color;
+    for (std::size_t vertex_index = 0; vertex_index < command.vertices.size(); ++vertex_index) {
+        command.local_positions[vertex_index] = local_corners[vertex_index];
+        command.vertices[vertex_index].position =
+            transform_point(bone_world, local_corners[vertex_index]);
+        command.vertices[vertex_index].uv = uv_corners[vertex_index];
+    }
+
+    record_out->draw_command = std::move(command);
+    return std::nullopt;
+}
+
+void rebuild_cached_scene(
+    PreparedSceneCache* cache,
+    const runtime::Skeleton& skeleton,
+    const runtime::AtlasData& atlas) {
+    if (cache == nullptr) {
+        return;
+    }
+
+    PreparedScene scene;
+    assign_scene_metadata(&scene, skeleton, atlas);
+    scene.bone_palette = skeleton.bone_world_transforms();
+    scene.clip_attachments.reserve(skeleton.draw_order().size());
+    scene.draw_commands.reserve(skeleton.draw_order().size());
+    scene.ordered_events.reserve(skeleton.draw_order().size() * 2U);
+    std::vector<ActiveClipState> active_clips;
+
+    auto clear_clips_if_needed = [&](std::size_t slot_index) {
+        while (!active_clips.empty() &&
+               active_clips.back().end_slot_index.has_value() &&
+               *active_clips.back().end_slot_index == slot_index) {
+            scene.ordered_events.push_back({
+                PreparedSceneEventKind::ClipEnd,
+                active_clips.back().clip_attachment_index,
+            });
+            active_clips.pop_back();
+        }
+    };
+
+    for (std::size_t draw_index = 0; draw_index < skeleton.draw_order().size(); ++draw_index) {
+        const std::size_t slot_index = skeleton.draw_order()[draw_index];
+        if (slot_index >= cache->slot_records_.size()) {
+            continue;
+        }
+
+        const PreparedSceneCache::SlotRecord& record = cache->slot_records_[slot_index];
+        if (record.clip_attachment.has_value()) {
+            ClipAttachmentDrawCommand clip = *record.clip_attachment;
+            clip.draw_order_index = draw_index;
+            const std::size_t clip_attachment_index = scene.clip_attachments.size();
+            scene.clip_attachments.push_back(std::move(clip));
+            scene.ordered_events.push_back({
+                PreparedSceneEventKind::ClipStart,
+                clip_attachment_index,
+            });
+
+            ActiveClipState clip_state;
+            clip_state.clip_attachment_index = clip_attachment_index;
+            clip_state.attachment_name = scene.clip_attachments.back().attachment_name;
+            clip_state.end_slot_index = scene.clip_attachments.back().end_slot_index;
+            active_clips.push_back(std::move(clip_state));
+            clear_clips_if_needed(slot_index);
+            continue;
+        }
+
+        if (!record.draw_command.has_value()) {
+            clear_clips_if_needed(slot_index);
+            continue;
+        }
+
+        PreparedDrawCommand command = *record.draw_command;
+        std::visit(
+            [&](auto& prepared_attachment) {
+                prepared_attachment.draw_order_index = draw_index;
+                if (!active_clips.empty()) {
+                    prepared_attachment.clip_attachment_name = active_clips.back().attachment_name;
+                } else {
+                    prepared_attachment.clip_attachment_name.reset();
+                }
+            },
+            command);
+        scene.draw_commands.push_back(std::move(command));
+        scene.ordered_events.push_back({
+            PreparedSceneEventKind::Draw,
+            scene.draw_commands.size() - 1U,
+        });
+        clear_clips_if_needed(slot_index);
+    }
+
+    while (!active_clips.empty()) {
+        scene.ordered_events.push_back({
+            PreparedSceneEventKind::ClipEnd,
+            active_clips.back().clip_attachment_index,
+        });
+        active_clips.pop_back();
+    }
+
+    cache->scene_ = std::move(scene);
+    cache->has_scene_ = true;
+    cache->has_batch_summary_ = false;
+}
+
 std::string_view mesh_buffer_usage_name(MeshBufferUsage usage) {
     switch (usage) {
     case MeshBufferUsage::Static:
@@ -1436,13 +1793,6 @@ std::string_view blend_mode_name(runtime::BlendMode blend_mode) {
 struct ClipVertex {
     RenderPoint position;
     RenderPoint uv;
-};
-
-struct ActiveClipState {
-    std::size_t clip_attachment_index{0};
-    std::string attachment_name;
-    std::optional<std::size_t> end_slot_index;
-    std::vector<RenderPoint> polygon;
 };
 
 double polygon_signed_area(const std::vector<RenderPoint>& polygon) {
@@ -2080,6 +2430,38 @@ std::size_t count_software_stencil_visible_pixels(
 
 } // namespace internal
 
+bool PreparedSceneCache::has_scene() const {
+    return has_scene_;
+}
+
+const PreparedScene& PreparedSceneCache::scene() const {
+    return scene_;
+}
+
+bool PreparedSceneCache::has_batch_summary() const {
+    return has_batch_summary_;
+}
+
+const PreparedSceneBatchSummary& PreparedSceneCache::batch_summary() const {
+    return batch_summary_;
+}
+
+const PreparedSceneCacheUpdateInfo& PreparedSceneCache::last_update() const {
+    return last_update_;
+}
+
+const std::vector<bool>& PreparedSceneCache::slot_dirty_flags() const {
+    return slot_dirty_flags_;
+}
+
+bool PreparedSceneCache::draw_order_dirty() const {
+    return draw_order_dirty_;
+}
+
+bool PreparedSceneCache::skin_swap_dirty() const {
+    return skin_swap_dirty_;
+}
+
 BlendState blend_state_for(runtime::BlendMode blend_mode, bool premultiplied_alpha) {
     return compute_blend_state(blend_mode, premultiplied_alpha);
 }
@@ -2126,15 +2508,7 @@ PreparedSceneResult prepare_setup_pose_scene(
 
     if (!skeleton.visible()) {
         PreparedScene scene;
-        scene.atlas_name = atlas.info().name;
-        scene.atlas_image = atlas.info().image;
-        scene.atlas_filter_min = atlas.info().filter_min;
-        scene.atlas_filter_mag = atlas.info().filter_mag;
-        scene.atlas_wrap_x = atlas.info().wrap_x;
-        scene.atlas_wrap_y = atlas.info().wrap_y;
-        scene.premultiplied_alpha = atlas.info().premultiplied_alpha;
-        scene.skeleton_name = skeleton.data()->info().name;
-        scene.skeleton_count = 1U;
+        assign_scene_metadata(&scene, skeleton, atlas);
         result.scene = std::move(scene);
         return result;
     }
@@ -2155,15 +2529,7 @@ PreparedSceneResult prepare_setup_pose_scene(
     }
 
     PreparedScene scene;
-    scene.atlas_name = atlas.info().name;
-    scene.atlas_image = atlas.info().image;
-    scene.atlas_filter_min = atlas.info().filter_min;
-    scene.atlas_filter_mag = atlas.info().filter_mag;
-    scene.atlas_wrap_x = atlas.info().wrap_x;
-    scene.atlas_wrap_y = atlas.info().wrap_y;
-    scene.premultiplied_alpha = atlas.info().premultiplied_alpha;
-    scene.skeleton_name = data->info().name;
-    scene.skeleton_count = 1U;
+    assign_scene_metadata(&scene, skeleton, atlas);
     scene.bone_palette = bone_world_transforms;
     scene.clip_attachments.reserve(draw_order.size());
     scene.draw_commands.reserve(draw_order.size());
@@ -2217,6 +2583,7 @@ PreparedSceneResult prepare_setup_pose_scene(
             command.attachment_name = clip_pose->attachment_name;
             command.slot_index = slot_index;
             command.draw_order_index = draw_index;
+            command.bone_index = slot.bone_index;
             command.end_slot_index = clip_pose->end_slot_index;
             command.end_slot_name = clip_pose->end_slot_name;
             command.polygon.reserve(clip_pose->polygon.size());
@@ -2340,6 +2707,120 @@ PreparedSceneResult prepare_setup_pose_scene(
     return result;
 }
 
+PreparedSceneCacheResult prepare_setup_pose_scene_cached(
+    PreparedSceneCache* cache,
+    const runtime::Skeleton& skeleton,
+    const runtime::AtlasData& atlas) {
+    PreparedSceneCacheResult result;
+    if (cache == nullptr) {
+        result.error_message = "Prepared scene cache must not be null.";
+        return result;
+    }
+
+    const std::size_t slot_count = skeleton.data()->slots().size();
+    cache->slot_dirty_flags_.assign(slot_count, false);
+    cache->draw_order_dirty_ = false;
+    cache->skin_swap_dirty_ = false;
+    cache->last_update_ = {};
+
+    const bool force_full_rebuild =
+        !cache->has_scene_ ||
+        cache->skeleton_data_ != skeleton.data().get() ||
+        cache->atlas_data_ != &atlas ||
+        cache->cached_visible_ != skeleton.visible() ||
+        cache->slot_snapshots_.size() != slot_count ||
+        cache->slot_records_.size() != slot_count;
+
+    cache->skeleton_data_ = skeleton.data().get();
+    cache->atlas_data_ = &atlas;
+    cache->cached_visible_ = skeleton.visible();
+
+    if (!skeleton.visible()) {
+        if (force_full_rebuild || cache->scene_.skeleton_count != 1U) {
+            PreparedScene scene;
+            assign_scene_metadata(&scene, skeleton, atlas);
+            cache->scene_ = std::move(scene);
+            cache->has_scene_ = true;
+            cache->has_batch_summary_ = false;
+            cache->draw_order_snapshot_.clear();
+            cache->slot_snapshots_.assign(slot_count, {});
+            cache->slot_records_.assign(slot_count, {});
+            cache->last_update_.rebuilt_slot_count = slot_count;
+        } else {
+            cache->last_update_.cache_hit = true;
+            cache->last_update_.bone_palette_only = true;
+        }
+
+        result.scene = &cache->scene_;
+        result.update_info = &cache->last_update_;
+        return result;
+    }
+
+    if (force_full_rebuild) {
+        cache->draw_order_snapshot_.assign(
+            skeleton.draw_order().begin(),
+            skeleton.draw_order().end());
+    } else if (cache->draw_order_snapshot_ != skeleton.draw_order()) {
+        cache->draw_order_dirty_ = true;
+    }
+
+    if (cache->slot_snapshots_.size() != slot_count) {
+        cache->slot_snapshots_.assign(slot_count, {});
+    }
+    if (cache->slot_records_.size() != slot_count) {
+        cache->slot_records_.assign(slot_count, {});
+    }
+
+    for (std::size_t slot_index = 0; slot_index < slot_count; ++slot_index) {
+        const PreparedSceneCache::SlotSnapshot snapshot =
+            build_slot_snapshot(skeleton, slot_index);
+        const bool slot_dirty =
+            force_full_rebuild || !slot_snapshot_matches(cache->slot_snapshots_[slot_index], snapshot);
+        cache->slot_dirty_flags_[slot_index] = slot_dirty;
+        if (!slot_dirty) {
+            continue;
+        }
+
+        ++cache->last_update_.dirty_slot_count;
+        if (cache->slot_snapshots_[slot_index].attachment_skin_index != snapshot.attachment_skin_index) {
+            cache->skin_swap_dirty_ = true;
+        }
+
+        if (const std::optional<std::string> error = build_slot_record(
+                &cache->slot_records_[slot_index],
+                skeleton,
+                atlas,
+                slot_index)) {
+            result.error_message = *error;
+            return result;
+        }
+        cache->slot_snapshots_[slot_index] = snapshot;
+        ++cache->last_update_.rebuilt_slot_count;
+    }
+
+    if (!force_full_rebuild &&
+        !cache->draw_order_dirty_ &&
+        cache->last_update_.dirty_slot_count == 0U) {
+        cache->scene_.bone_palette = skeleton.bone_world_transforms();
+        cache->last_update_.cache_hit = true;
+        cache->last_update_.bone_palette_only = true;
+        result.scene = &cache->scene_;
+        result.update_info = &cache->last_update_;
+        return result;
+    }
+
+    cache->draw_order_snapshot_.assign(
+        skeleton.draw_order().begin(),
+        skeleton.draw_order().end());
+    cache->last_update_.draw_order_dirty = cache->draw_order_dirty_;
+    cache->last_update_.skin_swap_dirty = cache->skin_swap_dirty_;
+    rebuild_cached_scene(cache, skeleton, atlas);
+
+    result.scene = &cache->scene_;
+    result.update_info = &cache->last_update_;
+    return result;
+}
+
 GpuSkinningEvaluationResult evaluate_gpu_skinned_vertices(
     const DynamicMeshDrawCommand& attachment,
     const std::vector<runtime::BoneWorldTransform>& bone_palette) {
@@ -2356,6 +2837,20 @@ PreparedSceneBatchSummary summarize_prepared_scene_batches(const PreparedScene& 
     }
 
     return summarize_render_command_list(scene, *command_list_result.command_list);
+}
+
+const PreparedSceneBatchSummary* summarize_prepared_scene_batches_cached(
+    PreparedSceneCache* cache) {
+    if (cache == nullptr || !cache->has_scene_) {
+        return nullptr;
+    }
+
+    if (!cache->has_batch_summary_) {
+        cache->batch_summary_ = summarize_prepared_scene_batches(cache->scene_);
+        cache->has_batch_summary_ = true;
+    }
+
+    return &cache->batch_summary_;
 }
 
 PreparedSceneBatchSummary summarize_render_command_list(

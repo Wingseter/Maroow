@@ -17,6 +17,48 @@
 #endif
 
 namespace marrow::runtime::detail {
+BoneWorldTransform load_world_transform(
+    std::size_t bone_index,
+    const BoneWorldTransformBuffers& world) {
+    BoneWorldTransform transform;
+    transform.a = (*world.a)[bone_index];
+    transform.b = (*world.b)[bone_index];
+    transform.c = (*world.c)[bone_index];
+    transform.d = (*world.d)[bone_index];
+    transform.world_x = (*world.world_x)[bone_index];
+    transform.world_y = (*world.world_y)[bone_index];
+    return transform;
+}
+
+void store_world_transform(
+    std::size_t bone_index,
+    const BoneWorldTransform& transform,
+    const BoneWorldTransformBuffers& world) {
+    (*world.a)[bone_index] = static_cast<float>(transform.a);
+    (*world.b)[bone_index] = static_cast<float>(transform.b);
+    (*world.c)[bone_index] = static_cast<float>(transform.c);
+    (*world.d)[bone_index] = static_cast<float>(transform.d);
+    (*world.world_x)[bone_index] = static_cast<float>(transform.world_x);
+    (*world.world_y)[bone_index] = static_cast<float>(transform.world_y);
+}
+
+void store_world_components(
+    std::size_t bone_index,
+    float a,
+    float b,
+    float c,
+    float d,
+    float world_x,
+    float world_y,
+    const BoneWorldTransformBuffers& world) {
+    (*world.a)[bone_index] = a;
+    (*world.b)[bone_index] = b;
+    (*world.c)[bone_index] = c;
+    (*world.d)[bone_index] = d;
+    (*world.world_x)[bone_index] = world_x;
+    (*world.world_y)[bone_index] = world_y;
+}
+
 namespace {
 
 template <typename T>
@@ -38,59 +80,15 @@ void remap_optional_index(
     *value = old_to_new[value->value()];
 }
 
-BoneWorldTransform load_world_transform(
-    std::size_t bone_index,
-    const BoneWorldTransformBuffers& world) {
-    BoneWorldTransform transform;
-    transform.a = static_cast<double>((*world.a)[bone_index]);
-    transform.b = static_cast<double>((*world.b)[bone_index]);
-    transform.c = static_cast<double>((*world.c)[bone_index]);
-    transform.d = static_cast<double>((*world.d)[bone_index]);
-    transform.world_x = static_cast<double>((*world.world_x)[bone_index]);
-    transform.world_y = static_cast<double>((*world.world_y)[bone_index]);
-    return transform;
-}
-
-void store_world_transform(
-    std::size_t bone_index,
-    const BoneWorldTransform& transform,
-    const BoneWorldTransformBuffers& world) {
-    (*world.a)[bone_index] = static_cast<float>(transform.a);
-    (*world.b)[bone_index] = static_cast<float>(transform.b);
-    (*world.c)[bone_index] = static_cast<float>(transform.c);
-    (*world.d)[bone_index] = static_cast<float>(transform.d);
-    (*world.world_x)[bone_index] = static_cast<float>(transform.world_x);
-    (*world.world_y)[bone_index] = static_cast<float>(transform.world_y);
-    if (world.aos != nullptr) {
-        (*world.aos)[bone_index] = transform;
-    }
-}
-
-void store_world_components(
-    std::size_t bone_index,
-    float a,
-    float b,
-    float c,
-    float d,
-    float world_x,
-    float world_y,
-    const BoneWorldTransformBuffers& world) {
-    (*world.a)[bone_index] = a;
-    (*world.b)[bone_index] = b;
-    (*world.c)[bone_index] = c;
-    (*world.d)[bone_index] = d;
-    (*world.world_x)[bone_index] = world_x;
-    (*world.world_y)[bone_index] = world_y;
-    if (world.aos != nullptr) {
-        BoneWorldTransform transform;
-        transform.a = a;
-        transform.b = b;
-        transform.c = c;
-        transform.d = d;
-        transform.world_x = world_x;
-        transform.world_y = world_y;
-        (*world.aos)[bone_index] = transform;
-    }
+void sincosf_compat(float angle, float* sine_out, float* cosine_out) {
+#if defined(__APPLE__)
+    ::__sincosf(angle, sine_out, cosine_out);
+#elif defined(__linux__) || defined(__GLIBC__)
+    ::sincosf(angle, sine_out, cosine_out);
+#else
+    *sine_out = std::sinf(angle);
+    *cosine_out = std::cosf(angle);
+#endif
 }
 
 void propagate_scalar_bone(
@@ -104,22 +102,15 @@ void propagate_scalar_bone(
     const BonePose& pose = poses[bone_index];
     const std::optional<std::size_t> parent_index = bones[bone_index].parent_index;
     if (!parent_index.has_value()) {
-        if (world.aos != nullptr) {
-            store_world_transform(
-                bone_index,
-                root_world_transform(pose.local_pose, skeleton_scale_x, skeleton_scale_y),
-                world);
-        } else {
-            store_world_components(
-                bone_index,
-                (*local.a)[bone_index] * static_cast<float>(skeleton_scale_x),
-                (*local.b)[bone_index] * static_cast<float>(skeleton_scale_x),
-                (*local.c)[bone_index] * static_cast<float>(skeleton_scale_y),
-                (*local.d)[bone_index] * static_cast<float>(skeleton_scale_y),
-                (*local.x)[bone_index] * static_cast<float>(skeleton_scale_x),
-                (*local.y)[bone_index] * static_cast<float>(skeleton_scale_y),
-                world);
-        }
+        store_world_components(
+            bone_index,
+            (*local.a)[bone_index] * static_cast<float>(skeleton_scale_x),
+            (*local.b)[bone_index] * static_cast<float>(skeleton_scale_x),
+            (*local.c)[bone_index] * static_cast<float>(skeleton_scale_y),
+            (*local.d)[bone_index] * static_cast<float>(skeleton_scale_y),
+            (*local.x)[bone_index] * static_cast<float>(skeleton_scale_x),
+            (*local.y)[bone_index] * static_cast<float>(skeleton_scale_y),
+            world);
         return;
     }
 
@@ -141,15 +132,7 @@ void propagate_scalar_bone(
         const float wb = pa * lb + pb * ld;
         const float wc = pc * la + pd * lc;
         const float wd = pc * lb + pd * ld;
-        if (world.aos != nullptr) {
-            const BoneWorldTransform parent_world = (*world.aos)[parent];
-            store_world_transform(
-                bone_index,
-                compose_world_transform(parent_world, pose, skeleton_scale_x, skeleton_scale_y),
-                world);
-        } else {
-            store_world_components(bone_index, wa, wb, wc, wd, wx, wy, world);
-        }
+        store_world_components(bone_index, wa, wb, wc, wd, wx, wy, world);
         return;
     }
 
@@ -163,28 +146,19 @@ void propagate_scalar_bone(
         const float ly = (*local.y)[bone_index];
         const float wx = pa * lx + pb * ly + (*world.world_x)[parent];
         const float wy = pc * lx + pd * ly + (*world.world_y)[parent];
-        if (world.aos != nullptr) {
-            const BoneWorldTransform parent_world = (*world.aos)[parent];
-            store_world_transform(
-                bone_index,
-                compose_world_transform(parent_world, pose, skeleton_scale_x, skeleton_scale_y),
-                world);
-        } else {
-            store_world_components(
-                bone_index,
-                (*local.a)[bone_index] * static_cast<float>(skeleton_scale_x),
-                (*local.b)[bone_index] * static_cast<float>(skeleton_scale_x),
-                (*local.c)[bone_index] * static_cast<float>(skeleton_scale_y),
-                (*local.d)[bone_index] * static_cast<float>(skeleton_scale_y),
-                wx,
-                wy,
-                world);
-        }
+        store_world_components(
+            bone_index,
+            (*local.a)[bone_index] * static_cast<float>(skeleton_scale_x),
+            (*local.b)[bone_index] * static_cast<float>(skeleton_scale_x),
+            (*local.c)[bone_index] * static_cast<float>(skeleton_scale_y),
+            (*local.d)[bone_index] * static_cast<float>(skeleton_scale_y),
+            wx,
+            wy,
+            world);
         return;
     }
 
-    const BoneWorldTransform parent_world =
-        world.aos != nullptr ? (*world.aos)[*parent_index] : load_world_transform(*parent_index, world);
+    const BoneWorldTransform parent_world = load_world_transform(*parent_index, world);
     store_world_transform(
         bone_index,
         compose_world_transform(parent_world, pose, skeleton_scale_x, skeleton_scale_y),
@@ -202,7 +176,10 @@ bool can_batch(
 
     for (std::size_t lane = 0; lane < 4U; ++lane) {
         const std::size_t bone_index = start_index + lane;
-        if (!bones[bone_index].parent_index.has_value() || poses[bone_index].inherit != inherit) {
+        const std::optional<std::size_t> parent_index = bones[bone_index].parent_index;
+        if (!parent_index.has_value() ||
+            poses[bone_index].inherit != inherit ||
+            *parent_index >= start_index) {
             return false;
         }
     }
@@ -315,9 +292,6 @@ Simd4f gather_parent_lane(
 void propagate_simd_normal_batch(
     std::size_t start_index,
     const std::vector<BoneData>& bones,
-    const std::vector<BonePose>& poses,
-    double skeleton_scale_x,
-    double skeleton_scale_y,
     const BoneLocalTransformBuffers& local,
     const BoneWorldTransformBuffers& world) {
     const std::array<std::size_t, 4U> parents = {
@@ -353,25 +327,11 @@ void propagate_simd_normal_batch(
     simd_store(world.b->data() + start_index, wb);
     simd_store(world.c->data() + start_index, wc);
     simd_store(world.d->data() + start_index, wd);
-
-    if (world.aos == nullptr) {
-        return;
-    }
-
-    for (std::size_t lane = 0; lane < 4U; ++lane) {
-        const std::size_t bone_index = start_index + lane;
-        const BoneWorldTransform parent_world = (*world.aos)[parents[lane]];
-        store_world_transform(
-            bone_index,
-            compose_world_transform(parent_world, poses[bone_index], skeleton_scale_x, skeleton_scale_y),
-            world);
-    }
 }
 
 void propagate_simd_translation_batch(
     std::size_t start_index,
     const std::vector<BoneData>& bones,
-    const std::vector<BonePose>& poses,
     double skeleton_scale_x,
     double skeleton_scale_y,
     const BoneLocalTransformBuffers& local,
@@ -411,19 +371,6 @@ void propagate_simd_translation_batch(
     simd_store(world.b->data() + start_index, wb);
     simd_store(world.c->data() + start_index, wc);
     simd_store(world.d->data() + start_index, wd);
-
-    if (world.aos == nullptr) {
-        return;
-    }
-
-    for (std::size_t lane = 0; lane < 4U; ++lane) {
-        const std::size_t bone_index = start_index + lane;
-        const BoneWorldTransform parent_world = (*world.aos)[parents[lane]];
-        store_world_transform(
-            bone_index,
-            compose_world_transform(parent_world, poses[bone_index], skeleton_scale_x, skeleton_scale_y),
-            world);
-    }
 }
 #endif
 
@@ -445,9 +392,6 @@ void BoneWorldTransformBuffers::resize(std::size_t count) const {
     d->resize(count);
     world_x->resize(count);
     world_y->resize(count);
-    if (aos != nullptr) {
-        aos->resize(count);
-    }
 }
 
 void reorder_topologically(
@@ -584,21 +528,92 @@ void reorder_topologically(
     }
 }
 
+void prepare_local_transform_buffer(
+    std::size_t bone_index,
+    const BoneTransform& transform,
+    const BoneLocalTransformBuffers& buffers) {
+    const float x = static_cast<float>(transform.x);
+    const float y = static_cast<float>(transform.y);
+    const float rotation_x = static_cast<float>(
+        degrees_to_radians(transform.rotation + transform.shear_x));
+    const float rotation_y = static_cast<float>(
+        degrees_to_radians(transform.rotation + 90.0 + transform.shear_y));
+    float sin_rotation_x = 0.0f;
+    float cos_rotation_x = 1.0f;
+    float sin_rotation_y = 0.0f;
+    float cos_rotation_y = 1.0f;
+    sincosf_compat(rotation_x, &sin_rotation_x, &cos_rotation_x);
+    sincosf_compat(rotation_y, &sin_rotation_y, &cos_rotation_y);
+
+    (*buffers.x)[bone_index] = x;
+    (*buffers.y)[bone_index] = y;
+    (*buffers.a)[bone_index] = cos_rotation_x * static_cast<float>(transform.scale_x);
+    (*buffers.b)[bone_index] = cos_rotation_y * static_cast<float>(transform.scale_y);
+    (*buffers.c)[bone_index] = sin_rotation_x * static_cast<float>(transform.scale_x);
+    (*buffers.d)[bone_index] = sin_rotation_y * static_cast<float>(transform.scale_y);
+}
+
 void prepare_local_transform_buffers(
     const std::vector<BonePose>& poses,
     const BoneLocalTransformBuffers& buffers) {
     buffers.resize(poses.size());
     for (std::size_t bone_index = 0; bone_index < poses.size(); ++bone_index) {
-        const BoneTransform& transform = poses[bone_index].local_pose;
-        const double rotation_x = degrees_to_radians(transform.rotation + transform.shear_x);
-        const double rotation_y = degrees_to_radians(transform.rotation + 90.0 + transform.shear_y);
-        (*buffers.x)[bone_index] = static_cast<float>(transform.x);
-        (*buffers.y)[bone_index] = static_cast<float>(transform.y);
-        (*buffers.a)[bone_index] = static_cast<float>(std::cos(rotation_x) * transform.scale_x);
-        (*buffers.b)[bone_index] = static_cast<float>(std::cos(rotation_y) * transform.scale_y);
-        (*buffers.c)[bone_index] = static_cast<float>(std::sin(rotation_x) * transform.scale_x);
-        (*buffers.d)[bone_index] = static_cast<float>(std::sin(rotation_y) * transform.scale_y);
+        prepare_local_transform_buffer(bone_index, poses[bone_index].local_pose, buffers);
     }
+}
+
+BoneWorldTransform compose_cached_world_transform(
+    const BoneWorldTransform* parent,
+    const BonePose& pose,
+    const BoneLocalTransformBuffers& local,
+    std::size_t bone_index,
+    double skeleton_scale_x,
+    double skeleton_scale_y) {
+    const double local_x = static_cast<double>((*local.x)[bone_index]);
+    const double local_y = static_cast<double>((*local.y)[bone_index]);
+    const double local_a = static_cast<double>((*local.a)[bone_index]);
+    const double local_b = static_cast<double>((*local.b)[bone_index]);
+    const double local_c = static_cast<double>((*local.c)[bone_index]);
+    const double local_d = static_cast<double>((*local.d)[bone_index]);
+
+    if (parent == nullptr) {
+        BoneWorldTransform world_transform;
+        world_transform.a = local_a * skeleton_scale_x;
+        world_transform.b = local_b * skeleton_scale_x;
+        world_transform.c = local_c * skeleton_scale_y;
+        world_transform.d = local_d * skeleton_scale_y;
+        world_transform.world_x = local_x * skeleton_scale_x;
+        world_transform.world_y = local_y * skeleton_scale_y;
+        return world_transform;
+    }
+
+    if (pose.inherit == BoneInherit::Normal) {
+        BoneWorldTransform world_transform;
+        world_transform.world_x =
+            parent->a * local_x + parent->b * local_y + parent->world_x;
+        world_transform.world_y =
+            parent->c * local_x + parent->d * local_y + parent->world_y;
+        world_transform.a = parent->a * local_a + parent->b * local_c;
+        world_transform.b = parent->a * local_b + parent->b * local_d;
+        world_transform.c = parent->c * local_a + parent->d * local_c;
+        world_transform.d = parent->c * local_b + parent->d * local_d;
+        return world_transform;
+    }
+
+    if (pose.inherit == BoneInherit::OnlyTranslation) {
+        BoneWorldTransform world_transform;
+        world_transform.world_x =
+            parent->a * local_x + parent->b * local_y + parent->world_x;
+        world_transform.world_y =
+            parent->c * local_x + parent->d * local_y + parent->world_y;
+        world_transform.a = local_a * skeleton_scale_x;
+        world_transform.b = local_b * skeleton_scale_x;
+        world_transform.c = local_c * skeleton_scale_y;
+        world_transform.d = local_d * skeleton_scale_y;
+        return world_transform;
+    }
+
+    return compose_world_transform(*parent, pose, skeleton_scale_x, skeleton_scale_y);
 }
 
 void propagate_world_transforms_scalar(
@@ -636,9 +651,6 @@ void propagate_world_transforms_optimized(
             propagate_simd_normal_batch(
                 bone_index,
                 bones,
-                poses,
-                skeleton_scale_x,
-                skeleton_scale_y,
                 local,
                 world);
             bone_index += 4U;
@@ -648,7 +660,6 @@ void propagate_world_transforms_optimized(
             propagate_simd_translation_batch(
                 bone_index,
                 bones,
-                poses,
                 skeleton_scale_x,
                 skeleton_scale_y,
                 local,
@@ -676,15 +687,6 @@ void propagate_world_transforms_optimized(
         local,
         world);
 #endif
-}
-
-void sync_world_transform_buffers_from_aos(
-    const std::vector<BoneWorldTransform>& source,
-    const BoneWorldTransformBuffers& destination) {
-    destination.resize(source.size());
-    for (std::size_t bone_index = 0; bone_index < source.size(); ++bone_index) {
-        store_world_transform(bone_index, source[bone_index], destination);
-    }
 }
 
 BoneTransformPropagationPath active_bone_transform_propagation_path() {

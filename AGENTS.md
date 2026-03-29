@@ -39,7 +39,10 @@
 - Runtime math unit tests: `./build/marrow_unit_tests`
 - Stress harness benchmark (100 synthetic medium skeletons by default): `./build-bench/marrow_benchmark`
 - Stress harness benchmark with custom skeleton count and bone complexity: `./build-bench/marrow_benchmark --skeletons 150 --bones 96`
+- Release 60fps target validation for 200 medium skeletons: `./build-bench/marrow_benchmark --skeletons 200`
+- Current validated 200-skeleton release metrics on this host: `frame_ms=6.05`, `score=100`, `constraint_us=14.14`, `render_us=0.11`, `max_skeletons_60fps=550.69`
 - SoA/SIMD bone propagation benchmark: `./build-bench/marrow_benchmark --simd-propagation --bones 1024`
+- Current validated SIMD propagation metrics on this host: `path=neon`, `world_bytes_per_bone=24`, `speedup=1.94x`
 - Animation-layer overhead benchmark (walk + breathing additive + aim override): `./build-bench/marrow_benchmark --animation-layers --skeletons 400 --bones 128 --frames 360`
 - Runtime visibility culling + update-throttling stress benchmark: `./build-bench/marrow_benchmark --runtime-stress assets/fixtures/player_idle.mskl`
 - Bootstrap smoke test: `./build/marrow_bootstrap`
