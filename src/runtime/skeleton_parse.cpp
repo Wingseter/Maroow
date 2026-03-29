@@ -721,15 +721,21 @@ AttachmentVertex add_vertices(
 AttachmentVertex subtract_vertices(
     const AttachmentVertex& lhs,
     const AttachmentVertex& rhs) {
-    return {lhs.x - rhs.x, lhs.y - rhs.y};
+    AttachmentVertex result;
+    result.x = lhs.x - rhs.x;
+    result.y = lhs.y - rhs.y;
+    return result;
 }
 
-AttachmentVertex scale_vertex(const AttachmentVertex& vertex, double scalar) {
-    return {vertex.x * scalar, vertex.y * scalar};
+AttachmentVertex scale_vertex(const AttachmentVertex& vertex, float scalar) {
+    AttachmentVertex result;
+    result.x = vertex.x * scalar;
+    result.y = vertex.y * scalar;
+    return result;
 }
 
-double vertex_length(const AttachmentVertex& vertex) {
-    return std::hypot(vertex.x, vertex.y);
+float vertex_length(const AttachmentVertex& vertex) {
+    return fast_sqrtf(vertex.x * vertex.x + vertex.y * vertex.y);
 }
 
 double world_axis_length(const BoneWorldTransform& transform) {
@@ -741,17 +747,20 @@ AttachmentVertex cubic_bezier_point(
     const AttachmentVertex& p1,
     const AttachmentVertex& p2,
     const AttachmentVertex& p3,
-    double t) {
-    const double inverse_t = 1.0 - t;
-    const double inverse_t2 = inverse_t * inverse_t;
-    const double inverse_t3 = inverse_t2 * inverse_t;
-    const double t2 = t * t;
-    const double t3 = t2 * t;
-    return {
-        inverse_t3 * p0.x + 3.0 * inverse_t2 * t * p1.x +
-            3.0 * inverse_t * t2 * p2.x + t3 * p3.x,
-        inverse_t3 * p0.y + 3.0 * inverse_t2 * t * p1.y +
-            3.0 * inverse_t * t2 * p2.y + t3 * p3.y};
+    float t) {
+    const float inverse_t = 1.0f - t;
+    const float inverse_t2 = inverse_t * inverse_t;
+    const float inverse_t3 = inverse_t2 * inverse_t;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    AttachmentVertex result;
+    result.x =
+        inverse_t3 * p0.x + 3.0f * inverse_t2 * t * p1.x +
+        3.0f * inverse_t * t2 * p2.x + t3 * p3.x;
+    result.y =
+        inverse_t3 * p0.y + 3.0f * inverse_t2 * t * p1.y +
+        3.0f * inverse_t * t2 * p2.y + t3 * p3.y;
+    return result;
 }
 
 AttachmentVertex cubic_bezier_tangent(
@@ -759,15 +768,18 @@ AttachmentVertex cubic_bezier_tangent(
     const AttachmentVertex& p1,
     const AttachmentVertex& p2,
     const AttachmentVertex& p3,
-    double t) {
-    const double inverse_t = 1.0 - t;
-    return {
-        3.0 * inverse_t * inverse_t * (p1.x - p0.x) +
-            6.0 * inverse_t * t * (p2.x - p1.x) +
-            3.0 * t * t * (p3.x - p2.x),
-        3.0 * inverse_t * inverse_t * (p1.y - p0.y) +
-            6.0 * inverse_t * t * (p2.y - p1.y) +
-            3.0 * t * t * (p3.y - p2.y)};
+    float t) {
+    const float inverse_t = 1.0f - t;
+    AttachmentVertex result;
+    result.x =
+        3.0f * inverse_t * inverse_t * (p1.x - p0.x) +
+        6.0f * inverse_t * t * (p2.x - p1.x) +
+        3.0f * t * t * (p3.x - p2.x);
+    result.y =
+        3.0f * inverse_t * inverse_t * (p1.y - p0.y) +
+        6.0f * inverse_t * t * (p2.y - p1.y) +
+        3.0f * t * t * (p3.y - p2.y);
+    return result;
 }
 
 void build_path_distance_samples(
@@ -787,12 +799,14 @@ void build_path_distance_samples(
 
     AttachmentVertex previous_point = control_points.front();
     AttachmentVertex previous_tangent = subtract_vertices(control_points[1], control_points[0]);
-    if (vertex_length(previous_tangent) <= 1e-8) {
-        previous_tangent = {1.0, 0.0};
+    if (vertex_length(previous_tangent) <= 1e-8f) {
+        previous_tangent.x = 1.0f;
+        previous_tangent.y = 0.0f;
     }
-    samples_out->push_back(PathDistanceSample{0.0, previous_point, previous_tangent});
+    samples_out->push_back(PathDistanceSample{0.0f, previous_point, previous_tangent});
 
-    double accumulated_distance = 0.0;
+    float accumulated_distance = 0.0f;
+    constexpr float kSubdivisionScale = 1.0f / static_cast<float>(kSubdivisionsPerSegment);
     for (std::size_t point_index = 0; point_index + 3 < control_points.size(); point_index += 3) {
         const AttachmentVertex& p0 = control_points[point_index];
         const AttachmentVertex& p1 = control_points[point_index + 1];
@@ -800,11 +814,10 @@ void build_path_distance_samples(
         const AttachmentVertex& p3 = control_points[point_index + 3];
 
         for (std::size_t step = 1; step <= kSubdivisionsPerSegment; ++step) {
-            const double t =
-                static_cast<double>(step) / static_cast<double>(kSubdivisionsPerSegment);
+            const float t = static_cast<float>(step) * kSubdivisionScale;
             const AttachmentVertex point = cubic_bezier_point(p0, p1, p2, p3, t);
             AttachmentVertex tangent = cubic_bezier_tangent(p0, p1, p2, p3, t);
-            if (vertex_length(tangent) <= 1e-8) {
+            if (vertex_length(tangent) <= 1e-8f) {
                 tangent = subtract_vertices(point, previous_point);
             }
 
@@ -824,7 +837,7 @@ std::vector<PathDistanceSample> build_path_distance_samples(
 
 PathDistanceSample sample_path_distance(
     const std::vector<PathDistanceSample>& samples,
-    double distance) {
+    float distance) {
     if (samples.empty()) {
         return {};
     }
@@ -839,15 +852,15 @@ PathDistanceSample sample_path_distance(
         samples.begin(),
         samples.end(),
         distance,
-        [](double probe_distance, const PathDistanceSample& sample) {
+        [](float probe_distance, const PathDistanceSample& sample) {
             return probe_distance < sample.distance;
         });
     const std::size_t upper_index =
         static_cast<std::size_t>(std::distance(samples.begin(), upper));
     const PathDistanceSample& previous = samples[upper_index - 1];
     const PathDistanceSample& current = samples[upper_index];
-    const double range = current.distance - previous.distance;
-    const double alpha = range > 0.0 ? (distance - previous.distance) / range : 0.0;
+    const float range = current.distance - previous.distance;
+    const float alpha = range > 0.0f ? (distance - previous.distance) / range : 0.0f;
     return {
         distance,
         add_vertices(

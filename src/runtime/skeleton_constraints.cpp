@@ -85,6 +85,19 @@ void bump_revision(std::size_t* revision) {
     }
 }
 
+unsigned least_significant_bit_index(std::uint64_t word) {
+#if defined(__clang__) || defined(__GNUC__)
+    return static_cast<unsigned>(__builtin_ctzll(word));
+#else
+    unsigned index = 0U;
+    while ((word & std::uint64_t{1}) == 0U) {
+        word >>= 1U;
+        ++index;
+    }
+    return index;
+#endif
+}
+
 } // namespace
 
 namespace detail {
@@ -270,6 +283,14 @@ void Skeleton::update_world_transforms(
         &solved_applied_parent_world_revisions_,
         bone_count,
         &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        &constraint_dirty_bone_words_,
+        data_->bone_subtree_word_count_,
+        &constraint_allocation_count_);
+    resize_vector_without_reallocation(
+        &constraint_dirty_subtree_words_,
+        data_->bone_subtree_word_count_,
+        &constraint_allocation_count_);
     resize_vector_without_reallocation(local_buffers.x, bone_count, &constraint_allocation_count_);
     resize_vector_without_reallocation(local_buffers.y, bone_count, &constraint_allocation_count_);
     resize_vector_without_reallocation(local_buffers.a, bone_count, &constraint_allocation_count_);
@@ -306,6 +327,8 @@ void Skeleton::update_world_transforms(
             solved_poses_[bone_index].local_pose,
             local_buffers);
     };
+    std::fill(constraint_dirty_bone_words_.begin(), constraint_dirty_bone_words_.end(), 0U);
+    std::fill(constraint_dirty_subtree_words_.begin(), constraint_dirty_subtree_words_.end(), 0U);
     const bool refresh_all_local_transforms =
         solved_pose_size_changed || local_buffer_size_changed;
     bool raw_input_pose_changed =
@@ -522,61 +545,94 @@ void Skeleton::update_world_transforms(
         refresh_cached_local_transform(bone_index);
         ++solved_local_pose_revisions_[bone_index];
         constraint_pose_dirty = true;
-    };
-    const auto recompute_world_from_parent = [&](std::size_t bone_index) {
-        const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
-        std::optional<BoneWorldTransform> parent_world;
-        if (parent_index.has_value()) {
-            parent_world = load_world_transform(*parent_index);
+        const std::size_t word_index = bone_index / 64U;
+        if (word_index < constraint_dirty_bone_words_.size()) {
+            constraint_dirty_bone_words_[word_index] |= std::uint64_t{1} << (bone_index % 64U);
         }
-        const BoneWorldTransform world_transform = detail::compose_cached_world_transform(
-            parent_world.has_value() ? &(*parent_world) : nullptr,
-            solved_poses_[bone_index],
-            local_buffers,
-            bone_index,
-            scale_x_,
-            scale_y_);
-        store_world_transform(bone_index, world_transform);
     };
-    const auto ensure_all_world_transforms_current = [&]() {
+    const auto ensure_dirty_world_transforms_current = [&]() {
         if (!constraint_pose_dirty) {
             return;
         }
 
-        for (std::size_t bone_index = 0; bone_index < data_->bones().size(); ++bone_index) {
-            const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
-            const std::size_t parent_world_revision =
-                parent_index.has_value() ? solved_world_revisions_[*parent_index] : 0U;
-            if (solved_applied_local_pose_revisions_[bone_index] ==
-                    solved_local_pose_revisions_[bone_index] &&
-                solved_applied_parent_world_revisions_[bone_index] == parent_world_revision) {
-                continue;
+        const std::size_t subtree_word_count = data_->bone_subtree_word_count_;
+        const auto& subtree_word_masks = data_->bone_subtree_word_masks_;
+        for (std::size_t word_index = 0;
+             word_index < constraint_dirty_bone_words_.size();
+             ++word_index) {
+            std::uint64_t dirty_word = constraint_dirty_bone_words_[word_index];
+            while (dirty_word != 0U) {
+                const unsigned bit_index = least_significant_bit_index(dirty_word);
+                dirty_word &= dirty_word - 1U;
+                const std::size_t bone_index = word_index * 64U + bit_index;
+                if (bone_index >= bone_count) {
+                    continue;
+                }
+
+                const std::uint64_t* const subtree_words =
+                    subtree_word_masks.data() + bone_index * subtree_word_count;
+                for (std::size_t subtree_word_index = 0;
+                     subtree_word_index < subtree_word_count;
+                     ++subtree_word_index) {
+                    constraint_dirty_subtree_words_[subtree_word_index] |=
+                        subtree_words[subtree_word_index];
+                }
             }
-
-            recompute_world_from_parent(bone_index);
-            solved_applied_local_pose_revisions_[bone_index] =
-                solved_local_pose_revisions_[bone_index];
-            solved_applied_parent_world_revisions_[bone_index] = parent_world_revision;
-            solved_world_revisions_[bone_index] = next_world_revision++;
         }
-    };
-    struct FloatAttachmentVertex {
-        float x{0.0f};
-        float y{0.0f};
-    };
-    struct FloatPathDistanceSample {
-        float distance{0.0f};
-        FloatAttachmentVertex point{};
-        FloatAttachmentVertex tangent{};
-    };
 
+        for (std::size_t word_index = 0;
+             word_index < constraint_dirty_subtree_words_.size();
+             ++word_index) {
+            std::uint64_t dirty_word = constraint_dirty_subtree_words_[word_index];
+            while (dirty_word != 0U) {
+                const unsigned bit_index = least_significant_bit_index(dirty_word);
+                dirty_word &= dirty_word - 1U;
+                const std::size_t bone_index = word_index * 64U + bit_index;
+                if (bone_index >= solved_poses_.size() || bone_index >= bone_count) {
+                    continue;
+                }
+
+                const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
+                std::size_t parent_world_revision = 0U;
+                std::optional<BoneWorldTransform> parent_world;
+                if (parent_index.has_value()) {
+                    parent_world_revision = solved_world_revisions_[*parent_index];
+                    parent_world = load_world_transform(*parent_index);
+                }
+
+                if (solved_applied_local_pose_revisions_[bone_index] ==
+                        solved_local_pose_revisions_[bone_index] &&
+                    solved_applied_parent_world_revisions_[bone_index] == parent_world_revision) {
+                    continue;
+                }
+
+                const BoneWorldTransform world_transform = detail::compose_cached_world_transform(
+                    parent_world.has_value() ? &(*parent_world) : nullptr,
+                    solved_poses_[bone_index],
+                    local_buffers,
+                    bone_index,
+                    scale_x_,
+                    scale_y_);
+                store_world_transform(bone_index, world_transform);
+                solved_applied_local_pose_revisions_[bone_index] =
+                    solved_local_pose_revisions_[bone_index];
+                solved_applied_parent_world_revisions_[bone_index] = parent_world_revision;
+                solved_world_revisions_[bone_index] = next_world_revision++;
+            }
+        }
+
+        std::fill(constraint_dirty_bone_words_.begin(), constraint_dirty_bone_words_.end(), 0U);
+        std::fill(constraint_dirty_subtree_words_.begin(), constraint_dirty_subtree_words_.end(), 0U);
+    };
     constexpr float kEpsilonF = 1e-8f;
     constexpr float kIkEpsilonF = 1e-4f;
     constexpr float kPiF = 3.14159265358979323846f;
     constexpr float kRadiansToDegreesScaleF = 180.0f / kPiF;
+    const float skeleton_scale_x = scale_x_;
+    const float skeleton_scale_y = scale_y_;
 
-    const auto clamp_mixf = [](double value) {
-        return static_cast<float>(detail::clamp_mix(value));
+    const auto clamp_mixf = [](double value) -> float {
+        return value <= 0.0 ? 0.0f : value >= 1.0 ? 1.0f : value;
     };
     const auto radians_to_degreesf = [](float radians) {
         return radians * kRadiansToDegreesScaleF;
@@ -596,34 +652,37 @@ void Skeleton::update_world_transforms(
     const auto mix_scalarf = [](float current, float target, float mix) {
         return current + ((target - current) * std::clamp(mix, 0.0f, 1.0f));
     };
-    const auto to_float_vertex = [](const AttachmentVertex& vertex) {
-        return FloatAttachmentVertex{
-            static_cast<float>(vertex.x),
-            static_cast<float>(vertex.y),
-        };
-    };
     const auto add_verticesf =
-        [](const FloatAttachmentVertex& lhs, const FloatAttachmentVertex& rhs) {
-            return FloatAttachmentVertex{lhs.x + rhs.x, lhs.y + rhs.y};
+        [](const AttachmentVertex& lhs, const AttachmentVertex& rhs) {
+            AttachmentVertex result;
+            result.x = lhs.x + rhs.x;
+            result.y = lhs.y + rhs.y;
+            return result;
         };
     const auto subtract_verticesf =
-        [](const FloatAttachmentVertex& lhs, const FloatAttachmentVertex& rhs) {
-            return FloatAttachmentVertex{lhs.x - rhs.x, lhs.y - rhs.y};
+        [](const AttachmentVertex& lhs, const AttachmentVertex& rhs) {
+            AttachmentVertex result;
+            result.x = lhs.x - rhs.x;
+            result.y = lhs.y - rhs.y;
+            return result;
         };
-    const auto vertex_lengthf = [](const FloatAttachmentVertex& vertex) {
+    const auto vertex_lengthf = [](const AttachmentVertex& vertex) {
         return detail::fast_sqrtf(vertex.x * vertex.x + vertex.y * vertex.y);
     };
-    const auto bone_tip_local_vectorf = [&](std::size_t bone_index) -> FloatAttachmentVertex {
+    const auto bone_tip_local_vectorf = [&](std::size_t bone_index) -> AttachmentVertex {
         if (bone_index >= bone_tip_local_vectors.size()) {
             return {};
         }
-        return to_float_vertex(bone_tip_local_vectors[bone_index]);
+        return bone_tip_local_vectors[bone_index];
     };
     const auto to_parent_localf = [&](std::optional<std::size_t> parent_index,
                                       float world_x,
-                                      float world_y) -> FloatAttachmentVertex {
+                                      float world_y) -> AttachmentVertex {
         if (!parent_index.has_value()) {
-            return {world_x, world_y};
+            AttachmentVertex result;
+            result.x = world_x;
+            result.y = world_y;
+            return result;
         }
 
         ensure_world_transform(ensure_world_transform, *parent_index);
@@ -637,27 +696,17 @@ void Skeleton::update_world_transforms(
         const float inverse_determinant = 1.0f / determinant;
         const float translated_x = world_x - parent_world.world_x;
         const float translated_y = world_y - parent_world.world_y;
-        return {
+        AttachmentVertex result;
+        result.x =
             ((translated_x * parent_world.d) - (translated_y * parent_world.b)) *
-                inverse_determinant,
+            inverse_determinant;
+        result.y =
             ((translated_y * parent_world.a) - (translated_x * parent_world.c)) *
-                inverse_determinant,
-        };
+            inverse_determinant;
+        return result;
     };
-    const auto sample_path_distancef =
-        [&](const std::vector<PathDistanceSample>& samples, float distance) {
-            const PathDistanceSample sample =
-                detail::sample_path_distance(samples, static_cast<double>(distance));
-            return FloatPathDistanceSample{
-                static_cast<float>(sample.distance),
-                to_float_vertex(sample.point),
-                to_float_vertex(sample.tangent),
-            };
-        };
     const auto world_axis_lengthf = [&](const BoneWorldTransform& world) {
-        const float axis_a = static_cast<float>(world.a);
-        const float axis_c = static_cast<float>(world.c);
-        return detail::fast_sqrtf(axis_a * axis_a + axis_c * axis_c);
+        return detail::fast_sqrtf(world.a * world.a + world.c * world.c);
     };
     const auto invalidate_constraint_state = [&](ConstraintInputRevisionState* state) {
         if (state != nullptr) {
@@ -801,17 +850,15 @@ void Skeleton::update_world_transforms(
         for (std::size_t point_index = 0; point_index < control_point_count; ++point_index) {
             const AttachmentVertex& control_point =
                 attachment->path_attachment->control_points[point_index];
-            const float point_x = static_cast<float>(control_point.x);
-            const float point_y = static_cast<float>(control_point.y);
+            const float point_x = control_point.x;
+            const float point_y = control_point.y;
             path_world_control_points_[point_index] = {
-                static_cast<double>(
-                    path_bone_transform.a * point_x +
+                path_bone_transform.a * point_x +
                     path_bone_transform.b * point_y +
-                    path_bone_transform.world_x),
-                static_cast<double>(
-                    path_bone_transform.c * point_x +
+                    path_bone_transform.world_x,
+                path_bone_transform.c * point_x +
                     path_bone_transform.d * point_y +
-                    path_bone_transform.world_y),
+                    path_bone_transform.world_y,
             };
         }
 
@@ -828,11 +875,13 @@ void Skeleton::update_world_transforms(
             continue;
         }
 
-        const float total_length = static_cast<float>(path_distance_samples_.back().distance);
+        const float total_length = path_distance_samples_.back().distance;
+        const float spacing = constraint.spacing;
         const float spacing_distance =
             constraint.spacing_mode == PathConstraintSpacingMode::Percent
-            ? total_length * static_cast<float>(constraint.spacing)
-            : static_cast<float>(constraint.spacing);
+            ? total_length * spacing
+            : spacing;
+        const float position = constraint.position;
 
         for (std::size_t chain_index = 0;
              chain_index < constraint.bone_indices.size();
@@ -841,38 +890,38 @@ void Skeleton::update_world_transforms(
             if (bone_index >= solved_poses_.size() || !bone_is_active(bone_index)) {
                 continue;
             }
-
+            const float chain_offset = static_cast<float>(chain_index);
             const float sample_distance = std::clamp(
-                static_cast<float>(constraint.position) * total_length +
-                    spacing_distance * static_cast<float>(chain_index),
+                position * total_length +
+                    spacing_distance * chain_offset,
                 0.0f,
                 total_length);
-            const FloatPathDistanceSample sample =
-                sample_path_distancef(path_distance_samples_, sample_distance);
+            const PathDistanceSample sample =
+                detail::sample_path_distance(path_distance_samples_, sample_distance);
             BoneTransform& pose = solved_poses_[bone_index].local_pose;
             const std::optional<std::size_t> parent_index = data_->bones()[bone_index].parent_index;
-            float pose_x = static_cast<float>(pose.x);
-            float pose_y = static_cast<float>(pose.y);
-            float pose_rotation = static_cast<float>(pose.rotation);
-            const float pose_shear_x = static_cast<float>(pose.shear_x);
+            float pose_x = pose.x;
+            float pose_y = pose.y;
+            float pose_rotation = pose.rotation;
+            const float pose_shear_x = pose.shear_x;
 
             if (translate_mix > 0.0f) {
-                const FloatAttachmentVertex target_local =
+                const AttachmentVertex target_local =
                     to_parent_localf(parent_index, sample.point.x, sample.point.y);
                 pose_x += (target_local.x - pose_x) * translate_mix;
                 pose_y += (target_local.y - pose_y) * translate_mix;
             }
 
             if (rotate_mix > 0.0f && vertex_lengthf(sample.tangent) > kEpsilonF) {
-                const FloatAttachmentVertex tangent_end_world =
+                const AttachmentVertex tangent_end_world =
                     add_verticesf(sample.point, sample.tangent);
-                const FloatAttachmentVertex tangent_origin_local =
+                const AttachmentVertex tangent_origin_local =
                     to_parent_localf(parent_index, sample.point.x, sample.point.y);
-                const FloatAttachmentVertex tangent_end_local = to_parent_localf(
+                const AttachmentVertex tangent_end_local = to_parent_localf(
                     parent_index,
                     tangent_end_world.x,
                     tangent_end_world.y);
-                const FloatAttachmentVertex tangent_local = subtract_verticesf(
+                const AttachmentVertex tangent_local = subtract_verticesf(
                     tangent_end_local,
                     tangent_origin_local);
                 if (vertex_lengthf(tangent_local) > kEpsilonF) {
@@ -935,6 +984,13 @@ void Skeleton::update_world_transforms(
         const float translate_mix = clamp_mixf(constraint.translate_mix);
         const float scale_mix = clamp_mixf(constraint.scale_mix);
         const float shear_mix = clamp_mixf(constraint.shear_mix);
+        const float offset_rotation = constraint.offsets.rotation;
+        const float offset_x = constraint.offsets.x;
+        const float offset_y = constraint.offsets.y;
+        const float offset_scale_x = constraint.offsets.scale_x;
+        const float offset_scale_y = constraint.offsets.scale_y;
+        const float offset_shear_x = constraint.offsets.shear_x;
+        const float offset_shear_y = constraint.offsets.shear_y;
         if (rotate_mix <= 0.0f && translate_mix <= 0.0f &&
             scale_mix <= 0.0f && shear_mix <= 0.0f) {
             invalidate_constraint_state(revision_state);
@@ -974,54 +1030,58 @@ void Skeleton::update_world_transforms(
         const BoneTransform& source_pose =
             solved_poses_[constraint.source_bone_index].local_pose;
         const BoneWorldTransform source_world = load_world_transform(constraint.source_bone_index);
+        const float source_rotation = source_pose.rotation;
+        const float source_scale_x = source_pose.scale_x;
+        const float source_scale_y = source_pose.scale_y;
+        const float source_shear_x = source_pose.shear_x;
+        const float source_shear_y = source_pose.shear_y;
         for (const std::size_t bone_index : constraint.target_bone_indices) {
             if (!bone_is_active(bone_index)) {
                 continue;
             }
 
             BoneTransform& pose = solved_poses_[bone_index].local_pose;
-            float pose_rotation = static_cast<float>(pose.rotation);
-            float pose_x = static_cast<float>(pose.x);
-            float pose_y = static_cast<float>(pose.y);
-            float pose_scale_x = static_cast<float>(pose.scale_x);
-            float pose_scale_y = static_cast<float>(pose.scale_y);
-            float pose_shear_x = static_cast<float>(pose.shear_x);
-            float pose_shear_y = static_cast<float>(pose.shear_y);
+            float pose_rotation = pose.rotation;
+            float pose_x = pose.x;
+            float pose_y = pose.y;
+            float pose_scale_x = pose.scale_x;
+            float pose_scale_y = pose.scale_y;
+            float pose_shear_x = pose.shear_x;
+            float pose_shear_y = pose.shear_y;
 
             if (rotate_mix > 0.0f) {
-                const float desired_rotation =
-                    static_cast<float>(source_pose.rotation + constraint.offsets.rotation);
+                const float desired_rotation = source_rotation + offset_rotation;
                 pose_rotation = mix_rotation_degreesf(
                     pose_rotation,
                     desired_rotation,
                     rotate_mix);
             }
             if (translate_mix > 0.0f) {
-                const FloatAttachmentVertex target_local = to_parent_localf(
+                const AttachmentVertex target_local = to_parent_localf(
                     data_->bones()[bone_index].parent_index,
-                    source_world.world_x + static_cast<float>(constraint.offsets.x),
-                    source_world.world_y + static_cast<float>(constraint.offsets.y));
+                    source_world.world_x + offset_x,
+                    source_world.world_y + offset_y);
                 pose_x = mix_scalarf(pose_x, target_local.x, translate_mix);
                 pose_y = mix_scalarf(pose_y, target_local.y, translate_mix);
             }
             if (scale_mix > 0.0f) {
                 pose_scale_x = mix_scalarf(
                     pose_scale_x,
-                    static_cast<float>(source_pose.scale_x + constraint.offsets.scale_x),
+                    source_scale_x + offset_scale_x,
                     scale_mix);
                 pose_scale_y = mix_scalarf(
                     pose_scale_y,
-                    static_cast<float>(source_pose.scale_y + constraint.offsets.scale_y),
+                    source_scale_y + offset_scale_y,
                     scale_mix);
             }
             if (shear_mix > 0.0f) {
                 pose_shear_x = mix_scalarf(
                     pose_shear_x,
-                    static_cast<float>(source_pose.shear_x + constraint.offsets.shear_x),
+                    source_shear_x + offset_shear_x,
                     shear_mix);
                 pose_shear_y = mix_scalarf(
                     pose_shear_y,
-                    static_cast<float>(source_pose.shear_y + constraint.offsets.shear_y),
+                    source_shear_y + offset_shear_y,
                     shear_mix);
             }
             pose.rotation = pose_rotation;
@@ -1068,11 +1128,11 @@ void Skeleton::update_world_transforms(
         const BoneInherit inherit = solved_poses_[bone_index].inherit;
         const BoneWorldTransform bone_world = load_world_transform(bone_index);
         const BoneWorldTransform parent_world = load_world_transform(*parent_index);
-        float pose_x = static_cast<float>(pose.x);
-        float pose_y = static_cast<float>(pose.y);
-        float pose_rotation = static_cast<float>(pose.rotation);
-        const float pose_shear_x = static_cast<float>(pose.shear_x);
-        const float pose_scale_y = static_cast<float>(pose.scale_y);
+        float pose_x = pose.x;
+        float pose_y = pose.y;
+        float pose_rotation = pose.rotation;
+        const float pose_shear_x = pose.shear_x;
+        const float pose_scale_y = pose.scale_y;
 
         float pa = parent_world.a;
         float pb = parent_world.b;
@@ -1084,14 +1144,14 @@ void Skeleton::update_world_transforms(
 
         switch (inherit) {
         case BoneInherit::OnlyTranslation:
-            tx = (target_x - bone_world.world_x) * scale_sign(static_cast<float>(scale_x_));
-            ty = (target_y - bone_world.world_y) * scale_sign(static_cast<float>(scale_y_));
+            tx = (target_x - bone_world.world_x) * scale_sign(skeleton_scale_x);
+            ty = (target_y - bone_world.world_y) * scale_sign(skeleton_scale_y);
             break;
         case BoneInherit::NoRotationOrReflection: {
             const float determinant = std::abs(pa * pd - pb * pc);
             const float scale = determinant / std::max(kIkEpsilonF, pa * pa + pc * pc);
-            const float safe_scale_x = safe_nonzero(static_cast<float>(scale_x_));
-            const float safe_scale_y = safe_nonzero(static_cast<float>(scale_y_));
+            const float safe_scale_x = safe_nonzero(skeleton_scale_x);
+            const float safe_scale_y = safe_nonzero(skeleton_scale_y);
             const float sa = pa / safe_scale_x;
             const float sc = pc / safe_scale_y;
             pb = -sc * scale * safe_scale_x;
@@ -1112,12 +1172,12 @@ void Skeleton::update_world_transforms(
         }
 
         rotation_delta += radians_to_degreesf(detail::fast_atan2f(ty, tx));
-        if (pose.scale_x < 0.0) {
+        if (pose.scale_x < 0.0f) {
             rotation_delta += 180.0f;
         }
         rotation_delta = normalize_rotation_degreesf(rotation_delta);
 
-        float scale_x = static_cast<float>(pose.scale_x);
+        float scale_x = pose.scale_x;
         if (compress || stretch) {
             if (inherit == BoneInherit::NoScale ||
                 inherit == BoneInherit::NoScaleOrReflection) {
@@ -1125,7 +1185,7 @@ void Skeleton::update_world_transforms(
                 ty = target_y - bone_world.world_y;
             }
 
-            const FloatAttachmentVertex tip_local = bone_tip_local_vectorf(bone_index);
+            const AttachmentVertex tip_local = bone_tip_local_vectorf(bone_index);
             const float bone_length = vertex_lengthf(tip_local);
             const float scaled_length = bone_length * scale_x;
             if (scaled_length > kIkEpsilonF) {
@@ -1176,17 +1236,17 @@ void Skeleton::update_world_transforms(
         BoneTransform& parent_pose = solved_poses_[parent_bone_index].local_pose;
         BoneTransform& child_pose = solved_poses_[child_bone_index].local_pose;
 
-        float px = static_cast<float>(parent_pose.x);
-        float py = static_cast<float>(parent_pose.y);
-        float parent_scale_x = static_cast<float>(parent_pose.scale_x);
-        float parent_scale_y = static_cast<float>(parent_pose.scale_y);
+        float px = parent_pose.x;
+        float py = parent_pose.y;
+        float parent_scale_x = parent_pose.scale_x;
+        float parent_scale_y = parent_pose.scale_y;
         float stretched_parent_scale_x = parent_scale_x;
         float stretched_parent_scale_y = parent_scale_y;
-        float child_scale_x = static_cast<float>(child_pose.scale_x);
+        float child_scale_x = child_pose.scale_x;
         int parent_offset = 0;
         int child_offset = 0;
         int child_sign = 1;
-        const float bend_directionf = static_cast<float>(bend_direction);
+        const float bend_directionf = bend_direction;
 
         if (parent_scale_x < 0.0f) {
             parent_scale_x = -parent_scale_x;
@@ -1202,8 +1262,8 @@ void Skeleton::update_world_transforms(
             child_offset = 180;
         }
 
-        const float cx = static_cast<float>(child_pose.x);
-        float cy = static_cast<float>(child_pose.y);
+        const float cx = child_pose.x;
+        float cy = child_pose.y;
         const BoneWorldTransform parent_world = load_world_transform(parent_bone_index);
         float a = parent_world.a;
         float b = parent_world.b;
@@ -1239,7 +1299,7 @@ void Skeleton::update_world_transforms(
         const float parent_length =
             detail::fast_sqrtf(child_parent_x * child_parent_x + child_parent_y * child_parent_y);
 
-        const FloatAttachmentVertex child_tip_local = bone_tip_local_vectorf(child_bone_index);
+        const AttachmentVertex child_tip_local = bone_tip_local_vectorf(child_bone_index);
         const float child_length = vertex_lengthf(child_tip_local);
         if (parent_length < kIkEpsilonF || child_length < kIkEpsilonF) {
             if (!apply_one_bone_ik(parent_bone_index, target_x, target_y, false, stretch, alpha)) {
@@ -1329,7 +1389,7 @@ void Skeleton::update_world_transforms(
             const float curve_linear = -2.0f * scaled_child_y_squared * parent_length;
             const float curve_quadratic = scaled_child_y_squared - scaled_child_x_squared;
             const float discriminant =
-                curve_linear * curve_linear - 4.0 * curve_quadratic * curve;
+                curve_linear * curve_linear - 4.0f * curve_quadratic * curve;
             if (discriminant >= 0.0f) {
                 float root = detail::fast_sqrtf(discriminant);
                 if (curve_linear < 0.0f) {
@@ -1406,11 +1466,11 @@ void Skeleton::update_world_transforms(
             }
         }
 
-        const float offset = detail::fast_atan2f(cy, cx) * static_cast<float>(child_sign);
-        const float parent_rotation = static_cast<float>(parent_pose.rotation);
+        const float offset = detail::fast_atan2f(cy, cx) * child_sign;
+        const float parent_rotation = parent_pose.rotation;
         const float parent_delta = normalize_rotation_degreesf(
             radians_to_degreesf(parent_angle - offset) +
-            static_cast<float>(parent_offset) - parent_rotation);
+            parent_offset - parent_rotation);
         parent_pose.rotation =
             normalize_rotation_degreesf(parent_rotation + parent_delta * alpha);
         parent_pose.scale_x = stretched_parent_scale_x;
@@ -1418,12 +1478,12 @@ void Skeleton::update_world_transforms(
         parent_pose.shear_x = 0.0f;
         parent_pose.shear_y = 0.0f;
 
-        const float child_rotation = static_cast<float>(child_pose.rotation);
+        const float child_rotation = child_pose.rotation;
         const float child_delta = normalize_rotation_degreesf(
             (radians_to_degreesf(child_angle + offset) -
-             static_cast<float>(child_pose.shear_x)) *
-                static_cast<float>(child_sign) +
-            static_cast<float>(child_offset) - child_rotation);
+             child_pose.shear_x) *
+                child_sign +
+            child_offset - child_rotation);
         child_pose.rotation = normalize_rotation_degreesf(child_rotation + child_delta * alpha);
         child_pose.y = cy;
         return true;
@@ -1514,7 +1574,7 @@ void Skeleton::update_world_transforms(
                 target_world.world_y,
                 constraint.bend_positive ? 1 : -1,
                 constraint.stretch,
-                static_cast<float>(constraint.softness),
+                constraint.softness,
                 mix)) {
             mark_bone_world_dirty(constraint.bone_indices[0]);
             mark_bone_world_dirty(constraint.bone_indices[1]);
@@ -1532,7 +1592,7 @@ void Skeleton::update_world_transforms(
         solved_constraint_scale_y_ = scale_y_;
     };
 
-    ensure_all_world_transforms_current();
+    ensure_dirty_world_transforms_current();
 
     if (physics == PhysicsMode::None) {
         finalize_constraint_state();
@@ -1546,8 +1606,10 @@ void Skeleton::update_world_transforms(
         physics_constraint_states_.resize(data_->physics_constraints().size());
     }
 
-    const double physics_delta_seconds =
-        physics == PhysicsMode::Update ? std::max(0.0, pending_physics_delta_seconds_) : 0.0;
+    const float physics_delta_seconds =
+        physics == PhysicsMode::Update && pending_physics_delta_seconds_ > 0.0
+        ? pending_physics_delta_seconds_
+        : 0.0f;
     for (std::size_t constraint_index = 0;
          constraint_index < data_->physics_constraints().size();
          ++constraint_index) {
@@ -1557,8 +1619,8 @@ void Skeleton::update_world_transforms(
             continue;
         }
 
-        const double mix = detail::clamp_mix(constraint.mix);
-        if (mix <= 0.0 || constraint.bone_indices.empty()) {
+        const float mix = clamp_mixf(constraint.mix);
+        if (mix <= 0.0f || constraint.bone_indices.empty()) {
             continue;
         }
 
@@ -1574,26 +1636,35 @@ void Skeleton::update_world_transforms(
             constraint_state.remaining += physics_delta_seconds;
         }
 
-        const bool apply_x = constraint.x > 0.0;
-        const bool apply_y = constraint.y > 0.0;
-        const bool apply_rotate_or_shear = constraint.rotate > 0.0 || constraint.shear_x > 0.0;
-        const bool apply_scale = constraint.scale_x > 0.0;
-        const double step = std::max(constraint.step, static_cast<double>(kEpsilonF));
-        const double inertia = detail::clamp_mix(constraint.inertia);
-        const double strength = std::max(0.0, constraint.strength);
-        const double mass_step = std::max(0.0, constraint.mass_inverse) * step;
-        const double damping_factor =
-            std::exp(-std::max(0.0, constraint.damping) * step);
-        const FloatAttachmentVertex external_force{
-            static_cast<float>(constraint.wind.x * scale_x_),
-            static_cast<float>(constraint.gravity.y * scale_y_),
+        const float x_mix = constraint.x;
+        const float y_mix = constraint.y;
+        const float rotate_mix = constraint.rotate;
+        const float shear_mix = constraint.shear_x;
+        const float scale_mix = constraint.scale_x;
+        const bool apply_x = x_mix > 0.0f;
+        const bool apply_y = y_mix > 0.0f;
+        const bool apply_rotate_or_shear = rotate_mix > 0.0f || shear_mix > 0.0f;
+        const bool apply_scale = scale_mix > 0.0f;
+        const float step_value = constraint.step;
+        const float step = std::max(step_value, kEpsilonF);
+        const float inertia = clamp_mixf(constraint.inertia);
+        const float strength_value = constraint.strength;
+        const float strength = std::max(0.0f, strength_value);
+        const float mass_inverse = constraint.mass_inverse;
+        const float mass_step = std::max(0.0f, mass_inverse) * step;
+        const float damping_value = constraint.damping;
+        const float damping_factor = std::exp(-std::max(0.0f, damping_value) * step);
+        const float limit = constraint.limit;
+        const AttachmentVertex external_force{
+            constraint.wind.x * skeleton_scale_x,
+            constraint.gravity.y * skeleton_scale_y,
         };
-        const float position_limit_x = static_cast<float>(
-            constraint.limit * physics_delta_seconds * std::abs(scale_x_));
-        const float position_limit_y = static_cast<float>(
-            constraint.limit * physics_delta_seconds * std::abs(scale_y_));
+        const float position_limit_x =
+            limit * physics_delta_seconds * std::abs(skeleton_scale_x);
+        const float position_limit_y =
+            limit * physics_delta_seconds * std::abs(skeleton_scale_y);
 
-        double next_remaining = constraint_state.remaining;
+        float next_remaining = constraint_state.remaining;
         for (std::size_t chain_index = 0;
              chain_index < constraint.bone_indices.size();
              ++chain_index) {
@@ -1602,7 +1673,7 @@ void Skeleton::update_world_transforms(
                 continue;
             }
 
-            const FloatAttachmentVertex tip_local = bone_tip_local_vectorf(bone_index);
+            const AttachmentVertex tip_local = bone_tip_local_vectorf(bone_index);
             const float tip_length = vertex_lengthf(tip_local);
 
             BoneWorldTransform bone_world = load_world_transform(bone_index);
@@ -1612,24 +1683,24 @@ void Skeleton::update_world_transforms(
                 bone_state.uy = bone_world.world_y;
             } else if (physics == PhysicsMode::Update) {
                 if (apply_x) {
-                    const double delta = (bone_state.ux - bone_world.world_x) * inertia;
+                    const float delta = (bone_state.ux - bone_world.world_x) * inertia;
                     bone_state.x_offset += std::clamp(
                         delta,
-                        -static_cast<double>(position_limit_x),
-                        static_cast<double>(position_limit_x));
+                        -position_limit_x,
+                        position_limit_x);
                     bone_state.ux = bone_world.world_x;
                 }
                 if (apply_y) {
-                    const double delta = (bone_state.uy - bone_world.world_y) * inertia;
+                    const float delta = (bone_state.uy - bone_world.world_y) * inertia;
                     bone_state.y_offset += std::clamp(
                         delta,
-                        -static_cast<double>(position_limit_y),
-                        static_cast<double>(position_limit_y));
+                        -position_limit_y,
+                        position_limit_y);
                     bone_state.uy = bone_world.world_y;
                 }
             }
 
-            double remaining = constraint_state.remaining;
+            float remaining = constraint_state.remaining;
             if ((apply_x || apply_y) && physics == PhysicsMode::Update && remaining >= step) {
                 do {
                     if (apply_x) {
@@ -1650,38 +1721,34 @@ void Skeleton::update_world_transforms(
             }
 
             if (apply_x) {
-                bone_world.world_x += bone_state.x_offset * mix * constraint.x;
+                bone_world.world_x += bone_state.x_offset * mix * x_mix;
             }
             if (apply_y) {
-                bone_world.world_y += bone_state.y_offset * mix * constraint.y;
+                bone_world.world_y += bone_state.y_offset * mix * y_mix;
             }
 
             if (apply_rotate_or_shear || apply_scale) {
-                const float base_angle = detail::fast_atan2f(
-                    static_cast<float>(bone_world.c),
-                    static_cast<float>(bone_world.a));
+                const float base_angle = detail::fast_atan2f(bone_world.c, bone_world.a);
                 float cos_angle = detail::fast_cosf(base_angle);
                 float sin_angle = detail::fast_sinf(base_angle);
                 float mixed_rotate = 0.0f;
-                float dx = static_cast<float>(bone_state.cx - bone_world.world_x);
-                float dy = static_cast<float>(bone_state.cy - bone_world.world_y);
+                float dx = bone_state.cx - bone_world.world_x;
+                float dy = bone_state.cy - bone_world.world_y;
                 if (physics == PhysicsMode::Update) {
                     dx = std::clamp(dx, -position_limit_x, position_limit_x);
                     dy = std::clamp(dy, -position_limit_y, position_limit_y);
 
                     if (apply_rotate_or_shear) {
-                        mixed_rotate = static_cast<float>(constraint.rotate * mix);
+                        mixed_rotate = rotate_mix * mix;
                         const float angle =
                             detail::fast_atan2f(
-                                dy + static_cast<float>(bone_state.ty),
-                                dx + static_cast<float>(bone_state.tx)) -
+                                dy + bone_state.ty,
+                                dx + bone_state.tx) -
                             base_angle -
-                            static_cast<float>(bone_state.rotate_offset) * mixed_rotate;
+                            bone_state.rotate_offset * mixed_rotate;
                         bone_state.rotate_offset +=
-                            normalize_rotation_radiansf(angle) * static_cast<float>(inertia);
-                        const float rotated =
-                            static_cast<float>(bone_state.rotate_offset) * mixed_rotate +
-                            base_angle;
+                            normalize_rotation_radiansf(angle) * inertia;
+                        const float rotated = bone_state.rotate_offset * mixed_rotate + base_angle;
                         cos_angle = detail::fast_cosf(rotated);
                         sin_angle = detail::fast_sinf(rotated);
                     }
@@ -1719,8 +1786,7 @@ void Skeleton::update_world_transforms(
                                 }
 
                                 const float rotated =
-                                    static_cast<float>(bone_state.rotate_offset) * mixed_rotate +
-                                    base_angle;
+                                    bone_state.rotate_offset * mixed_rotate + base_angle;
                                 cos_angle = detail::fast_cosf(rotated);
                                 sin_angle = detail::fast_sinf(rotated);
                             } else if (remaining < step) {
@@ -1732,39 +1798,39 @@ void Skeleton::update_world_transforms(
                 }
 
                 if (apply_rotate_or_shear) {
-                    const float offset = static_cast<float>(bone_state.rotate_offset * mix);
+                    const float offset = bone_state.rotate_offset * mix;
                     float sine = 0.0f;
                     float cosine = 1.0f;
-                    if (constraint.shear_x > 0.0) {
+                    if (shear_mix > 0.0f) {
                         float angle = 0.0f;
-                        if (constraint.rotate > 0.0) {
-                            angle = offset * static_cast<float>(constraint.rotate);
+                        if (rotate_mix > 0.0f) {
+                            angle = offset * rotate_mix;
                             sine = detail::fast_sinf(angle);
                             cosine = detail::fast_cosf(angle);
-                            const double axis_b = bone_world.b;
+                            const float axis_b = bone_world.b;
                             bone_world.b = cosine * axis_b - sine * bone_world.d;
                             bone_world.d = sine * axis_b + cosine * bone_world.d;
                         }
-                        angle += offset * static_cast<float>(constraint.shear_x);
+                        angle += offset * shear_mix;
                         sine = detail::fast_sinf(angle);
                         cosine = detail::fast_cosf(angle);
-                        const double axis_a = bone_world.a;
+                        const float axis_a = bone_world.a;
                         bone_world.a = cosine * axis_a - sine * bone_world.c;
                         bone_world.c = sine * axis_a + cosine * bone_world.c;
                     } else {
-                        const float angle = offset * static_cast<float>(constraint.rotate);
+                        const float angle = offset * rotate_mix;
                         sine = detail::fast_sinf(angle);
                         cosine = detail::fast_cosf(angle);
-                        const double axis_a = bone_world.a;
+                        const float axis_a = bone_world.a;
                         bone_world.a = cosine * axis_a - sine * bone_world.c;
                         bone_world.c = sine * axis_a + cosine * bone_world.c;
-                        const double axis_b = bone_world.b;
+                        const float axis_b = bone_world.b;
                         bone_world.b = cosine * axis_b - sine * bone_world.d;
                         bone_world.d = sine * axis_b + cosine * bone_world.d;
                     }
                 }
                 if (apply_scale) {
-                    const double scale = 1.0 + bone_state.scale_offset * mix * constraint.scale_x;
+                    const float scale = 1.0f + bone_state.scale_offset * mix * scale_mix;
                     bone_world.a *= scale;
                     bone_world.c *= scale;
                 }
@@ -1772,15 +1838,18 @@ void Skeleton::update_world_transforms(
 
             if (physics != PhysicsMode::Pose) {
                 if (tip_length > kEpsilonF) {
-                    const AttachmentVertex tip_world = detail::transform_attachment_vertex(
-                        bone_world,
-                        tip_local.x,
-                        tip_local.y);
+                    AttachmentVertex tip_world;
+                    tip_world.x =
+                        bone_world.a * tip_local.x + bone_world.b * tip_local.y +
+                        bone_world.world_x;
+                    tip_world.y =
+                        bone_world.c * tip_local.x + bone_world.d * tip_local.y +
+                        bone_world.world_y;
                     bone_state.tx = tip_world.x - bone_world.world_x;
                     bone_state.ty = tip_world.y - bone_world.world_y;
                 } else {
-                    bone_state.tx = 0.0;
-                    bone_state.ty = 0.0;
+                    bone_state.tx = 0.0f;
+                    bone_state.ty = 0.0f;
                 }
                 bone_state.cx = bone_world.world_x;
                 bone_state.cy = bone_world.world_y;
@@ -1794,7 +1863,7 @@ void Skeleton::update_world_transforms(
             constraint_state.remaining = next_remaining;
             constraint_state.reset = false;
         } else if (physics == PhysicsMode::Reset) {
-            constraint_state.remaining = 0.0;
+            constraint_state.remaining = 0.0f;
             constraint_state.reset = false;
         }
     }

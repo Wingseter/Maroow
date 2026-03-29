@@ -83,7 +83,7 @@ float fast_acosf(float value);
 
 AttachmentVertex add_vertices(const AttachmentVertex& lhs, const AttachmentVertex& rhs);
 AttachmentVertex subtract_vertices(const AttachmentVertex& lhs, const AttachmentVertex& rhs);
-double vertex_length(const AttachmentVertex& vertex);
+float vertex_length(const AttachmentVertex& vertex);
 double world_axis_length(const BoneWorldTransform& transform);
 
 AttachmentVertex inverse_transform_point(
@@ -179,7 +179,7 @@ std::vector<PathDistanceSample> build_path_distance_samples(
     const std::vector<AttachmentVertex>& control_points);
 PathDistanceSample sample_path_distance(
     const std::vector<PathDistanceSample>& samples,
-    double distance);
+    float distance);
 
 bool polygon_contains_point(
     const std::vector<AttachmentVertex>& polygon,

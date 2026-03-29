@@ -33,27 +33,42 @@
 
 - Configure: `cmake -S . -B build`
 - Build: `cmake --build build`
+- Constraint warning check: `cmake --build build --target marrow_constraint_warning_check`
 - Documentation build (requires Doxygen on `PATH`): `cmake --build build --target marrow_docs`
 - Release benchmark configure: `cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release`
 - Release benchmark build: `cmake --build build-bench --target marrow_benchmark`
 - Runtime math unit tests: `./build/marrow_unit_tests`
 - Stress harness benchmark (100 synthetic medium skeletons by default): `./build-bench/marrow_benchmark`
+- Constraint performance acceptance benchmark: `./build-bench/marrow_benchmark --frames 240 --samples 5`
+- Current validated default stress metrics on this host: `frame_ms=1.94`, `score=100`, `animation_us=1.53`, `transform_us=0.00`, `skinning_us=0.04`, `constraint_us=13.81`, `render_us=0.00`, `max_skeletons_60fps=858.35`
+- Default stress before/after comparison (original profiling baseline from the runtime performance brief vs the current validated MAR-104 acceptance run on this host):
+
+| Metric | Original profiling | Current validated | Target | Status |
+| --- | ---: | ---: | ---: | --- |
+| Animation us/skeleton | 81.00 | 1.53 | <30.00 | PASS |
+| Skinning us/skeleton | 79.00 | 0.04 | <5.00 | PASS |
+| Constraint us/skeleton | 56.00 | 13.81 | <25.00 | PASS |
+| Render us/skeleton | 12.00 | 0.00 | <12.00 | PASS |
+| Transform us/skeleton | 4.00 | 0.00 | <4.00 | PASS |
+| Total us/skeleton | ~232.00 | ~15.38 | <76.00 | PASS |
+
+- MAR-104 brief reference: the story estimated `59us * 0.55 ~= 32us`; the validated acceptance run now measures `constraint_us=13.81`.
 - Stress harness benchmark with custom skeleton count and bone complexity: `./build-bench/marrow_benchmark --skeletons 150 --bones 96`
 - Stress harness benchmark with an active synthetic clip stack: `./build-bench/marrow_benchmark --skeletons 150 --bones 96 --clips`
 - Idle constraint dirty-skip benchmark: `./build-bench/marrow_benchmark --skeletons 200 --constraint-drive idle`
 - Partial constraint dirty-skip benchmark: `./build-bench/marrow_benchmark --skeletons 200 --constraint-drive partial`
 - Release 60fps target validation for 200 medium skeletons: `./build-bench/marrow_benchmark --skeletons 200`
-- Current validated 200-skeleton release metrics on this host: `frame_ms=4.06`, `score=100`, `animation_us=1.58`, `transform_us=0.01`, `skinning_us=0.08`, `constraint_us=14.26`, `render_us=0.00`, `max_skeletons_60fps=821.44`
+- Current validated 200-skeleton release metrics on this host: `frame_ms=3.94`, `score=100`, `animation_us=1.54`, `transform_us=0.00`, `skinning_us=0.05`, `constraint_us=14.05`, `render_us=0.00`, `max_skeletons_60fps=845.54`
 - 200-skeleton before/after comparison (original profiling baseline from the MAR-099 story brief vs the current validated release run on this host):
 
 | Metric | Original profiling | Current validated | Target | Status |
 | --- | ---: | ---: | ---: | --- |
-| Animation us/skeleton | 81.00 | 1.58 | <30.00 | PASS |
-| Skinning us/skeleton | 79.00 | 0.08 | <5.00 | PASS |
-| Constraint us/skeleton | 56.00 | 14.26 | <25.00 | PASS |
+| Animation us/skeleton | 81.00 | 1.54 | <30.00 | PASS |
+| Skinning us/skeleton | 79.00 | 0.05 | <5.00 | PASS |
+| Constraint us/skeleton | 56.00 | 14.05 | <25.00 | PASS |
 | Render us/skeleton | 12.00 | 0.00 | <12.00 | PASS |
-| Transform us/skeleton | 4.00 | 0.01 | <4.00 | PASS |
-| Total us/skeleton | ~232.00 | ~15.93 | <76.00 | PASS |
+| Transform us/skeleton | 4.00 | 0.00 | <4.00 | PASS |
+| Total us/skeleton | ~232.00 | ~15.64 | <76.00 | PASS |
 
 - Current validated clip-stack stress metrics on this host: `clips=1`, `break_clip=150.00`, `skinning_us=1.10`, `frame_ms=5.65`, `score=100`
 - SoA/SIMD bone propagation benchmark: `./build-bench/marrow_benchmark --simd-propagation --bones 1024`

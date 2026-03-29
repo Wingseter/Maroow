@@ -54,6 +54,25 @@ std::vector<AttachmentVertex> build_bone_tip_local_vectors(
     return bone_tip_local_vectors;
 }
 
+std::vector<std::uint64_t> build_bone_subtree_word_masks(
+    const std::vector<std::vector<std::size_t>>& children_map,
+    std::size_t word_count) {
+    const std::size_t bone_count = children_map.size();
+    std::vector<std::uint64_t> masks(bone_count * word_count, 0U);
+    for (std::size_t bone_index = bone_count; bone_index-- > 0U;) {
+        std::uint64_t* const mask_words = masks.data() + bone_index * word_count;
+        mask_words[bone_index / 64U] |= std::uint64_t{1} << (bone_index % 64U);
+        for (const std::size_t child_index : children_map[bone_index]) {
+            const std::uint64_t* const child_words = masks.data() + child_index * word_count;
+            for (std::size_t word_index = 0; word_index < word_count; ++word_index) {
+                mask_words[word_index] |= child_words[word_index];
+            }
+        }
+    }
+
+    return masks;
+}
+
 } // namespace
 
 SkeletonData::SkeletonData(
@@ -97,6 +116,9 @@ SkeletonData::SkeletonData(
     }
     bone_evaluation_order_ = detail::build_bone_evaluation_order(bones_);
     children_map_ = build_children_map(bones_);
+    bone_subtree_word_count_ = (bones_.size() + 63U) / 64U;
+    bone_subtree_word_masks_ =
+        build_bone_subtree_word_masks(children_map_, bone_subtree_word_count_);
     bone_tip_local_vectors_ = build_bone_tip_local_vectors(bones_, children_map_);
 }
 
@@ -731,17 +753,19 @@ void SkeletonBounds::update(const Skeleton& skeleton, bool compute_aabb) {
         }
 
         for (const AttachmentVertex& vertex : pose->polygon) {
+            const double vertex_x = vertex.x;
+            const double vertex_y = vertex.y;
             if (!has_aabb_) {
-                min_x_ = max_x_ = vertex.x;
-                min_y_ = max_y_ = vertex.y;
+                min_x_ = max_x_ = vertex_x;
+                min_y_ = max_y_ = vertex_y;
                 has_aabb_ = true;
                 continue;
             }
 
-            min_x_ = std::min(min_x_, vertex.x);
-            min_y_ = std::min(min_y_, vertex.y);
-            max_x_ = std::max(max_x_, vertex.x);
-            max_y_ = std::max(max_y_, vertex.y);
+            min_x_ = std::min(min_x_, vertex_x);
+            min_y_ = std::min(min_y_, vertex_y);
+            max_x_ = std::max(max_x_, vertex_x);
+            max_y_ = std::max(max_y_, vertex_y);
         }
     }
 }

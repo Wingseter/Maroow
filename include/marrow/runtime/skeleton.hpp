@@ -26,14 +26,34 @@ struct SkeletonInfo {
 };
 
 struct BoneTransform {
-    double x{0.0};
-    double y{0.0};
-    double rotation{0.0};
-    double scale_x{1.0};
-    double scale_y{1.0};
-    double shear_x{0.0};
-    double shear_y{0.0};
+    constexpr BoneTransform() = default;
+    constexpr BoneTransform(
+        double x_in,
+        double y_in,
+        double rotation_in,
+        double scale_x_in,
+        double scale_y_in,
+        double shear_x_in,
+        double shear_y_in)
+        : x(static_cast<float>(x_in)),
+          y(static_cast<float>(y_in)),
+          rotation(static_cast<float>(rotation_in)),
+          scale_x(static_cast<float>(scale_x_in)),
+          scale_y(static_cast<float>(scale_y_in)),
+          shear_x(static_cast<float>(shear_x_in)),
+          shear_y(static_cast<float>(shear_y_in)) {}
+
+    float x{0.0f};
+    float y{0.0f};
+    float rotation{0.0f};
+    float scale_x{1.0f};
+    float scale_y{1.0f};
+    float shear_x{0.0f};
+    float shear_y{0.0f};
 };
+static_assert(
+    sizeof(BoneTransform) == sizeof(float) * 7U,
+    "BoneTransform should pack down to seven floats.");
 
 struct BoneData {
     std::string name;
@@ -127,15 +147,29 @@ enum class SequencePlaybackMode {
 };
 
 struct AttachmentVertex {
-    double x{0.0};
-    double y{0.0};
+    constexpr AttachmentVertex() = default;
+    constexpr AttachmentVertex(float x_in, float y_in)
+        : x(x_in),
+          y(y_in) {}
+    constexpr AttachmentVertex(double x_in, double y_in)
+        : x(static_cast<float>(x_in)),
+          y(static_cast<float>(y_in)) {}
+
+    float x{0.0f};
+    float y{0.0f};
 };
+static_assert(
+    sizeof(AttachmentVertex) == sizeof(float) * 2U,
+    "AttachmentVertex should pack down to two floats.");
 
 struct PathDistanceSample {
-    double distance{0.0};
+    float distance{0.0f};
     AttachmentVertex point{};
     AttachmentVertex tangent{};
 };
+static_assert(
+    sizeof(PathDistanceSample) == sizeof(float) * 5U,
+    "PathDistanceSample should pack down to five floats.");
 
 struct PhysicsConstraintData {
     std::string name;
@@ -659,11 +693,15 @@ public:
      */
     double mix_duration(std::string_view from_animation, std::string_view to_animation) const;
 
+    friend class Skeleton;
+
 private:
     SkeletonInfo info_;
     std::vector<BoneData> bones_;
     std::vector<std::size_t> bone_evaluation_order_;
     std::vector<std::vector<std::size_t>> children_map_;
+    std::size_t bone_subtree_word_count_{0};
+    std::vector<std::uint64_t> bone_subtree_word_masks_;
     std::vector<AttachmentVertex> bone_tip_local_vectors_;
     std::vector<IkConstraintData> ik_constraints_;
     std::vector<PathConstraintData> path_constraints_;
@@ -1196,25 +1234,28 @@ private:
         double delta_seconds);
 
     struct PhysicsBoneState {
-        double ux{0.0};
-        double uy{0.0};
-        double cx{0.0};
-        double cy{0.0};
-        double tx{0.0};
-        double ty{0.0};
-        double x_offset{0.0};
-        double x_velocity{0.0};
-        double y_offset{0.0};
-        double y_velocity{0.0};
-        double rotate_offset{0.0};
-        double rotate_velocity{0.0};
-        double scale_offset{0.0};
-        double scale_velocity{0.0};
+        float ux{0.0f};
+        float uy{0.0f};
+        float cx{0.0f};
+        float cy{0.0f};
+        float tx{0.0f};
+        float ty{0.0f};
+        float x_offset{0.0f};
+        float x_velocity{0.0f};
+        float y_offset{0.0f};
+        float y_velocity{0.0f};
+        float rotate_offset{0.0f};
+        float rotate_velocity{0.0f};
+        float scale_offset{0.0f};
+        float scale_velocity{0.0f};
     };
+    static_assert(
+        sizeof(PhysicsBoneState) == sizeof(float) * 14U,
+        "PhysicsBoneState should pack down to fourteen floats.");
 
     struct PhysicsConstraintState {
         std::vector<PhysicsBoneState> bones;
-        double remaining{0.0};
+        float remaining{0.0f};
         bool reset{true};
     };
 
@@ -1311,6 +1352,8 @@ private:
     std::vector<std::size_t> solved_applied_local_pose_revisions_;
     std::vector<std::size_t> solved_world_revisions_;
     std::vector<std::size_t> solved_applied_parent_world_revisions_;
+    std::vector<std::uint64_t> constraint_dirty_bone_words_;
+    std::vector<std::uint64_t> constraint_dirty_subtree_words_;
     std::vector<ConstraintInputRevisionState> ik_constraint_revision_states_;
     std::vector<ConstraintInputRevisionState> transform_constraint_revision_states_;
     std::vector<AttachmentVertex> path_world_control_points_;

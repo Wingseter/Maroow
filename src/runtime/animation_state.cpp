@@ -117,7 +117,7 @@ void apply_rotate_timeline_mixing(
     std::size_t timeline_index);
 
 void apply_layer_scalar(
-    double* current,
+    float* current,
     double setup,
     double sample,
     bool additive,

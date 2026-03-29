@@ -161,6 +161,23 @@ target_include_directories(marrow_runtime
         ${PROJECT_SOURCE_DIR}/include
 )
 
+add_library(marrow_constraint_warning_check STATIC EXCLUDE_FROM_ALL
+    src/runtime/skeleton_constraints.cpp
+)
+
+target_include_directories(marrow_constraint_warning_check
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(marrow_constraint_warning_check
+        PRIVATE
+            -Wdouble-promotion
+            -Werror
+    )
+endif()
+
 if(MARROW_ENABLE_THREAD_SANITIZER)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         message(FATAL_ERROR "MARROW_ENABLE_THREAD_SANITIZER requires Clang or GCC.")
