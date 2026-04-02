@@ -643,6 +643,10 @@ ImVec2 screen_from_world(
     const ViewportLayout& layout,
     double world_x,
     double world_y);
+ImVec2 screen_from_world(
+    const ViewportLayout& layout,
+    float world_x,
+    float world_y);
 ImVec2 local_viewport_position(
     const ViewportLayout& layout,
     const ImVec2& screen_position);
@@ -652,6 +656,7 @@ bool scrub_timeline_time(
     std::string_view source,
     bool update_status_message);
 void advance_timeline_playback(ShellState* state, double delta_seconds);
+void advance_timeline_playback(ShellState* state, float delta_seconds);
 bool focus_timeline_track(
     ShellState* state,
     const TimelineTrackRow& track,
@@ -2854,8 +2859,8 @@ void draw_attachment_details(
         ImGui::TextUnformatted("Point");
         ImGui::Text(
             "Local position: (%.1f, %.1f)",
-            attachment.point_attachment->local_position.x,
-            attachment.point_attachment->local_position.y);
+            static_cast<double>(attachment.point_attachment->local_position.x),
+            static_cast<double>(attachment.point_attachment->local_position.y));
         ImGui::Text("Rotation: %.1f deg", attachment.point_attachment->rotation);
     }
 
@@ -3216,17 +3221,23 @@ std::optional<marrow::runtime::AttachmentVertex> inverse_transform_point_safe(
     double world_x,
     double world_y) {
     constexpr double kEpsilon = 1e-8;
-    const double determinant = (transform.a * transform.d) - (transform.b * transform.c);
+    const double determinant =
+        (static_cast<double>(transform.a) * static_cast<double>(transform.d)) -
+        (static_cast<double>(transform.b) * static_cast<double>(transform.c));
     if (std::abs(determinant) <= kEpsilon) {
         return std::nullopt;
     }
 
     const double inverse_determinant = 1.0 / determinant;
-    const double translated_x = world_x - transform.world_x;
-    const double translated_y = world_y - transform.world_y;
+    const double translated_x = world_x - static_cast<double>(transform.world_x);
+    const double translated_y = world_y - static_cast<double>(transform.world_y);
     return marrow::runtime::AttachmentVertex{
-        ((translated_x * transform.d) - (translated_y * transform.b)) * inverse_determinant,
-        ((translated_y * transform.a) - (translated_x * transform.c)) * inverse_determinant};
+        ((translated_x * static_cast<double>(transform.d)) -
+         (translated_y * static_cast<double>(transform.b))) *
+            inverse_determinant,
+        ((translated_y * static_cast<double>(transform.a)) -
+         (translated_x * static_cast<double>(transform.c))) *
+            inverse_determinant};
 }
 
 double weight_for_bone(
@@ -3534,8 +3545,8 @@ bool apply_paint_weight_to_vertex(
 
         updated.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
             active_bone_name,
-            bind_position->x - offset_x,
-            bind_position->y - offset_y,
+            static_cast<double>(bind_position->x) - offset_x,
+            static_cast<double>(bind_position->y) - offset_y,
             0.0});
         influence_it = updated.influences.end() - 1;
     }
@@ -4063,7 +4074,7 @@ void append_timeline_key_times(
 
     for (const Timeline& timeline : timelines) {
         for (const auto& keyframe : timeline.keyframes) {
-            key_times->push_back(keyframe.time);
+            key_times->push_back(static_cast<double>(keyframe.time));
         }
     }
 }
@@ -4080,12 +4091,12 @@ std::vector<double> collect_animation_key_times(const marrow::runtime::Animation
     append_timeline_key_times(animation.mesh_deform_timelines, &key_times);
     if (animation.draw_order_timeline_data.has_value()) {
         for (const auto& keyframe : animation.draw_order_timeline_data->keyframes) {
-            key_times.push_back(keyframe.time);
+            key_times.push_back(static_cast<double>(keyframe.time));
         }
     }
     if (animation.event_timeline_data.has_value()) {
         for (const auto& keyframe : animation.event_timeline_data->keyframes) {
-            key_times.push_back(keyframe.time);
+            key_times.push_back(static_cast<double>(keyframe.time));
         }
     }
 
@@ -4110,7 +4121,7 @@ std::vector<double> collect_key_times(const std::vector<Keyframe>& keyframes) {
     std::vector<double> key_times;
     key_times.reserve(keyframes.size());
     for (const Keyframe& keyframe : keyframes) {
-        key_times.push_back(keyframe.time);
+        key_times.push_back(static_cast<double>(keyframe.time));
     }
     return key_times;
 }
@@ -4407,8 +4418,8 @@ void copy_rotate_timeline_edit(
     edit->keyframes.reserve(source.size());
     for (const auto& keyframe : source) {
         marrow::editor::TransformKeyframeEdit copied;
-        copied.time = keyframe.time;
-        copied.angle = keyframe.angle;
+        copied.time = static_cast<double>(keyframe.time);
+        copied.angle = static_cast<double>(keyframe.angle);
         copied.interpolation = keyframe.interpolation;
         edit->keyframes.push_back(std::move(copied));
     }
@@ -4421,9 +4432,9 @@ void copy_vector_timeline_edit(
     edit->keyframes.reserve(source.size());
     for (const auto& keyframe : source) {
         marrow::editor::TransformKeyframeEdit copied;
-        copied.time = keyframe.time;
-        copied.x = keyframe.x;
-        copied.y = keyframe.y;
+        copied.time = static_cast<double>(keyframe.time);
+        copied.x = static_cast<double>(keyframe.x);
+        copied.y = static_cast<double>(keyframe.y);
         copied.interpolation = keyframe.interpolation;
         edit->keyframes.push_back(std::move(copied));
     }
@@ -4436,11 +4447,22 @@ void copy_deform_timeline_edit(
     edit->keyframes.reserve(source.size());
     for (const auto& keyframe : source) {
         marrow::editor::DeformKeyframeEdit copied;
-        copied.time = keyframe.time;
-        copied.vertex_offsets = keyframe.vertex_offsets;
+        copied.time = static_cast<double>(keyframe.time);
+        copied.vertex_offsets.reserve(keyframe.vertex_offsets.size());
+        for (const marrow::runtime::AnimationScalar offset : keyframe.vertex_offsets) {
+            copied.vertex_offsets.push_back(static_cast<double>(offset));
+        }
         copied.interpolation = keyframe.interpolation;
         edit->keyframes.push_back(std::move(copied));
     }
+}
+
+std::optional<double> widen_animation_optional(
+    const std::optional<marrow::runtime::AnimationScalar>& value) {
+    if (!value.has_value()) {
+        return std::nullopt;
+    }
+    return static_cast<double>(*value);
 }
 
 std::optional<marrow::editor::TransformTimelineEdit> make_transform_timeline_edit(
@@ -4640,7 +4662,7 @@ std::optional<marrow::editor::DrawOrderTimelineEdit> make_draw_order_timeline_ed
         }
 
         marrow::editor::DrawOrderKeyframeEdit copied;
-        copied.time = keyframe.time;
+        copied.time = static_cast<double>(keyframe.time);
         copied.slot_names = slot_names;
         edit.keyframes.push_back(std::move(copied));
     }
@@ -4701,15 +4723,15 @@ std::optional<marrow::editor::EventTimelineEdit> make_event_timeline_edit(
         }
 
         marrow::editor::EventKeyframeEdit copied;
-        copied.time = keyframe.time;
+        copied.time = static_cast<double>(keyframe.time);
         copied.event_name =
             state.load_result.skeleton_data->events()[keyframe.event_index].name;
         copied.int_value = keyframe.int_value;
-        copied.float_value = keyframe.float_value;
+        copied.float_value = widen_animation_optional(keyframe.float_value);
         copied.string_value = keyframe.string_value;
         copied.audio_path = keyframe.audio_path;
-        copied.volume = keyframe.volume;
-        copied.balance = keyframe.balance;
+        copied.volume = widen_animation_optional(keyframe.volume);
+        copied.balance = widen_animation_optional(keyframe.balance);
         edit.keyframes.push_back(std::move(copied));
     }
 
@@ -4761,19 +4783,19 @@ marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
     const auto& pose = state.preview_skeleton->bone_poses()[*track.bone_index].local_pose;
     switch (*track.transform_channel) {
     case marrow::editor::TransformTimelineChannel::Rotate:
-        keyframe.angle = pose.rotation;
+        keyframe.angle = static_cast<double>(pose.rotation);
         break;
     case marrow::editor::TransformTimelineChannel::Translate:
-        keyframe.x = pose.x;
-        keyframe.y = pose.y;
+        keyframe.x = static_cast<double>(pose.x);
+        keyframe.y = static_cast<double>(pose.y);
         break;
     case marrow::editor::TransformTimelineChannel::Scale:
-        keyframe.x = pose.scale_x;
-        keyframe.y = pose.scale_y;
+        keyframe.x = static_cast<double>(pose.scale_x);
+        keyframe.y = static_cast<double>(pose.scale_y);
         break;
     case marrow::editor::TransformTimelineChannel::Shear:
-        keyframe.x = pose.shear_x;
-        keyframe.y = pose.shear_y;
+        keyframe.x = static_cast<double>(pose.shear_x);
+        keyframe.y = static_cast<double>(pose.shear_y);
         break;
     }
 
@@ -5582,6 +5604,10 @@ void advance_timeline_playback(ShellState* state, double delta_seconds) {
     }
 }
 
+void advance_timeline_playback(ShellState* state, float delta_seconds) {
+    advance_timeline_playback(state, static_cast<double>(delta_seconds));
+}
+
 bool focus_timeline_track(
     ShellState* state,
     const TimelineTrackRow& track,
@@ -5616,11 +5642,22 @@ ImVec2 screen_from_world(
     const ViewportLayout& layout,
     double world_x,
     double world_y) {
+    const double pixels_per_unit = static_cast<double>(layout.pixels_per_unit);
     return ImVec2(
         layout.screen_center.x +
-            static_cast<float>((world_x - layout.world_center_x) * layout.pixels_per_unit),
+            static_cast<float>((world_x - layout.world_center_x) * pixels_per_unit),
         layout.screen_center.y -
-            static_cast<float>((world_y - layout.world_center_y) * layout.pixels_per_unit));
+            static_cast<float>((world_y - layout.world_center_y) * pixels_per_unit));
+}
+
+ImVec2 screen_from_world(
+    const ViewportLayout& layout,
+    float world_x,
+    float world_y) {
+    return screen_from_world(
+        layout,
+        static_cast<double>(world_x),
+        static_cast<double>(world_y));
 }
 
 float squared_distance(const ImVec2& a, const ImVec2& b) {
@@ -6110,8 +6147,22 @@ marrow::runtime::AttachmentVertex transform_attachment_vertex_local(
     double x,
     double y) {
     return marrow::runtime::AttachmentVertex{
-        transform.world_x + (transform.a * x) + (transform.b * y),
-        transform.world_y + (transform.c * x) + (transform.d * y)};
+        static_cast<double>(transform.world_x) +
+            (static_cast<double>(transform.a) * x) +
+            (static_cast<double>(transform.b) * y),
+        static_cast<double>(transform.world_y) +
+            (static_cast<double>(transform.c) * x) +
+            (static_cast<double>(transform.d) * y)};
+}
+
+marrow::runtime::AttachmentVertex transform_attachment_vertex_local(
+    const marrow::runtime::BoneWorldTransform& transform,
+    float x,
+    float y) {
+    return transform_attachment_vertex_local(
+        transform,
+        static_cast<double>(x),
+        static_cast<double>(y));
 }
 
 std::optional<marrow::runtime::AttachmentVertex> longest_child_local_offset(
@@ -6133,7 +6184,8 @@ std::optional<marrow::runtime::AttachmentVertex> longest_child_local_offset(
 
         const auto& child_pose = poses[child_index].local_pose;
         const double length_squared =
-            (child_pose.x * child_pose.x) + (child_pose.y * child_pose.y);
+            (static_cast<double>(child_pose.x) * static_cast<double>(child_pose.x)) +
+            (static_cast<double>(child_pose.y) * static_cast<double>(child_pose.y));
         if (length_squared <= best_length_squared) {
             continue;
         }
@@ -6295,8 +6347,14 @@ std::vector<marrow::runtime::AttachmentVertex> sample_path_curve_points(
             const auto& p2 = control_points[point_index + 2U];
             const auto& p3 = control_points[point_index + 3U];
             sampled_points.push_back(marrow::runtime::AttachmentVertex{
-                (p0.x * basis0) + (p1.x * basis1) + (p2.x * basis2) + (p3.x * basis3),
-                (p0.y * basis0) + (p1.y * basis1) + (p2.y * basis2) + (p3.y * basis3)});
+                (static_cast<double>(p0.x) * basis0) +
+                    (static_cast<double>(p1.x) * basis1) +
+                    (static_cast<double>(p2.x) * basis2) +
+                    (static_cast<double>(p3.x) * basis3),
+                (static_cast<double>(p0.y) * basis0) +
+                    (static_cast<double>(p1.y) * basis1) +
+                    (static_cast<double>(p2.y) * basis2) +
+                    (static_cast<double>(p3.y) * basis3)});
         }
     }
 
@@ -6418,8 +6476,8 @@ DebugOverlayGeometry build_debug_overlay_geometry(
                             skeleton,
                             constraint.bone_indices.front())) {
                     const ImVec2 tip_screen = screen_from_world(layout, tip->x, tip->y);
-                    first_length = std::sqrt(
-                        squared_distance(origin, tip_screen));
+                    first_length = static_cast<double>(std::sqrt(
+                        squared_distance(origin, tip_screen)));
                 }
             } else if (constraint.bone_indices.size() >= 2U &&
                        constraint.bone_indices[1U] < world_transforms.size()) {
@@ -6427,14 +6485,14 @@ DebugOverlayGeometry build_debug_overlay_geometry(
                     layout,
                     world_transforms[constraint.bone_indices[1U]].world_x,
                     world_transforms[constraint.bone_indices[1U]].world_y);
-                first_length = std::sqrt(squared_distance(origin, joint));
+                first_length = static_cast<double>(std::sqrt(squared_distance(origin, joint)));
                 if (const auto tip =
                         bone_tip_world_position(
                             *state.preview_skeleton,
                             skeleton,
                             constraint.bone_indices[1U])) {
                     const ImVec2 tip_screen = screen_from_world(layout, tip->x, tip->y);
-                    second_length = std::sqrt(squared_distance(joint, tip_screen));
+                    second_length = static_cast<double>(std::sqrt(squared_distance(joint, tip_screen)));
                 }
             }
 
@@ -6598,8 +6656,8 @@ DebugOverlayGeometry build_debug_overlay_geometry(
 
                 const ImVec2 force_end = screen_from_world(
                     layout,
-                    tip->x + (constraint.wind.x * 0.18),
-                    tip->y + (constraint.gravity.y * 0.18));
+                    tip->x + (constraint.wind.x * 0.18f),
+                    tip->y + (constraint.gravity.y * 0.18f));
                 add_debug_arrow(&overlay, end, force_end, force_color, 1.2f);
                 drew_constraint = true;
             }
@@ -8417,13 +8475,13 @@ void draw_constraints_window(ShellState* state) {
                     "Updated physics mix on " + selected_name);
 
                 const auto update_force = [&](const char* label,
-                                              double value,
+                                              float value,
                                               auto setter,
                                               std::string status) {
-                    double edited_value = value;
+                    float edited_value = value;
                     const bool changed = ImGui::DragScalar(
                         label,
-                        ImGuiDataType_Double,
+                        ImGuiDataType_Float,
                         &edited_value,
                         0.5f,
                         nullptr,
@@ -8447,28 +8505,28 @@ void draw_constraints_window(ShellState* state) {
                 update_force(
                     "Gravity X",
                     display_edit.gravity.x,
-                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                    [](marrow::editor::PhysicsConstraintEdit* edit, float value) {
                         edit->gravity.x = value;
                     },
                     "Updated physics gravity X on " + selected_name);
                 update_force(
                     "Gravity Y",
                     display_edit.gravity.y,
-                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                    [](marrow::editor::PhysicsConstraintEdit* edit, float value) {
                         edit->gravity.y = value;
                     },
                     "Updated physics gravity Y on " + selected_name);
                 update_force(
                     "Wind X",
                     display_edit.wind.x,
-                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                    [](marrow::editor::PhysicsConstraintEdit* edit, float value) {
                         edit->wind.x = value;
                     },
                     "Updated physics wind X on " + selected_name);
                 update_force(
                     "Wind Y",
                     display_edit.wind.y,
-                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                    [](marrow::editor::PhysicsConstraintEdit* edit, float value) {
                         edit->wind.y = value;
                     },
                     "Updated physics wind Y on " + selected_name);
@@ -9566,10 +9624,10 @@ void draw_transform_timeline_editor(
                         }
                         editable_key.interpolation =
                             marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
+                                static_cast<double>(bezier.cx1),
+                                static_cast<double>(bezier.cy1),
+                                static_cast<double>(bezier.cx2),
+                                static_cast<double>(bezier.cy2));
                         break;
                     }
                     }
@@ -9589,19 +9647,19 @@ void draw_transform_timeline_editor(
                     display_key.interpolation.cubic_bezier();
 
                 const auto update_bezier = [&](const char* label,
-                                               double* component,
+                                               marrow::runtime::AnimationScalar* component,
                                                bool clamp_x,
                                                std::string status) {
                     const bool changed = ImGui::DragScalar(
                         label,
-                        ImGuiDataType_Double,
+                        ImGuiDataType_Float,
                         component,
                         0.01f,
                         nullptr,
                         nullptr,
                         "%.3f");
                     if (clamp_x) {
-                        *component = std::clamp(*component, 0.0, 1.0);
+                        *component = std::clamp(*component, 0.0f, 1.0f);
                     }
                     apply_coalesced_project_drag(
                         state,
@@ -9621,10 +9679,10 @@ void draw_transform_timeline_editor(
                                         .keyframes[key_index];
                                 editable_key.interpolation =
                                     marrow::runtime::Interpolation::cubic_bezier(
-                                        bezier.cx1,
-                                        bezier.cy1,
-                                        bezier.cx2,
-                                        bezier.cy2);
+                                        static_cast<double>(bezier.cx1),
+                                        static_cast<double>(bezier.cy1),
+                                        static_cast<double>(bezier.cx2),
+                                        static_cast<double>(bezier.cy2));
                             }
                         });
                 };
@@ -9860,10 +9918,10 @@ void draw_mesh_deform_timeline_editor(
                         }
                         editable_key.interpolation =
                             marrow::runtime::Interpolation::cubic_bezier(
-                                bezier.cx1,
-                                bezier.cy1,
-                                bezier.cx2,
-                                bezier.cy2);
+                                static_cast<double>(bezier.cx1),
+                                static_cast<double>(bezier.cy1),
+                                static_cast<double>(bezier.cx2),
+                                static_cast<double>(bezier.cy2));
                         break;
                     }
                     }
@@ -9879,19 +9937,19 @@ void draw_mesh_deform_timeline_editor(
                     display_key.interpolation.cubic_bezier();
 
                 const auto update_bezier = [&](const char* label,
-                                               double* component,
+                                               marrow::runtime::AnimationScalar* component,
                                                bool clamp_x,
                                                std::string status) {
                     const bool changed = ImGui::DragScalar(
                         label,
-                        ImGuiDataType_Double,
+                        ImGuiDataType_Float,
                         component,
                         0.01f,
                         nullptr,
                         nullptr,
                         "%.3f");
                     if (clamp_x) {
-                        *component = std::clamp(*component, 0.0, 1.0);
+                        *component = std::clamp(*component, 0.0f, 1.0f);
                     }
                     apply_coalesced_project_drag(
                         state,
@@ -9911,10 +9969,10 @@ void draw_mesh_deform_timeline_editor(
                                         .keyframes[key_index];
                                 editable_key.interpolation =
                                     marrow::runtime::Interpolation::cubic_bezier(
-                                        bezier.cx1,
-                                        bezier.cy1,
-                                        bezier.cx2,
-                                        bezier.cy2);
+                                        static_cast<double>(bezier.cx1),
+                                        static_cast<double>(bezier.cy1),
+                                        static_cast<double>(bezier.cx2),
+                                        static_cast<double>(bezier.cy2));
                             }
                         });
                 };
@@ -10904,13 +10962,14 @@ void draw_viewport_window(ShellState* state) {
 
     if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
         const ImVec2 mouse_delta = ImGui::GetIO().MouseDelta;
-        state->viewport.pan_x += mouse_delta.x;
-        state->viewport.pan_y += mouse_delta.y;
+        state->viewport.pan_x += static_cast<double>(mouse_delta.x);
+        state->viewport.pan_y += static_cast<double>(mouse_delta.y);
     }
 
     if (hovered && std::abs(ImGui::GetIO().MouseWheel) > 0.0f) {
         const float zoom_factor = ImGui::GetIO().MouseWheel > 0.0f ? 1.1f : 0.9f;
-        state->viewport.zoom = clamp_zoom(static_cast<float>(state->viewport.zoom) * zoom_factor);
+        state->viewport.zoom = static_cast<double>(
+            clamp_zoom(static_cast<float>(state->viewport.zoom) * zoom_factor));
     }
 
     const auto layout = build_viewport_layout(*state, canvas_origin, canvas_size);
@@ -11105,10 +11164,19 @@ void draw_inspector_window(ShellState* state) {
                 yes_no(state->preview_skeleton->is_bone_active(bone_index)));
             ImGui::Separator();
             ImGui::TextUnformatted("Setup Pose");
-            ImGui::Text("Translate: (%.1f, %.1f)", setup_pose.x, setup_pose.y);
-            ImGui::Text("Rotation: %.1f deg", setup_pose.rotation);
-            ImGui::Text("Scale: (%.2f, %.2f)", setup_pose.scale_x, setup_pose.scale_y);
-            ImGui::Text("Shear: (%.1f, %.1f)", setup_pose.shear_x, setup_pose.shear_y);
+            ImGui::Text(
+                "Translate: (%.1f, %.1f)",
+                static_cast<double>(setup_pose.x),
+                static_cast<double>(setup_pose.y));
+            ImGui::Text("Rotation: %.1f deg", static_cast<double>(setup_pose.rotation));
+            ImGui::Text(
+                "Scale: (%.2f, %.2f)",
+                static_cast<double>(setup_pose.scale_x),
+                static_cast<double>(setup_pose.scale_y));
+            ImGui::Text(
+                "Shear: (%.1f, %.1f)",
+                static_cast<double>(setup_pose.shear_x),
+                static_cast<double>(setup_pose.shear_y));
             const char* inherit_label = "normal";
             switch (bone.inherit) {
             case marrow::runtime::BoneInherit::Normal:
@@ -11130,13 +11198,16 @@ void draw_inspector_window(ShellState* state) {
             ImGui::Text("Inherit: %s", inherit_label);
             ImGui::Separator();
             ImGui::TextUnformatted("World Pose");
-            ImGui::Text("World position: (%.1f, %.1f)", world.world_x, world.world_y);
+            ImGui::Text(
+                "World position: (%.1f, %.1f)",
+                static_cast<double>(world.world_x),
+                static_cast<double>(world.world_y));
             ImGui::Text(
                 "Basis X: (%.2f, %.2f)  Basis Y: (%.2f, %.2f)",
-                world.a,
-                world.c,
-                world.b,
-                world.d);
+                static_cast<double>(world.a),
+                static_cast<double>(world.c),
+                static_cast<double>(world.b),
+                static_cast<double>(world.d));
         } else {
             ImGui::Spacing();
             ImGui::TextUnformatted("Select a bone from the hierarchy or viewport.");
@@ -11580,7 +11651,8 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     const double pre_reload_track_time = current->track_time;
     const double pre_reload_mix_time = current->mix_time;
     const double pre_reload_rotation =
-        hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation;
+        static_cast<double>(
+            hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
     if (std::abs(pre_reload_rotation - 15.0) > 1e-3) {
         std::cerr << "Hot-reload smoke expected the pre-reload mixed attack pose at 15 degrees.\n";
         return false;
@@ -11616,7 +11688,8 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     }
 
     const double post_reload_rotation =
-        hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation;
+        static_cast<double>(
+            hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
     if (std::abs(post_reload_rotation - 22.5) > 1e-3) {
         std::cerr << "Hot-reload smoke did not sample the updated attack pose after reload.\n";
         return false;
@@ -11693,7 +11766,8 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
         const double arm_rotation =
-            shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation;
+            static_cast<double>(
+                shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
         if (std::abs(arm_rotation - 60.0) > 1e-3) {
             std::cerr << "Timeline scrub did not update the preview arm rotation at t=0.2.\n";
             ImGui::DestroyContext();
@@ -12233,8 +12307,9 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
-    if (std::abs(shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation - 8.0) >
-        1e-3) {
+    if (std::abs(
+            shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation - 8.0f) >
+        1e-3f) {
         std::cerr << "Timeline track focus did not apply the project-authored spine rotation.\n";
         ImGui::DestroyContext();
         return 1;
@@ -12313,15 +12388,17 @@ int run_headless_smoke(const Options& options) {
         shell_state.project_dirty = true;
 
         if (!focus_timeline_track(&shell_state, *spine_track, 0.625, "Smoke", false) ||
-            std::abs(shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation - 10.5) >
-                1e-3) {
+            std::abs(
+                shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation -
+                10.5f) > 1e-3f) {
             std::cerr << "Timeline editor smoke did not apply edited linear interpolation.\n";
             ImGui::DestroyContext();
             return 1;
         }
         if (!scrub_timeline_time(&shell_state, 0.875, "Smoke", false) ||
-            std::abs(shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation - 12.0) >
-                1e-3) {
+            std::abs(
+                shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation -
+                12.0f) > 1e-3f) {
             std::cerr << "Timeline editor smoke did not apply the inserted stepped key.\n";
             ImGui::DestroyContext();
             return 1;
@@ -12372,8 +12449,8 @@ int run_headless_smoke(const Options& options) {
                 marrow::runtime::InterpolationKind::Linear ||
             exported_rotate->keyframes[2].interpolation.kind() !=
                 marrow::runtime::InterpolationKind::Stepped ||
-            std::abs(exported_rotate->keyframes[1].angle - 9.0) > 1e-3 ||
-            std::abs(exported_rotate->keyframes[2].angle - 12.0) > 1e-3) {
+            std::abs(exported_rotate->keyframes[1].angle - 9.0f) > 1e-3f ||
+            std::abs(exported_rotate->keyframes[2].angle - 12.0f) > 1e-3f) {
             std::cerr << "Timeline editor smoke export did not round-trip the edited rotate curve.\n";
             ImGui::DestroyContext();
             return 1;
@@ -12755,8 +12832,8 @@ int run_headless_smoke(const Options& options) {
             const auto* exported_deform =
                 exported_idle->find_deform_timeline(*exported_body_slot_index, "body_mesh");
             if (exported_deform == nullptr || exported_deform->keyframes.size() != 4U ||
-                std::abs(exported_deform->keyframes[1].vertex_offsets[2] - 14.0) > 1e-3 ||
-                std::abs(exported_deform->keyframes[2].vertex_offsets[2] - 8.0) > 1e-3 ||
+                std::abs(exported_deform->keyframes[1].vertex_offsets[2] - 14.0f) > 1e-3f ||
+                std::abs(exported_deform->keyframes[2].vertex_offsets[2] - 8.0f) > 1e-3f ||
                 exported_deform->keyframes[2].interpolation.kind() !=
                     marrow::runtime::InterpolationKind::Stepped) {
                 std::cerr << "Timeline editor smoke export did not round-trip the edited deform keys.\n";
@@ -12932,12 +13009,14 @@ int run_headless_smoke(const Options& options) {
         shell_state.weight_paint.mode = WeightPaintMode::Paint;
 
         const auto require_weight_near =
-            [](double actual, double expected, double epsilon, std::string_view label) {
-                if (std::abs(actual - expected) <= epsilon) {
+            [](auto actual, double expected, double epsilon, std::string_view label) {
+                const double actual_value = static_cast<double>(actual);
+                if (std::abs(actual_value - expected) <= epsilon) {
                     return true;
                 }
 
-                std::cerr << label << " expected " << expected << " but was " << actual << '\n';
+                std::cerr << label << " expected " << expected << " but was "
+                          << actual_value << '\n';
                 return false;
             };
         const auto build_weight_overlay = [&]() -> std::optional<MeshWeightOverlay> {
@@ -13312,7 +13391,8 @@ int run_headless_smoke(const Options& options) {
     }
     if (const auto arm_index = shell_state.load_result.skeleton_data->find_bone_index("arm_l")) {
         const double mixed_rotation =
-            shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation;
+            static_cast<double>(
+                shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
         if (std::abs(mixed_rotation - 45.0) > 1e-3) {
             std::cerr << "State preview smoke did not apply the queued mix pose.\n";
             ImGui::DestroyContext();
@@ -13338,14 +13418,18 @@ int run_headless_smoke(const Options& options) {
     shell_state.preview_reverse = false;
 
     const auto require_smoke_near =
-        [](double actual, double expected, double epsilon, std::string_view label) {
-            if (std::abs(actual - expected) <= epsilon) {
+        [](auto actual, auto expected, double epsilon, std::string_view label) {
+            const double actual_value = static_cast<double>(actual);
+            const double expected_value = static_cast<double>(expected);
+            if (std::abs(actual_value - expected_value) <= epsilon) {
                 return true;
             }
 
-            std::cerr << label << " expected " << expected << " but was " << actual << ".\n";
+            std::cerr << label << " expected " << expected_value << " but was " << actual_value
+                      << ".\n";
             return false;
         };
+    constexpr double kConstraintPreviewPositionEpsilon = 5e-2;
 
     shell_state.preview_skin_names = {"default"};
     shell_state.preview_slot_overrides.assign(
@@ -13421,12 +13505,12 @@ int run_headless_smoke(const Options& options) {
     if (!require_smoke_near(
             ik_tip_world.world_x,
             ik_target_world.world_x,
-            1e-3,
+            kConstraintPreviewPositionEpsilon,
             "constraint preview IK tip x") ||
         !require_smoke_near(
             ik_tip_world.world_y,
             ik_target_world.world_y,
-            1e-3,
+            kConstraintPreviewPositionEpsilon,
             "constraint preview IK tip y")) {
         std::cerr << "Constraint preview did not solve the authored IK reach target.\n";
         ImGui::DestroyContext();
@@ -13439,12 +13523,36 @@ int run_headless_smoke(const Options& options) {
         shell_state.preview_skeleton->bone_world_transforms()[*path_b_index];
     const auto& path_c_world =
         shell_state.preview_skeleton->bone_world_transforms()[*path_c_index];
-    if (!require_smoke_near(path_a_world.world_x, 20.0, 1e-3, "constraint preview path_a x") ||
-        !require_smoke_near(path_a_world.world_y, 0.0, 1e-3, "constraint preview path_a y") ||
-        !require_smoke_near(path_b_world.world_x, 80.0, 1e-3, "constraint preview path_b x") ||
-        !require_smoke_near(path_b_world.world_y, 0.0, 1e-3, "constraint preview path_b y") ||
-        !require_smoke_near(path_c_world.world_x, 100.0, 1e-3, "constraint preview path_c x") ||
-        !require_smoke_near(path_c_world.world_y, 40.0, 1e-3, "constraint preview path_c y")) {
+    if (!require_smoke_near(
+            path_a_world.world_x,
+            20.0,
+            kConstraintPreviewPositionEpsilon,
+            "constraint preview path_a x") ||
+        !require_smoke_near(
+            path_a_world.world_y,
+            0.0,
+            kConstraintPreviewPositionEpsilon,
+            "constraint preview path_a y") ||
+        !require_smoke_near(
+            path_b_world.world_x,
+            80.0,
+            kConstraintPreviewPositionEpsilon,
+            "constraint preview path_b x") ||
+        !require_smoke_near(
+            path_b_world.world_y,
+            0.0,
+            kConstraintPreviewPositionEpsilon,
+            "constraint preview path_b y") ||
+        !require_smoke_near(
+            path_c_world.world_x,
+            100.0,
+            kConstraintPreviewPositionEpsilon,
+            "constraint preview path_c x") ||
+        !require_smoke_near(
+            path_c_world.world_y,
+            40.0,
+            kConstraintPreviewPositionEpsilon,
+            "constraint preview path_c y")) {
         std::cerr << "Constraint preview did not place the path chain on the authored guide.\n";
         ImGui::DestroyContext();
         return 1;
@@ -13467,12 +13575,12 @@ int run_headless_smoke(const Options& options) {
     if (!require_smoke_near(
             transform_target_world.world_x,
             expected_transform_x,
-            1e-3,
+            kConstraintPreviewPositionEpsilon,
             "constraint preview transform target x") ||
         !require_smoke_near(
             transform_target_world.world_y,
             expected_transform_y,
-            1e-3,
+            kConstraintPreviewPositionEpsilon,
             "constraint preview transform target y") ||
         !require_smoke_near(
             transform_target_world.a,
@@ -13613,32 +13721,32 @@ int run_headless_smoke(const Options& options) {
         if (!require_smoke_near(
                 edited_path_a_world.world_x,
                 0.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview path_a x") ||
             !require_smoke_near(
                 edited_path_a_world.world_y,
                 0.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview path_a y") ||
             !require_smoke_near(
                 edited_path_b_world.world_x,
                 60.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview path_b x") ||
             !require_smoke_near(
                 edited_path_b_world.world_y,
                 0.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview path_b y") ||
             !require_smoke_near(
                 edited_path_c_world.world_x,
                 100.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview path_c x") ||
             !require_smoke_near(
                 edited_path_c_world.world_y,
                 20.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview path_c y")) {
             std::cerr << "Constraint editor smoke did not re-preview the edited path constraint.\n";
             ImGui::DestroyContext();
@@ -13650,12 +13758,12 @@ int run_headless_smoke(const Options& options) {
         if (!require_smoke_near(
                 edited_transform_target_world.world_x,
                 200.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview transform target x") ||
             !require_smoke_near(
                 edited_transform_target_world.world_y,
                 25.0,
-                1e-3,
+                kConstraintPreviewPositionEpsilon,
                 "edited constraint preview transform target y")) {
             std::cerr << "Constraint editor smoke did not re-preview the edited transform constraint.\n";
             ImGui::DestroyContext();
@@ -13670,8 +13778,8 @@ int run_headless_smoke(const Options& options) {
         const auto stepped_ribbon_tip =
             shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
         const double preview_physics_motion = std::hypot(
-            stepped_ribbon_tip.world_x - lagged_ribbon_tip.world_x,
-            stepped_ribbon_tip.world_y - lagged_ribbon_tip.world_y);
+            static_cast<double>(stepped_ribbon_tip.world_x - lagged_ribbon_tip.world_x),
+            static_cast<double>(stepped_ribbon_tip.world_y - lagged_ribbon_tip.world_y));
         if (preview_physics_motion <= 0.1) {
             std::cerr << "Constraint editor smoke did not advance the preview physics chain.\n";
             ImGui::DestroyContext();

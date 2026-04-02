@@ -34,12 +34,12 @@ void store_world_transform(
     std::size_t bone_index,
     const BoneWorldTransform& transform,
     const BoneWorldTransformBuffers& world) {
-    (*world.a)[bone_index] = static_cast<float>(transform.a);
-    (*world.b)[bone_index] = static_cast<float>(transform.b);
-    (*world.c)[bone_index] = static_cast<float>(transform.c);
-    (*world.d)[bone_index] = static_cast<float>(transform.d);
-    (*world.world_x)[bone_index] = static_cast<float>(transform.world_x);
-    (*world.world_y)[bone_index] = static_cast<float>(transform.world_y);
+    (*world.a)[bone_index] = transform.a;
+    (*world.b)[bone_index] = transform.b;
+    (*world.c)[bone_index] = transform.c;
+    (*world.d)[bone_index] = transform.d;
+    (*world.world_x)[bone_index] = transform.world_x;
+    (*world.world_y)[bone_index] = transform.world_y;
 }
 
 void store_world_components(
@@ -99,17 +99,19 @@ void propagate_scalar_bone(
     double skeleton_scale_y,
     const BoneLocalTransformBuffers& local,
     const BoneWorldTransformBuffers& world) {
+    const float scale_x = skeleton_scale_x;
+    const float scale_y = skeleton_scale_y;
     const BonePose& pose = poses[bone_index];
     const std::optional<std::size_t> parent_index = bones[bone_index].parent_index;
     if (!parent_index.has_value()) {
         store_world_components(
             bone_index,
-            (*local.a)[bone_index] * static_cast<float>(skeleton_scale_x),
-            (*local.b)[bone_index] * static_cast<float>(skeleton_scale_x),
-            (*local.c)[bone_index] * static_cast<float>(skeleton_scale_y),
-            (*local.d)[bone_index] * static_cast<float>(skeleton_scale_y),
-            (*local.x)[bone_index] * static_cast<float>(skeleton_scale_x),
-            (*local.y)[bone_index] * static_cast<float>(skeleton_scale_y),
+            (*local.a)[bone_index] * scale_x,
+            (*local.b)[bone_index] * scale_x,
+            (*local.c)[bone_index] * scale_y,
+            (*local.d)[bone_index] * scale_y,
+            (*local.x)[bone_index] * scale_x,
+            (*local.y)[bone_index] * scale_y,
             world);
         return;
     }
@@ -148,10 +150,10 @@ void propagate_scalar_bone(
         const float wy = pc * lx + pd * ly + (*world.world_y)[parent];
         store_world_components(
             bone_index,
-            (*local.a)[bone_index] * static_cast<float>(skeleton_scale_x),
-            (*local.b)[bone_index] * static_cast<float>(skeleton_scale_x),
-            (*local.c)[bone_index] * static_cast<float>(skeleton_scale_y),
-            (*local.d)[bone_index] * static_cast<float>(skeleton_scale_y),
+            (*local.a)[bone_index] * scale_x,
+            (*local.b)[bone_index] * scale_x,
+            (*local.c)[bone_index] * scale_y,
+            (*local.d)[bone_index] * scale_y,
             wx,
             wy,
             world);
@@ -355,8 +357,8 @@ void propagate_simd_translation_batch(
     const Simd4f local_b = simd_load(local.b->data() + start_index);
     const Simd4f local_c = simd_load(local.c->data() + start_index);
     const Simd4f local_d = simd_load(local.d->data() + start_index);
-    const Simd4f scale_x = simd_splat(static_cast<float>(skeleton_scale_x));
-    const Simd4f scale_y = simd_splat(static_cast<float>(skeleton_scale_y));
+    const Simd4f scale_x = simd_splat(skeleton_scale_x);
+    const Simd4f scale_y = simd_splat(skeleton_scale_y);
 
     const Simd4f wx = simd_add(simd_add(simd_mul(pa, lx), simd_mul(pb, ly)), pwx);
     const Simd4f wy = simd_add(simd_add(simd_mul(pc, lx), simd_mul(pd, ly)), pwy);
@@ -532,12 +534,13 @@ void prepare_local_transform_buffer(
     std::size_t bone_index,
     const BoneTransform& transform,
     const BoneLocalTransformBuffers& buffers) {
-    const float x = static_cast<float>(transform.x);
-    const float y = static_cast<float>(transform.y);
-    const float rotation_x = static_cast<float>(
-        degrees_to_radians(transform.rotation + transform.shear_x));
-    const float rotation_y = static_cast<float>(
-        degrees_to_radians(transform.rotation + 90.0 + transform.shear_y));
+    constexpr float kDegreesToRadiansScaleF = 0.01745329251994329577f;
+    const float x = transform.x;
+    const float y = transform.y;
+    const float rotation_x =
+        (transform.rotation + transform.shear_x) * kDegreesToRadiansScaleF;
+    const float rotation_y =
+        (transform.rotation + 90.0f + transform.shear_y) * kDegreesToRadiansScaleF;
     float sin_rotation_x = 0.0f;
     float cos_rotation_x = 1.0f;
     float sin_rotation_y = 0.0f;
@@ -547,10 +550,10 @@ void prepare_local_transform_buffer(
 
     (*buffers.x)[bone_index] = x;
     (*buffers.y)[bone_index] = y;
-    (*buffers.a)[bone_index] = cos_rotation_x * static_cast<float>(transform.scale_x);
-    (*buffers.b)[bone_index] = cos_rotation_y * static_cast<float>(transform.scale_y);
-    (*buffers.c)[bone_index] = sin_rotation_x * static_cast<float>(transform.scale_x);
-    (*buffers.d)[bone_index] = sin_rotation_y * static_cast<float>(transform.scale_y);
+    (*buffers.a)[bone_index] = cos_rotation_x * transform.scale_x;
+    (*buffers.b)[bone_index] = cos_rotation_y * transform.scale_y;
+    (*buffers.c)[bone_index] = sin_rotation_x * transform.scale_x;
+    (*buffers.d)[bone_index] = sin_rotation_y * transform.scale_y;
 }
 
 void prepare_local_transform_buffers(
@@ -569,21 +572,23 @@ BoneWorldTransform compose_cached_world_transform(
     std::size_t bone_index,
     double skeleton_scale_x,
     double skeleton_scale_y) {
-    const double local_x = static_cast<double>((*local.x)[bone_index]);
-    const double local_y = static_cast<double>((*local.y)[bone_index]);
-    const double local_a = static_cast<double>((*local.a)[bone_index]);
-    const double local_b = static_cast<double>((*local.b)[bone_index]);
-    const double local_c = static_cast<double>((*local.c)[bone_index]);
-    const double local_d = static_cast<double>((*local.d)[bone_index]);
+    const float scale_x = skeleton_scale_x;
+    const float scale_y = skeleton_scale_y;
+    const float local_x = (*local.x)[bone_index];
+    const float local_y = (*local.y)[bone_index];
+    const float local_a = (*local.a)[bone_index];
+    const float local_b = (*local.b)[bone_index];
+    const float local_c = (*local.c)[bone_index];
+    const float local_d = (*local.d)[bone_index];
 
     if (parent == nullptr) {
         BoneWorldTransform world_transform;
-        world_transform.a = local_a * skeleton_scale_x;
-        world_transform.b = local_b * skeleton_scale_x;
-        world_transform.c = local_c * skeleton_scale_y;
-        world_transform.d = local_d * skeleton_scale_y;
-        world_transform.world_x = local_x * skeleton_scale_x;
-        world_transform.world_y = local_y * skeleton_scale_y;
+        world_transform.a = local_a * scale_x;
+        world_transform.b = local_b * scale_x;
+        world_transform.c = local_c * scale_y;
+        world_transform.d = local_d * scale_y;
+        world_transform.world_x = local_x * scale_x;
+        world_transform.world_y = local_y * scale_y;
         return world_transform;
     }
 
@@ -606,10 +611,10 @@ BoneWorldTransform compose_cached_world_transform(
             parent->a * local_x + parent->b * local_y + parent->world_x;
         world_transform.world_y =
             parent->c * local_x + parent->d * local_y + parent->world_y;
-        world_transform.a = local_a * skeleton_scale_x;
-        world_transform.b = local_b * skeleton_scale_x;
-        world_transform.c = local_c * skeleton_scale_y;
-        world_transform.d = local_d * skeleton_scale_y;
+        world_transform.a = local_a * scale_x;
+        world_transform.b = local_b * scale_x;
+        world_transform.c = local_c * scale_y;
+        world_transform.d = local_d * scale_y;
         return world_transform;
     }
 

@@ -58,7 +58,8 @@
 - Idle constraint dirty-skip benchmark: `./build-bench/marrow_benchmark --skeletons 200 --constraint-drive idle`
 - Partial constraint dirty-skip benchmark: `./build-bench/marrow_benchmark --skeletons 200 --constraint-drive partial`
 - Release 60fps target validation for 200 medium skeletons: `./build-bench/marrow_benchmark --skeletons 200`
-- Current validated 200-skeleton release metrics on this host: `frame_ms=3.94`, `score=100`, `animation_us=1.54`, `transform_us=0.00`, `skinning_us=0.05`, `constraint_us=14.05`, `render_us=0.00`, `max_skeletons_60fps=845.54`
+- Benchmark timing note: run `marrow_benchmark` commands without concurrent build/test workloads; parallel renderer/test activity can perturb the profiler-overhead guard.
+- Current validated 200-skeleton release metrics on this host: `frame_ms=3.99`, `score=100`, `animation_us=1.60`, `transform_us=0.01`, `skinning_us=0.13`, `constraint_us=14.11`, `render_us=0.00`, `max_skeletons_60fps=835.31`
 - 200-skeleton before/after comparison (original profiling baseline from the MAR-099 story brief vs the current validated release run on this host):
 
 | Metric | Original profiling | Current validated | Target | Status |

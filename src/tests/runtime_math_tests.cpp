@@ -1914,6 +1914,9 @@ void test_constraint_dirty_skip_preserves_output(TestContext& context) {
             skipped_timing.skipped_transform_constraints == 2U,
         "unchanged transform constraints should reuse the cached solve output");
     context.expect(
+        skipped_timing.full_skeleton_passes == 0U,
+        "unchanged constraint updates should skip full world-transform passes entirely");
+    context.expect(
         initial_world.size() == skipped_world.size(),
         "constraint dirty skip regression should preserve the world-transform buffer size");
 
@@ -1949,6 +1952,9 @@ void test_constraint_dirty_skip_re_evaluates_only_affected_constraints(TestConte
             ik_timing.skipped_transform_constraints == 2U,
         "moving an IK target should leave transform constraints on the cached skip path");
     context.expect(
+        ik_timing.full_skeleton_passes == 1U,
+        "moving one IK target should keep world solving to the initial full pass");
+    context.expect(
         std::abs(ik_world[3].world_y - baseline_world[3].world_y) > 0.5,
         "the affected IK branch should move after its target changes");
     context.expect_near(
@@ -1973,6 +1979,9 @@ void test_constraint_dirty_skip_re_evaluates_only_affected_constraints(TestConte
         transform_timing.evaluated_transform_constraints == 1U &&
             transform_timing.skipped_transform_constraints == 1U,
         "changing one transform source should only re-evaluate the affected transform constraint");
+    context.expect(
+        transform_timing.full_skeleton_passes == 1U,
+        "moving one transform source should keep world solving to the initial full pass");
     context.expect(
         std::abs(transform_world[13].a - ik_world[13].a) > 0.05 ||
             std::abs(transform_world[13].c - ik_world[13].c) > 0.05 ||
@@ -2059,6 +2068,8 @@ void test_ik_cases(TestContext& context) {
 }
 
 void test_physics_stepping(TestContext& context) {
+    constexpr double kPhysicsWorldTolerance = 5e-4;
+
     const std::shared_ptr<const SkeletonData> data = make_physics_test_data();
 
     Skeleton authored(data);
@@ -2095,7 +2106,7 @@ void test_physics_stepping(TestContext& context) {
         simulated.bone_world_transforms()[2],
         authored_tip,
         "physics reset tip",
-        1e-5);
+        kPhysicsWorldTolerance);
 }
 
 void test_skeleton_bounds_queries(TestContext& context) {

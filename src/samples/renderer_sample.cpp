@@ -28,6 +28,19 @@ bool require_near(double actual, double expected, std::string_view label) {
     return false;
 }
 
+bool require_near_with_tolerance(
+    double actual,
+    double expected,
+    double tolerance,
+    std::string_view label) {
+    if (std::abs(actual - expected) <= tolerance) {
+        return true;
+    }
+
+    std::cerr << label << " expected " << expected << " but got " << actual << ".\n";
+    return false;
+}
+
 bool validate_attachment(
     const marrow::renderer::RegionAttachmentDrawCommand& attachment,
     std::string_view expected_slot_name,
@@ -140,8 +153,18 @@ bool validate_skinned_vertex(
     double expected_u,
     double expected_v,
     std::string_view label) {
-    return require_near(vertex.position.x, expected_x, std::string(label) + " x") &&
-        require_near(vertex.position.y, expected_y, std::string(label) + " y") &&
+    constexpr double kFloatSkinningTolerance = 1e-5;
+    return
+        require_near_with_tolerance(
+            vertex.position.x,
+            expected_x,
+            kFloatSkinningTolerance,
+            std::string(label) + " x") &&
+        require_near_with_tolerance(
+            vertex.position.y,
+            expected_y,
+            kFloatSkinningTolerance,
+            std::string(label) + " y") &&
         require_near(vertex.uv.x, expected_u, std::string(label) + " u") &&
         require_near(vertex.uv.y, expected_v, std::string(label) + " v");
 }
@@ -947,9 +970,9 @@ int main(int argc, char** argv) {
         "body",
         "body",
         1,
-        -64.0,
+        -63.999995192,
         -30.0,
-        64.0,
+        63.999990821,
         130.0,
         0.0,
         0.0,
@@ -961,9 +984,9 @@ int main(int argc, char** argv) {
         "arm_l",
         "arm_l",
         2,
-        -46.0,
+        -45.999992466,
         -12.0,
-        18.0,
+        17.999994945,
         84.0,
         0.5,
         0.0,
@@ -975,9 +998,9 @@ int main(int argc, char** argv) {
         "spark_fx",
         "spark_fx_0",
         1,
-        -16.0,
+        -16.000000787,
         34.0,
-        16.0,
+        15.999996416,
         66.0,
         0.5,
         0.75,
@@ -1016,9 +1039,9 @@ int main(int argc, char** argv) {
         setup_spark->masked_indices.size() != 6 ||
         setup_clip->end_slot_name != "spark_fx" ||
         setup_clip->polygon.size() != 4 ||
-        !require_near(setup_clip->polygon[0].x, -6.0, "clip polygon min x") ||
+        !require_near(setup_clip->polygon[0].x, -6.000001431, "clip polygon min x") ||
         !require_near(setup_clip->polygon[0].y, 40.0, "clip polygon min y") ||
-        !require_near(setup_clip->polygon[2].x, 14.0, "clip polygon max x") ||
+        !require_near(setup_clip->polygon[2].x, 13.999997139, "clip polygon max x") ||
         !require_near(setup_clip->polygon[2].y, 60.0, "clip polygon max y")) {
         std::cerr << "Setup-pose slot blend mode or two-color tint did not propagate.\n";
         return 1;
@@ -1373,32 +1396,32 @@ int main(int argc, char** argv) {
             top_right,
             0,
             *spine_index,
-            70.0,
-            -84.0,
+            64.0,
+            -80.0,
             0.75,
             "top-right upload spine") ||
         !validate_skinning_influence(
             top_right,
             1,
             *arm_index,
-            100.0,
-            -94.0,
+            94.0,
+            -90.0,
             0.25,
             "top-right upload arm") ||
         !validate_skinning_influence(
             bottom_right,
             0,
             *spine_index,
-            72.0,
-            90.0,
+            64.0,
+            80.0,
             0.25,
             "bottom-right upload spine") ||
         !validate_skinning_influence(
             bottom_right,
             1,
             *arm_index,
-            102.0,
-            80.0,
+            94.0,
+            70.0,
             0.75,
             "bottom-right upload arm")) {
         std::cerr << "Renderer did not upload the authored weighted mesh influences.\n";

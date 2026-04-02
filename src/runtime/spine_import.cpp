@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -190,12 +191,39 @@ std::optional<LoadError> read_optional_string(
     return std::nullopt;
 }
 
+template <typename Number>
+std::optional<LoadError> assign_number(
+    const Document& document,
+    const Value& value,
+    std::string_view json_path,
+    Number* value_out) {
+    const double parsed = value.as_number();
+    if constexpr (std::is_same_v<Number, double>) {
+        *value_out = parsed;
+        return std::nullopt;
+    } else {
+        if (!std::isfinite(parsed) ||
+            parsed < -static_cast<double>(std::numeric_limits<Number>::max()) ||
+            parsed > static_cast<double>(std::numeric_limits<Number>::max())) {
+            return validation_error(
+                document,
+                value.location(),
+                std::string(json_path),
+                "number is outside the runtime float32 range");
+        }
+
+        *value_out = static_cast<Number>(parsed);
+        return std::nullopt;
+    }
+}
+
+template <typename Number>
 std::optional<LoadError> read_optional_number(
     const Document& document,
     const Value& object,
     std::string_view key,
     std::string_view json_path,
-    double* value_out) {
+    Number* value_out) {
     const Value* member = find_optional_member(object, key);
     if (member == nullptr) {
         return std::nullopt;
@@ -208,16 +236,20 @@ std::optional<LoadError> read_optional_number(
         return error;
     }
 
-    *value_out = member->as_number();
-    return std::nullopt;
+    return assign_number(
+        document,
+        *member,
+        std::string(json_path) + "." + std::string(key),
+        value_out);
 }
 
+template <typename Number>
 std::optional<LoadError> read_required_number(
     const Document& document,
     const Value& object,
     std::string_view key,
     std::string_view json_path,
-    double* value_out) {
+    Number* value_out) {
     const Value* member = nullptr;
     if (const auto error = json::require_member(
             document,
@@ -229,8 +261,11 @@ std::optional<LoadError> read_required_number(
         return error;
     }
 
-    *value_out = member->as_number();
-    return std::nullopt;
+    return assign_number(
+        document,
+        *member,
+        std::string(json_path) + "." + std::string(key),
+        value_out);
 }
 
 std::optional<LoadError> read_optional_boolean(

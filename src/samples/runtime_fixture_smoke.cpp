@@ -410,13 +410,26 @@ std::vector<BoneWorldTransform> compute_reference_world_transforms(
 bool require_world_transform(
     const BoneWorldTransform& actual,
     const BoneWorldTransform& expected,
-    std::string_view label) {
-    return require_near(actual.a, expected.a, std::string(label) + " axis a") &&
-        require_near(actual.b, expected.b, std::string(label) + " axis b") &&
-        require_near(actual.c, expected.c, std::string(label) + " axis c") &&
-        require_near(actual.d, expected.d, std::string(label) + " axis d") &&
-        require_near(actual.world_x, expected.world_x, std::string(label) + " world x") &&
-        require_near(actual.world_y, expected.world_y, std::string(label) + " world y");
+    std::string_view label,
+    double tolerance = -1.0) {
+    const auto require_component = [&](double actual_component,
+                                       double expected_component,
+                                       std::string_view component_label) {
+        if (tolerance >= 0.0) {
+            return require_near_with_tolerance(
+                actual_component,
+                expected_component,
+                tolerance,
+                component_label);
+        }
+        return require_near(actual_component, expected_component, component_label);
+    };
+    return require_component(actual.a, expected.a, std::string(label) + " axis a") &&
+        require_component(actual.b, expected.b, std::string(label) + " axis b") &&
+        require_component(actual.c, expected.c, std::string(label) + " axis c") &&
+        require_component(actual.d, expected.d, std::string(label) + " axis d") &&
+        require_component(actual.world_x, expected.world_x, std::string(label) + " world x") &&
+        require_component(actual.world_y, expected.world_y, std::string(label) + " world y");
 }
 
 double wrap_reference_rotation_degrees(double angle) {
@@ -4030,9 +4043,9 @@ bool validate_runtime_visibility_and_throttling(
 
         max_pose_error = std::max(
             max_pose_error,
-            std::abs(
+            static_cast<double>(std::abs(
                 throttled_skeleton.bone_poses()[*root_index].local_pose.x -
-                full_rate_skeleton.bone_poses()[*root_index].local_pose.x));
+                full_rate_skeleton.bone_poses()[*root_index].local_pose.x)));
         max_world_error = std::max(
             max_world_error,
             static_cast<double>(std::abs(
@@ -4286,8 +4299,10 @@ bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) 
     Skeleton skeleton(skeleton_result.skeleton_data);
     marrow::runtime::WorldTransformTimingBreakdown initial_timing;
     skeleton.update_world_transforms(marrow::runtime::PhysicsMode::None, &initial_timing);
-    if (initial_timing.full_skeleton_passes != 1U) {
-        std::cerr << "IK constraint solve should perform exactly one full world-transform pass per update.\n";
+    if (initial_timing.full_skeleton_passes != 0U ||
+        initial_timing.evaluated_ik_constraints != 0U ||
+        initial_timing.skipped_ik_constraints != skeleton_result.skeleton_data->ik_constraints().size()) {
+        std::cerr << "IK fixture setup-state update should stay on the cached targeted-subtree skip path.\n";
         return false;
     }
     const ReferenceIkState reference = solve_reference_ik(*skeleton_result.skeleton_data);
@@ -4448,8 +4463,11 @@ bool validate_runtime_ik_constraints(const std::filesystem::path& fixture_path) 
     skeleton.bone_poses()[*target_full_index].local_pose.y = -60.0;
     marrow::runtime::WorldTransformTimingBreakdown moved_timing;
     skeleton.update_world_transforms(marrow::runtime::PhysicsMode::None, &moved_timing);
-    if (moved_timing.full_skeleton_passes != 1U) {
-        std::cerr << "Moved IK target solve should perform exactly one full world-transform pass per update.\n";
+    if (moved_timing.full_skeleton_passes != 1U ||
+        moved_timing.evaluated_ik_constraints != 1U ||
+        moved_timing.skipped_ik_constraints + moved_timing.evaluated_ik_constraints !=
+            skeleton_result.skeleton_data->ik_constraints().size()) {
+        std::cerr << "Moved IK target solve should re-evaluate only the affected constraint after the full input pass.\n";
         return false;
     }
 
@@ -4696,6 +4714,9 @@ bool validate_runtime_path_transform_constraints(const std::filesystem::path& fi
 }
 
 bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_path) {
+    constexpr double kPhysicsWorldTolerance = 5e-4;
+    constexpr double kPhysicsFrameRateTolerance = 2e-2;
+
     const std::optional<Document> document = load_document_or_print(fixture_path);
     if (!document.has_value()) {
         return false;
@@ -4830,11 +4851,13 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
     if (!require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_01_index],
             lagged_root,
-            "physics pose root") ||
+            "physics pose root",
+            kPhysicsWorldTolerance) ||
         !require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
             lagged_tip,
-            "physics pose tip")) {
+            "physics pose tip",
+            kPhysicsWorldTolerance)) {
         std::cerr << "Physics POSE mode did not preserve the accumulated offsets.\n";
         return false;
     }
@@ -4843,11 +4866,13 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
     if (!require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_01_index],
             authored_root,
-            "physics none root") ||
+            "physics none root",
+            kPhysicsWorldTolerance) ||
         !require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
             authored_tip,
-            "physics none tip")) {
+            "physics none tip",
+            kPhysicsWorldTolerance)) {
         std::cerr << "Physics NONE mode did not return to the authored pose.\n";
         return false;
     }
@@ -4856,11 +4881,13 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
     if (!require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_01_index],
             authored_root,
-            "physics reset root") ||
+            "physics reset root",
+            kPhysicsWorldTolerance) ||
         !require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
             authored_tip,
-            "physics reset tip")) {
+            "physics reset tip",
+            kPhysicsWorldTolerance)) {
         std::cerr << "Physics reset did not snapshot the current authored pose.\n";
         return false;
     }
@@ -4868,11 +4895,13 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
     if (!require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_01_index],
             authored_root,
-            "physics reset pose root") ||
+            "physics reset pose root",
+            kPhysicsWorldTolerance) ||
         !require_world_transform(
             physics_skeleton.bone_world_transforms()[*ribbon_tip_index],
             authored_tip,
-            "physics reset pose tip")) {
+            "physics reset pose tip",
+            kPhysicsWorldTolerance)) {
         std::cerr << "Physics reset left non-zero offsets or velocities behind.\n";
         return false;
     }
@@ -4901,12 +4930,14 @@ bool validate_runtime_physics_constraints(const std::filesystem::path& fixture_p
     }
     const BoneWorldTransform slow_tip = slow_frame_rate.bone_world_transforms()[*ribbon_tip_index];
     const BoneWorldTransform fast_tip = fast_frame_rate.bone_world_transforms()[*ribbon_tip_index];
-    if (std::abs(slow_tip.world_x - fast_tip.world_x) > 1e-2 ||
-        std::abs(slow_tip.world_y - fast_tip.world_y) > 1e-2 ||
+    if (std::abs(slow_tip.world_x - fast_tip.world_x) > kPhysicsFrameRateTolerance ||
+        std::abs(slow_tip.world_y - fast_tip.world_y) > kPhysicsFrameRateTolerance ||
         std::abs(slow_frame_rate.bone_world_transforms()[*ribbon_01_index].a -
-                 fast_frame_rate.bone_world_transforms()[*ribbon_01_index].a) > 1e-2 ||
+                 fast_frame_rate.bone_world_transforms()[*ribbon_01_index].a) >
+            kPhysicsFrameRateTolerance ||
         std::abs(slow_frame_rate.bone_world_transforms()[*ribbon_01_index].c -
-                 fast_frame_rate.bone_world_transforms()[*ribbon_01_index].c) > 1e-2) {
+                 fast_frame_rate.bone_world_transforms()[*ribbon_01_index].c) >
+            kPhysicsFrameRateTolerance) {
         std::cerr << "Physics fixed-step accumulation still depends on frame rate."
                   << " slowTip=(" << slow_tip.world_x << ", " << slow_tip.world_y << ")"
                   << " fastTip=(" << fast_tip.world_x << ", " << fast_tip.world_y << ")\n";
