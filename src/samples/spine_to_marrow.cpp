@@ -161,6 +161,12 @@ std::filesystem::path atlas_output_path_for_page(
         (base_output_path.stem().string() + "_" + suffix + base_output_path.extension().string());
 }
 
+void print_warnings(const std::vector<std::string>& warnings) {
+    for (const std::string& warning : warnings) {
+        std::cerr << "Warning: " << warning << '\n';
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -181,6 +187,7 @@ int main(int argc, char** argv) {
 
     if (*input_kind == InputKind::SpineJson) {
         const auto import_result = marrow::runtime::import_spine_json_file(options.input_path);
+        print_warnings(import_result.warnings);
         if (!import_result) {
             std::cerr << import_result.error->format() << '\n';
             return 1;

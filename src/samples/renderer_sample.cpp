@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -857,6 +858,120 @@ std::optional<Options> parse_options(int argc, char** argv) {
     return options;
 }
 
+bool filename_matches_any(
+    const std::filesystem::path& path,
+    std::initializer_list<std::string_view> expected_names) {
+    const std::string filename = path.filename().string();
+    for (const std::string_view expected_name : expected_names) {
+        if (filename == expected_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool uses_checked_in_fixture_renderer_validation(
+    const std::filesystem::path& skeleton_path,
+    const std::filesystem::path& atlas_path) {
+    return filename_matches_any(skeleton_path, {"player_idle.mskl", "player_idle.mbin"}) &&
+        filename_matches_any(atlas_path, {"player_idle.matl"});
+}
+
+bool validate_generic_renderer_sample(
+    const Options& options,
+    const std::shared_ptr<const marrow::runtime::SkeletonData>& skeleton_data,
+    const std::shared_ptr<const marrow::runtime::AtlasData>& atlas_data,
+    const std::filesystem::path& atlas_image_path) {
+    marrow::runtime::Skeleton skeleton(skeleton_data);
+    skeleton.set_to_setup_pose();
+
+    const auto scene_result =
+        marrow::renderer::prepare_setup_pose_scene(skeleton, *atlas_data);
+    if (!scene_result) {
+        std::cerr << scene_result.error_message << '\n';
+        return false;
+    }
+
+    const marrow::renderer::PreparedScene& scene = *scene_result.scene;
+    if (scene.draw_commands.empty()) {
+        std::cerr << "Prepared scene does not contain any setup-pose attachments to render.\n";
+        return false;
+    }
+    if (scene.bone_palette.size() != skeleton_data->bones().size()) {
+        std::cerr << "Prepared scene did not preserve the imported bone palette.\n";
+        return false;
+    }
+
+    constexpr std::array<float, 16> kIdentityProjection{{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    const marrow::renderer::RenderCommandListResult command_list_result =
+        marrow::renderer::build_render_command_list(scene, kIdentityProjection);
+    if (!command_list_result) {
+        std::cerr << command_list_result.error_message << '\n';
+        return false;
+    }
+    if (command_list_result.command_list->commands.empty()) {
+        std::cerr << "Render command list did not contain any setup-pose draw calls.\n";
+        return false;
+    }
+
+    const DrawCommandCounts draw_counts = count_draw_commands(scene);
+    const marrow::renderer::PreparedSceneBatchSummary batch_summary =
+        marrow::renderer::summarize_prepared_scene_batches(scene);
+    if (!batch_summary) {
+        std::cerr << batch_summary.error_message.value_or("Failed to summarize prepared scene batches.")
+                  << '\n';
+        return false;
+    }
+
+    std::cout << "Generic renderer sample prepared setup pose: skeleton="
+              << scene.skeleton_name
+              << ", bones=" << scene.bone_palette.size()
+              << ", regions=" << draw_counts.region_attachments
+              << ", meshes=" << draw_counts.dynamic_mesh_attachments
+              << ", clips=" << scene.clip_attachments.size()
+              << ", drawCommands=" << scene.draw_commands.size()
+              << ", drawCalls=" << batch_summary.draw_call_count
+              << ", atlas=" << scene.atlas_name << '\n';
+
+    marrow::renderer::SampleAppWindow window;
+    window.title = "Marrow Render Validation";
+    window.width = 1280;
+    window.height = 720;
+
+    const marrow::renderer::DemoShell shell(
+        window,
+        scene,
+        atlas_image_path,
+        options.hud_overlay);
+
+    if (options.skip_render) {
+        std::cout << "Renderer startup skipped after generic setup-pose validation.\n";
+        return true;
+    }
+
+    if (options.auto_close_frames.has_value()) {
+        if (const std::optional<std::string> render_error =
+                shell.run(options.auto_close_frames)) {
+            std::cerr << *render_error << '\n';
+            return false;
+        }
+        std::cout << "Auto-close smoke mode completed after presenting the atlas through sokol_gfx.\n";
+        return true;
+    }
+
+    if (const std::optional<std::string> render_error = shell.run()) {
+        std::cerr << *render_error << '\n';
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -876,13 +991,26 @@ int main(int argc, char** argv) {
         std::cerr << atlas_result.error->format() << '\n';
         return 1;
     }
+
+    const std::filesystem::path atlas_image_path =
+        resolve_atlas_image_path(options->atlas_path, *atlas_result.atlas_data);
+    if (!uses_checked_in_fixture_renderer_validation(
+            options->skeleton_path,
+            options->atlas_path)) {
+        return validate_generic_renderer_sample(
+                   *options,
+                   skeleton_result.skeleton_data,
+                   atlas_result.atlas_data,
+                   atlas_image_path)
+            ? 0
+            : 1;
+    }
+
     if (atlas_result.atlas_data->info().premultiplied_alpha) {
         std::cerr << "The checked-in fixture atlas should stay in straight-alpha mode for MAR-062 coverage.\n";
         return 1;
     }
 
-    const std::filesystem::path atlas_image_path =
-        resolve_atlas_image_path(options->atlas_path, *atlas_result.atlas_data);
     const marrow::renderer::TextureImageLoadResult atlas_texture =
         marrow::renderer::load_png_texture_or_white(atlas_image_path);
     if (!atlas_texture.loaded_from_file) {

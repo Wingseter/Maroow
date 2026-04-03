@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -5155,6 +5157,197 @@ bool validate_runtime_atlas_version_rejection() {
     return true;
 }
 
+bool filename_matches_any(
+    const std::filesystem::path& path,
+    std::initializer_list<std::string_view> expected_names) {
+    const std::string filename = path.filename().string();
+    for (const std::string_view expected_name : expected_names) {
+        if (filename == expected_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool uses_checked_in_fixture_validation(
+    const std::filesystem::path& skeleton_path,
+    const std::filesystem::path& atlas_path) {
+    return filename_matches_any(skeleton_path, {"player_idle.mskl", "player_idle.mbin"}) &&
+        filename_matches_any(atlas_path, {"player_idle.matl"});
+}
+
+bool require_finite_world_transforms(const Skeleton& skeleton, std::string_view label) {
+    for (std::size_t bone_index = 0; bone_index < skeleton.bone_world_transforms().size();
+         ++bone_index) {
+        const BoneWorldTransform transform = skeleton.bone_world_transforms()[bone_index];
+        if (std::isfinite(transform.a) && std::isfinite(transform.b) &&
+            std::isfinite(transform.c) && std::isfinite(transform.d) &&
+            std::isfinite(transform.world_x) && std::isfinite(transform.world_y)) {
+            continue;
+        }
+
+        std::cerr << label << " produced a non-finite world transform at bone "
+                  << bone_index << ".\n";
+        return false;
+    }
+
+    return true;
+}
+
+bool validate_generic_runtime_asset(
+    const std::filesystem::path& skeleton_path,
+    const std::filesystem::path& atlas_path) {
+    const auto skeleton_result = marrow::runtime::load_skeleton_data(skeleton_path);
+    if (!skeleton_result) {
+        return print_error(*skeleton_result.error);
+    }
+
+    const auto atlas_result = AtlasLoader::load(atlas_path);
+    if (!atlas_result) {
+        return print_error(*atlas_result.error);
+    }
+
+    const auto& skeleton_data = *skeleton_result.skeleton_data;
+    if (skeleton_data.bones().empty() || skeleton_data.slots().empty()) {
+        std::cerr << "Generic runtime validation requires at least one bone and one slot.\n";
+        return false;
+    }
+
+    Skeleton skeleton(skeleton_result.skeleton_data);
+    if (skeleton.bone_poses().size() != skeleton_data.bones().size() ||
+        skeleton.bone_world_transforms().size() != skeleton_data.bones().size() ||
+        skeleton.slot_states().size() != skeleton_data.slots().size() ||
+        skeleton.draw_order().size() != skeleton_data.slots().size()) {
+        std::cerr << "Skeleton instance state does not match the imported SkeletonData sizes.\n";
+        return false;
+    }
+
+    skeleton.clear_last_error();
+    skeleton.set_to_setup_pose();
+    if (skeleton.last_error().has_value()) {
+        std::cerr << *skeleton.last_error() << '\n';
+        return false;
+    }
+
+    skeleton.clear_last_error();
+    skeleton.update_world_transforms();
+    if (skeleton.last_error().has_value()) {
+        std::cerr << *skeleton.last_error() << '\n';
+        return false;
+    }
+    if (!require_finite_world_transforms(skeleton, "setup pose")) {
+        return false;
+    }
+
+    std::size_t active_setup_attachments = 0;
+    for (std::size_t slot_index = 0; slot_index < skeleton.slot_states().size(); ++slot_index) {
+        const auto& slot_state = skeleton.slot_states()[slot_index];
+        if (slot_state.attachment_name.empty()) {
+            continue;
+        }
+
+        ++active_setup_attachments;
+        if (skeleton.current_attachment(slot_index) == nullptr) {
+            std::cerr << "Setup pose attachment '" << slot_state.attachment_name
+                      << "' could not be resolved for slot " << slot_index << ".\n";
+            return false;
+        }
+    }
+    if (active_setup_attachments == 0U) {
+        std::cerr << "Imported runtime asset did not expose any setup-pose attachments.\n";
+        return false;
+    }
+
+    const auto setup_scene_result =
+        marrow::renderer::prepare_setup_pose_scene(skeleton, *atlas_result.atlas_data);
+    if (!setup_scene_result) {
+        std::cerr << setup_scene_result.error_message << '\n';
+        return false;
+    }
+
+    const auto& setup_scene = *setup_scene_result.scene;
+    if (setup_scene.draw_commands.empty()) {
+        std::cerr << "Imported runtime asset prepared an empty setup-pose scene.\n";
+        return false;
+    }
+    if (setup_scene.bone_palette.size() != skeleton_data.bones().size()) {
+        std::cerr << "Prepared setup-pose scene did not preserve the imported bone palette.\n";
+        return false;
+    }
+
+    constexpr std::array<float, 16> kIdentityProjection{{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    const auto command_list_result =
+        marrow::renderer::build_render_command_list(setup_scene, kIdentityProjection);
+    if (!command_list_result) {
+        std::cerr << command_list_result.error_message << '\n';
+        return false;
+    }
+    if (command_list_result.command_list->commands.empty()) {
+        std::cerr << "Imported runtime asset built an empty render command list.\n";
+        return false;
+    }
+
+    std::size_t validated_animation_count = 0;
+    for (const auto& animation : skeleton_data.animations()) {
+        Skeleton animated_skeleton(skeleton_result.skeleton_data);
+        const double duration = animation.duration();
+        const double sample_time = duration > 0.0 ? duration * 0.5 : 0.0;
+
+        animated_skeleton.clear_last_error();
+        animated_skeleton.apply_animation(animation, sample_time);
+        if (animated_skeleton.last_error().has_value()) {
+            std::cerr << "Animation '" << animation.name << "' failed to apply: "
+                      << *animated_skeleton.last_error() << '\n';
+            return false;
+        }
+
+        animated_skeleton.clear_last_error();
+        animated_skeleton.update_world_transforms();
+        if (animated_skeleton.last_error().has_value()) {
+            std::cerr << "Animation '" << animation.name
+                      << "' failed to update world transforms: "
+                      << *animated_skeleton.last_error() << '\n';
+            return false;
+        }
+        if (!require_finite_world_transforms(
+                animated_skeleton,
+                std::string("animation '") + animation.name + "'")) {
+            return false;
+        }
+
+        const auto animated_scene_result =
+            marrow::renderer::prepare_setup_pose_scene(
+                animated_skeleton,
+                *atlas_result.atlas_data);
+        if (!animated_scene_result) {
+            std::cerr << "Animation '" << animation.name
+                      << "' failed to prepare a scene: "
+                      << animated_scene_result.error_message << '\n';
+            return false;
+        }
+
+        ++validated_animation_count;
+    }
+
+    std::cout << "Loaded generic runtime asset: " << skeleton_path.string() << '\n'
+              << "  bones=" << skeleton_data.bones().size()
+              << ", slots=" << skeleton_data.slots().size()
+              << ", skins=" << skeleton_data.skins().size()
+              << ", animations=" << skeleton_data.animations().size()
+              << ", events=" << skeleton_data.events().size() << '\n'
+              << "  setupAttachments=" << active_setup_attachments
+              << ", drawCommands=" << setup_scene.draw_commands.size()
+              << ", clips=" << setup_scene.clip_attachments.size()
+              << ", validatedAnimations=" << validated_animation_count << '\n';
+    std::cout << "Generic runtime asset smoke test passed.\n";
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -5165,6 +5358,10 @@ int main(int argc, char** argv) {
 
     g_quantized_runtime_validation =
         skeleton_path.extension() == marrow::runtime::skeleton_binary_extension();
+
+    if (!uses_checked_in_fixture_validation(skeleton_path, atlas_path)) {
+        return validate_generic_runtime_asset(skeleton_path, atlas_path) ? 0 : 1;
+    }
 
     const std::optional<Document> skeleton_document = load_document_or_print(skeleton_path);
     const std::optional<Document> atlas_document = load_document_or_print(atlas_path);

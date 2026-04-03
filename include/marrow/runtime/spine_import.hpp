@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "marrow/runtime/json.hpp"
@@ -11,6 +12,7 @@ namespace marrow::runtime {
 struct SpineImportResult {
     std::optional<json::Document> document;
     std::optional<json::LoadError> error;
+    std::vector<std::string> warnings;
 
     /// @brief Reports whether Spine JSON import succeeded.
     /// @return `true` when an imported document is present; otherwise `false`.

@@ -53,6 +53,7 @@ struct ImportContext {
     std::vector<std::string> setup_draw_order;
     std::vector<AttachmentRecord> attachment_records;
     std::optional<std::string> default_skin_name;
+    std::vector<std::string>* warnings{nullptr};
 };
 
 struct ConvertedAttachmentResult {
@@ -78,6 +79,14 @@ struct AtlasImportRegion {
     double rotate_degrees{0.0};
 };
 
+struct WeightedMeshInfluence {
+    std::size_t source_index{0};
+    std::size_t bone_index{0};
+    double local_x{0.0};
+    double local_y{0.0};
+    double weight{0.0};
+};
+
 struct AtlasImportPage {
     std::string image_name;
     double width{0.0};
@@ -100,6 +109,13 @@ LoadError validation_error(
         location,
         std::move(json_path),
         std::move(message));
+}
+
+void append_import_warning(const ImportContext& context, std::string message) {
+    if (context.warnings == nullptr) {
+        return;
+    }
+    context.warnings->push_back(std::move(message));
 }
 
 Value make_null_value() {
@@ -241,6 +257,35 @@ std::optional<LoadError> read_optional_number(
         *member,
         std::string(json_path) + "." + std::string(key),
         value_out);
+}
+
+template <typename Number>
+std::optional<LoadError> read_optional_number_alias(
+    const Document& document,
+    const Value& object,
+    std::string_view primary_key,
+    std::string_view fallback_key,
+    std::string_view json_path,
+    Number* value_out) {
+    const Value* member = find_optional_member(object, primary_key);
+    std::string member_path =
+        std::string(json_path) + "." + std::string(primary_key);
+    if (member == nullptr && !fallback_key.empty()) {
+        member = find_optional_member(object, fallback_key);
+        member_path = std::string(json_path) + "." + std::string(fallback_key);
+    }
+    if (member == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = json::require_type(
+            document,
+            *member,
+            Value::Type::Number,
+            member_path)) {
+        return error;
+    }
+
+    return assign_number(document, *member, member_path, value_out);
 }
 
 template <typename Number>
@@ -487,11 +532,13 @@ std::optional<LoadError> parse_string_array(
 }
 
 std::optional<LoadError> parse_path_points(
-    const Document& document,
+    const ImportContext& context,
+    const SpineSlotInfo& slot,
     const Value& vertices_value,
     std::size_t vertex_count,
     std::string_view json_path,
     std::vector<AttachmentVertex>* points_out) {
+    const Document& document = context.document;
     std::vector<double> coordinates;
     if (const auto error = parse_number_array(
             document,
@@ -501,26 +548,106 @@ std::optional<LoadError> parse_path_points(
         return error;
     }
 
-    if (coordinates.size() != vertex_count * 2U) {
-        return validation_error(
-            document,
-            vertices_value.location(),
-            std::string(json_path),
-            "weighted path attachments are not supported by the Marrow importer");
-    }
-
-    if (vertex_count < 4 || ((vertex_count - 1U) % 3U) != 0U) {
-        return validation_error(
-            document,
-            vertices_value.location(),
-            std::string(json_path),
-            "path attachments must provide 3n+1 control points");
-    }
-
     points_out->clear();
     points_out->reserve(vertex_count);
-    for (std::size_t index = 0; index < coordinates.size(); index += 2) {
-        points_out->push_back({coordinates[index], coordinates[index + 1]});
+    if (coordinates.size() == vertex_count * 2U) {
+        for (std::size_t index = 0; index < coordinates.size(); index += 2) {
+            points_out->push_back({coordinates[index], coordinates[index + 1]});
+        }
+    } else {
+        const BoneWorldTransform& slot_bone_world =
+            context.bone_world_transforms[slot.bone_index];
+        std::size_t cursor = 0;
+        for (std::size_t vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
+            if (cursor >= coordinates.size()) {
+                return validation_error(
+                    document,
+                    vertices_value.location(),
+                    std::string(json_path),
+                    "weighted path vertices ended before all control points were decoded");
+            }
+
+            const double bone_count_value = coordinates[cursor++];
+            if (bone_count_value < 1.0 || std::floor(bone_count_value) != bone_count_value) {
+                return validation_error(
+                    document,
+                    vertices_value.location(),
+                    std::string(json_path),
+                    "weighted path vertices must start with an integer bone influence count");
+            }
+
+            const std::size_t influence_count = static_cast<std::size_t>(bone_count_value);
+            if (cursor + influence_count * 4U > coordinates.size()) {
+                return validation_error(
+                    document,
+                    vertices_value.location(),
+                    std::string(json_path),
+                    "weighted path vertices were truncated while reading influences");
+            }
+
+            double total_weight = 0.0;
+            MeshWorldVertex flattened_world{};
+            for (std::size_t influence_index = 0; influence_index < influence_count; ++influence_index) {
+                const double bone_index_value = coordinates[cursor++];
+                if (bone_index_value < 0.0 ||
+                    std::floor(bone_index_value) != bone_index_value ||
+                    bone_index_value >= static_cast<double>(context.bones.size())) {
+                    return validation_error(
+                        document,
+                        vertices_value.location(),
+                        std::string(json_path),
+                        "weighted path bone indices must reference imported bones");
+                }
+
+                const std::size_t bone_index = static_cast<std::size_t>(bone_index_value);
+                const double local_x = coordinates[cursor++];
+                const double local_y = coordinates[cursor++];
+                const double weight = coordinates[cursor++];
+                if (weight < 0.0) {
+                    return validation_error(
+                        document,
+                        vertices_value.location(),
+                        std::string(json_path),
+                        "weighted path bone weights must be non-negative");
+                }
+                if (weight <= 0.0) {
+                    continue;
+                }
+
+                const MeshWorldVertex world_vertex = detail::transform_mesh_point(
+                    context.bone_world_transforms[bone_index],
+                    local_x,
+                    local_y);
+                flattened_world.x += world_vertex.x * weight;
+                flattened_world.y += world_vertex.y * weight;
+                total_weight += weight;
+            }
+
+            if (total_weight <= 0.0) {
+                return validation_error(
+                    document,
+                    vertices_value.location(),
+                    std::string(json_path),
+                    "weighted path vertices must preserve a positive total weight");
+            }
+
+            points_out->push_back(detail::inverse_transform_point(
+                slot_bone_world,
+                flattened_world.x / total_weight,
+                flattened_world.y / total_weight));
+        }
+        if (cursor != coordinates.size()) {
+            return validation_error(
+                document,
+                vertices_value.location(),
+                std::string(json_path),
+                "weighted path vertices contained trailing data after decoding");
+        }
+
+        append_import_warning(
+            context,
+            std::string(json_path) +
+                ": flattened weighted path attachment to static setup-pose points");
     }
 
     return std::nullopt;
@@ -589,10 +716,98 @@ std::optional<std::size_t> find_slot_index(
     return static_cast<std::size_t>(std::distance(slots.begin(), it));
 }
 
+struct CurveSegment {
+    double start_time{0.0};
+    double end_time{0.0};
+    double start_value{0.0};
+    double end_value{0.0};
+};
+
+constexpr double kCurveSegmentTolerance = 1e-6;
+constexpr double kCurveComponentMatchTolerance = 1e-2;
+
+bool curve_segments_match(
+    const std::array<double, 4>& left,
+    const std::array<double, 4>& right,
+    double tolerance) {
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (std::abs(left[index] - right[index]) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool control_points_fit_segment(
+    const std::array<double, 4>& control_points,
+    const CurveSegment& segment) {
+    const double duration = segment.end_time - segment.start_time;
+    if (duration <= kCurveSegmentTolerance) {
+        return false;
+    }
+
+    return control_points[0] >= segment.start_time - kCurveSegmentTolerance &&
+        control_points[0] <= segment.end_time + kCurveSegmentTolerance &&
+        control_points[2] >= segment.start_time - kCurveSegmentTolerance &&
+        control_points[2] <= segment.end_time + kCurveSegmentTolerance &&
+        control_points[0] <= control_points[2] + kCurveSegmentTolerance;
+}
+
+std::optional<std::array<double, 4>> normalize_spine_curve_segment(
+    const std::array<double, 4>& control_points,
+    const CurveSegment& segment) {
+    const double duration = segment.end_time - segment.start_time;
+    if (duration <= kCurveSegmentTolerance) {
+        return std::nullopt;
+    }
+
+    const double value_range = segment.end_value - segment.start_value;
+    if (std::abs(value_range) <= kCurveSegmentTolerance) {
+        return std::nullopt;
+    }
+
+    return std::array<double, 4>{
+        (control_points[0] - segment.start_time) / duration,
+        (control_points[1] - segment.start_value) / value_range,
+        (control_points[2] - segment.start_time) / duration,
+        (control_points[3] - segment.start_value) / value_range,
+    };
+}
+
+Value make_curve_array_value(const std::array<double, 4>& control_points) {
+    Value::Array output;
+    output.reserve(control_points.size());
+    for (const double coordinate : control_points) {
+        output.push_back(make_number_value(coordinate));
+    }
+    return make_array_value(std::move(output));
+}
+
+std::array<double, 4> sanitize_normalized_curve(std::array<double, 4> control_points) {
+    control_points[0] = std::clamp(control_points[0], 0.0, 1.0);
+    control_points[2] = std::clamp(control_points[2], 0.0, 1.0);
+    if (control_points[0] > control_points[2]) {
+        std::swap(control_points[0], control_points[2]);
+    }
+    return control_points;
+}
+
+std::string invalid_bezier_curve_message(std::size_t segment_count) {
+    if (segment_count <= 1U) {
+        return "bezier curves must contain exactly 4 control point numbers";
+    }
+
+    return "bezier curves must contain exactly 4 control point numbers or " +
+        std::to_string(segment_count * 4U) + " numbers for the animated components";
+}
+
 Value build_curve_value(
+    const ImportContext* warning_context,
     const Document& document,
     const Value& keyframe_value,
     std::string_view json_path,
+    const CurveSegment* segments,
+    std::size_t segment_count,
     bool* stepped_out) {
     *stepped_out = false;
 
@@ -620,29 +835,156 @@ Value build_curve_value(
     }
 
     if (curve_value->is_array()) {
-        if (curve_value->as_array().size() != 4U) {
+        const Value::Array& curve_array = curve_value->as_array();
+        const std::size_t curve_value_count = curve_array.size();
+        if (curve_value_count != 4U &&
+            (segment_count == 0U || curve_value_count != segment_count * 4U)) {
             throw validation_error(
                 document,
                 curve_value->location(),
                 curve_path,
-                "bezier curves must contain exactly 4 control point numbers");
+                invalid_bezier_curve_message(segment_count));
         }
 
-        Value::Array control_points;
-        control_points.reserve(4);
-        for (std::size_t index = 0; index < 4U; ++index) {
-            const Value& control_point = curve_value->as_array()[index];
-            if (const auto error = json::require_type(
-                    document,
-                    control_point,
-                    Value::Type::Number,
-                    curve_path + "[" + std::to_string(index) + "]")) {
-                throw *error;
+        const auto read_control_points = [&](std::size_t offset) {
+            std::array<double, 4> control_points{};
+            for (std::size_t index = 0; index < control_points.size(); ++index) {
+                const Value& control_point = curve_array[offset + index];
+                if (const auto error = json::require_type(
+                        document,
+                        control_point,
+                        Value::Type::Number,
+                        curve_path + "[" + std::to_string(offset + index) + "]")) {
+                    throw *error;
+                }
+
+                control_points[index] = control_point.as_number();
+            }
+            return control_points;
+        };
+
+        if (curve_value_count == 4U) {
+            std::array<double, 4> control_points = read_control_points(0U);
+            if (segment_count == 1U && control_points_fit_segment(control_points, segments[0])) {
+                const auto normalized_curve =
+                    normalize_spine_curve_segment(control_points, segments[0]);
+                if (!normalized_curve.has_value()) {
+                    return make_string_value("linear");
+                }
+                return make_curve_array_value(sanitize_normalized_curve(*normalized_curve));
+            }
+            if (segment_count == 1U &&
+                (control_points[0] < -kCurveSegmentTolerance ||
+                 control_points[0] > 1.0 + kCurveSegmentTolerance ||
+                 control_points[2] < -kCurveSegmentTolerance ||
+                 control_points[2] > 1.0 + kCurveSegmentTolerance)) {
+                control_points[0] = std::clamp(
+                    control_points[0],
+                    segments[0].start_time,
+                    segments[0].end_time);
+                control_points[2] = std::clamp(
+                    control_points[2],
+                    segments[0].start_time,
+                    segments[0].end_time);
+                if (control_points[0] > control_points[2]) {
+                    std::swap(control_points[0], control_points[2]);
+                }
+                if (control_points_fit_segment(control_points, segments[0])) {
+                    if (warning_context != nullptr) {
+                        append_import_warning(
+                            *warning_context,
+                            curve_path +
+                                ": clamped bezier control point times into the keyframe segment");
+                    }
+                    const auto normalized_curve =
+                        normalize_spine_curve_segment(control_points, segments[0]);
+                    if (!normalized_curve.has_value()) {
+                        return make_string_value("linear");
+                    }
+                    return make_curve_array_value(sanitize_normalized_curve(*normalized_curve));
+                }
             }
 
-            control_points.push_back(make_number_value(control_point.as_number()));
+            return make_curve_array_value(sanitize_normalized_curve(control_points));
         }
-        return make_array_value(std::move(control_points));
+
+        std::optional<std::array<double, 4>> shared_curve;
+        std::array<double, 4> accumulated_curve{};
+        std::size_t accumulated_curve_count = 0U;
+        bool approximated_multi_component_curve = false;
+        for (std::size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
+            std::array<double, 4> control_points =
+                read_control_points(segment_index * 4U);
+            if (!control_points_fit_segment(control_points, segments[segment_index])) {
+                control_points[0] = std::clamp(
+                    control_points[0],
+                    segments[segment_index].start_time,
+                    segments[segment_index].end_time);
+                control_points[2] = std::clamp(
+                    control_points[2],
+                    segments[segment_index].start_time,
+                    segments[segment_index].end_time);
+                if (control_points[0] > control_points[2]) {
+                    std::swap(control_points[0], control_points[2]);
+                }
+
+                if (!control_points_fit_segment(control_points, segments[segment_index])) {
+                    throw validation_error(
+                        document,
+                        curve_value->location(),
+                        curve_path,
+                        "multi-component bezier control point times must stay within the keyframe segment");
+                }
+                if (warning_context != nullptr) {
+                    append_import_warning(
+                        *warning_context,
+                        curve_path +
+                            ": clamped multi-component bezier control point times into the keyframe segment");
+                }
+            }
+
+            const auto normalized_curve =
+                normalize_spine_curve_segment(control_points, segments[segment_index]);
+            if (!normalized_curve.has_value()) {
+                continue;
+            }
+
+            for (std::size_t index = 0; index < accumulated_curve.size(); ++index) {
+                accumulated_curve[index] += (*normalized_curve)[index];
+            }
+            ++accumulated_curve_count;
+
+            if (!shared_curve.has_value()) {
+                shared_curve = normalized_curve;
+                continue;
+            }
+
+            if (!curve_segments_match(
+                    *shared_curve,
+                    *normalized_curve,
+                    kCurveComponentMatchTolerance)) {
+                approximated_multi_component_curve = true;
+            }
+        }
+
+        if (!shared_curve.has_value()) {
+            return make_string_value("linear");
+        }
+        if (approximated_multi_component_curve && accumulated_curve_count > 0U) {
+            std::array<double, 4> averaged_curve{};
+            for (std::size_t index = 0; index < averaged_curve.size(); ++index) {
+                averaged_curve[index] =
+                    accumulated_curve[index] / static_cast<double>(accumulated_curve_count);
+            }
+            if (warning_context != nullptr) {
+                append_import_warning(
+                    *warning_context,
+                    curve_path +
+                        ": approximated multi-component bezier curves to a shared interpolation curve");
+            }
+            return make_curve_array_value(sanitize_normalized_curve(averaged_curve));
+        }
+        return make_curve_array_value(sanitize_normalized_curve(*shared_curve));
     }
 
     if (!curve_value->is_number()) {
@@ -1416,6 +1758,7 @@ std::optional<LoadError> build_mesh_attachment(
     } else {
         const BoneWorldTransform& slot_bone_world = context.bone_world_transforms[slot.bone_index];
         std::size_t cursor = 0;
+        std::size_t pruned_weighted_vertex_count = 0;
         for (std::size_t vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
             if (cursor >= spine_vertices.size()) {
                 return validation_error(
@@ -1434,13 +1777,6 @@ std::optional<LoadError> build_mesh_attachment(
                     "weighted mesh vertices must start with an integer bone influence count");
             }
             const std::size_t influence_count = static_cast<std::size_t>(bone_count_value);
-            if (influence_count > 4U) {
-                return validation_error(
-                    document,
-                    vertices_value->location(),
-                    std::string(json_path) + ".vertices",
-                    "Marrow mesh vertices support at most 4 bone influences");
-            }
             if (cursor + influence_count * 4U > spine_vertices.size()) {
                 return validation_error(
                     document,
@@ -1449,10 +1785,8 @@ std::optional<LoadError> build_mesh_attachment(
                     "weighted mesh vertices were truncated while reading influences");
             }
 
-            Value::Array influences;
-            influences.reserve(influence_count);
-            double total_weight = 0.0;
-            AttachmentVertex averaged_world{};
+            std::vector<WeightedMeshInfluence> decoded_influences;
+            decoded_influences.reserve(influence_count);
             for (std::size_t influence_index = 0; influence_index < influence_count; ++influence_index) {
                 const double bone_index_value = spine_vertices[cursor++];
                 if (bone_index_value < 0.0 ||
@@ -1468,27 +1802,51 @@ std::optional<LoadError> build_mesh_attachment(
                 const double local_x = spine_vertices[cursor++];
                 const double local_y = spine_vertices[cursor++];
                 const double weight = spine_vertices[cursor++];
-                if (weight <= 0.0) {
+                if (weight < 0.0) {
                     return validation_error(
                         document,
                         vertices_value->location(),
                         std::string(json_path) + ".vertices",
-                        "weighted mesh bone weights must be positive");
+                        "weighted mesh bone weights must be non-negative");
                 }
 
-                influences.push_back(build_weight_influence_object(
-                    context.bones[bone_index].name,
+                decoded_influences.push_back(WeightedMeshInfluence{
+                    influence_index,
+                    bone_index,
                     local_x,
                     local_y,
-                    weight));
-                total_weight += weight;
+                    weight});
+            }
+            decoded_influences.erase(
+                std::remove_if(
+                    decoded_influences.begin(),
+                    decoded_influences.end(),
+                    [](const WeightedMeshInfluence& influence) {
+                        return influence.weight <= 0.0;
+                    }),
+                decoded_influences.end());
+            if (decoded_influences.size() > 4U) {
+                ++pruned_weighted_vertex_count;
+                std::stable_sort(
+                    decoded_influences.begin(),
+                    decoded_influences.end(),
+                    [](const WeightedMeshInfluence& lhs, const WeightedMeshInfluence& rhs) {
+                        return lhs.weight > rhs.weight;
+                    });
+                decoded_influences.resize(4U);
+                std::sort(
+                    decoded_influences.begin(),
+                    decoded_influences.end(),
+                    [](const WeightedMeshInfluence& lhs, const WeightedMeshInfluence& rhs) {
+                        return lhs.source_index < rhs.source_index;
+                    });
+            }
 
-                const MeshWorldVertex world_vertex = detail::transform_mesh_point(
-                    context.bone_world_transforms[bone_index],
-                    local_x,
-                    local_y);
-                averaged_world.x += world_vertex.x * weight;
-                averaged_world.y += world_vertex.y * weight;
+            Value::Array influences;
+            influences.reserve(decoded_influences.size());
+            double total_weight = 0.0;
+            for (const WeightedMeshInfluence& influence : decoded_influences) {
+                total_weight += influence.weight;
             }
             if (total_weight <= 0.0) {
                 return validation_error(
@@ -1498,10 +1856,27 @@ std::optional<LoadError> build_mesh_attachment(
                     "weighted mesh vertices must preserve a positive total weight");
             }
 
+            AttachmentVertex averaged_world{};
+            for (const WeightedMeshInfluence& influence : decoded_influences) {
+                const double normalized_weight = influence.weight / total_weight;
+                influences.push_back(build_weight_influence_object(
+                    context.bones[influence.bone_index].name,
+                    influence.local_x,
+                    influence.local_y,
+                    normalized_weight));
+
+                const MeshWorldVertex world_vertex = detail::transform_mesh_point(
+                    context.bone_world_transforms[influence.bone_index],
+                    influence.local_x,
+                    influence.local_y);
+                averaged_world.x += world_vertex.x * normalized_weight;
+                averaged_world.y += world_vertex.y * normalized_weight;
+            }
+
             const AttachmentVertex representative_local = detail::inverse_transform_point(
                 slot_bone_world,
-                averaged_world.x / total_weight,
-                averaged_world.y / total_weight);
+                averaged_world.x,
+                averaged_world.y);
             vertices_array.push_back(make_number_value(representative_local.x));
             vertices_array.push_back(make_number_value(representative_local.y));
             weights_array.push_back(make_array_value(std::move(influences)));
@@ -1512,6 +1887,14 @@ std::optional<LoadError> build_mesh_attachment(
                 vertices_value->location(),
                 std::string(json_path) + ".vertices",
                 "weighted mesh vertices contained trailing data after decoding");
+        }
+        if (pruned_weighted_vertex_count > 0U) {
+            append_import_warning(
+                context,
+                std::string(json_path) +
+                    ".vertices: pruned weighted mesh influences to the strongest 4 on " +
+                    std::to_string(pruned_weighted_vertex_count) + " " +
+                    (pruned_weighted_vertex_count == 1U ? "vertex" : "vertices"));
         }
     }
 
@@ -1534,12 +1917,15 @@ std::optional<LoadError> build_mesh_attachment(
 }
 
 std::optional<LoadError> build_polygon_attachment(
-    const Document& document,
+    const ImportContext& context,
     const Value& attachment_value,
+    const SpineSlotInfo& slot,
     std::string_view attachment_name,
     std::string_view output_type,
     std::string_view json_path,
+    bool allow_weighted_static_flattening,
     Value* attachment_out) {
+    const Document& document = context.document;
     double vertex_count_value = 0.0;
     if (const auto error = read_required_number(
             document,
@@ -1577,18 +1963,115 @@ std::optional<LoadError> build_polygon_attachment(
             &coordinates)) {
         return error;
     }
-    if (coordinates.size() != vertex_count * 2U) {
+    Value::Array vertices;
+    vertices.reserve(vertex_count * 2U);
+
+    if (coordinates.size() == vertex_count * 2U) {
+        for (const double coordinate : coordinates) {
+            vertices.push_back(make_number_value(coordinate));
+        }
+    } else if (allow_weighted_static_flattening) {
+        const BoneWorldTransform& slot_bone_world =
+            context.bone_world_transforms[slot.bone_index];
+        std::size_t cursor = 0;
+        for (std::size_t vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
+            if (cursor >= coordinates.size()) {
+                return validation_error(
+                    document,
+                    vertices_value->location(),
+                    std::string(json_path) + ".vertices",
+                    "weighted polygon vertices ended before all attachment points were decoded");
+            }
+
+            const double bone_count_value = coordinates[cursor++];
+            if (bone_count_value < 1.0 || std::floor(bone_count_value) != bone_count_value) {
+                return validation_error(
+                    document,
+                    vertices_value->location(),
+                    std::string(json_path) + ".vertices",
+                    "weighted polygon vertices must start with an integer bone influence count");
+            }
+
+            const std::size_t influence_count = static_cast<std::size_t>(bone_count_value);
+            if (cursor + influence_count * 4U > coordinates.size()) {
+                return validation_error(
+                    document,
+                    vertices_value->location(),
+                    std::string(json_path) + ".vertices",
+                    "weighted polygon vertices were truncated while reading influences");
+            }
+
+            double total_weight = 0.0;
+            MeshWorldVertex flattened_world{};
+            for (std::size_t influence_index = 0; influence_index < influence_count; ++influence_index) {
+                const double bone_index_value = coordinates[cursor++];
+                if (bone_index_value < 0.0 ||
+                    std::floor(bone_index_value) != bone_index_value ||
+                    bone_index_value >= static_cast<double>(context.bones.size())) {
+                    return validation_error(
+                        document,
+                        vertices_value->location(),
+                        std::string(json_path) + ".vertices",
+                        "weighted polygon bone indices must reference imported bones");
+                }
+
+                const std::size_t bone_index = static_cast<std::size_t>(bone_index_value);
+                const double local_x = coordinates[cursor++];
+                const double local_y = coordinates[cursor++];
+                const double weight = coordinates[cursor++];
+                if (weight < 0.0) {
+                    return validation_error(
+                        document,
+                        vertices_value->location(),
+                        std::string(json_path) + ".vertices",
+                        "weighted polygon bone weights must be non-negative");
+                }
+                if (weight <= 0.0) {
+                    continue;
+                }
+
+                const MeshWorldVertex world_vertex = detail::transform_mesh_point(
+                    context.bone_world_transforms[bone_index],
+                    local_x,
+                    local_y);
+                flattened_world.x += world_vertex.x * weight;
+                flattened_world.y += world_vertex.y * weight;
+                total_weight += weight;
+            }
+
+            if (total_weight <= 0.0) {
+                return validation_error(
+                    document,
+                    vertices_value->location(),
+                    std::string(json_path) + ".vertices",
+                    "weighted polygon vertices must preserve a positive total weight");
+            }
+
+            const AttachmentVertex flattened_local = detail::inverse_transform_point(
+                slot_bone_world,
+                flattened_world.x / total_weight,
+                flattened_world.y / total_weight);
+            vertices.push_back(make_number_value(flattened_local.x));
+            vertices.push_back(make_number_value(flattened_local.y));
+        }
+        if (cursor != coordinates.size()) {
+            return validation_error(
+                document,
+                vertices_value->location(),
+                std::string(json_path) + ".vertices",
+                "weighted polygon vertices contained trailing data after decoding");
+        }
+
+        append_import_warning(
+            context,
+            std::string(json_path) +
+                ".vertices: flattened weighted clipping polygon to static setup-pose vertices");
+    } else {
         return validation_error(
             document,
             vertices_value->location(),
             std::string(json_path) + ".vertices",
             "weighted polygon attachments are not supported by the Marrow importer");
-    }
-
-    Value::Array vertices;
-    vertices.reserve(coordinates.size());
-    for (const double coordinate : coordinates) {
-        vertices.push_back(make_number_value(coordinate));
     }
 
     Value::Object attachment_object;
@@ -1754,21 +2237,25 @@ std::optional<LoadError> convert_spine_attachment(
         result.attachment_value = make_object_value(std::move(attachment_object));
     } else if (normalized_type == "boundingbox") {
         if (const auto error = build_polygon_attachment(
-                document,
+                *context,
                 attachment_value,
+                slot,
                 attachment_name,
                 "bounding_box",
                 json_path,
+                false,
                 &result.attachment_value)) {
             return error;
         }
     } else if (normalized_type == "clipping") {
         if (const auto error = build_polygon_attachment(
-                document,
+                *context,
                 attachment_value,
+                slot,
                 attachment_name,
                 "clipping",
                 json_path,
+                true,
                 &result.attachment_value)) {
             return error;
         }
@@ -1802,6 +2289,15 @@ std::optional<LoadError> convert_spine_attachment(
                 "vertexCount must be a non-negative integer");
         }
         const std::size_t vertex_count = static_cast<std::size_t>(vertex_count_value);
+        bool closed = false;
+        if (const auto error = read_optional_boolean(
+                document,
+                attachment_value,
+                "closed",
+                json_path,
+                &closed)) {
+            return error;
+        }
 
         const Value* vertices_value = nullptr;
         if (const auto error = json::require_member(
@@ -1816,12 +2312,27 @@ std::optional<LoadError> convert_spine_attachment(
 
         std::vector<AttachmentVertex> points;
         if (const auto error = parse_path_points(
-                document,
+                *context,
+                slot,
                 *vertices_value,
                 vertex_count,
                 std::string(json_path) + ".vertices",
                 &points)) {
             return error;
+        }
+        if (closed && !points.empty() && (points.size() % 3U) == 0U) {
+            points.push_back(points.front());
+            append_import_warning(
+                *context,
+                std::string(json_path) +
+                    ": approximated closed path attachment by duplicating the first control point");
+        }
+        if (points.size() < 4U || ((points.size() - 1U) % 3U) != 0U) {
+            return validation_error(
+                document,
+                vertices_value->location(),
+                std::string(json_path) + ".vertices",
+                "path attachments must provide 3n+1 control points");
         }
 
         Value::Array point_values;
@@ -2541,6 +3052,32 @@ std::optional<LoadError> parse_path_constraints(
                 constraint_path + ".bones",
                 "path constraints must target at least one bone");
         }
+        std::optional<std::size_t> previous_bone_index;
+        bool invalid_bone_chain = false;
+        for (const Value& bone_name_value : bones) {
+            const auto bone_index = find_bone_index(context.bones, bone_name_value.as_string());
+            if (!bone_index.has_value()) {
+                return validation_error(
+                    document,
+                    bone_name_value.location(),
+                    constraint_path + ".bones",
+                    "path constraint references unknown bone '" +
+                        bone_name_value.as_string() + "'");
+            }
+            if (previous_bone_index.has_value() &&
+                context.bones[*bone_index].parent_index != previous_bone_index) {
+                append_import_warning(
+                    context,
+                    constraint_path +
+                        ".bones: skipped path constraint because the targeted bones do not form a direct parent-child chain");
+                invalid_bone_chain = true;
+                break;
+            }
+            previous_bone_index = *bone_index;
+        }
+        if (invalid_bone_chain) {
+            continue;
+        }
 
         std::optional<std::string> position_mode;
         std::optional<std::string> spacing_mode;
@@ -2625,11 +3162,10 @@ std::optional<LoadError> parse_path_constraints(
         }
         if (rotate_mix > 0.0 && rotate_mode.has_value() &&
             *rotate_mode != "tangent") {
-            return validation_error(
-                document,
-                constraint_value.location(),
-                constraint_path + ".rotateMode",
-                "only tangent path rotation is supported by the Marrow importer");
+            append_import_warning(
+                context,
+                constraint_path + ".rotateMode: approximated unsupported path rotate mode '" +
+                    *rotate_mode + "' as tangent");
         }
 
         const std::string_view resolved_position_mode =
@@ -2862,11 +3398,72 @@ std::optional<LoadError> append_additive_vector_timeline(
         output_keyframe.emplace("time", make_number_value(time));
         output_keyframe.emplace("x", make_number_value(base_x + x));
         output_keyframe.emplace("y", make_number_value(base_y + y));
+        const CurveSegment curve_segments[2] = {
+            CurveSegment{
+                time,
+                time,
+                x,
+                x,
+            },
+            CurveSegment{
+                time,
+                time,
+                y,
+                y,
+            },
+        };
+        CurveSegment normalized_segments[2] = {curve_segments[0], curve_segments[1]};
+        std::size_t curve_segment_count = 0U;
+        if (keyframe_index + 1U < timeline_value.as_array().size()) {
+            const Value& next_keyframe_value = timeline_value.as_array()[keyframe_index + 1U];
+            const std::string next_keyframe_path =
+                std::string(json_path) + "[" + std::to_string(keyframe_index + 1U) + "]";
+            double next_time = time;
+            double next_x = 0.0;
+            double next_y = 0.0;
+            if (const auto error = read_optional_number(
+                    document,
+                    next_keyframe_value,
+                    "time",
+                    next_keyframe_path,
+                    &next_time)) {
+                return error;
+            }
+            if (const auto error = read_optional_number(
+                    document,
+                    next_keyframe_value,
+                    x_key,
+                    next_keyframe_path,
+                    &next_x)) {
+                return error;
+            }
+            if (const auto error = read_optional_number(
+                    document,
+                    next_keyframe_value,
+                    y_key,
+                    next_keyframe_path,
+                    &next_y)) {
+                return error;
+            }
+
+            normalized_segments[0].end_time = next_time;
+            normalized_segments[0].end_value = next_x;
+            normalized_segments[1].end_time = next_time;
+            normalized_segments[1].end_value = next_y;
+            curve_segment_count = 2U;
+        }
         bool stepped = false;
         try {
             output_keyframe.emplace(
                 "curve",
-                build_curve_value(document, keyframe_value, keyframe_path, &stepped));
+                build_curve_value(
+                    &context,
+                    document,
+                    keyframe_value,
+                    keyframe_path,
+                    normalized_segments,
+                    curve_segment_count,
+                    &stepped));
         } catch (const LoadError& error) {
             return error;
         }
@@ -2952,11 +3549,71 @@ std::optional<LoadError> append_scale_timeline(
         output_keyframe.emplace("time", make_number_value(time));
         output_keyframe.emplace("x", make_number_value(base_x * x));
         output_keyframe.emplace("y", make_number_value(base_y * y));
+        CurveSegment curve_segments[2] = {
+            CurveSegment{
+                time,
+                time,
+                x,
+                x,
+            },
+            CurveSegment{
+                time,
+                time,
+                y,
+                y,
+            },
+        };
+        std::size_t curve_segment_count = 0U;
+        if (keyframe_index + 1U < timeline_value.as_array().size()) {
+            const Value& next_keyframe_value = timeline_value.as_array()[keyframe_index + 1U];
+            const std::string next_keyframe_path =
+                std::string(json_path) + "[" + std::to_string(keyframe_index + 1U) + "]";
+            double next_time = time;
+            double next_x = 1.0;
+            double next_y = 1.0;
+            if (const auto error = read_optional_number(
+                    document,
+                    next_keyframe_value,
+                    "time",
+                    next_keyframe_path,
+                    &next_time)) {
+                return error;
+            }
+            if (const auto error = read_optional_number(
+                    document,
+                    next_keyframe_value,
+                    x_key,
+                    next_keyframe_path,
+                    &next_x)) {
+                return error;
+            }
+            if (const auto error = read_optional_number(
+                    document,
+                    next_keyframe_value,
+                    y_key,
+                    next_keyframe_path,
+                    &next_y)) {
+                return error;
+            }
+
+            curve_segments[0].end_time = next_time;
+            curve_segments[0].end_value = next_x;
+            curve_segments[1].end_time = next_time;
+            curve_segments[1].end_value = next_y;
+            curve_segment_count = 2U;
+        }
         bool stepped = false;
         try {
             output_keyframe.emplace(
                 "curve",
-                build_curve_value(document, keyframe_value, keyframe_path, &stepped));
+                build_curve_value(
+                    &context,
+                    document,
+                    keyframe_value,
+                    keyframe_path,
+                    curve_segments,
+                    curve_segment_count,
+                    &stepped));
         } catch (const LoadError& error) {
             return error;
         }
@@ -3192,10 +3849,11 @@ std::optional<LoadError> parse_animations(
                                 &time)) {
                             return error;
                         }
-                        if (const auto error = read_optional_number(
+                        if (const auto error = read_optional_number_alias(
                                 document,
                                 keyframe_value,
                                 "angle",
+                                "value",
                                 keyframe_path,
                                 &angle)) {
                             return error;
@@ -3212,11 +3870,53 @@ std::optional<LoadError> parse_animations(
                         Value::Object output_keyframe;
                         output_keyframe.emplace("time", make_number_value(time));
                         output_keyframe.emplace("angle", make_number_value(angle));
+                        CurveSegment curve_segment{
+                            time,
+                            time,
+                            angle,
+                            angle,
+                        };
+                        std::size_t curve_segment_count = 0U;
+                        if (keyframe_index + 1U < rotate_value->as_array().size()) {
+                            const Value& next_keyframe_value =
+                                rotate_value->as_array()[keyframe_index + 1U];
+                            const std::string next_keyframe_path =
+                                bone_path + ".rotate[" + std::to_string(keyframe_index + 1U) + "]";
+                            double next_time = time;
+                            double next_angle = 0.0;
+                            if (const auto error = read_optional_number(
+                                    document,
+                                    next_keyframe_value,
+                                    "time",
+                                    next_keyframe_path,
+                                    &next_time)) {
+                                return error;
+                            }
+                            if (const auto error = read_optional_number_alias(
+                                    document,
+                                    next_keyframe_value,
+                                    "angle",
+                                    "value",
+                                    next_keyframe_path,
+                                    &next_angle)) {
+                                return error;
+                            }
+                            curve_segment.end_time = next_time;
+                            curve_segment.end_value = next_angle;
+                            curve_segment_count = 1U;
+                        }
                         bool stepped = false;
                         try {
                             output_keyframe.emplace(
                                 "curve",
-                                build_curve_value(document, keyframe_value, keyframe_path, &stepped));
+                                build_curve_value(
+                                    &context,
+                                    document,
+                                    keyframe_value,
+                                    keyframe_path,
+                                    &curve_segment,
+                                    curve_segment_count,
+                                    &stepped));
                         } catch (const LoadError& error) {
                             return error;
                         }
@@ -3459,7 +4159,14 @@ std::optional<LoadError> parse_animations(
                         try {
                             output_keyframe.emplace(
                                 "curve",
-                                build_curve_value(document, keyframe_value, keyframe_path, &stepped));
+                                build_curve_value(
+                                    &context,
+                                    document,
+                                    keyframe_value,
+                                    keyframe_path,
+                                    nullptr,
+                                    0U,
+                                    &stepped));
                         } catch (const LoadError& error) {
                             return error;
                         }
@@ -3701,14 +4408,29 @@ std::optional<LoadError> parse_animations(
                 animation_path + ".deform",
                 "deform timelines are not supported by the Marrow importer");
         }
-        if (find_optional_member(animation_value, "ik") != nullptr ||
-            find_optional_member(animation_value, "transform") != nullptr ||
-            find_optional_member(animation_value, "path") != nullptr) {
-            return validation_error(
-                document,
-                animation_value.location(),
-                animation_path,
-                "constraint timelines are not supported by the Marrow importer");
+        std::vector<std::string_view> skipped_constraint_timeline_types;
+        if (find_optional_member(animation_value, "ik") != nullptr) {
+            skipped_constraint_timeline_types.push_back("ik");
+        }
+        if (find_optional_member(animation_value, "transform") != nullptr) {
+            skipped_constraint_timeline_types.push_back("transform");
+        }
+        if (find_optional_member(animation_value, "path") != nullptr) {
+            skipped_constraint_timeline_types.push_back("path");
+        }
+        if (find_optional_member(animation_value, "physics") != nullptr) {
+            skipped_constraint_timeline_types.push_back("physics");
+        }
+        if (!skipped_constraint_timeline_types.empty()) {
+            std::string warning =
+                animation_path + ": skipped unsupported Spine constraint timelines: ";
+            for (std::size_t index = 0; index < skipped_constraint_timeline_types.size(); ++index) {
+                if (index > 0U) {
+                    warning += ", ";
+                }
+                warning += skipped_constraint_timeline_types[index];
+            }
+            append_import_warning(context, std::move(warning));
         }
 
         animations.emplace(animation_name, make_object_value(std::move(output_animation)));
@@ -4355,6 +5077,7 @@ SpineImportResult import_spine_json_document_impl(const Document& spine_document
 
     ImportContext context{spine_document};
     context.skeleton_name = derive_skeleton_name(spine_document);
+    context.warnings = &result.warnings;
 
     Value skeleton_value;
     if (const auto error = parse_skeleton_metadata(&context, &skeleton_value)) {
