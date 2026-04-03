@@ -116,11 +116,15 @@ Log at least:
 - After tests/verification
 - After updating progress log
 
-## Browser Testing (Required for Frontend Stories)
-If the selected story changes UI, you MUST verify it in the browser:
-1. Load the `dev-browser` skill.
-2. Navigate to the relevant page.
-3. Verify the UI changes work as expected.
-4. Take a screenshot if helpful for the progress log.
+## Native App Verification (Required for UI Stories)
+This is a C++/CMake native desktop application (GLFW + OpenGL + Dear ImGui), NOT a web project.
+Do NOT attempt browser testing, dev-browser skills, or web-based verification.
 
-A frontend story is NOT complete until browser verification passes.
+If the selected story changes UI or rendering, verify with:
+1. `cmake --build build` — full build must succeed with zero errors.
+2. `./build/marrow_editor_shell assets/fixtures/player_idle.marrow &` — editor must launch without crash (kill after 2 seconds).
+3. `./build/marrow_project_smoke` — editor data paths must validate.
+4. `./build/marrow_renderer_sample --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl` — render pipeline must validate.
+5. `./build/marrow_fixture_smoke` — runtime smoke must pass.
+
+A UI story is NOT complete until all applicable verification commands pass.
