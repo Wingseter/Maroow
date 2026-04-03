@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001\u2013039) delivered core runtime and editor. Phase 2 (MAR-040\u2013066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, and documentation.",
+  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, and documentation.",
   "qualityGates": [
     "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -724,12 +724,12 @@
     {
       "id": "MAR-041",
       "title": "Rewrite IK constraint solver to match Spine reference",
-      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180\u00b0 flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
+      "description": "Research found 7 discrepancies vs Spine's IK solver. Rewrite both one-bone and two-bone IK: (1) Add softness parameter for smooth near-full-extension. (2) Add stretch/compress support. (3) Implement non-uniform scale ellipse solver with quartic fallback (Spine uses a completely different path when parent scaleX != scaleY). (4) Handle negative bone scale (add 180° flip). (5) Zero-length parent falls back to single-bone IK instead of skipping. (6) Inherit-mode-aware target transforms for one-bone IK. (7) Guard division by zero with epsilon fallback.",
       "acceptanceCriteria": [
         "Two-bone IK does not produce NaN when target overlaps the chain root.",
         "Softness parameter smooths the snap at full extension (test with softness=20).",
         "Non-uniform parent scale (scaleX=1, scaleY=2) produces correct IK solution via ellipse solver.",
-        "Negative bone scaleX flips IK rotation by 180\u00b0.",
+        "Negative bone scaleX flips IK rotation by 180°.",
         "Zero-length parent bone falls back to single-bone IK, not skip.",
         "All angle results are wrapped to [-180, 180].",
         "A comprehensive IK test suite covers: reachable, unreachable, degenerate, non-uniform, negative scale, softness cases."
@@ -745,13 +745,13 @@
     {
       "id": "MAR-042",
       "title": "Implement Spine-compatible rotation mixing with cross-detection",
-      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the \u00b1180\u00b0 boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
+      "description": "Research found Spine uses a sophisticated cross-detection algorithm for rotation mixing (not simple angle wrapping). Spine maintains a per-timeline timelinesRotation[] array that tracks accumulated rotation and detects direction crosses at the ±180° boundary. Simple wrapping causes visible rotation pops during crossfades. Implement Spine's _spAnimationState_applyRotateTimeline algorithm. Also ensure rotation keyframes store deltas relative to setup pose, matching Spine's getRelativeValue pattern.",
       "acceptanceCriteria": [
         "AnimationState maintains a timelinesRotation array per track for cross-detection.",
-        "Rotation from 350\u00b0 to 10\u00b0 interpolates the short way (20\u00b0 arc) during mixing.",
-        "Crossing the \u00b1180\u00b0 boundary mid-crossfade does not cause a rotation pop.",
+        "Rotation from 350° to 10° interpolates the short way (20° arc) during mixing.",
+        "Crossing the ±180° boundary mid-crossfade does not cause a rotation pop.",
         "The O(1) normalization formula (ceil(diff/360 - 0.5) * 360) replaces the while loop.",
-        "A test with a 3-keyframe rotation (0\u00b0 \u2192 170\u00b0 \u2192 -170\u00b0) produces smooth continuous rotation.",
+        "A test with a 3-keyframe rotation (0° → 170° → -170°) produces smooth continuous rotation.",
         "Existing rotation smoke tests pass."
       ],
       "dependsOn": [],
@@ -836,7 +836,7 @@
       "acceptanceCriteria": [
         "A vertex shader transforms 2D positions and passes UVs to the fragment shader.",
         "A fragment shader samples a texture and applies slot color tint.",
-        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed \u2014 use a solid white 1x1 texture fallback).",
+        "marrow_renderer_sample opens a GLFW window and renders the fixture skeleton's region attachments as colored quads (no texture file needed — use a solid white 1x1 texture fallback).",
         "The window stays open until closed by the user."
       ],
       "dependsOn": [],
@@ -1145,11 +1145,11 @@
       "title": "Add binary format keyframe quantization and key reduction",
       "description": "Research from Riot Games shows 48-bit quantized keyframes (16-bit time + 16-bit channel index + 32-bit payload for 2D) with iterative Bezier curve fitting can reduce animation data by 50-70%. Implement at export time: (1) Quantize rotation to 16-bit, position to 2x16-bit. (2) Curve fit to remove redundant keyframes within error threshold. (3) Store all keyframes contiguously sorted by time for cache-friendly playback.",
       "acceptanceCriteria": [
-        "Export pipeline quantizes rotation keyframes to 16-bit (\u00b10.006\u00b0 precision).",
+        "Export pipeline quantizes rotation keyframes to 16-bit (±0.006° precision).",
         "Position keyframes quantize to 2x16-bit with animation bounding box range reduction.",
         "Key reduction removes redundant keyframes within configurable error threshold.",
         "Binary format stores keyframes contiguously sorted by (time, bone_index).",
-        "Roundtrip test: original animation vs quantized animation has max error < 0.1\u00b0 rotation, < 0.5px position.",
+        "Roundtrip test: original animation vs quantized animation has max error < 0.1° rotation, < 0.5px position.",
         "Size comparison logged: binary-quantized vs JSON."
       ],
       "dependsOn": [
@@ -1277,7 +1277,7 @@
         "AnimationState::restore_state() resumes playback from a snapshot after SkeletonData rebuild.",
         "The editor watches .mskl/.matl files and triggers hot-reload on change.",
         "Hot-reload preserves current animation, track time, and mix state.",
-        "A smoke test validates: load \u2192 play \u2192 modify .mskl \u2192 reload \u2192 verify playback continues."
+        "A smoke test validates: load → play → modify .mskl → reload → verify playback continues."
       ],
       "dependsOn": [],
       "status": "done",
@@ -1306,12 +1306,12 @@
     {
       "id": "MAR-075",
       "title": "Implement Spine atlas importer",
-      "description": "Parse Spine's line-based .atlas text format and convert to Marrow's .matl JSON. Handle atlas page headers, region definitions, rotation flags (Spine uses 90\u00b0 CW), filter/wrap modes, and multi-page atlases.",
+      "description": "Parse Spine's line-based .atlas text format and convert to Marrow's .matl JSON. Handle atlas page headers, region definitions, rotation flags (Spine uses 90° CW), filter/wrap modes, and multi-page atlases.",
       "acceptanceCriteria": [
         "The spine_to_marrow tool also converts .atlas to .matl.",
         "Atlas page metadata (image name, size, filter, wrap) converts correctly.",
         "Region definitions (name, bounds, origin, rotation) convert correctly.",
-        "Spine's 90\u00b0 CW rotation flag is handled (UVs adjusted or flag preserved).",
+        "Spine's 90° CW rotation flag is handled (UVs adjusted or flag preserved).",
         "Multi-page atlases produce multiple .matl files or a combined document.",
         "A test converts a known Spine atlas and validates region lookups match."
       ],
@@ -1421,7 +1421,7 @@
         "Paint mode adds bone influence weight under brush with configurable radius and strength.",
         "Erase mode removes weight from the active bone.",
         "Smooth mode averages weights with neighboring vertices.",
-        "Heat map overlay shows current weights (blue\u2192green\u2192yellow\u2192red gradient).",
+        "Heat map overlay shows current weights (blue→green→yellow→red gradient).",
         "Weights auto-normalize to sum=1.0 after each stroke.",
         "Undo/redo works for each paint stroke.",
         "Real-time mesh deformation preview while painting."
@@ -1475,7 +1475,7 @@
       "title": "Implement debug overlay for bones, constraints, and meshes",
       "description": "Add a debug rendering mode that draws bone hierarchy lines, IK reach cones, path constraint splines, physics spring visualization, mesh wireframes, and bounding boxes. Toggle per category in the editor.",
       "acceptanceCriteria": [
-        "Bone hierarchy renders as colored lines (parent\u2192child) with joint circles.",
+        "Bone hierarchy renders as colored lines (parent→child) with joint circles.",
         "IK constraints show target marker and reach limit arc.",
         "Path constraints show the bezier spline curve.",
         "Physics constraints show spring/damper visualization.",
@@ -1512,10 +1512,10 @@
     {
       "id": "MAR-086",
       "title": "Write Quick Start guide and API concepts documentation",
-      "description": "Create the most important documentation pages: a Quick Start (load \u2192 animate \u2192 render in one page) and a Concepts page explaining SkeletonData/Skeleton/AnimationState architecture. Add Doxygen comments to all public API headers.",
+      "description": "Create the most important documentation pages: a Quick Start (load → animate → render in one page) and a Concepts page explaining SkeletonData/Skeleton/AnimationState architecture. Add Doxygen comments to all public API headers.",
       "acceptanceCriteria": [
         "docs/quick-start.md shows a complete working example from zero to rendered animation.",
-        "docs/concepts.md explains the SkeletonData\u2192Skeleton\u2192AnimationState\u2192Renderer data flow.",
+        "docs/concepts.md explains the SkeletonData→Skeleton→AnimationState→Renderer data flow.",
         "All public functions in include/marrow/ have @brief and @param Doxygen comments.",
         "Doxygen builds with zero warnings.",
         "docs/format-spec.md documents .mskl, .matl, .mbin, and .marrow file formats.",
@@ -1567,7 +1567,7 @@
       "title": "Precompute bone children map and tip cache",
       "description": "Performance analysis found bone_tip_local_vector (skeleton_constraints.cpp:90-110) does O(B) linear scan to find children, called per IK/physics constraint. Also recompute_world_subtree (line 775) scans all bones per recursion level. Precompute a children adjacency list and bone tip cache at skeleton construction time.",
       "acceptanceCriteria": [
-        "SkeletonData stores a children_map: parent_index \u2192 vector<child_index>.",
+        "SkeletonData stores a children_map: parent_index → vector<child_index>.",
         "bone_tip_local_vector uses the children_map for O(1) lookup.",
         "recompute_world_subtree iterates children_map instead of scanning all bones.",
         "Physics subtree recompute is O(subtree_size) instead of O(B * depth).",
@@ -1637,7 +1637,7 @@
     {
       "id": "MAR-093",
       "title": "Add indexed timeline lookup and cached keyframe cursor",
-      "description": "Research found animation_us bottleneck comes from: (1) find_rotate_timeline() etc. doing O(N) std::find_if per bone per timeline type \u2014 replace with O(1) bone_timeline_index array built at load time. (2) Keyframe search starts at index 0 every frame \u2014 add per-timeline cached last_keyframe_index in a SamplingContext (ozz-animation pattern). Spine v4 uses cached linear scan over binary search because for 2-20 keys, forward cache beats binary search.",
+      "description": "Research found animation_us bottleneck comes from: (1) find_rotate_timeline() etc. doing O(N) std::find_if per bone per timeline type — replace with O(1) bone_timeline_index array built at load time. (2) Keyframe search starts at index 0 every frame — add per-timeline cached last_keyframe_index in a SamplingContext (ozz-animation pattern). Spine v4 uses cached linear scan over binary search because for 2-20 keys, forward cache beats binary search.",
       "acceptanceCriteria": [
         "AnimationData stores bone_timeline_index: flat array indexed by bone_index with pointers to each timeline type.",
         "SamplingContext stores last_keyframe_index per active timeline per track, lives on Skeleton instance.",
@@ -1655,7 +1655,7 @@
     {
       "id": "MAR-094",
       "title": "Eliminate constant tracks and convert animation data to float32",
-      "description": "Research: (1) All keyframe data uses double (8 bytes) \u2014 for 2D animation float (4 bytes) provides identical visual quality and doubles cache density. (2) ozz-animation's AnimationOptimizer removes redundant keyframes where all keys match setup pose \u2014 typical Spine exports have 20-40% redundant timelines. (3) Replace solve_cubic_bezier_parameter Newton+bisection (40 iterations) with a pre-computed 64-entry LUT per unique bezier curve.",
+      "description": "Research: (1) All keyframe data uses double (8 bytes) — for 2D animation float (4 bytes) provides identical visual quality and doubles cache density. (2) ozz-animation's AnimationOptimizer removes redundant keyframes where all keys match setup pose — typical Spine exports have 20-40% redundant timelines. (3) Replace solve_cubic_bezier_parameter Newton+bisection (40 iterations) with a pre-computed 64-entry LUT per unique bezier curve.",
       "acceptanceCriteria": [
         "All keyframe times, values, and interpolation parameters use float instead of double.",
         "Constant/identity timelines (single key matching setup pose) are pruned at load time.",
@@ -1673,12 +1673,12 @@
     {
       "id": "MAR-095",
       "title": "Move mesh skinning to GPU: static VBO + bone palette only",
-      "description": "Research found the vertex shader ALREADY does bone blending but the CPU ALSO pre-computes skinned vertices redundantly (evaluate_skinned_vertices in module.cpp, evaluate_current_mesh_attachment in skeleton_skin.cpp). Fix: store bind-pose bone-local vertex data as static vertex attributes (uploaded once), skip CPU skinning for non-clipped meshes, only upload 3KB bone palette per frame. Expected: 79\u03bcs \u2192 ~2\u03bcs per skeleton (96% reduction).",
+      "description": "Research found the vertex shader ALREADY does bone blending but the CPU ALSO pre-computes skinned vertices redundantly (evaluate_skinned_vertices in module.cpp, evaluate_current_mesh_attachment in skeleton_skin.cpp). Fix: store bind-pose bone-local vertex data as static vertex attributes (uploaded once), skip CPU skinning for non-clipped meshes, only upload 3KB bone palette per frame. Expected: 79μs → ~2μs per skeleton (96% reduction).",
       "acceptanceCriteria": [
         "DynamicMeshDrawCommand vertex_payloads are built once at attachment creation, not per frame.",
         "evaluate_skinned_vertices() is skipped for meshes without active clip masks.",
         "Per-frame data upload is bone palette only (128 bones x 24 bytes = 3KB).",
-        "marrow_benchmark skinning_us drops from ~79\u03bcs to <5\u03bcs per skeleton.",
+        "marrow_benchmark skinning_us drops from ~79μs to <5μs per skeleton.",
         "Meshes with FFD deforms upload a secondary dynamic offset buffer only when offsets change.",
         "All smoke tests produce identical visual results."
       ],
@@ -1710,14 +1710,14 @@
     {
       "id": "MAR-097",
       "title": "Convert constraint solver to float and add fast atan2",
-      "description": "Research found ALL IK/transform constraint math uses double precision (50+ locals, 38 transcendentals) but output is stored as float \u2014 wasting 30-40% of constraint time. Also std::atan2(double) is 1.5-2x slower than atan2f(float). Fix: convert all constraint solver locals to float, replace 12 std::atan2 calls with polynomial approximation (0.005 rad / 0.28\u00b0 max error, 6x faster), replace std::acos/sin/cos/sqrt with fast float equivalents.",
+      "description": "Research found ALL IK/transform constraint math uses double precision (50+ locals, 38 transcendentals) but output is stored as float — wasting 30-40% of constraint time. Also std::atan2(double) is 1.5-2x slower than atan2f(float). Fix: convert all constraint solver locals to float, replace 12 std::atan2 calls with polynomial approximation (0.005 rad / 0.28° max error, 6x faster), replace std::acos/sin/cos/sqrt with fast float equivalents.",
       "acceptanceCriteria": [
         "All local variables in apply_one_bone_ik and apply_two_bone_ik are float.",
         "All local variables in path and transform constraint solvers are float.",
         "std::atan2 replaced with fast_atan2f polynomial (max error 0.005 rad).",
         "std::acos/sin/cos replaced with fast float approximations.",
         "marrow_benchmark constraint_us drops by at least 35%.",
-        "All constraint smoke tests pass within 0.3\u00b0 tolerance."
+        "All constraint smoke tests pass within 0.3° tolerance."
       ],
       "dependsOn": [],
       "status": "done",
@@ -1728,7 +1728,7 @@
     {
       "id": "MAR-098",
       "title": "Add per-constraint dirty-flag skipping",
-      "description": "Research: constraint loop evaluates every IK/transform constraint unconditionally every frame. For idle/partially-animated skeletons, many constraints have unchanged inputs. Add per-constraint dirty detection: track whether input bones changed since last solve, skip if unchanged. Spine considers IK cheap but Marrow's 56\u03bcs suggests overhead.",
+      "description": "Research: constraint loop evaluates every IK/transform constraint unconditionally every frame. For idle/partially-animated skeletons, many constraints have unchanged inputs. Add per-constraint dirty detection: track whether input bones changed since last solve, skip if unchanged. Spine considers IK cheap but Marrow's 56μs suggests overhead.",
       "acceptanceCriteria": [
         "Each constraint tracks revision numbers of its input bones (target + constrained).",
         "If no input bone revision changed, the constraint evaluation is skipped entirely.",
@@ -1746,13 +1746,13 @@
     {
       "id": "MAR-099",
       "title": "Validate performance: target 200 skeletons at 60fps",
-      "description": "After all optimization stories (MAR-087\u2013098), run comprehensive benchmarks. Original profiling: animation 81\u03bcs + skinning 79\u03bcs + constraint 56\u03bcs + render 12\u03bcs + transform 4\u03bcs = ~232\u03bcs/skeleton. Targets after optimization: animation <30\u03bcs, skinning <5\u03bcs, constraint <25\u03bcs, render <12\u03bcs, transform <4\u03bcs = <76\u03bcs/skeleton \u2192 219 skeletons at 60fps.",
+      "description": "After all optimization stories (MAR-087–098), run comprehensive benchmarks. Original profiling: animation 81μs + skinning 79μs + constraint 56μs + render 12μs + transform 4μs = ~232μs/skeleton. Targets after optimization: animation <30μs, skinning <5μs, constraint <25μs, render <12μs, transform <4μs = <76μs/skeleton → 219 skeletons at 60fps.",
       "acceptanceCriteria": [
         "marrow_benchmark --skeletons 200 completes a frame in <16.6ms.",
         "Benchmark score >= 80/100.",
-        "animation_us < 30\u03bcs per skeleton.",
-        "skinning_us < 5\u03bcs per skeleton.",
-        "constraint_us < 25\u03bcs per skeleton.",
+        "animation_us < 30μs per skeleton.",
+        "skinning_us < 5μs per skeleton.",
+        "constraint_us < 25μs per skeleton.",
         "SIMD NEON path shows >1.5x speedup over scalar.",
         "Results documented in AGENTS.md with before/after comparison table."
       ],
@@ -1772,10 +1772,10 @@
     {
       "id": "MAR-100",
       "title": "Convert BoneTransform from double to float",
-      "description": "Performance investigation found BoneTransform's 7 double fields are the primary reason constraint_us didn't improve. Every IK/transform constraint does 7 double\u2192float reads + 7 float\u2192double writes per bone, negating the fast trig savings. BoneWorldTransform is already float. Convert BoneTransform to float \u2014 sufficient precision for 2D animation (sub-pixel accuracy at position 10000).",
+      "description": "Performance investigation found BoneTransform's 7 double fields are the primary reason constraint_us didn't improve. Every IK/transform constraint does 7 double→float reads + 7 float→double writes per bone, negating the fast trig savings. BoneWorldTransform is already float. Convert BoneTransform to float — sufficient precision for 2D animation (sub-pixel accuracy at position 10000).",
       "acceptanceCriteria": [
         "BoneTransform uses float for all 7 fields (x, y, rotation, scale_x, scale_y, shear_x, shear_y).",
-        "No double\u2194float casts remain in IK and transform constraint solvers.",
+        "No double↔float casts remain in IK and transform constraint solvers.",
         "AttachmentVertex converted to float.",
         "All smoke tests pass within float precision tolerance.",
         "marrow_benchmark constraint_us drops by at least 20%."
@@ -1789,11 +1789,11 @@
     {
       "id": "MAR-101",
       "title": "Convert PhysicsBoneState and PathDistanceSample to float",
-      "description": "PhysicsBoneState has 14 double fields (112 bytes/bone), physics simulation runs entirely in double. PathDistanceSample uses double for distance and point coordinates. Both are unnecessary \u2014 world transforms are float. Convert to float to halve memory and eliminate precision boundary crossings.",
+      "description": "PhysicsBoneState has 14 double fields (112 bytes/bone), physics simulation runs entirely in double. PathDistanceSample uses double for distance and point coordinates. Both are unnecessary — world transforms are float. Convert to float to halve memory and eliminate precision boundary crossings.",
       "acceptanceCriteria": [
         "PhysicsBoneState uses float for all 14 fields (56 bytes/bone, was 112).",
         "PathDistanceSample and sample_path_distance use float.",
-        "No double\u2194float casts remain in physics and path constraint code.",
+        "No double↔float casts remain in physics and path constraint code.",
         "Physics smoke tests pass within float tolerance.",
         "marrow_benchmark constraint_us drops by an additional 10-15%."
       ],
@@ -1840,10 +1840,10 @@
     },
     {
       "id": "MAR-104",
-      "title": "Validate constraint performance: target <25\u03bcs",
-      "description": "After MAR-100\u2013103, validate that constraint_us meets the <25\u03bcs target. Expected: BoneTransform float (20%\u2193) + PhysicsBoneState float (10-15%\u2193) + targeted subtree (5-10%\u2193) + literal fix (1-2%\u2193) = 36-47% total reduction. 59\u03bcs * 0.55 \u2248 32\u03bcs. May need additional optimization if not met.",
+      "title": "Validate constraint performance: target <25μs",
+      "description": "After MAR-100–103, validate that constraint_us meets the <25μs target. Expected: BoneTransform float (20%↓) + PhysicsBoneState float (10-15%↓) + targeted subtree (5-10%↓) + literal fix (1-2%↓) = 36-47% total reduction. 59μs * 0.55 ≈ 32μs. May need additional optimization if not met.",
       "acceptanceCriteria": [
-        "marrow_benchmark --frames 240 --samples 5 shows constraint_us < 35\u03bcs.",
+        "marrow_benchmark --frames 240 --samples 5 shows constraint_us < 35μs.",
         "Overall score >= 80/100.",
         "max_skeletons_60fps >= 180.",
         "Results documented in AGENTS.md with full before/after table.",
@@ -1863,11 +1863,11 @@
     {
       "id": "MAR-105",
       "title": "Fix editor shell float/double drift from animation scalar conversion",
-      "description": "The Phase 5 animation float32 conversion (MAR-094) changed AnimationScalar from double to float, but src/editor/shell_main.cpp still uses double* in bezier editing lambdas and likely other locations. This causes 9 compile errors blocking the editor build. Audit the entire editor shell for double\u2192float type mismatches and fix all occurrences so the editor compiles and runs.",
+      "description": "The Phase 5 animation float32 conversion (MAR-094) changed AnimationScalar from double to float, but src/editor/shell_main.cpp still uses double* in bezier editing lambdas and likely other locations. This causes 9 compile errors blocking the editor build. Audit the entire editor shell for double→float type mismatches and fix all occurrences so the editor compiles and runs.",
       "acceptanceCriteria": [
         "cmake --build build --target marrow_editor_shell compiles with zero errors.",
         "All editor bezier/keyframe editing lambdas use float* (AnimationScalar*) instead of double*.",
-        "No double\u2192float warnings remain in shell_main.cpp with -Wdouble-promotion.",
+        "No double→float warnings remain in shell_main.cpp with -Wdouble-promotion.",
         "marrow_project_smoke passes.",
         "The editor shell launches and opens without crash."
       ],
@@ -1911,7 +1911,7 @@
     {
       "id": "MAR-108",
       "title": "Full build validation: all targets compile and all tests pass",
-      "description": "After MAR-105\u2013107, verify the entire project builds cleanly and all test/smoke/benchmark targets pass. This is the gate for declaring Phase 5+6 optimization complete.",
+      "description": "After MAR-105–107, verify the entire project builds cleanly and all test/smoke/benchmark targets pass. This is the gate for declaring Phase 5+6 optimization complete.",
       "acceptanceCriteria": [
         "cmake --build build completes with zero errors (ALL targets including editor_shell).",
         "marrow_fixture_smoke passes (both JSON and binary paths).",
@@ -2002,7 +2002,7 @@
     {
       "id": "MAR-113",
       "title": "Validate 5 real Spine assets: owl, goblins, spineboy, tank, raptor",
-      "description": "After MAR-109\u2013112, import all 5 official Spine 4.2 example assets and validate: import succeeds, marrow_inspect shows correct bone/slot/animation counts, fixture smoke validates loaded data, and renderer_sample can display setup pose.",
+      "description": "After MAR-109–112, import all 5 official Spine 4.2 example assets and validate: import succeeds, marrow_inspect shows correct bone/slot/animation counts, fixture smoke validates loaded data, and renderer_sample can display setup pose.",
       "acceptanceCriteria": [
         "All 5 Spine examples import via spine_to_marrow without errors.",
         "marrow_inspect shows correct skeleton metadata for each import.",
@@ -2020,6 +2020,112 @@
       "startedAt": "2026-04-02T14:29:54.734805+00:00",
       "completedAt": "2026-04-02T16:02:40.454613+00:00",
       "updatedAt": "2026-04-02T16:02:40.454463+00:00"
+    },
+    {
+      "id": "MAR-114",
+      "title": "Implement GL-native ViewportRenderer for PreparedScene in editor FBO",
+      "description": "The editor viewport is empty because sokol_gfx cannot render to external GL FBOs. Create a ViewportRenderer class that uses raw OpenGL (not sokol) to render PreparedScene data into the editor's existing FBO. Reuse the shader math from the sokol backend (vertex skinning, two-color tint, blend modes) but implement as direct GL calls. Wire into render_viewport_framebuffer() so textured region/mesh attachments render alongside the existing debug geometry.",
+      "acceptanceCriteria": [
+        "ViewportRenderer renders PreparedScene region attachments as textured quads into the editor FBO.",
+        "ViewportRenderer renders GPU-skinned mesh attachments into the editor FBO.",
+        "Atlas texture is loaded into a GL texture and bound during viewport rendering.",
+        "Blend modes (Normal/Additive/Multiply/Screen) are applied via glBlendFunc per draw command.",
+        "Two-color tint shader is available for slots with dark color.",
+        "Stencil-based clipping works for clip attachments.",
+        "The editor viewport shows the actual character (body, arms, etc.) on the dark background.",
+        "Debug overlay (bones, constraints) renders on top of the character.",
+        "Viewport camera pan/zoom affects both character and debug overlay."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-115",
+      "title": "Wire animation playback to live viewport rendering",
+      "description": "Animation playback updates skeleton pose correctly but viewport shows nothing because the PreparedScene is rebuilt but never re-rendered. Wire the timeline Play/Pause to trigger PreparedScene rebuild and ViewportRenderer redraw each frame so the character animates live in the viewport.",
+      "acceptanceCriteria": [
+        "Clicking Play in the timeline shows the character animating in the viewport.",
+        "Scrubbing the timeline slider updates the character pose in real-time.",
+        "Pausing freezes the viewport at the current frame.",
+        "Looping wraps the animation correctly.",
+        "Reverse playback shows the animation playing backward.",
+        "Timeline current-time indicator stays in sync with the rendered pose."
+      ],
+      "dependsOn": [
+        "MAR-114"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-116",
+      "title": "Wire weight painting and property edits to live viewport feedback",
+      "description": "Weight painting modifies mesh data but shows no visual feedback because the viewport doesn't render meshes. With ViewportRenderer in place, wire weight paint brush strokes to trigger mesh re-render showing deformation changes. Wire inspector property edits (bone transform, slot color) to update the viewport in real-time.",
+      "acceptanceCriteria": [
+        "Weight paint brush strokes show immediate mesh deformation change in viewport.",
+        "Heat map overlay renders on top of the textured mesh (not just wireframe).",
+        "Changing bone transform in inspector updates the viewport pose.",
+        "Changing slot color in inspector updates the viewport tint.",
+        "Skin switching in inspector updates the viewport attachments."
+      ],
+      "dependsOn": [
+        "MAR-114"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-117",
+      "title": "Implement onion skinning with textured ghost frames",
+      "description": "Onion skinning currently renders ghost poses as wireframe bones only. With ViewportRenderer, render ghost frames as semi-transparent textured characters with before/after tinting, making motion arcs visible.",
+      "acceptanceCriteria": [
+        "Ghost frames render as semi-transparent textured characters (not just wireframe).",
+        "Before-ghosts tinted blue/cool, after-ghosts tinted red/warm.",
+        "Alpha decreases with distance from current frame.",
+        "Anchor mode shows ghosts at fixed intervals for stable arc evaluation.",
+        "Onion skinning toggle on/off works."
+      ],
+      "dependsOn": [
+        "MAR-114",
+        "MAR-115"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-118",
+      "title": "Fix GLFW window focus: editor comes to front on launch",
+      "description": "The editor window always launches behind other apps (Antigravity, Terminal). GLFW apps launched from CLI are treated as accessory processes on macOS. Add NSApplication activation and GLFW_FOCUS_ON_SHOW hint so the editor window comes to front on launch.",
+      "acceptanceCriteria": [
+        "Editor window appears in front of other apps on launch.",
+        "Editor appears in Cmd+Tab app switcher.",
+        "GLFW_FOCUS_ON_SHOW hint is set to GLFW_TRUE.",
+        "macOS NSApp activation is called after window creation.",
+        "Works when launched from terminal, Finder, and open command."
+      ],
+      "dependsOn": [],
+      "status": "open"
+    },
+    {
+      "id": "MAR-119",
+      "title": "End-to-end editor validation: load, view, animate, edit, export",
+      "description": "After MAR-114–118, validate the complete editor workflow: open project → see character in viewport → play animation → edit bone transform → paint weights → toggle onion skin → export .mskl → verify exported file loads in marrow_inspect.",
+      "acceptanceCriteria": [
+        "Open player_idle.marrow → character visible in viewport with textures.",
+        "Play idle animation → character animates smoothly.",
+        "Select arm_l bone → bone highlights, inspector shows properties.",
+        "Edit bone rotation → viewport updates in real-time.",
+        "Enable weight paint → heat map visible on mesh, brush modifies weights.",
+        "Enable onion skinning → ghost frames visible as semi-transparent characters.",
+        "Export → .mskl loads in marrow_inspect with correct counts.",
+        "Undo/redo works through all edit operations.",
+        "Screenshot of working editor documented in AGENTS.md."
+      ],
+      "dependsOn": [
+        "MAR-114",
+        "MAR-115",
+        "MAR-116",
+        "MAR-117",
+        "MAR-118"
+      ],
+      "status": "open"
     }
   ]
 }
