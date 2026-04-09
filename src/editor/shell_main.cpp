@@ -21,6 +21,7 @@
 #include <GLFW/glfw3.h>
 
 #if defined(__APPLE__)
+#include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>
 #else
 #include <GL/glcorearb.h>
@@ -31,6 +32,8 @@
 #include "imgui_impl_opengl3.h"
 #include "imgui_internal.h"
 
+#include "macos_app_focus.hpp"
+#include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/module.hpp"
 #include "marrow/editor/project.hpp"
@@ -43,6 +46,7 @@ namespace {
 struct Options {
     std::filesystem::path project_path{"assets/fixtures/player_idle.marrow"};
     std::optional<int> auto_close_frames;
+    bool verify_launch_focus{false};
 };
 
 enum class ParseStatus {
@@ -101,6 +105,11 @@ struct ViewportRenderVertex {
     float color_a{0.0f};
 };
 
+struct ViewportGeometryPass {
+    std::vector<ViewportRenderVertex> line_vertices;
+    std::vector<ViewportRenderVertex> triangle_vertices;
+};
+
 struct ViewportFramebufferSize {
     int width{0};
     int height{0};
@@ -111,11 +120,13 @@ struct ViewportRenderResources {
     bool initialization_attempted{false};
     GLuint framebuffer{0};
     GLuint color_texture{0};
+    GLuint depth_stencil_renderbuffer{0};
     GLuint program{0};
     GLuint vertex_shader{0};
     GLuint fragment_shader{0};
     GLuint vao{0};
     GLuint vbo{0};
+    marrow::editor::ViewportRenderer prepared_scene_renderer{};
     GLint view_size_location{-1};
     int framebuffer_width{0};
     int framebuffer_height{0};
@@ -572,6 +583,13 @@ std::optional<std::string> ensure_viewport_framebuffer(
     ViewportRenderResources* resources,
     int width,
     int height);
+std::optional<std::string> render_prepared_scene_framebuffer(
+    const ViewportLayout& layout,
+    const ViewportGeometryPass& background_geometry,
+    const ViewportGeometryPass& overlay_geometry,
+    const marrow::renderer::PreparedScene& scene,
+    const std::filesystem::path& atlas_image_path,
+    ViewportRenderResources* resources);
 std::optional<std::string> render_viewport_framebuffer(
     const ShellState& state,
     const ViewportLayout& layout,
@@ -647,6 +665,10 @@ ImVec2 screen_from_world(
     const ViewportLayout& layout,
     float world_x,
     float world_y);
+std::array<float, 16> viewport_projection_matrix(const ViewportLayout& layout);
+std::filesystem::path resolve_viewport_atlas_image_path(
+    const ShellState& state,
+    const marrow::renderer::PreparedScene& scene);
 ImVec2 local_viewport_position(
     const ViewportLayout& layout,
     const ImVec2& screen_position);
@@ -682,10 +704,11 @@ void draw_transform_timeline_editor(
 
 void print_usage(std::string_view executable_name) {
     std::cout << "Usage: " << executable_name
-              << " [project.marrow] [--auto-close <frames>]\n"
+              << " [project.marrow] [--auto-close <frames>] [--verify-launch-focus]\n"
                  "       "
               << executable_name
-              << " --project <project.marrow> [--auto-close <frames>]\n"
+              << " --project <project.marrow> [--auto-close <frames>] "
+                 "[--verify-launch-focus]\n"
                  "Launch the Marrow Dear ImGui editor shell using GLFW and OpenGL.\n";
 }
 
@@ -743,6 +766,11 @@ ParseResult parse_arguments(int argc, char** argv) {
             continue;
         }
 
+        if (argument == "--verify-launch-focus") {
+            result.options.verify_launch_focus = true;
+            continue;
+        }
+
         if (!argument.empty() && argument.front() == '-') {
             std::cerr << "Unknown option: " << argument << '\n';
             print_usage(argv[0]);
@@ -757,6 +785,13 @@ ParseResult parse_arguments(int argc, char** argv) {
 
         result.options.project_path = std::filesystem::path(argument);
         project_path_set = true;
+    }
+
+    if (result.options.verify_launch_focus &&
+        result.options.auto_close_frames.has_value()) {
+        std::cerr << "--verify-launch-focus cannot be combined with --auto-close.\n";
+        print_usage(argv[0]);
+        return result;
     }
 
     result.status = ParseStatus::Ok;
@@ -774,8 +809,74 @@ void configure_glfw_for_editor() {
 #if defined(__APPLE__)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
+    glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_TRUE);
     glfwWindowHint(GLFW_SAMPLES, 4);
 }
+
+#if defined(__APPLE__)
+void activate_editor_window_on_launch(GLFWwindow* window) {
+    if (!marrow::editor::platform::activate_editor_application()) {
+        std::cerr << "Warning: failed to promote the Marrow editor app to a regular "
+                     "foreground macOS application.\n";
+    }
+    glfwFocusWindow(window);
+}
+
+bool verify_editor_launch_focus_configuration(GLFWwindow* window) {
+    bool success = true;
+
+    if (glfwGetWindowAttrib(window, GLFW_FOCUS_ON_SHOW) != GLFW_TRUE) {
+        std::cerr << "Expected GLFW_FOCUS_ON_SHOW to be enabled for the editor "
+                     "window.\n";
+        success = false;
+    }
+
+    if (!marrow::editor::platform::activate_editor_application()) {
+        std::cerr << "Expected macOS launch activation to promote the editor to a "
+                     "regular foreground application.\n";
+        success = false;
+    }
+
+    if (!marrow::editor::platform::uses_regular_activation_policy()) {
+        std::cerr << "Expected the Marrow editor to use "
+                     "NSApplicationActivationPolicyRegular for Cmd+Tab visibility.\n";
+        success = false;
+    }
+
+    return success;
+}
+
+int run_launch_focus_verification() {
+    glfwSetErrorCallback(glfw_error_callback);
+    glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
+    glfwInitHint(GLFW_COCOA_MENUBAR, GLFW_FALSE);
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW for launch-focus verification.\n";
+        return 1;
+    }
+
+    configure_glfw_for_editor();
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+
+    GLFWwindow* window = glfwCreateWindow(640, 480, "Marrow Launch Focus Verification", nullptr, nullptr);
+    if (window == nullptr) {
+        std::cerr << "Failed to create the Marrow launch-focus verification window.\n";
+        glfwTerminate();
+        return 1;
+    }
+
+    const bool success = verify_editor_launch_focus_configuration(window);
+    glfwDestroyWindow(window);
+    glfwTerminate();
+
+    if (!success) {
+        return 1;
+    }
+
+    std::cout << "Verified macOS editor launch focus configuration.\n";
+    return 0;
+}
+#endif
 
 float monitor_content_scale() {
     GLFWmonitor* primary_monitor = glfwGetPrimaryMonitor();
@@ -972,6 +1073,10 @@ std::optional<std::string> program_log(GLuint program) {
 }
 
 void destroy_viewport_framebuffer(ViewportRenderResources* resources) {
+    if (resources->depth_stencil_renderbuffer != 0) {
+        glDeleteRenderbuffers(1, &resources->depth_stencil_renderbuffer);
+        resources->depth_stencil_renderbuffer = 0;
+    }
     if (resources->color_texture != 0) {
         glDeleteTextures(1, &resources->color_texture);
         resources->color_texture = 0;
@@ -1108,6 +1213,12 @@ std::optional<std::string> initialize_viewport_renderer(
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
+    if (const auto error = resources->prepared_scene_renderer.initialize()) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+
     resources->available = true;
     return std::nullopt;
 }
@@ -1118,6 +1229,7 @@ void destroy_viewport_renderer(ViewportRenderResources* resources) {
     }
 
     destroy_viewport_framebuffer(resources);
+    resources->prepared_scene_renderer.destroy();
     if (resources->vbo != 0) {
         glDeleteBuffers(1, &resources->vbo);
         resources->vbo = 0;
@@ -1206,8 +1318,24 @@ std::optional<std::string> ensure_viewport_framebuffer(
         GL_TEXTURE_2D,
         resources->color_texture,
         0);
+    glGenRenderbuffers(1, &resources->depth_stencil_renderbuffer);
+    if (resources->depth_stencil_renderbuffer == 0) {
+        resources->error_message = "Failed to allocate viewport depth-stencil storage.";
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        destroy_viewport_framebuffer(resources);
+        return resources->error_message;
+    }
+    glBindRenderbuffer(GL_RENDERBUFFER, resources->depth_stencil_renderbuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+    glFramebufferRenderbuffer(
+        GL_FRAMEBUFFER,
+        GL_DEPTH_STENCIL_ATTACHMENT,
+        GL_RENDERBUFFER,
+        resources->depth_stencil_renderbuffer);
 
     const GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
@@ -5660,6 +5788,62 @@ ImVec2 screen_from_world(
         static_cast<double>(world_y));
 }
 
+std::array<float, 16> viewport_projection_matrix(const ViewportLayout& layout) {
+    const double pixels_per_unit =
+        std::max(static_cast<double>(layout.pixels_per_unit), 0.0001);
+    const double world_width =
+        std::max(static_cast<double>(layout.canvas_size.x) / pixels_per_unit, 1.0);
+    const double world_height =
+        std::max(static_cast<double>(layout.canvas_size.y) / pixels_per_unit, 1.0);
+    const double center_x =
+        layout.world_center_x -
+        (static_cast<double>(layout.screen_center.x - (layout.canvas_origin.x + (layout.canvas_size.x * 0.5f))) /
+         pixels_per_unit);
+    const double center_y =
+        layout.world_center_y +
+        (static_cast<double>(layout.screen_center.y - (layout.canvas_origin.y + (layout.canvas_size.y * 0.5f))) /
+         pixels_per_unit);
+    const double min_x = center_x - (world_width * 0.5);
+    const double max_x = center_x + (world_width * 0.5);
+    const double min_y = center_y - (world_height * 0.5);
+    const double max_y = center_y + (world_height * 0.5);
+
+    return {{
+        static_cast<float>(2.0 / world_width),
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        static_cast<float>(2.0 / world_height),
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        -1.0f,
+        0.0f,
+        static_cast<float>(-(max_x + min_x) / world_width),
+        static_cast<float>(-(max_y + min_y) / world_height),
+        0.0f,
+        1.0f,
+    }};
+}
+
+std::filesystem::path resolve_viewport_atlas_image_path(
+    const ShellState& state,
+    const marrow::renderer::PreparedScene& scene) {
+    if (!state.load_result || state.load_result.project == nullptr ||
+        state.load_result.project->resolved_atlas_paths().empty()) {
+        return {};
+    }
+
+    const std::filesystem::path atlas_path =
+        state.load_result.project->resolved_atlas_paths().front();
+    const std::filesystem::path image_path(scene.atlas_image);
+    return image_path.is_absolute()
+        ? image_path.lexically_normal()
+        : (atlas_path.parent_path() / image_path).lexically_normal();
+}
+
 float squared_distance(const ImVec2& a, const ImVec2& b) {
     const float dx = a.x - b.x;
     const float dy = a.y - b.y;
@@ -6830,20 +7014,23 @@ void append_viewport_pose_geometry(
     }
 }
 
-void build_viewport_render_geometry(
+void build_viewport_background_geometry(
     const ShellState& state,
     const ViewportLayout& layout,
     const std::vector<OnionSkinGhostPose>& ghost_poses,
-    std::optional<std::size_t> hovered_bone,
-    const MeshWeightOverlay* mesh_weight_overlay,
-    std::vector<ViewportRenderVertex>* line_vertices,
-    std::vector<ViewportRenderVertex>* triangle_vertices) {
+    ViewportGeometryPass* geometry) {
+    if (geometry == nullptr) {
+        return;
+    }
+
+    auto& line_vertices = geometry->line_vertices;
+    auto& triangle_vertices = geometry->triangle_vertices;
     const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state.viewport.zoom));
     for (float x = first_grid_line(layout.world_origin_screen.x, layout.canvas_origin.x, grid_spacing);
          x < layout.canvas_end.x;
          x += grid_spacing) {
         append_colored_line(
-            line_vertices,
+            &line_vertices,
             ImVec2(x - layout.canvas_origin.x, 0.0f),
             ImVec2(x - layout.canvas_origin.x, layout.canvas_size.y),
             IM_COL32(31, 35, 41, 255));
@@ -6852,19 +7039,19 @@ void build_viewport_render_geometry(
          y < layout.canvas_end.y;
          y += grid_spacing) {
         append_colored_line(
-            line_vertices,
+            &line_vertices,
             ImVec2(0.0f, y - layout.canvas_origin.y),
             ImVec2(layout.canvas_size.x, y - layout.canvas_origin.y),
             IM_COL32(31, 35, 41, 255));
     }
 
     append_colored_line(
-        line_vertices,
+        &line_vertices,
         ImVec2(0.0f, layout.world_origin_screen.y - layout.canvas_origin.y),
         ImVec2(layout.canvas_size.x, layout.world_origin_screen.y - layout.canvas_origin.y),
         IM_COL32(189, 86, 37, 255));
     append_colored_line(
-        line_vertices,
+        &line_vertices,
         ImVec2(layout.world_origin_screen.x - layout.canvas_origin.x, 0.0f),
         ImVec2(layout.world_origin_screen.x - layout.canvas_origin.x, layout.canvas_size.y),
         IM_COL32(204, 177, 110, 255));
@@ -6883,20 +7070,33 @@ void build_viewport_render_geometry(
             ghost_pose.fill_color,
             ghost_pose.fill_color,
             ghost_pose.fill_color,
-            line_vertices,
-            triangle_vertices);
+            &line_vertices,
+            &triangle_vertices);
+    }
+}
+
+void build_viewport_overlay_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
+    ViewportGeometryPass* geometry) {
+    if (geometry == nullptr) {
+        return;
     }
 
+    auto& line_vertices = geometry->line_vertices;
+    auto& triangle_vertices = geometry->triangle_vertices;
     if (mesh_weight_overlay != nullptr) {
         append_mesh_weight_overlay_geometry(
             layout,
             *mesh_weight_overlay,
-            triangle_vertices,
-            line_vertices);
+            &triangle_vertices,
+            &line_vertices);
     }
 
     const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
-    append_debug_overlay_geometry(layout, debug_overlay, line_vertices, triangle_vertices);
+    append_debug_overlay_geometry(layout, debug_overlay, &line_vertices, &triangle_vertices);
 
     if (state.viewport.debug_overlay.bones) {
         append_viewport_pose_geometry(
@@ -6912,17 +7112,62 @@ void build_viewport_render_geometry(
             IM_COL32(98, 103, 110, 200),
             IM_COL32(226, 186, 97, 240),
             IM_COL32(247, 204, 114, 255),
-            line_vertices,
-            triangle_vertices);
+            &line_vertices,
+            &triangle_vertices);
     }
 }
 
-std::optional<std::string> render_viewport_framebuffer(
+void build_viewport_render_geometry(
     const ShellState& state,
     const ViewportLayout& layout,
     const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
     const MeshWeightOverlay* mesh_weight_overlay,
+    std::vector<ViewportRenderVertex>* line_vertices,
+    std::vector<ViewportRenderVertex>* triangle_vertices) {
+    if (line_vertices == nullptr || triangle_vertices == nullptr) {
+        return;
+    }
+
+    ViewportGeometryPass background_geometry;
+    background_geometry.line_vertices.reserve((layout.bones.size() * 8U) + 1024U);
+    background_geometry.triangle_vertices.reserve(layout.bones.size() * 24U);
+    build_viewport_background_geometry(state, layout, ghost_poses, &background_geometry);
+
+    ViewportGeometryPass overlay_geometry;
+    overlay_geometry.line_vertices.reserve((layout.bones.size() * 24U) + 1024U);
+    overlay_geometry.triangle_vertices.reserve(layout.bones.size() * 72U);
+    build_viewport_overlay_geometry(
+        state,
+        layout,
+        hovered_bone,
+        mesh_weight_overlay,
+        &overlay_geometry);
+
+    line_vertices->insert(
+        line_vertices->end(),
+        background_geometry.line_vertices.begin(),
+        background_geometry.line_vertices.end());
+    line_vertices->insert(
+        line_vertices->end(),
+        overlay_geometry.line_vertices.begin(),
+        overlay_geometry.line_vertices.end());
+    triangle_vertices->insert(
+        triangle_vertices->end(),
+        background_geometry.triangle_vertices.begin(),
+        background_geometry.triangle_vertices.end());
+    triangle_vertices->insert(
+        triangle_vertices->end(),
+        overlay_geometry.triangle_vertices.begin(),
+        overlay_geometry.triangle_vertices.end());
+}
+
+std::optional<std::string> render_prepared_scene_framebuffer(
+    const ViewportLayout& layout,
+    const ViewportGeometryPass& background_geometry,
+    const ViewportGeometryPass& overlay_geometry,
+    const marrow::renderer::PreparedScene& scene,
+    const std::filesystem::path& atlas_image_path,
     ViewportRenderResources* resources) {
     if (resources == nullptr || !resources->available) {
         return "Viewport renderer is unavailable.";
@@ -6931,19 +7176,6 @@ std::optional<std::string> render_viewport_framebuffer(
         return "Viewport framebuffer has not been created.";
     }
 
-    std::vector<ViewportRenderVertex> line_vertices;
-    std::vector<ViewportRenderVertex> triangle_vertices;
-    line_vertices.reserve((layout.bones.size() * 24U) + 2048U);
-    triangle_vertices.reserve(layout.bones.size() * 72U);
-    build_viewport_render_geometry(
-        state,
-        layout,
-        ghost_poses,
-        hovered_bone,
-        mesh_weight_overlay,
-        &line_vertices,
-        &triangle_vertices);
-
     glBindFramebuffer(GL_FRAMEBUFFER, resources->framebuffer);
     glViewport(0, 0, resources->framebuffer_width, resources->framebuffer_height);
     glDisable(GL_DEPTH_TEST);
@@ -6951,13 +7183,17 @@ std::optional<std::string> render_viewport_framebuffer(
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glClearColor(0.07f, 0.08f, 0.10f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
     glUseProgram(resources->program);
     glUniform2f(
         resources->view_size_location,
         std::max(layout.canvas_size.x, 1.0f),
         std::max(layout.canvas_size.y, 1.0f));
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBindVertexArray(resources->vao);
     glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
 
@@ -6973,14 +7209,85 @@ std::optional<std::string> render_viewport_framebuffer(
             GL_STREAM_DRAW);
         glDrawArrays(mode, 0, static_cast<GLsizei>(vertices.size()));
     };
-    draw_vertices(line_vertices, GL_LINES);
-    draw_vertices(triangle_vertices, GL_TRIANGLES);
+    draw_vertices(background_geometry.line_vertices, GL_LINES);
+    draw_vertices(background_geometry.triangle_vertices, GL_TRIANGLES);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    if (const auto error = resources->prepared_scene_renderer.render(
+            scene,
+            atlas_image_path,
+            viewport_projection_matrix(layout))) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return error;
+    }
+
+    glUseProgram(resources->program);
+    glUniform2f(
+        resources->view_size_location,
+        std::max(layout.canvas_size.x, 1.0f),
+        std::max(layout.canvas_size.y, 1.0f));
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glBindVertexArray(resources->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
+    draw_vertices(overlay_geometry.line_vertices, GL_LINES);
+    draw_vertices(overlay_geometry.triangle_vertices, GL_TRIANGLES);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return std::nullopt;
+}
+
+std::optional<std::string> render_viewport_framebuffer(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
+    std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
+    ViewportRenderResources* resources) {
+    if (!state.load_result || !state.preview_skeleton || state.load_result.atlas_data.empty()) {
+        return "Viewport preview scene is unavailable.";
+    }
+
+    ViewportGeometryPass background_geometry;
+    background_geometry.line_vertices.reserve((layout.bones.size() * 8U) + 1024U);
+    background_geometry.triangle_vertices.reserve(layout.bones.size() * 24U);
+    build_viewport_background_geometry(state, layout, ghost_poses, &background_geometry);
+
+    ViewportGeometryPass overlay_geometry;
+    overlay_geometry.line_vertices.reserve((layout.bones.size() * 24U) + 1024U);
+    overlay_geometry.triangle_vertices.reserve(layout.bones.size() * 72U);
+    build_viewport_overlay_geometry(
+        state,
+        layout,
+        hovered_bone,
+        mesh_weight_overlay,
+        &overlay_geometry);
+
+    const marrow::renderer::PreparedSceneResult scene_result =
+        marrow::renderer::prepare_setup_pose_scene(
+            *state.preview_skeleton,
+            *state.load_result.atlas_data.front());
+    if (!scene_result) {
+        return scene_result.error_message;
+    }
+
+    return render_prepared_scene_framebuffer(
+        layout,
+        background_geometry,
+        overlay_geometry,
+        *scene_result.scene,
+        resolve_viewport_atlas_image_path(state, *scene_result.scene),
+        resources);
 }
 
 std::optional<std::size_t> pick_bone_at_position(
@@ -11710,6 +12017,716 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     return true;
 }
 
+const marrow::renderer::RegionAttachmentDrawCommand* find_region_attachment(
+    const marrow::renderer::PreparedScene& scene,
+    std::string_view slot_name) {
+    for (const auto& command : scene.draw_commands) {
+        const auto* attachment = marrow::renderer::region_attachment_command(command);
+        if (attachment != nullptr && attachment->slot_name == slot_name) {
+            return attachment;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<std::size_t> find_region_attachment_index(
+    const marrow::renderer::PreparedScene& scene,
+    std::string_view slot_name) {
+    for (std::size_t draw_index = 0; draw_index < scene.draw_commands.size(); ++draw_index) {
+        const auto* attachment =
+            marrow::renderer::region_attachment_command(scene.draw_commands[draw_index]);
+        if (attachment != nullptr && attachment->slot_name == slot_name) {
+            return draw_index;
+        }
+    }
+    return std::nullopt;
+}
+
+const marrow::renderer::DynamicMeshDrawCommand* find_dynamic_mesh_attachment(
+    const marrow::renderer::PreparedScene& scene,
+    std::string_view slot_name) {
+    for (const auto& command : scene.draw_commands) {
+        const auto* attachment = marrow::renderer::dynamic_mesh_attachment_command(command);
+        if (attachment != nullptr && attachment->slot_name == slot_name) {
+            return attachment;
+        }
+    }
+    return nullptr;
+}
+
+const marrow::renderer::ClipAttachmentDrawCommand* find_clip_attachment(
+    const marrow::renderer::PreparedScene& scene,
+    std::string_view attachment_name) {
+    const auto iterator = std::find_if(
+        scene.clip_attachments.begin(),
+        scene.clip_attachments.end(),
+        [&](const marrow::renderer::ClipAttachmentDrawCommand& attachment) {
+            return attachment.attachment_name == attachment_name;
+        });
+    return iterator != scene.clip_attachments.end() ? &(*iterator) : nullptr;
+}
+
+std::array<std::uint8_t, 4> read_viewport_pixel(
+    const ViewportRenderResources& resources,
+    int x,
+    int y) {
+    std::array<std::uint8_t, 4> pixel{};
+    const int safe_x = std::clamp(x, 0, resources.framebuffer_width - 1);
+    const int safe_y = std::clamp(y, 0, resources.framebuffer_height - 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, resources.framebuffer);
+    glReadPixels(safe_x, safe_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return pixel;
+}
+
+bool pixels_match(
+    const std::array<std::uint8_t, 4>& left,
+    const std::array<std::uint8_t, 4>& right,
+    int tolerance = 6) {
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (std::abs(static_cast<int>(left[index]) - static_cast<int>(right[index])) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool point_in_polygon(
+    const std::vector<marrow::renderer::RenderPoint>& polygon,
+    const marrow::renderer::RenderPoint& point) {
+    if (polygon.size() < 3U) {
+        return false;
+    }
+
+    bool inside = false;
+    for (std::size_t index = 0, previous = polygon.size() - 1U;
+         index < polygon.size();
+         previous = index++) {
+        const auto& current = polygon[index];
+        const auto& prior = polygon[previous];
+        const bool intersects =
+            ((current.y > point.y) != (prior.y > point.y)) &&
+            (point.x <
+             ((prior.x - current.x) * (point.y - current.y) / (prior.y - current.y)) +
+                 current.x);
+        if (intersects) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+#if defined(__APPLE__)
+struct ScopedViewportSmokeContext {
+    CGLPixelFormatObj pixel_format{nullptr};
+    CGLContextObj context{nullptr};
+
+    void destroy() {
+        if (context != nullptr) {
+            if (CGLGetCurrentContext() == context) {
+                CGLSetCurrentContext(nullptr);
+            }
+            CGLReleaseContext(context);
+            context = nullptr;
+        }
+        if (pixel_format != nullptr) {
+            CGLReleasePixelFormat(pixel_format);
+            pixel_format = nullptr;
+        }
+    }
+
+    ~ScopedViewportSmokeContext() {
+        destroy();
+    }
+};
+
+std::optional<std::string> initialize_viewport_smoke_context(
+    ScopedViewportSmokeContext* smoke_context) {
+    const auto make_attributes =
+        [](bool accelerated, bool allow_offline) -> std::vector<CGLPixelFormatAttribute> {
+        std::vector<CGLPixelFormatAttribute> attributes;
+        attributes.reserve(13);
+        attributes.push_back(kCGLPFAOpenGLProfile);
+        attributes.push_back(static_cast<CGLPixelFormatAttribute>(kCGLOGLPVersion_3_2_Core));
+        if (accelerated) {
+            attributes.push_back(kCGLPFAAccelerated);
+        }
+        attributes.push_back(kCGLPFAColorSize);
+        attributes.push_back(static_cast<CGLPixelFormatAttribute>(24));
+        attributes.push_back(kCGLPFAAlphaSize);
+        attributes.push_back(static_cast<CGLPixelFormatAttribute>(8));
+        attributes.push_back(kCGLPFADepthSize);
+        attributes.push_back(static_cast<CGLPixelFormatAttribute>(24));
+        attributes.push_back(kCGLPFAStencilSize);
+        attributes.push_back(static_cast<CGLPixelFormatAttribute>(8));
+        if (allow_offline) {
+            attributes.push_back(kCGLPFAAllowOfflineRenderers);
+        }
+        attributes.push_back(static_cast<CGLPixelFormatAttribute>(0));
+        return attributes;
+    };
+
+    const std::array<std::pair<bool, bool>, 4> pixel_format_attempts{{
+        {true, true},
+        {false, true},
+        {true, false},
+        {false, false},
+    }};
+
+    GLint pixel_format_count = 0;
+    CGLError pixel_format_error = kCGLBadAttribute;
+    for (const auto [accelerated, allow_offline] : pixel_format_attempts) {
+        const std::vector<CGLPixelFormatAttribute> attributes =
+            make_attributes(accelerated, allow_offline);
+        smoke_context->pixel_format = nullptr;
+        pixel_format_count = 0;
+        pixel_format_error = CGLChoosePixelFormat(
+            attributes.data(),
+            &smoke_context->pixel_format,
+            &pixel_format_count);
+        if (pixel_format_error == kCGLNoError &&
+            smoke_context->pixel_format != nullptr &&
+            pixel_format_count > 0) {
+            break;
+        }
+    }
+
+    if (pixel_format_error != kCGLNoError ||
+        smoke_context->pixel_format == nullptr ||
+        pixel_format_count <= 0) {
+        return "Viewport renderer smoke failed to create an offscreen macOS GL pixel format.";
+    }
+
+    const CGLError context_error =
+        CGLCreateContext(smoke_context->pixel_format, nullptr, &smoke_context->context);
+    if (context_error != kCGLNoError || smoke_context->context == nullptr) {
+        return "Viewport renderer smoke failed to create an offscreen macOS GL context.";
+    }
+
+    const CGLError current_error = CGLSetCurrentContext(smoke_context->context);
+    if (current_error != kCGLNoError) {
+        return "Viewport renderer smoke failed to make the offscreen macOS GL context current.";
+    }
+
+    return std::nullopt;
+}
+#endif
+
+bool validate_viewport_prepared_scene_renderer_smoke(
+    const std::filesystem::path& project_path) {
+#if defined(__APPLE__)
+    ScopedViewportSmokeContext smoke_context;
+    if (const auto error = initialize_viewport_smoke_context(&smoke_context)) {
+        std::cerr << *error << '\n';
+        return false;
+    }
+#else
+    glfwSetErrorCallback(glfw_error_callback);
+    glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
+    glfwInitHint(GLFW_COCOA_MENUBAR, GLFW_FALSE);
+    if (!glfwInit()) {
+        std::cerr << "Viewport renderer smoke failed to initialize GLFW.\n";
+        return false;
+    }
+
+    configure_glfw_for_editor();
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    GLFWwindow* window =
+        glfwCreateWindow(640, 480, "Marrow Viewport Renderer Smoke", nullptr, nullptr);
+    if (window == nullptr) {
+        std::cerr << "Viewport renderer smoke failed to create a hidden GL window.\n";
+        glfwTerminate();
+        return false;
+    }
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(0);
+#endif
+
+    ViewportRenderResources resources;
+    auto cleanup = [&]() {
+        destroy_viewport_renderer(&resources);
+#if defined(__APPLE__)
+        smoke_context.destroy();
+#else
+        glfwDestroyWindow(window);
+        glfwTerminate();
+#endif
+    };
+
+    ShellState shell_state;
+    shell_state.project_path = project_path;
+    if (!reload_project(&shell_state)) {
+        std::cerr << shell_state.error_message << '\n';
+        cleanup();
+        return false;
+    }
+    shell_state.viewport.pan_x = 0.0;
+    shell_state.viewport.pan_y = 0.0;
+    shell_state.viewport.zoom = 1.0;
+    shell_state.viewport.debug_overlay = {};
+
+    if (const auto error = initialize_viewport_renderer(&resources)) {
+        std::cerr << *error << '\n';
+        cleanup();
+        return false;
+    }
+    if (const auto error = ensure_viewport_framebuffer(&resources, 640, 480)) {
+        std::cerr << *error << '\n';
+        cleanup();
+        return false;
+    }
+
+    const auto render_scene_to_pixels =
+        [&](const ShellState& render_state,
+            const ViewportLayout& layout,
+            const marrow::renderer::PreparedScene& scene,
+            const ViewportGeometryPass& overlay_geometry,
+            const ImVec2& sample_point) {
+            const ViewportGeometryPass empty_background;
+            if (const auto error = render_prepared_scene_framebuffer(
+                    layout,
+                    empty_background,
+                    overlay_geometry,
+                    scene,
+                    resolve_viewport_atlas_image_path(render_state, scene),
+                    &resources)) {
+                std::cerr << *error << '\n';
+                return std::optional<std::array<std::uint8_t, 4>>{};
+            }
+
+            return std::optional<std::array<std::uint8_t, 4>>{read_viewport_pixel(
+                resources,
+                static_cast<int>(std::lround(sample_point.x)),
+                resources.framebuffer_height - 1 -
+                    static_cast<int>(std::lround(sample_point.y)))};
+        };
+
+    const auto setup_layout = build_viewport_layout(
+        shell_state,
+        ImVec2(0.0f, 0.0f),
+        ImVec2(static_cast<float>(resources.framebuffer_width),
+               static_cast<float>(resources.framebuffer_height)));
+    if (!setup_layout.has_value()) {
+        std::cerr << "Viewport renderer smoke could not build the setup-pose layout.\n";
+        cleanup();
+        return false;
+    }
+
+    const auto setup_scene_result = marrow::renderer::prepare_setup_pose_scene(
+        *shell_state.preview_skeleton,
+        *shell_state.load_result.atlas_data.front());
+    if (!setup_scene_result) {
+        std::cerr << setup_scene_result.error_message << '\n';
+        cleanup();
+        return false;
+    }
+
+    const marrow::renderer::PreparedScene& setup_scene = *setup_scene_result.scene;
+    const auto body_draw_index = find_region_attachment_index(setup_scene, "body");
+    const auto* body_attachment = find_region_attachment(setup_scene, "body");
+    const auto* spark_attachment = find_region_attachment(setup_scene, "spark_fx");
+    const auto* clip_attachment = find_clip_attachment(setup_scene, "fx_mask");
+    if (!body_draw_index.has_value() ||
+        body_attachment == nullptr ||
+        spark_attachment == nullptr ||
+        clip_attachment == nullptr) {
+        std::cerr << "Viewport renderer smoke could not resolve the expected setup-pose attachments.\n";
+        cleanup();
+        return false;
+    }
+
+    const ImVec2 body_center = screen_from_world(
+        *setup_layout,
+        (body_attachment->vertices[0].position.x + body_attachment->vertices[2].position.x) * 0.5,
+        (body_attachment->vertices[0].position.y + body_attachment->vertices[2].position.y) * 0.5);
+    double body_min_x = body_attachment->vertices[0].position.x;
+    double body_max_x = body_attachment->vertices[0].position.x;
+    double body_min_y = body_attachment->vertices[0].position.y;
+    double body_max_y = body_attachment->vertices[0].position.y;
+    for (const auto& vertex : body_attachment->vertices) {
+        body_min_x = std::min(body_min_x, vertex.position.x);
+        body_max_x = std::max(body_max_x, vertex.position.x);
+        body_min_y = std::min(body_min_y, vertex.position.y);
+        body_max_y = std::max(body_max_y, vertex.position.y);
+    }
+    std::vector<ImVec2> body_sample_points;
+    body_sample_points.reserve(25);
+    for (int row = 1; row <= 5; ++row) {
+        const double row_ratio = static_cast<double>(row) / 6.0;
+        const double y = body_min_y + ((body_max_y - body_min_y) * row_ratio);
+        for (int column = 1; column <= 5; ++column) {
+            const double column_ratio = static_cast<double>(column) / 6.0;
+            const double x = body_min_x + ((body_max_x - body_min_x) * column_ratio);
+            body_sample_points.push_back(screen_from_world(*setup_layout, x, y));
+        }
+    }
+    marrow::renderer::PreparedScene blank_scene = setup_scene;
+    blank_scene.clip_attachments.clear();
+    blank_scene.draw_commands.clear();
+    blank_scene.ordered_events.clear();
+    const auto background_pixel =
+        render_scene_to_pixels(shell_state, *setup_layout, blank_scene, {}, body_center);
+    const auto setup_body_pixel =
+        render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, body_center);
+    if (!background_pixel.has_value() || !setup_body_pixel.has_value()) {
+        cleanup();
+        return false;
+    }
+    if (pixels_match(*setup_body_pixel, *background_pixel)) {
+        std::cerr << "Viewport renderer smoke did not draw the setup-pose body region.\n";
+        cleanup();
+        return false;
+    }
+
+    marrow::renderer::PreparedScene tinted_scene = setup_scene;
+    if (auto* body_command = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(
+            &tinted_scene.draw_commands[*body_draw_index])) {
+        body_command->blend_mode = marrow::runtime::BlendMode::Normal;
+    } else {
+        std::cerr << "Viewport renderer smoke lost the setup-pose body command.\n";
+        cleanup();
+        return false;
+    }
+    marrow::renderer::PreparedScene no_dark_scene = tinted_scene;
+    if (auto* body_command = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(
+            &no_dark_scene.draw_commands[*body_draw_index])) {
+        body_command->dark_color.reset();
+    } else {
+        std::cerr << "Viewport renderer smoke could not retarget the body two-color test.\n";
+        cleanup();
+        return false;
+    }
+    bool two_color_changed = false;
+    for (const ImVec2& sample_point : body_sample_points) {
+        const auto tinted_pixel =
+            render_scene_to_pixels(shell_state, *setup_layout, tinted_scene, {}, sample_point);
+        const auto no_dark_pixel =
+            render_scene_to_pixels(shell_state, *setup_layout, no_dark_scene, {}, sample_point);
+        if (tinted_pixel.has_value() &&
+            no_dark_pixel.has_value() &&
+            !pixels_match(*tinted_pixel, *no_dark_pixel)) {
+            two_color_changed = true;
+            break;
+        }
+    }
+    if (!two_color_changed) {
+        std::cerr << "Viewport renderer smoke did not apply the two-color tint path.\n";
+        cleanup();
+        return false;
+    }
+
+    auto render_body_blend_mode =
+        [&](marrow::runtime::BlendMode blend_mode,
+            const ImVec2& sample_point) -> std::optional<std::array<std::uint8_t, 4>> {
+            marrow::renderer::PreparedScene blend_scene = setup_scene;
+            auto* body_command = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(
+                &blend_scene.draw_commands[*body_draw_index]);
+            if (body_command == nullptr) {
+                return std::nullopt;
+            }
+            body_command->dark_color.reset();
+            body_command->blend_mode = blend_mode;
+            return render_scene_to_pixels(shell_state, *setup_layout, blend_scene, {}, sample_point);
+        };
+    bool blend_modes_diverged = false;
+    for (const ImVec2& sample_point : body_sample_points) {
+        const auto normal_pixel =
+            render_body_blend_mode(marrow::runtime::BlendMode::Normal, sample_point);
+        const auto additive_pixel =
+            render_body_blend_mode(marrow::runtime::BlendMode::Additive, sample_point);
+        const auto multiply_pixel =
+            render_body_blend_mode(marrow::runtime::BlendMode::Multiply, sample_point);
+        const auto screen_pixel =
+            render_body_blend_mode(marrow::runtime::BlendMode::Screen, sample_point);
+        if (normal_pixel.has_value() &&
+            additive_pixel.has_value() &&
+            multiply_pixel.has_value() &&
+            screen_pixel.has_value() &&
+            !pixels_match(*normal_pixel, *additive_pixel) &&
+            !pixels_match(*normal_pixel, *multiply_pixel) &&
+            !pixels_match(*normal_pixel, *screen_pixel)) {
+            blend_modes_diverged = true;
+            break;
+        }
+    }
+    if (!blend_modes_diverged) {
+        std::cerr << "Viewport renderer smoke did not vary the framebuffer result across blend modes.\n";
+        cleanup();
+        return false;
+    }
+
+    double spark_min_x = spark_attachment->vertices[0].position.x;
+    double spark_max_x = spark_attachment->vertices[0].position.x;
+    double spark_min_y = spark_attachment->vertices[0].position.y;
+    double spark_max_y = spark_attachment->vertices[0].position.y;
+    for (const auto& vertex : spark_attachment->vertices) {
+        spark_min_x = std::min(spark_min_x, vertex.position.x);
+        spark_max_x = std::max(spark_max_x, vertex.position.x);
+        spark_min_y = std::min(spark_min_y, vertex.position.y);
+        spark_max_y = std::max(spark_max_y, vertex.position.y);
+    }
+    std::vector<ImVec2> clipped_spark_sample_points;
+    clipped_spark_sample_points.reserve(16);
+    for (int row = 1; row <= 4; ++row) {
+        const double row_ratio = static_cast<double>(row) / 5.0;
+        const double y = spark_min_y + ((spark_max_y - spark_min_y) * row_ratio);
+        for (int column = 1; column <= 4; ++column) {
+            const double column_ratio = static_cast<double>(column) / 5.0;
+            const double x = spark_min_x + ((spark_max_x - spark_min_x) * column_ratio);
+            if (point_in_polygon(clip_attachment->polygon, {x, y})) {
+                continue;
+            }
+            clipped_spark_sample_points.push_back(screen_from_world(*setup_layout, x, y));
+        }
+    }
+    if (clipped_spark_sample_points.empty()) {
+        std::cerr << "Viewport renderer smoke could not find a spark sample outside the clip polygon.\n";
+        cleanup();
+        return false;
+    }
+
+    marrow::renderer::PreparedScene unclipped_scene = setup_scene;
+    unclipped_scene.clip_attachments.clear();
+    unclipped_scene.ordered_events.clear();
+    for (std::size_t draw_index = 0; draw_index < unclipped_scene.draw_commands.size(); ++draw_index) {
+        std::visit(
+            [](auto& attachment) {
+                attachment.clip_attachment_name.reset();
+                attachment.masked_vertices.clear();
+                attachment.masked_indices.clear();
+            },
+            unclipped_scene.draw_commands[draw_index]);
+        unclipped_scene.ordered_events.push_back({
+            marrow::renderer::PreparedSceneEventKind::Draw,
+            draw_index,
+        });
+    }
+    bool clipping_applied = false;
+    for (const ImVec2& sample_point : clipped_spark_sample_points) {
+        const auto clipped_spark_pixel =
+            render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, sample_point);
+        const auto unclipped_spark_pixel =
+            render_scene_to_pixels(shell_state, *setup_layout, unclipped_scene, {}, sample_point);
+        if (clipped_spark_pixel.has_value() &&
+            unclipped_spark_pixel.has_value() &&
+            !pixels_match(*clipped_spark_pixel, *unclipped_spark_pixel) &&
+            !pixels_match(*unclipped_spark_pixel, *background_pixel)) {
+            clipping_applied = true;
+            break;
+        }
+    }
+    if (!clipping_applied) {
+        std::cerr << "Viewport renderer smoke did not apply stencil clipping to the spark attachment.\n";
+        cleanup();
+        return false;
+    }
+
+    const auto spine_index = shell_state.load_result.skeleton_data->find_bone_index("spine");
+    if (!spine_index.has_value()) {
+        std::cerr << "Viewport renderer smoke requires the spine bone.\n";
+        cleanup();
+        return false;
+    }
+    const ImVec2 spine_screen = setup_layout->bones[*spine_index].screen_position;
+    const auto setup_spine_pixel =
+        render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, spine_screen);
+    if (!setup_spine_pixel.has_value()) {
+        cleanup();
+        return false;
+    }
+
+    shell_state.selected_bone_index = *spine_index;
+    shell_state.viewport.debug_overlay.bones = true;
+    ViewportGeometryPass overlay_geometry;
+    build_viewport_overlay_geometry(
+        shell_state,
+        *setup_layout,
+        shell_state.selected_bone_index,
+        nullptr,
+        &overlay_geometry);
+    bool overlay_changed = false;
+    for (int offset_y = -3; offset_y <= 3 && !overlay_changed; ++offset_y) {
+        for (int offset_x = -3; offset_x <= 3; ++offset_x) {
+            const ImVec2 overlay_sample_point(
+                spine_screen.x + static_cast<float>(offset_x),
+                spine_screen.y + static_cast<float>(offset_y));
+            const auto base_pixel =
+                render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, overlay_sample_point);
+            const auto overlay_pixel = render_scene_to_pixels(
+                shell_state,
+                *setup_layout,
+                setup_scene,
+                overlay_geometry,
+                overlay_sample_point);
+            if (base_pixel.has_value() &&
+                overlay_pixel.has_value() &&
+                !pixels_match(*base_pixel, *overlay_pixel)) {
+                overlay_changed = true;
+                break;
+            }
+        }
+    }
+    if (!overlay_changed) {
+        std::cerr << "Viewport renderer smoke did not draw the debug bone overlay on top of the character.\n";
+        cleanup();
+        return false;
+    }
+
+    ShellState camera_state = {};
+    camera_state.project_path = project_path;
+    if (!reload_project(&camera_state)) {
+        std::cerr << camera_state.error_message << '\n';
+        cleanup();
+        return false;
+    }
+    camera_state.selected_bone_index = *spine_index;
+    camera_state.viewport.debug_overlay.bones = true;
+    camera_state.viewport.pan_x = 96.0;
+    camera_state.viewport.pan_y = -54.0;
+    camera_state.viewport.zoom = 1.35;
+    const auto panned_layout = build_viewport_layout(
+        camera_state,
+        ImVec2(0.0f, 0.0f),
+        ImVec2(static_cast<float>(resources.framebuffer_width),
+               static_cast<float>(resources.framebuffer_height)));
+    if (!panned_layout.has_value()) {
+        std::cerr << "Viewport renderer smoke could not build the panned layout.\n";
+        cleanup();
+        return false;
+    }
+    ViewportGeometryPass panned_overlay_geometry;
+    build_viewport_overlay_geometry(
+        camera_state,
+        *panned_layout,
+        camera_state.selected_bone_index,
+        nullptr,
+        &panned_overlay_geometry);
+    const ImVec2 panned_body_center = screen_from_world(
+        *panned_layout,
+        (body_attachment->vertices[0].position.x + body_attachment->vertices[2].position.x) * 0.5,
+        (body_attachment->vertices[0].position.y + body_attachment->vertices[2].position.y) * 0.5);
+    const ImVec2 panned_spine_screen = panned_layout->bones[*spine_index].screen_position;
+    const auto panned_body_pixel = render_scene_to_pixels(
+        camera_state,
+        *panned_layout,
+        setup_scene,
+        panned_overlay_geometry,
+        panned_body_center);
+    const auto panned_spine_pixel = render_scene_to_pixels(
+        camera_state,
+        *panned_layout,
+        setup_scene,
+        panned_overlay_geometry,
+        panned_spine_screen);
+    if (!panned_body_pixel.has_value() ||
+        !panned_spine_pixel.has_value() ||
+        pixels_match(*panned_body_pixel, *background_pixel) ||
+        pixels_match(*panned_spine_pixel, *background_pixel) ||
+        std::abs(panned_body_center.x - body_center.x) < 20.0f ||
+        std::abs(panned_spine_screen.x - spine_screen.x) < 20.0f) {
+        std::cerr << "Viewport renderer smoke did not apply the shared pan/zoom camera to the character and overlay.\n";
+        cleanup();
+        return false;
+    }
+
+    ShellState mesh_state;
+    mesh_state.project_path = project_path;
+    if (!reload_project(&mesh_state)) {
+        std::cerr << mesh_state.error_message << '\n';
+        cleanup();
+        return false;
+    }
+    mesh_state.viewport.pan_x = 0.0;
+    mesh_state.viewport.pan_y = 0.0;
+    mesh_state.viewport.zoom = 1.0;
+    mesh_state.preview_skin_names = {"default"};
+    mesh_state.preview_slot_overrides.assign(
+        mesh_state.preview_slot_overrides.size(),
+        std::nullopt);
+    if (!refresh_preview_pose(&mesh_state)) {
+        std::cerr << mesh_state.error_message << '\n';
+        cleanup();
+        return false;
+    }
+    const auto body_slot_index = mesh_state.load_result.skeleton_data->find_slot_index("body");
+    const auto warrior_skin_index = mesh_state.load_result.skeleton_data->find_skin_index("warrior");
+    if (!body_slot_index.has_value() ||
+        !warrior_skin_index.has_value() ||
+        !set_preview_skin_enabled(&mesh_state, *warrior_skin_index, true, false)) {
+        std::cerr << "Viewport renderer smoke could not activate the warrior mesh skin.\n";
+        cleanup();
+        return false;
+    }
+    if (!set_selected_animation(&mesh_state, "idle", "Smoke", false, true) ||
+        !scrub_timeline_time(&mesh_state, 0.5, "Smoke", false)) {
+        std::cerr << "Viewport renderer smoke could not scrub the animated warrior preview pose.\n";
+        cleanup();
+        return false;
+    }
+    const auto* warrior_attachment =
+        mesh_state.preview_skeleton->current_attachment(*body_slot_index);
+    if (warrior_attachment == nullptr || warrior_attachment->name != "warrior_body") {
+        std::cerr << "Viewport renderer smoke did not apply the warrior body attachment.\n";
+        cleanup();
+        return false;
+    }
+    const auto mesh_layout = build_viewport_layout(
+        mesh_state,
+        ImVec2(0.0f, 0.0f),
+        ImVec2(static_cast<float>(resources.framebuffer_width),
+               static_cast<float>(resources.framebuffer_height)));
+    if (!mesh_layout.has_value()) {
+        std::cerr << "Viewport renderer smoke could not build the mesh layout.\n";
+        cleanup();
+        return false;
+    }
+    const auto mesh_scene_result = marrow::renderer::prepare_setup_pose_scene(
+        *mesh_state.preview_skeleton,
+        *mesh_state.load_result.atlas_data.front());
+    if (!mesh_scene_result) {
+        std::cerr << mesh_scene_result.error_message << '\n';
+        cleanup();
+        return false;
+    }
+    const auto* mesh_attachment = find_dynamic_mesh_attachment(*mesh_scene_result.scene, "body");
+    if (mesh_attachment == nullptr) {
+        std::cerr << "Viewport renderer smoke did not resolve the warrior body mesh.\n";
+        cleanup();
+        return false;
+    }
+    const auto mesh_vertices = marrow::renderer::evaluate_gpu_skinned_vertices(
+        *mesh_attachment,
+        mesh_scene_result.scene->bone_palette);
+    if (!mesh_vertices || mesh_vertices.vertices.empty()) {
+        std::cerr << "Viewport renderer smoke could not evaluate the warrior body mesh.\n";
+        cleanup();
+        return false;
+    }
+    double mesh_center_x = 0.0;
+    double mesh_center_y = 0.0;
+    for (const auto& vertex : mesh_vertices.vertices) {
+        mesh_center_x += vertex.position.x;
+        mesh_center_y += vertex.position.y;
+    }
+    mesh_center_x /= static_cast<double>(mesh_vertices.vertices.size());
+    mesh_center_y /= static_cast<double>(mesh_vertices.vertices.size());
+    const ImVec2 mesh_center = screen_from_world(*mesh_layout, mesh_center_x, mesh_center_y);
+    const auto mesh_pixel = render_scene_to_pixels(
+        mesh_state,
+        *mesh_layout,
+        *mesh_scene_result.scene,
+        {},
+        mesh_center);
+    if (!mesh_pixel.has_value() || pixels_match(*mesh_pixel, *background_pixel)) {
+        std::cerr << "Viewport renderer smoke did not draw the warrior GPU-skinned mesh attachment.\n";
+        cleanup();
+        return false;
+    }
+
+    cleanup();
+    return true;
+}
+
 int run_headless_smoke(const Options& options) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -11732,6 +12749,11 @@ int run_headless_smoke(const Options& options) {
     shell_state.project_path = options.project_path;
     if (!reload_project(&shell_state)) {
         std::cerr << shell_state.error_message;
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!validate_viewport_prepared_scene_renderer_smoke(options.project_path)) {
         ImGui::DestroyContext();
         return 1;
     }
@@ -14281,8 +15303,16 @@ int main(int argc, char** argv) {
 
     const bool smoke_mode = parse_result.options.auto_close_frames.has_value();
 #if defined(__APPLE__)
+    if (parse_result.options.verify_launch_focus) {
+        return run_launch_focus_verification();
+    }
     if (smoke_mode) {
         return run_headless_smoke(parse_result.options);
+    }
+#elif !defined(__APPLE__)
+    if (parse_result.options.verify_launch_focus) {
+        std::cout << "Launch-focus verification is only supported on macOS.\n";
+        return 0;
     }
 #endif
 
@@ -14311,6 +15341,10 @@ int main(int argc, char** argv) {
         glfwTerminate();
         return 1;
     }
+
+#if defined(__APPLE__)
+    activate_editor_window_on_launch(window);
+#endif
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(smoke_mode ? 0 : 1);

@@ -463,6 +463,7 @@ target_link_libraries(marrow_psd_import_smoke
 
 add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
+    src/editor/viewport_renderer.cpp
 )
 
 target_link_libraries(marrow_editor_shell
@@ -471,6 +472,12 @@ target_link_libraries(marrow_editor_shell
         marrow_renderer
         marrow_imgui
 )
+
+if(APPLE)
+    target_sources(marrow_editor_shell PRIVATE
+        src/editor/macos_app_focus.mm
+    )
+endif()
 
 if(DOXYGEN_FOUND)
     add_custom_target(marrow_docs

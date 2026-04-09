@@ -1,0 +1,98 @@
+{
+  "atlas": {
+    "filter_mag": "linear",
+    "filter_min": "linear",
+    "height": 256,
+    "image": "player_fixture.png",
+    "name": "player_fixture",
+    "premultiplied_alpha": false,
+    "width": 256,
+    "wrap_x": "clamp_to_edge",
+    "wrap_y": "clamp_to_edge"
+  },
+  "marrow": "1.0",
+  "regions": [
+    {
+      "height": 160,
+      "name": "body",
+      "origin_x": 64,
+      "origin_y": 80,
+      "width": 128,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "height": 96,
+      "name": "arm_l",
+      "origin_x": 16,
+      "origin_y": 72,
+      "width": 64,
+      "x": 128,
+      "y": 0
+    },
+    {
+      "height": 96,
+      "name": "mage_arm_l",
+      "origin_x": 16,
+      "origin_y": 72,
+      "width": 64,
+      "x": 192,
+      "y": 0
+    },
+    {
+      "height": 96,
+      "name": "mage_body",
+      "origin_x": 48,
+      "origin_y": 48,
+      "width": 96,
+      "x": 128,
+      "y": 96
+    },
+    {
+      "height": 96,
+      "name": "warrior_body",
+      "origin_x": 64,
+      "origin_y": 48,
+      "width": 128,
+      "x": 0,
+      "y": 160
+    },
+    {
+      "height": 32,
+      "name": "spark_fx_0",
+      "origin_x": 16,
+      "origin_y": 16,
+      "width": 32,
+      "x": 128,
+      "y": 192
+    },
+    {
+      "height": 32,
+      "name": "spark_fx_1",
+      "origin_x": 16,
+      "origin_y": 16,
+      "width": 32,
+      "x": 160,
+      "y": 192
+    },
+    {
+      "height": 32,
+      "name": "spark_fx_2",
+      "origin_x": 16,
+      "origin_y": 16,
+      "width": 32,
+      "x": 192,
+      "y": 192
+    },
+    {
+      "height": 32,
+      "name": "spark_fx_3",
+      "origin_x": 16,
+      "origin_y": 16,
+      "width": 32,
+      "x": 224,
+      "y": 192
+    }
+  ],
+  "version": 1
+}
