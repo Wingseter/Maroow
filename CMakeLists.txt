@@ -463,6 +463,8 @@ target_link_libraries(marrow_psd_import_smoke
 
 add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
+    src/editor/shell_viewport.cpp
+    src/editor/shell_smoke.cpp
     src/editor/viewport_renderer.cpp
 )
 

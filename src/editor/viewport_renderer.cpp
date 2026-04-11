@@ -421,6 +421,47 @@ std::optional<std::string> ViewportRenderer::render(
     return std::nullopt;
 }
 
+std::optional<std::string> ViewportRenderer::render_tinted(
+    const renderer::PreparedScene& scene,
+    const std::filesystem::path& atlas_image_path,
+    const std::array<float, 16>& projection,
+    const std::array<float, 4>& tint_color) {
+    if (!available_) {
+        return error_message_.empty()
+            ? std::optional<std::string>("Viewport prepared-scene renderer is unavailable.")
+            : std::optional<std::string>(error_message_);
+    }
+
+    renderer::RenderCommandListResult command_list_result =
+        renderer::build_render_command_list(scene, projection);
+    if (!command_list_result) {
+        error_message_ = command_list_result.error_message;
+        return command_list_result.error_message;
+    }
+
+    for (auto& cmd : command_list_result.command_list->commands) {
+        for (auto& vertex : cmd.vertices) {
+            vertex.light_color[0] *= tint_color[0];
+            vertex.light_color[1] *= tint_color[1];
+            vertex.light_color[2] *= tint_color[2];
+            vertex.light_color[3] *= tint_color[3];
+        }
+    }
+
+    if (const auto error = ensure_atlas_texture(scene, atlas_image_path)) {
+        error_message_ = *error;
+        return error;
+    }
+
+    if (const auto error = submit_command_list(*command_list_result.command_list)) {
+        error_message_ = *error;
+        return error;
+    }
+
+    error_message_.clear();
+    return std::nullopt;
+}
+
 bool ViewportRenderer::available() const {
     return available_;
 }

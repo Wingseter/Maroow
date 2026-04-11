@@ -38,6 +38,11 @@ public:
         const renderer::PreparedScene& scene,
         const std::filesystem::path& atlas_image_path,
         const std::array<float, 16>& projection);
+    std::optional<std::string> render_tinted(
+        const renderer::PreparedScene& scene,
+        const std::filesystem::path& atlas_image_path,
+        const std::array<float, 16>& projection,
+        const std::array<float, 4>& tint_color);
 
     bool available() const;
     const std::string& error_message() const;
