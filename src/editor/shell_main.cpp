@@ -8440,7 +8440,7 @@ void draw_viewport_window(ShellState* state) {
     ImGui::Separator();
 
     if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Onion Skin", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::CollapsingHeader("Onion Skin")) {
         const auto& onion_skin = state->viewport.onion_skin;
         bool onion_enabled = onion_skin.enabled;
         if (ImGui::Checkbox("Enabled##onion_skin", &onion_enabled)) {
@@ -8539,7 +8539,7 @@ void draw_viewport_window(ShellState* state) {
     }
 
     if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Debug Overlay", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::CollapsingHeader("Debug Overlay")) {
         const auto& debug_overlay = state->viewport.debug_overlay;
         const auto draw_toggle = [&](const char* label,
                                      const char* status_label,
@@ -8613,7 +8613,7 @@ void draw_viewport_window(ShellState* state) {
     }
 
     if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Performance HUD", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::CollapsingHeader("Performance HUD")) {
         bool hud_enabled = state->hud_overlay_enabled;
         if (ImGui::Checkbox("Enabled##performance_hud", &hud_enabled)) {
             state->hud_overlay_enabled = hud_enabled;
@@ -8627,7 +8627,7 @@ void draw_viewport_window(ShellState* state) {
     }
 
     if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Weight Paint", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::CollapsingHeader("Weight Paint")) {
         bool tool_enabled = state->weight_paint.enabled;
         if (ImGui::Checkbox("Enable Tool##weight_paint", &tool_enabled)) {
             state->weight_paint.enabled = tool_enabled;
