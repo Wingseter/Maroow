@@ -2,3 +2,4 @@
 build/
 build-bench/
 build-tsan/
+.DS_Store

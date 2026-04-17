@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+
+<html class="dark"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&amp;family=Inter+Condensed:wght@400;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "inverse-surface": "#e1e2ea",
+                        "primary-container": "#608bff",
+                        "on-surface": "#e1e2ea",
+                        "surface-container-low": "#191c22",
+                        "on-tertiary-fixed": "#410004",
+                        "tertiary-container": "#ff5450",
+                        "outline-variant": "#434654",
+                        "primary-fixed-dim": "#b3c5ff",
+                        "tertiary": "#ffb3ad",
+                        "secondary-container": "#40495b",
+                        "secondary": "#bec7dc",
+                        "surface-variant": "#32353b",
+                        "outline": "#8d90a0",
+                        "on-primary-fixed": "#00174a",
+                        "surface-container-high": "#272a30",
+                        "surface-dim": "#101319",
+                        "primary": "#b3c5ff",
+                        "on-tertiary": "#680009",
+                        "on-tertiary-container": "#5c0007",
+                        "on-background": "#e1e2ea",
+                        "error-container": "#93000a",
+                        "on-secondary": "#283141",
+                        "background": "#101319",
+                        "on-primary": "#002a77",
+                        "surface": "#101319",
+                        "on-error": "#690005",
+                        "secondary-fixed-dim": "#bec7dc",
+                        "inverse-primary": "#1755d1",
+                        "error": "#ffb4ab",
+                        "surface-container-highest": "#32353b",
+                        "tertiary-fixed": "#ffdad7",
+                        "on-surface-variant": "#c3c6d6",
+                        "inverse-on-surface": "#2d3037",
+                        "on-primary-container": "#002468",
+                        "on-error-container": "#ffdad6",
+                        "tertiary-fixed-dim": "#ffb3ad",
+                        "surface-container-lowest": "#0b0e14",
+                        "on-secondary-fixed-variant": "#3e4758",
+                        "surface-container": "#1d2026",
+                        "on-primary-fixed-variant": "#003ea6",
+                        "surface-bright": "#363940",
+                        "secondary-fixed": "#dae2f9",
+                        "on-secondary-container": "#afb8cd",
+                        "surface-tint": "#b3c5ff",
+                        "on-secondary-fixed": "#131c2b",
+                        "primary-fixed": "#dbe1ff",
+                        "on-tertiary-fixed-variant": "#930012"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "fontFamily": {
+                        "headline": ["Inter"],
+                        "body": ["Inter"],
+                        "label": ["Inter"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+            font-size: 16px;
+        }
+        ::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #101319;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #434654;
+            border-radius: 2px;
+        }
+        .no-line-boundary {
+            background-clip: padding-box;
+        }
+        .canvas-grid {
+            background-image: radial-gradient(#272a30 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body h-screen overflow-hidden select-none">
+<!-- TopNavBar -->
+<header class="fixed top-0 w-full z-50 flex items-center px-3 justify-between bg-slate-950 h-10 border-none">
+<div class="flex items-center gap-6">
+<span class="text-sm font-black tracking-tighter text-blue-100">Maroow Editor</span>
+<nav class="flex items-center gap-4">
+<span class="font-inter tracking-tight text-[11px] uppercase font-semibold text-slate-400 hover:text-slate-200 cursor-pointer transition-colors">File</span>
+<span class="font-inter tracking-tight text-[11px] uppercase font-semibold text-blue-200 border-b-2 border-blue-500 pb-1 cursor-pointer">Edit</span>
+<span class="font-inter tracking-tight text-[11px] uppercase font-semibold text-slate-400 hover:text-slate-200 cursor-pointer transition-colors">View</span>
+<span class="font-inter tracking-tight text-[11px] uppercase font-semibold text-slate-400 hover:text-slate-200 cursor-pointer transition-colors">Assets</span>
+<span class="font-inter tracking-tight text-[11px] uppercase font-semibold text-slate-400 hover:text-slate-200 cursor-pointer transition-colors">Window</span>
+<span class="font-inter tracking-tight text-[11px] uppercase font-semibold text-slate-400 hover:text-slate-200 cursor-pointer transition-colors">Help</span>
+</nav>
+</div>
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-slate-400 hover:text-blue-300 cursor-pointer">settings</span>
+<span class="material-symbols-outlined text-slate-400 hover:text-blue-300 cursor-pointer">cloud_done</span>
+<span class="material-symbols-outlined text-slate-400 hover:text-blue-300 cursor-pointer">notifications</span>
+<div class="w-6 h-6 rounded-sm bg-slate-800 flex items-center justify-center overflow-hidden border border-outline-variant/20">
+<img class="w-full h-full object-cover" data-alt="User workspace profile avatar icon" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAB98xo28chsMejBI2BwJn8zMnprOqeCvD2igpkrhXGD-bqYja1mxbKHEXOFpiIAmKgVMu_B68BfBbB_bG3K7ns4XKoWnAKOO8IjaFJzz4SHaJF4PuJ7A5g3ayJ2XwiD7rtqCMbM3u88fxn3EU3tEQrxQ4jGu5bt1ogG3qV292QNZo-ciki9Y5EAp4LfZitVv2ynMjaAjKA3ADTXtcebiisHtHkZGX5X02D1UNNxdqopmSgMk9ADHT-0Bf8Ya-e0rTCE2QtM6RDGf0"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar -->
+<aside class="fixed left-0 top-10 h-[calc(100vh-2.5rem)] flex flex-col items-center py-4 bg-slate-900 w-16 z-40 border-none">
+<div class="flex flex-col gap-1 w-full">
+<div class="flex flex-col items-center py-3 gap-1 bg-blue-600/20 text-blue-400 border-l-2 border-blue-400 cursor-pointer">
+<span class="material-symbols-outlined">folder_open</span>
+<span class="font-inter-condensed text-[10px] tracking-tight">Project</span>
+</div>
+<div class="flex flex-col items-center py-3 gap-1 text-slate-500 hover:bg-slate-800/50 hover:text-slate-300 cursor-pointer transition-all duration-150">
+<span class="material-symbols-outlined">account_tree</span>
+<span class="font-inter-condensed text-[10px] tracking-tight text-center">Hierarchy</span>
+</div>
+<div class="flex flex-col items-center py-3 gap-1 text-slate-500 hover:bg-slate-800/50 hover:text-slate-300 cursor-pointer transition-all duration-150">
+<span class="material-symbols-outlined">local_library</span>
+<span class="font-inter-condensed text-[10px] tracking-tight">Library</span>
+</div>
+<div class="flex flex-col items-center py-3 gap-1 text-slate-500 hover:bg-slate-800/50 hover:text-slate-300 cursor-pointer transition-all duration-150">
+<span class="material-symbols-outlined">extension</span>
+<span class="font-inter-condensed text-[10px] tracking-tight">Assets</span>
+</div>
+<div class="flex flex-col items-center py-3 gap-1 text-slate-500 hover:bg-slate-800/50 hover:text-slate-300 cursor-pointer transition-all duration-150">
+<span class="material-symbols-outlined">history</span>
+<span class="font-inter-condensed text-[10px] tracking-tight">History</span>
+</div>
+</div>
+<div class="mt-auto pb-4">
+<button class="bg-gradient-to-br from-primary to-primary-container text-on-primary-container text-[10px] font-bold px-2 py-1 rounded-sm shadow-lg hover:brightness-110 active:scale-95 transition-all">Render</button>
+</div>
+</aside>
+<!-- Main Workspace Container -->
+<main class="ml-16 mt-10 h-[calc(100vh-2.5rem)] flex flex-col w-[calc(100vw-4rem)]">
+<div class="flex-grow flex w-full">
+<!-- LEFT COLUMN (28% width) -->
+<div class="w-[28%] flex flex-col bg-surface-container-lowest gap-[2px]">
+<!-- TOP-LEFT (52% height) -->
+<section class="h-[52%] bg-surface-container-low flex flex-col overflow-hidden">
+<div class="flex bg-surface-container-lowest border-b border-outline-variant/10">
+<div class="px-3 py-1.5 text-[11px] font-bold border-t-2 border-primary text-primary bg-surface-container-low">Project</div>
+<div class="px-3 py-1.5 text-[11px] font-medium text-on-surface-variant hover:bg-surface-variant cursor-pointer">Hierarchy</div>
+</div>
+<div class="p-2 flex gap-1 bg-surface-container-high/30">
+<button class="flex items-center gap-1 px-2 py-1 bg-surface-container-high text-[10px] text-on-surface-variant rounded hover:bg-surface-bright"><span class="material-symbols-outlined text-[14px]">refresh</span> Reload</button>
+<button class="flex items-center gap-1 px-2 py-1 bg-surface-container-high text-[10px] text-on-surface-variant rounded hover:bg-surface-bright"><span class="material-symbols-outlined text-[14px]">save</span> Save</button>
+<button class="flex items-center gap-1 px-2 py-1 bg-surface-container-high text-[10px] text-on-surface-variant rounded hover:bg-surface-bright"><span class="material-symbols-outlined text-[14px]">file_export</span> Export</button>
+</div>
+<div class="flex-grow overflow-y-auto px-2 py-1 space-y-1">
+<!-- Collapsible Section -->
+<div class="group">
+<div class="flex items-center gap-1 py-1 text-[11px] font-bold text-secondary cursor-pointer hover:text-on-surface">
+<span class="material-symbols-outlined text-[14px]">arrow_drop_down</span>
+                                Animation Clips (4)
+                            </div>
+<div class="pl-4 space-y-0.5">
+<div class="text-[10px] py-1 px-2 text-on-surface-variant hover:bg-surface-variant rounded flex items-center justify-between">
+<span>idle_hero_01</span>
+<span class="text-[9px] text-outline">00:45</span>
+</div>
+<div class="text-[10px] py-1 px-2 text-primary bg-primary/10 rounded flex items-center justify-between">
+<span>run_loop</span>
+<span class="text-[9px] text-primary/60">00:12</span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-1 py-1 text-[11px] font-bold text-secondary opacity-60">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span> Skins
+                        </div>
+<div class="flex items-center gap-1 py-1 text-[11px] font-bold text-secondary opacity-60">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span> Constraints
+                        </div>
+<div class="flex items-center gap-1 py-1 text-[11px] font-bold text-secondary opacity-60">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span> Atlases
+                        </div>
+<!-- Hierarchy Tree Simulation -->
+<div class="mt-4 pt-4 border-t border-outline-variant/10">
+<div class="flex items-center gap-1 py-1 text-[11px] font-bold text-primary">
+<span class="material-symbols-outlined text-[14px]">account_tree</span> Bone Tree
+                            </div>
+<div class="pl-2 space-y-0.5 text-[10px]">
+<div class="flex items-center gap-1 p-1 bg-surface-container-high/50 text-on-surface"><span class="material-symbols-outlined text-[12px]">adjust</span> root</div>
+<div class="pl-4 border-l border-outline-variant/30">
+<div class="flex items-center gap-1 p-1 hover:bg-surface-variant"><span class="material-symbols-outlined text-[12px]">radio_button_checked</span> hip</div>
+<div class="pl-4 border-l border-outline-variant/30">
+<div class="flex items-center gap-1 p-1 hover:bg-surface-variant"><span class="material-symbols-outlined text-[12px]">radio_button_checked</span> spine_01</div>
+<div class="pl-4 border-l border-outline-variant/30">
+<div class="flex items-center gap-1 p-1 hover:bg-surface-variant"><span class="material-symbols-outlined text-[12px]">radio_button_checked</span> spine_02</div>
+<div class="flex items-center gap-1 p-1 hover:bg-surface-variant"><span class="material-symbols-outlined text-[12px]">radio_button_checked</span> neck</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- BOTTOM-LEFT (48% height) -->
+<section class="h-[48%] bg-surface-container-low flex flex-col overflow-hidden">
+<div class="flex bg-surface-container-lowest border-b border-outline-variant/10">
+<div class="px-3 py-1.5 text-[11px] font-bold border-t-2 border-primary text-primary bg-surface-container-low">Properties</div>
+<div class="px-3 py-1.5 text-[11px] font-medium text-on-surface-variant hover:bg-surface-variant cursor-pointer">Runtime Assets</div>
+<div class="px-3 py-1.5 text-[11px] font-medium text-on-surface-variant hover:bg-surface-variant cursor-pointer">Constraints</div>
+</div>
+<div class="flex-grow overflow-y-auto px-4 py-3">
+<div class="mb-4">
+<h4 class="text-[9px] uppercase tracking-widest text-outline font-bold mb-2">Viewport State</h4>
+<div class="grid grid-cols-2 gap-2">
+<div class="text-[10px] text-on-surface-variant">FPS: <span class="text-on-surface">60.0</span></div>
+<div class="text-[10px] text-on-surface-variant">Draw Calls: <span class="text-on-surface">12</span></div>
+<div class="text-[10px] text-on-surface-variant">Tris: <span class="text-on-surface">2.4k</span></div>
+<div class="text-[10px] text-on-surface-variant">Zoom: <span class="text-on-surface">100%</span></div>
+</div>
+</div>
+<div>
+<h4 class="text-[9px] uppercase tracking-widest text-outline font-bold mb-2">Bones: spine_02</h4>
+<div class="space-y-3">
+<!-- Property Row -->
+<div class="space-y-1">
+<label class="text-[10px] text-secondary">Translation</label>
+<div class="grid grid-cols-2 gap-2">
+<div class="flex bg-surface-container-lowest rounded overflow-hidden h-7">
+<span class="bg-surface-container-highest px-2 flex items-center text-[9px] text-outline">X</span>
+<input class="w-full bg-transparent border-none focus:ring-0 text-[10px] text-on-surface py-0 font-mono" type="text" value="124.50"/>
+</div>
+<div class="flex bg-surface-container-lowest rounded overflow-hidden h-7">
+<span class="bg-surface-container-highest px-2 flex items-center text-[9px] text-outline">Y</span>
+<input class="w-full bg-transparent border-none focus:ring-0 text-[10px] text-on-surface py-0 font-mono" type="text" value="-8.22"/>
+</div>
+</div>
+</div>
+<!-- Property Row -->
+<div class="space-y-1">
+<label class="text-[10px] text-secondary">Rotation</label>
+<div class="flex bg-surface-container-lowest rounded overflow-hidden h-7">
+<span class="bg-surface-container-highest px-2 flex items-center text-[9px] text-outline">DEG</span>
+<input class="w-full bg-transparent border-none focus:ring-0 text-[10px] text-on-surface py-0 font-mono" type="text" value="45.00"/>
+</div>
+</div>
+<!-- Property Row -->
+<div class="space-y-1">
+<label class="text-[10px] text-secondary">Scale</label>
+<div class="grid grid-cols-2 gap-2">
+<div class="flex bg-surface-container-lowest rounded overflow-hidden h-7">
+<span class="bg-surface-container-highest px-2 flex items-center text-[9px] text-outline">SX</span>
+<input class="w-full bg-transparent border-none focus:ring-0 text-[10px] text-on-surface py-0 font-mono" type="text" value="1.0"/>
+</div>
+<div class="flex bg-surface-container-lowest rounded overflow-hidden h-7">
+<span class="bg-surface-container-highest px-2 flex items-center text-[9px] text-outline">SY</span>
+<input class="w-full bg-transparent border-none focus:ring-0 text-[10px] text-on-surface py-0 font-mono" type="text" value="1.0"/>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+</div>
+<!-- CENTER COLUMN (Remaining Space) -->
+<div class="flex-grow flex flex-col bg-surface-container-lowest relative">
+<!-- Viewport Header -->
+<div class="h-8 bg-surface-container-low flex items-center justify-between px-4 border-b border-outline-variant/10">
+<span class="text-[10px] font-bold text-on-surface-variant flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-tertiary-container animate-pulse"></span>
+                        Setup pose preview
+                    </span>
+<div class="flex gap-4">
+<div class="flex items-center gap-1 text-[10px] text-outline hover:text-on-surface cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">grid_on</span> Grid
+                        </div>
+<div class="flex items-center gap-1 text-[10px] text-outline hover:text-on-surface cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">layers</span> Layers
+                        </div>
+<div class="flex items-center gap-1 text-[10px] text-outline hover:text-on-surface cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">videocam</span> 2D View
+                        </div>
+</div>
+</div>
+<!-- Viewport Canvas -->
+<div class="flex-grow canvas-grid relative flex items-center justify-center">
+<!-- 2D Skeleton Wireframe Visual -->
+<div class="w-64 h-96 relative opacity-80">
+<svg class="w-full h-full stroke-primary fill-none stroke-[1.5]" viewbox="0 0 100 200">
+<!-- Spine -->
+<path d="M50 150 L50 100 L50 60"></path>
+<!-- Legs -->
+<path d="M50 150 L30 180 L25 200"></path>
+<path d="M50 150 L70 180 L75 200"></path>
+<!-- Arms -->
+<path d="M50 80 L20 100 L10 130"></path>
+<path d="M50 80 L80 100 L90 130"></path>
+<!-- Head -->
+<circle cx="50" cy="40" r="15"></circle>
+<!-- Joints (Diamonds) -->
+<g fill="#b3c5ff">
+<rect height="5" transform="rotate(45 50 150)" width="5" x="47.5" y="147.5"></rect>
+<rect height="5" transform="rotate(45 50 100)" width="5" x="47.5" y="97.5"></rect>
+<rect height="5" transform="rotate(45 50 60)" width="5" x="47.5" y="57.5"></rect>
+<rect height="5" transform="rotate(45 30 180)" width="5" x="27.5" y="177.5"></rect>
+<rect height="5" transform="rotate(45 70 180)" width="5" x="67.5" y="177.5"></rect>
+</g>
+</svg>
+<!-- Gizmo Overlay -->
+<div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-32 h-32 border-2 border-primary/20 rounded-full flex items-center justify-center">
+<div class="w-full h-[1px] bg-primary-container/40 absolute"></div>
+<div class="w-[1px] h-full bg-primary-container/40 absolute"></div>
+<div class="w-3 h-3 bg-primary shadow-lg shadow-primary/50 rotate-45 border border-white/20"></div>
+</div>
+</div>
+<!-- Overlay Toolbar -->
+<div class="absolute bottom-6 left-1/2 -translate-x-1/2 bg-surface-container-high/80 backdrop-blur-md rounded px-4 py-2 flex items-center gap-6 shadow-2xl border border-outline-variant/10">
+<div class="flex gap-2">
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-variant text-on-surface hover:bg-surface-bright"><span class="material-symbols-outlined">near_me</span></button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-primary text-on-primary-container"><span class="material-symbols-outlined">open_with</span></button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-variant text-on-surface hover:bg-surface-bright"><span class="material-symbols-outlined">rotate_right</span></button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-variant text-on-surface hover:bg-surface-bright"><span class="material-symbols-outlined">square_foot</span></button>
+</div>
+<div class="h-6 w-[1px] bg-outline-variant/30"></div>
+<div class="flex items-center gap-2 text-[10px] font-bold text-on-surface-variant">
+                            Local <span class="material-symbols-outlined text-[14px]">expand_more</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- BOTTOM (30% height) - Timeline -->
+<footer class="h-[30%] bg-surface-container-low flex flex-col overflow-hidden relative border-t border-outline-variant/20">
+<!-- Timeline Header -->
+<div class="h-10 bg-surface-container-lowest flex items-center justify-between px-4">
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2">
+<span class="text-[10px] font-bold text-outline uppercase tracking-wider">Animation</span>
+<div class="bg-surface-container-high px-2 py-1 rounded flex items-center gap-2 cursor-pointer border border-outline-variant/10">
+<span class="text-[10px] font-bold text-primary">idle</span>
+<span class="material-symbols-outlined text-[14px] text-outline">expand_more</span>
+</div>
+</div>
+<div class="flex items-center gap-1 bg-surface-container-high rounded p-0.5">
+<button class="p-1 hover:text-on-surface text-outline"><span class="material-symbols-outlined text-[18px]">skip_previous</span></button>
+<button class="p-1 hover:text-on-surface text-outline"><span class="material-symbols-outlined text-[18px]">play_arrow</span></button>
+<button class="p-1 hover:text-on-surface text-outline"><span class="material-symbols-outlined text-[18px]">refresh</span></button>
+<button class="p-1 text-primary"><span class="material-symbols-outlined text-[18px]" style="font-variation-settings: 'FILL' 1;">repeat</span></button>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="text-[11px] font-mono text-on-surface flex items-center gap-1">
+<span class="text-primary">000</span> / 120
+                    </div>
+<div class="flex gap-1">
+<button class="w-6 h-6 flex items-center justify-center rounded bg-surface-container-high text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[16px]">add</span></button>
+<button class="w-6 h-6 flex items-center justify-center rounded bg-surface-container-high text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[16px]">remove</span></button>
+</div>
+</div>
+</div>
+<!-- Timeline Content -->
+<div class="flex-grow flex">
+<!-- Track Names -->
+<div class="w-48 bg-surface-container-low border-r border-outline-variant/20 overflow-y-auto">
+<div class="h-6 flex items-center px-4 bg-surface-container-highest/20 border-b border-outline-variant/10">
+<span class="text-[9px] font-bold text-outline uppercase">Tracks</span>
+</div>
+<div class="divide-y divide-outline-variant/5">
+<div class="h-8 flex items-center px-4 gap-2 bg-primary/5">
+<span class="material-symbols-outlined text-[14px] text-primary">key</span>
+<span class="text-[10px] font-medium text-on-surface">root</span>
+</div>
+<div class="h-8 flex items-center px-4 gap-2 hover:bg-surface-variant">
+<span class="material-symbols-outlined text-[14px] text-outline">key</span>
+<span class="text-[10px] font-medium text-on-surface-variant">hip</span>
+</div>
+<div class="h-8 flex items-center px-4 gap-2 hover:bg-surface-variant">
+<span class="material-symbols-outlined text-[14px] text-outline">key</span>
+<span class="text-[10px] font-medium text-on-surface-variant">torso</span>
+</div>
+<div class="h-8 flex items-center px-4 gap-2 hover:bg-surface-variant opacity-50">
+<span class="material-symbols-outlined text-[14px] text-outline">key</span>
+<span class="text-[10px] font-medium text-on-surface-variant">arm_L</span>
+</div>
+</div>
+</div>
+<!-- Timeline Tracks -->
+<div class="flex-grow relative bg-surface-container-lowest overflow-hidden">
+<!-- Grid Lines -->
+<div class="absolute inset-0 flex justify-between pointer-events-none opacity-10">
+<div class="w-[1px] h-full bg-outline-variant"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+<div class="w-[1px] h-full bg-outline-variant ml-[10%]"></div>
+</div>
+<div class="h-6 flex items-center px-4 bg-surface-container-highest/20 border-b border-outline-variant/10">
+<div class="w-full flex justify-between text-[9px] font-mono text-outline">
+<span>0</span><span>15</span><span>30</span><span>45</span><span>60</span><span>75</span><span>90</span><span>105</span><span>120</span>
+</div>
+</div>
+<!-- Tracks Content -->
+<div class="divide-y divide-outline-variant/5 relative">
+<!-- Root Track -->
+<div class="h-8 relative">
+<div class="absolute left-[0%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+<div class="absolute left-[30%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+<div class="absolute left-[60%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+</div>
+<!-- Hip Track -->
+<div class="h-8 relative">
+<div class="absolute left-[0%] top-1/2 -translate-y-1/2 w-2 h-2 border border-primary rotate-45"></div>
+<div class="absolute left-[15%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+<div class="absolute left-[45%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+</div>
+<!-- Torso Track -->
+<div class="h-8 relative">
+<div class="absolute left-[0%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+<div class="absolute left-[55%] top-1/2 -translate-y-1/2 w-2 h-2 bg-primary rotate-45 border border-white/20"></div>
+</div>
+</div>
+<!-- Red Playhead -->
+<div class="absolute top-0 left-[22%] bottom-0 w-[2px] bg-tertiary-container shadow-[0_0_8px_rgba(255,84,80,0.5)] z-10">
+<div class="absolute -top-1 -left-1 w-2.5 h-4 bg-tertiary-container rounded-sm"></div>
+</div>
+</div>
+</div>
+<!-- BottomNavBar (Embedded Style) -->
+<div class="fixed bottom-0 left-16 right-0 z-50 flex justify-start items-center bg-slate-950 h-8">
+<div class="flex items-center h-full px-4 gap-8">
+<div class="flex items-center gap-2 text-blue-300 bg-slate-800/80 px-4 h-full cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">linear_scale</span>
+<span class="font-inter text-[9px] font-bold uppercase">Timeline</span>
+</div>
+<div class="flex items-center gap-2 text-slate-500 hover:text-slate-200 cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">show_chart</span>
+<span class="font-inter text-[9px] font-bold uppercase">Graph</span>
+</div>
+<div class="flex items-center gap-2 text-slate-500 hover:text-slate-200 cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">graphic_eq</span>
+<span class="font-inter text-[9px] font-bold uppercase">Audio</span>
+</div>
+<div class="flex items-center gap-2 text-slate-500 hover:text-slate-200 cursor-pointer">
+<span class="material-symbols-outlined text-[14px]">terminal</span>
+<span class="font-inter text-[9px] font-bold uppercase">Console</span>
+</div>
+</div>
+</div>
+</footer>
+</main>
+</body></html>

@@ -481,6 +481,13 @@ if(APPLE)
     )
 endif()
 
+add_custom_command(TARGET marrow_editor_shell POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/assets/fonts
+        $<TARGET_FILE_DIR:marrow_editor_shell>/fonts
+    COMMENT "Copying editor fonts to build directory"
+)
+
 if(DOXYGEN_FOUND)
     add_custom_target(marrow_docs
         COMMAND ${DOXYGEN_EXECUTABLE} ${MARROW_DOXYGEN_CONFIG}

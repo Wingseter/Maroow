@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Maroow Editor - Weight Painting Tool</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "inverse-surface": "#e1e2ea",
+                        "primary-container": "#608bff",
+                        "on-surface": "#e1e2ea",
+                        "surface-container-low": "#191c22",
+                        "on-tertiary-fixed": "#410004",
+                        "tertiary-container": "#ff5450",
+                        "outline-variant": "#434654",
+                        "primary-fixed-dim": "#b3c5ff",
+                        "tertiary": "#ffb3ad",
+                        "secondary-container": "#40495b",
+                        "secondary": "#bec7dc",
+                        "surface-variant": "#32353b",
+                        "outline": "#8d90a0",
+                        "on-primary-fixed": "#00174a",
+                        "surface-container-high": "#272a30",
+                        "surface-dim": "#101319",
+                        "primary": "#b3c5ff",
+                        "on-tertiary": "#680009",
+                        "on-tertiary-container": "#5c0007",
+                        "on-background": "#e1e2ea",
+                        "error-container": "#93000a",
+                        "on-secondary": "#283141",
+                        "background": "#101319",
+                        "on-primary": "#002a77",
+                        "surface": "#101319",
+                        "on-error": "#690005",
+                        "secondary-fixed-dim": "#bec7dc",
+                        "inverse-primary": "#1755d1",
+                        "error": "#ffb4ab",
+                        "surface-container-highest": "#32353b",
+                        "tertiary-fixed": "#ffdad7",
+                        "on-surface-variant": "#c3c6d6",
+                        "inverse-on-surface": "#2d3037",
+                        "on-primary-container": "#002468",
+                        "on-error-container": "#ffdad6",
+                        "tertiary-fixed-dim": "#ffb3ad",
+                        "surface-container-lowest": "#0b0e14",
+                        "on-secondary-fixed-variant": "#3e4758",
+                        "surface-container": "#1d2026",
+                        "on-primary-fixed-variant": "#003ea6",
+                        "surface-bright": "#363940",
+                        "secondary-fixed": "#dae2f9",
+                        "on-secondary-container": "#afb8cd",
+                        "surface-tint": "#b3c5ff",
+                        "on-secondary-fixed": "#131c2b",
+                        "primary-fixed": "#dbe1ff",
+                        "on-tertiary-fixed-variant": "#930012"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "fontFamily": {
+                        "headline": ["Inter"],
+                        "body": ["Inter"],
+                        "label": ["Inter"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .heatmap-gradient {
+            background: linear-gradient(to right, #002468, #608bff, #ffb3ad, #ff5450);
+        }
+        .viewport-grid {
+            background-image: radial-gradient(#272a30 1px, transparent 1px);
+            background-size: 24px 24px;
+        }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: #101319; }
+        ::-webkit-scrollbar-thumb { background: #32353b; }
+        ::-webkit-scrollbar-thumb:hover { background: #434654; }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-body overflow-hidden h-screen select-none">
+<!-- TopNavBar Shell -->
+<header class="fixed top-0 w-full z-50 flex items-center px-3 justify-between bg-slate-950 text-blue-400 dark:text-blue-300 font-inter tracking-tight text-[11px] uppercase font-semibold h-10">
+<div class="flex items-center gap-6">
+<span class="text-sm font-black tracking-tighter text-blue-100">Maroow Editor</span>
+<nav class="flex gap-4">
+<a class="text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" href="#">File</a>
+<a class="text-blue-200 border-b-2 border-blue-500 pb-1 hover:bg-slate-800 transition-colors" href="#">Edit</a>
+<a class="text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" href="#">View</a>
+<a class="text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" href="#">Assets</a>
+<a class="text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" href="#">Window</a>
+<a class="text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" href="#">Help</a>
+</nav>
+</div>
+<div class="flex items-center gap-3">
+<button class="material-symbols-outlined text-slate-400 hover:text-slate-200 p-1 transition-all active:scale-95">settings</button>
+<button class="material-symbols-outlined text-blue-400 p-1 transition-all active:scale-95">cloud_done</button>
+<button class="material-symbols-outlined text-slate-400 hover:text-slate-200 p-1 transition-all active:scale-95">notifications</button>
+<div class="h-6 w-6 bg-surface-container-highest rounded-full border border-outline-variant/20 overflow-hidden">
+<img alt="User workspace profile" data-alt="Close-up profile avatar of a professional 3D artist in a dimly lit studio environment with blue monitor glow" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDfEmTYstg-d1qGYqLCMgchUq4wFztS0VkwSuX6cp_nNYxJp0gUT7iXPMSnCEq6WKjjKpqeHXWUuNI8D-rSwEe1nWU-iiemdXAjpovqj6JVJ4SIfAeMaRogoJlddFdJ4_LA-U5rCHVj4JfI5psnEr71N3NHn2UXFuFSbp5ou5OISObJ7BVlf7FCMTBHcgsvuBqB0IU8aRYGE48xKPA2DmV1TDIVTpyqclN2qwned7zvODx3L-GNDftJXBZtDWqxsBijuirXbzCX20A"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar Shell -->
+<aside class="fixed left-0 top-10 h-[calc(100vh-2.5rem)] flex flex-col items-center py-4 bg-slate-900 text-blue-400 font-inter-condensed text-[10px] tracking-tight w-16 z-40">
+<div class="flex flex-col items-center gap-1 mb-8">
+<div class="w-8 h-8 bg-blue-600/20 rounded flex items-center justify-center mb-1">
+<span class="material-symbols-outlined text-blue-400">account_tree</span>
+</div>
+<span class="text-[8px] text-slate-500 uppercase">Project Alpha</span>
+</div>
+<nav class="flex flex-col w-full">
+<button class="flex flex-col items-center justify-center py-3 text-slate-500 hover:bg-slate-800/50 transition-all duration-150">
+<span class="material-symbols-outlined mb-1">folder_open</span>
+<span>Project</span>
+</button>
+<button class="flex flex-col items-center justify-center py-3 bg-blue-600/20 text-blue-400 border-l-2 border-blue-400 transition-all duration-150">
+<span class="material-symbols-outlined mb-1">account_tree</span>
+<span>Hierarchy</span>
+</button>
+<button class="flex flex-col items-center justify-center py-3 text-slate-500 hover:bg-slate-800/50 transition-all duration-150">
+<span class="material-symbols-outlined mb-1">local_library</span>
+<span>Library</span>
+</button>
+<button class="flex flex-col items-center justify-center py-3 text-slate-500 hover:bg-slate-800/50 transition-all duration-150">
+<span class="material-symbols-outlined mb-1">extension</span>
+<span>Assets</span>
+</button>
+<button class="flex flex-col items-center justify-center py-3 text-slate-500 hover:bg-slate-800/50 transition-all duration-150">
+<span class="material-symbols-outlined mb-1">history</span>
+<span>History</span>
+</button>
+</nav>
+<div class="mt-auto flex flex-col items-center gap-4">
+<button class="w-10 h-10 bg-gradient-to-br from-primary to-primary-container text-on-primary-container rounded flex items-center justify-center shadow-lg active:scale-95 transition-transform">
+<span class="material-symbols-outlined">play_arrow</span>
+</button>
+</div>
+</aside>
+<!-- Main Workspace Layout -->
+<main class="ml-16 mt-10 h-[calc(100vh-2.5rem-3rem)] grid grid-cols-12 overflow-hidden bg-surface-container-lowest">
+<!-- Left Sidebar: Hierarchy & Properties -->
+<section class="col-span-3 flex flex-col bg-surface-container-low border-r border-transparent">
+<!-- Hierarchy Section -->
+<div class="flex-1 flex flex-col border-b border-surface-container-high">
+<header class="px-3 py-2 flex items-center justify-between bg-surface-container-high/50">
+<span class="text-[10px] font-bold uppercase tracking-widest text-secondary">Hierarchy</span>
+<span class="material-symbols-outlined text-xs text-outline">search</span>
+</header>
+<div class="flex-1 overflow-y-auto p-2 text-[11px]">
+<div class="flex items-center gap-2 py-1 text-on-surface-variant">
+<span class="material-symbols-outlined text-[14px]">expand_more</span>
+<span class="material-symbols-outlined text-[14px]">person</span>
+<span>character_rig_main</span>
+</div>
+<div class="pl-4">
+<div class="flex items-center gap-2 py-1 text-on-surface-variant">
+<span class="material-symbols-outlined text-[14px]">expand_more</span>
+<span class="material-symbols-outlined text-[14px]">settings_accessibility</span>
+<span>root_bone</span>
+</div>
+<div class="pl-4">
+<div class="flex items-center gap-2 py-1 bg-primary/10 text-primary-fixed border-l-2 border-primary px-1">
+<span class="material-symbols-outlined text-[14px]">skeleton</span>
+<span>spine_01_def</span>
+</div>
+<div class="pl-4 opacity-60">
+<div class="flex items-center gap-2 py-1 text-on-surface-variant">
+<span class="material-symbols-outlined text-[14px]">chevron_right</span>
+<span class="material-symbols-outlined text-[14px]">skeleton</span>
+<span>spine_02_def</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Properties / Attachments Section -->
+<div class="h-1/2 flex flex-col bg-surface-container-low">
+<header class="px-3 py-2 flex items-center justify-between bg-surface-container-high">
+<span class="text-[10px] font-bold uppercase tracking-widest text-secondary">Attachments</span>
+<span class="material-symbols-outlined text-xs text-outline">add</span>
+</header>
+<div class="flex-1 overflow-y-auto p-3 space-y-4">
+<!-- Mesh Selection -->
+<div class="bg-surface-container-high rounded p-2 flex items-center gap-3">
+<div class="w-8 h-8 bg-surface-container-lowest rounded flex items-center justify-center border border-outline-variant/30">
+<span class="material-symbols-outlined text-primary text-lg">grid_view</span>
+</div>
+<div>
+<div class="text-[11px] font-bold text-on-surface">Main_Mesh_01</div>
+<div class="text-[9px] text-outline uppercase tracking-tighter">Skinned Mesh Renderer</div>
+</div>
+</div>
+<!-- Mesh Weights Tree -->
+<div class="space-y-1">
+<div class="flex items-center gap-2 text-[11px] font-semibold text-secondary py-1">
+<span class="material-symbols-outlined text-sm">expand_more</span>
+<span>Mesh Weights</span>
+</div>
+<div class="pl-4 space-y-1">
+<div class="flex items-center justify-between py-1 px-2 hover:bg-surface-variant rounded">
+<span class="text-[10px] text-on-surface-variant">Vertex Group 01</span>
+<span class="text-[10px] font-mono text-primary">0.84</span>
+</div>
+<div class="flex items-center justify-between py-1 px-2 bg-surface-variant rounded">
+<span class="text-[10px] text-on-surface-variant">Vertex Group 02</span>
+<span class="text-[10px] font-mono text-tertiary">1.00</span>
+</div>
+<div class="flex items-center justify-between py-1 px-2 hover:bg-surface-variant rounded">
+<span class="text-[10px] text-on-surface-variant">Vertex Group 03</span>
+<span class="text-[10px] font-mono text-on-secondary-container">0.12</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- Center: Viewport -->
+<section class="col-span-7 relative flex flex-col bg-surface-container-lowest overflow-hidden">
+<!-- Viewport Toolbar -->
+<div class="absolute top-4 left-4 z-10 flex gap-2">
+<div class="bg-surface-container-highest/80 backdrop-blur-md rounded border border-outline-variant/20 p-1 flex gap-1">
+<button class="w-7 h-7 flex items-center justify-center text-primary bg-primary/20 rounded">
+<span class="material-symbols-outlined text-[18px]">brush</span>
+</button>
+<button class="w-7 h-7 flex items-center justify-center text-outline hover:bg-surface-bright rounded transition-colors">
+<span class="material-symbols-outlined text-[18px]">flare</span>
+</button>
+<button class="w-7 h-7 flex items-center justify-center text-outline hover:bg-surface-bright rounded transition-colors">
+<span class="material-symbols-outlined text-[18px]">ink_eraser</span>
+</button>
+</div>
+<div class="bg-surface-container-highest/80 backdrop-blur-md rounded border border-outline-variant/20 px-3 flex items-center gap-3">
+<span class="text-[10px] font-bold text-outline">VIEW: FRONT</span>
+<div class="w-[1px] h-3 bg-outline-variant"></div>
+<span class="text-[10px] font-bold text-primary">WEIGHT PAINT</span>
+</div>
+</div>
+<!-- Weight Paint Settings Overlay -->
+<div class="absolute top-4 right-4 z-10 w-56 bg-surface-container-high/90 backdrop-blur-lg rounded-lg shadow-2xl border border-outline-variant/30 p-4">
+<div class="flex items-center justify-between mb-4">
+<h3 class="text-[11px] font-bold uppercase tracking-wider text-secondary">Weight Paint</h3>
+<div class="flex items-center gap-2">
+<span class="text-[9px] text-outline">Enable Tool</span>
+<div class="w-6 h-3 bg-primary rounded-full relative">
+<div class="absolute right-0.5 top-0.5 w-2 h-2 bg-on-primary-container rounded-full"></div>
+</div>
+</div>
+</div>
+<div class="space-y-4">
+<div>
+<div class="flex justify-between text-[10px] mb-1">
+<span class="text-on-surface-variant">Mode</span>
+<span class="text-primary font-bold">Paint</span>
+</div>
+<div class="grid grid-cols-2 gap-1">
+<button class="bg-primary/20 text-primary text-[9px] py-1 rounded">ADD</button>
+<button class="bg-surface-bright text-outline text-[9px] py-1 rounded">SUB</button>
+</div>
+</div>
+<div>
+<div class="flex justify-between text-[10px] mb-1">
+<span class="text-on-surface-variant">Radius</span>
+<span class="text-primary-fixed-dim">45px</span>
+</div>
+<div class="h-1 bg-surface-container-lowest rounded-full relative">
+<div class="absolute left-0 top-0 h-full w-[45%] bg-primary-container rounded-full"></div>
+<div class="absolute left-[45%] -top-1 w-3 h-3 bg-primary rounded-full border-2 border-surface-container-high shadow-sm"></div>
+</div>
+</div>
+<div>
+<div class="flex justify-between text-[10px] mb-1">
+<span class="text-on-surface-variant">Strength</span>
+<span class="text-primary-fixed-dim">0.5</span>
+</div>
+<div class="h-1 bg-surface-container-lowest rounded-full relative">
+<div class="absolute left-0 top-0 h-full w-[50%] bg-primary-container rounded-full"></div>
+<div class="absolute left-[50%] -top-1 w-3 h-3 bg-primary rounded-full border-2 border-surface-container-high shadow-sm"></div>
+</div>
+</div>
+<div class="pt-2">
+<div class="text-[9px] text-outline uppercase mb-1">Heat Map Reference</div>
+<div class="h-2 w-full heatmap-gradient rounded-full"></div>
+<div class="flex justify-between text-[8px] text-outline mt-1 font-mono">
+<span>0.0</span>
+<span>0.5</span>
+<span>1.0</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Viewport Canvas -->
+<div class="flex-1 viewport-grid flex items-center justify-center relative cursor-crosshair">
+<!-- Mock Mesh Visualization -->
+<div class="w-[80%] h-[80%] relative flex items-center justify-center">
+<img class="opacity-20 mix-blend-screen" data-alt="Technical wireframe of a complex humanoid character mesh against a dark charcoal background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAjCnUR7LQjHkrfU5EdkhytkxaOEjqZjFpMThQ3hU5niPKp9RllUDRmK3kJVuyHQ9Txka3zcJ_kdPOseQsx2cjS_uNDfGhsKIRBvMzGkOiCeDjoJu6ojQ3TL8vOe0-m-iDjkZ0m4cORoppkZX7yZPyiF4gCvY9pVk8wF6uLuqu0A_zKSaWWdWjHwuv9fK0mYEgT6yn6uAFFF8sQQLflFt6iDyUu0sICez-u-w7wooCUsOc_m5Qk4J8l7l07mZ-Urv8VMHWMQpQpyYQ"/>
+<!-- SVG Overlay for Heatmap effect simulation -->
+<svg class="absolute inset-0 w-full h-full" viewbox="0 0 100 100">
+<circle cx="50" cy="40" fill="url(#heatGradient)" fill-opacity="0.6" r="15"></circle>
+<defs>
+<radialgradient id="heatGradient">
+<stop offset="0%" stop-color="#ff5450"></stop>
+<stop offset="50%" stop-color="#ffb3ad"></stop>
+<stop offset="80%" stop-color="#608bff"></stop>
+<stop offset="100%" stop-color="#002468"></stop>
+</radialgradient>
+</defs>
+</svg>
+<!-- Brush Cursor -->
+<div class="absolute top-[35%] left-[45%] w-24 h-24 border border-primary/40 rounded-full flex items-center justify-center">
+<div class="w-1 h-1 bg-primary rounded-full"></div>
+<div class="absolute inset-0 border border-primary/10 scale-110 rounded-full"></div>
+</div>
+</div>
+<!-- Gizmo -->
+<div class="absolute bottom-8 right-8 w-16 h-16 pointer-events-none">
+<div class="relative w-full h-full">
+<div class="absolute left-1/2 bottom-0 w-0.5 h-12 bg-error"></div>
+<div class="absolute bottom-1/2 right-0 w-12 h-0.5 bg-primary"></div>
+<div class="absolute left-1/2 bottom-1/2 w-8 h-8 border-l-2 border-b-2 border-white/20 rounded-bl-sm"></div>
+<span class="absolute top-0 left-1/2 -translate-x-1/2 text-[10px] text-error font-bold">Y</span>
+<span class="absolute right-0 bottom-1/2 translate-y-1/2 text-[10px] text-primary font-bold">X</span>
+</div>
+</div>
+</div>
+</section>
+<!-- Right Side: Secondary Tools (Minimalist) -->
+<section class="col-span-2 bg-surface-container-low border-l border-transparent">
+<header class="px-3 py-2 flex items-center justify-between bg-surface-container-high/50">
+<span class="text-[10px] font-bold uppercase tracking-widest text-secondary">Layers</span>
+</header>
+<div class="p-3 space-y-2">
+<div class="flex items-center gap-2 py-2 px-2 bg-surface-container-high rounded border-l-2 border-primary">
+<span class="material-symbols-outlined text-sm text-primary">layers</span>
+<span class="text-[11px] text-on-surface">Base_Weights</span>
+<span class="material-symbols-outlined text-[14px] ml-auto text-outline">visibility</span>
+</div>
+<div class="flex items-center gap-2 py-2 px-2 hover:bg-surface-variant rounded transition-colors group">
+<span class="material-symbols-outlined text-sm text-outline">layers</span>
+<span class="text-[11px] text-on-surface-variant">Detail_Sculpt</span>
+<span class="material-symbols-outlined text-[14px] ml-auto text-outline/30 group-hover:text-outline transition-colors">visibility_off</span>
+</div>
+</div>
+</section>
+</main>
+<!-- BottomNavBar Shell -->
+<footer class="fixed bottom-0 left-16 right-0 z-50 flex justify-start items-center bg-slate-950 text-blue-400 font-inter text-[9px] font-bold uppercase h-12">
+<div class="flex h-full">
+<button class="flex flex-col items-center justify-center text-slate-500 px-6 h-full hover:text-slate-200 transition-transform active:scale-90">
+<span class="material-symbols-outlined mb-0.5">linear_scale</span>
+<span>Timeline</span>
+</button>
+<button class="flex flex-col items-center justify-center text-slate-500 px-6 h-full hover:text-slate-200 transition-transform active:scale-90">
+<span class="material-symbols-outlined mb-0.5">show_chart</span>
+<span>Graph</span>
+</button>
+<button class="flex flex-col items-center justify-center text-slate-500 px-6 h-full hover:text-slate-200 transition-transform active:scale-90">
+<span class="material-symbols-outlined mb-0.5">graphic_eq</span>
+<span>Audio</span>
+</button>
+<button class="flex flex-col items-center justify-center text-blue-300 bg-slate-800/80 rounded-t-sm px-6 h-full transition-transform active:scale-90">
+<span class="material-symbols-outlined mb-0.5">terminal</span>
+<span>Console</span>
+</button>
+</div>
+<div class="ml-auto px-6 flex items-center gap-6 text-slate-500 font-mono">
+<div class="flex items-center gap-2">
+<span class="text-[8px] opacity-40">MEM</span>
+<span class="text-blue-400/60">2.4 GB</span>
+</div>
+<div class="flex items-center gap-2">
+<span class="text-[8px] opacity-40">FPS</span>
+<span class="text-blue-400/60">60.0</span>
+</div>
+<div class="flex items-center gap-2 text-primary-container">
+<span class="text-[8px] opacity-40">POS</span>
+<span>X:124.2 Y:8.4 Z:0.0</span>
+</div>
+</div>
+</footer>
+</body></html>

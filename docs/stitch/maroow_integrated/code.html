@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html class="dark" lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Maroow Editor — Integrated Design (All 51 Icons)</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Inter+Condensed:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+<script>
+tailwind.config = {
+  darkMode: "class",
+  theme: {
+    extend: {
+      colors: {
+        "surface": "#101319",
+        "surface-dim": "#101319",
+        "surface-lowest": "#0b0e14",
+        "surface-low": "#191c22",
+        "surface-default": "#1d2026",
+        "surface-high": "#272a30",
+        "surface-highest": "#32353b",
+        "surface-bright": "#363940",
+        "outline": "#8d90a0",
+        "outline-variant": "#434654",
+        "primary": "#b3c5ff",
+        "primary-container": "#608bff",
+        "on-primary": "#002a77",
+        "secondary": "#bec7dc",
+        "secondary-container": "#40495b",
+        "tertiary": "#ffb3ad",
+        "tertiary-container": "#ff5450",
+        "on-surface": "#e1e2ea",
+        "on-surface-variant": "#c3c6d6",
+        "inactive": "#8d9199",
+        "ok": "#a6e4a1",
+      },
+      fontFamily: {
+        sans: ["Inter", "system-ui", "sans-serif"],
+        cond: ["Inter Condensed", "Inter", "sans-serif"],
+        mono: ["JetBrains Mono", "monospace"],
+      },
+      fontSize: {
+        "2xs": "0.625rem",
+      },
+      boxShadow: {
+        "glow-primary": "0 0 0 1px rgba(179,197,255,0.12), 0 4px 16px rgba(96,139,255,0.15)",
+        "inset-line": "inset 0 -2px 0 0 rgba(96,139,255,0.0)",
+      },
+    },
+  },
+};
+</script>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: "Inter", system-ui, sans-serif; background: #0b0e14; }
+  .ico { image-rendering: -webkit-optimize-contrast; }
+  .data { font-family: "Inter Condensed", "Inter", sans-serif; letter-spacing: -0.02em; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  /* Custom scrollbar for panels */
+  .scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scroll::-webkit-scrollbar-track { background: transparent; }
+  .scroll::-webkit-scrollbar-thumb { background: #32353b; border-radius: 3px; }
+  .scroll::-webkit-scrollbar-thumb:hover { background: #434654; }
+
+  /* Playhead */
+  .playhead {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: #ff5450;
+    box-shadow: 0 0 0 0.5px #ff5450, 0 0 8px rgba(255,84,80,0.4);
+  }
+  .playhead::before {
+    content: ""; position: absolute; top: -2px; left: -5px;
+    width: 11px; height: 6px; background: #ff5450;
+    clip-path: polygon(0 0, 100% 0, 50% 100%);
+  }
+
+  /* Keyframe diamonds */
+  .kf { width: 7px; height: 7px; transform: rotate(45deg); display: inline-block; }
+  .kf.prim { background: #b3c5ff; }
+  .kf.sec { background: #8d90a0; }
+  .kf.active { background: #ff5450; box-shadow: 0 0 6px rgba(255,84,80,0.6); }
+
+  /* Group background tinting for tree rows */
+  .tree-row:hover { background: #1d2026; }
+  .tree-row.sel { background: #1d2026; box-shadow: inset 2px 0 0 #608bff; }
+
+  /* Signature CTA gradient */
+  .cta {
+    background: linear-gradient(135deg, #b3c5ff 0%, #608bff 100%);
+    color: #002a77;
+  }
+
+  /* Glass panel */
+  .glass {
+    background: rgba(50,53,59,0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  /* Toolbar button states */
+  .tb {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 2px;
+    transition: background 120ms ease;
+  }
+  .tb:hover { background: #272a30; }
+  .tb.on { background: #272a30; box-shadow: inset 0 -2px 0 #608bff; }
+  .tb.disabled { opacity: 0.35; pointer-events: none; }
+
+  /* Tab indicator */
+  .tab { padding: 8px 14px; font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: #8d90a0; }
+  .tab.active { color: #e1e2ea; box-shadow: inset 0 -2px 0 #608bff; }
+  .tab:hover:not(.active) { color: #c3c6d6; }
+
+  /* Zebra stripe for timeline */
+  .tl-row:nth-child(odd) { background: #0b0e14; }
+  .tl-row:nth-child(even) { background: #101319; }
+
+  /* Indent guide (subtle) */
+  .indent { padding-left: 12px; }
+
+  /* Property track small square */
+  .pt { width: 16px; height: 16px; border-radius: 2px; display: inline-flex; align-items: center; justify-content: center; }
+</style>
+</head>
+<body class="bg-surface-lowest text-on-surface min-h-screen">
+
+<!-- ======================================================================= -->
+<!-- HEADER: App title + design system reference                              -->
+<!-- ======================================================================= -->
+<header class="px-8 py-6 border-b border-outline-variant/20">
+  <div class="flex items-baseline justify-between">
+    <div>
+      <div class="text-2xs font-mono uppercase tracking-widest text-inactive">docs / stitch / maroow_integrated</div>
+      <h1 class="text-2xl font-semibold text-on-surface mt-1">Maroow Editor — Integrated Design</h1>
+      <p class="text-sm text-on-surface-variant mt-1">Charcoal Studio × 51 custom icons · Spine 4.2 compatible</p>
+    </div>
+    <div class="flex items-center gap-4 text-xs data text-on-surface-variant">
+      <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-primary"></span>primary #b3c5ff</span>
+      <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-secondary"></span>secondary #bec7dc</span>
+      <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-primary-container"></span>active #608bff</span>
+      <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-tertiary-container"></span>playhead #ff5450</span>
+    </div>
+  </div>
+</header>
+
+<!-- ======================================================================= -->
+<!-- MAIN EDITOR MOCKUP                                                        -->
+<!-- ======================================================================= -->
+<main class="p-8">
+<div class="mx-auto max-w-[1680px] rounded-sm overflow-hidden shadow-glow-primary bg-surface">
+
+  <!-- ==================== MENU BAR ==================== -->
+  <div class="flex items-center justify-between h-10 bg-surface-low px-3 border-b border-surface-lowest">
+    <div class="flex items-center gap-1">
+      <!-- Logo -->
+      <div class="flex items-center gap-2 pr-3 pl-1">
+        <div class="w-5 h-5 cta rounded-sm flex items-center justify-center text-[11px] font-bold">M</div>
+        <span class="text-xs font-semibold tracking-wide">MAROOW</span>
+      </div>
+      <span class="text-outline-variant/60">│</span>
+
+      <!-- Menu items -->
+      <button class="tab !py-1.5 !px-3 text-secondary hover:text-on-surface">File</button>
+      <button class="tab !py-1.5 !px-3 text-secondary hover:text-on-surface">Edit</button>
+      <button class="tab !py-1.5 !px-3 text-secondary hover:text-on-surface">View</button>
+
+      <span class="text-outline-variant/60 ml-2">│</span>
+
+      <!-- Quick actions: save / export / reload / undo / redo -->
+      <button class="tb" title="Save project (Ctrl+S)">
+        <img src="../../../assets/icons/export/24/save.png" class="ico w-[18px] h-[18px]" alt="save"/>
+      </button>
+      <button class="tb" title="Export runtime (.mbin)">
+        <img src="../../../assets/icons/export/24/export.png" class="ico w-[18px] h-[18px]" alt="export"/>
+      </button>
+      <button class="tb" title="Reload project">
+        <img src="../../../assets/icons/export/24/reload.png" class="ico w-[18px] h-[18px]" alt="reload"/>
+      </button>
+      <span class="text-outline-variant/60 mx-1">·</span>
+      <button class="tb" title="Undo (Ctrl+Z)">
+        <img src="../../../assets/icons/export/24/undo.png" class="ico w-[18px] h-[18px]" alt="undo"/>
+      </button>
+      <button class="tb disabled" title="Redo (Ctrl+Shift+Z)">
+        <img src="../../../assets/icons/export/24/redo.png" class="ico w-[18px] h-[18px]" alt="redo"/>
+      </button>
+    </div>
+
+    <!-- Status -->
+    <div class="flex items-center gap-3 pr-2 data text-xs">
+      <span class="flex items-center gap-1.5 text-on-surface-variant">
+        <img src="../../../assets/icons/export/24/status_warn.png" class="ico w-3.5 h-3.5 opacity-80" alt="warn"/>
+        2 unsaved changes
+      </span>
+      <span class="text-outline-variant/60">│</span>
+      <span class="text-on-surface-variant">Playing <span class="text-primary">idle</span> · 1.25×</span>
+    </div>
+  </div>
+
+  <!-- ==================== EDITOR BODY ==================== -->
+  <div class="grid" style="grid-template-columns: 320px 1fr; height: 820px;">
+
+    <!-- ==================== LEFT COLUMN ==================== -->
+    <aside class="flex flex-col bg-surface-low border-r border-surface-lowest">
+
+      <!-- Tabs: Project / Hierarchy -->
+      <div class="flex items-end h-9 bg-surface-low border-b border-surface-lowest pl-2">
+        <button class="tab">Project</button>
+        <button class="tab active">Hierarchy</button>
+        <div class="ml-auto pr-2 flex items-center gap-1">
+          <button class="tb" title="Move up">
+            <img src="../../../assets/icons/export/24/move_up.png" class="ico w-[16px] h-[16px] opacity-70" alt="up"/>
+          </button>
+          <button class="tb" title="Move down">
+            <img src="../../../assets/icons/export/24/move_down.png" class="ico w-[16px] h-[16px] opacity-70" alt="down"/>
+          </button>
+        </div>
+      </div>
+
+      <!-- Search / filter -->
+      <div class="px-3 py-2 border-b border-surface-lowest">
+        <div class="relative">
+          <input type="text" placeholder="Search bones, slots, animations…"
+            class="w-full bg-transparent border-0 border-b-2 border-surface-high pb-1.5 px-0 text-xs text-on-surface placeholder:text-inactive focus:border-primary-container focus:ring-0"/>
+        </div>
+      </div>
+
+      <!-- Hierarchy tree -->
+      <div class="flex-1 overflow-y-auto scroll py-1 data text-[13px]">
+
+        <!-- Animations section -->
+        <div class="px-3 pt-3 pb-1 text-2xs uppercase tracking-widest text-inactive font-semibold">Animations</div>
+        <div class="tree-row sel flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/node_anim.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-on-surface">idle</span>
+          <span class="ml-auto text-2xs mono text-inactive">2.00s</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/node_anim.png" class="ico w-4 h-4 opacity-70" alt=""/>
+          <span class="text-secondary">walk</span>
+          <span class="ml-auto text-2xs mono text-inactive">1.20s</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/node_anim.png" class="ico w-4 h-4 opacity-70" alt=""/>
+          <span class="text-secondary">attack_peak</span>
+          <span class="ml-auto text-2xs mono text-inactive">0.45s</span>
+        </div>
+
+        <!-- Skins section -->
+        <div class="px-3 pt-4 pb-1 text-2xs uppercase tracking-widest text-inactive font-semibold">Skins</div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/node_skin.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-on-surface">default</span>
+          <img src="../../../assets/icons/export/24/eye.png" class="ico w-[14px] h-[14px] ml-auto opacity-90" alt="visible"/>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer opacity-60">
+          <img src="../../../assets/icons/export/24/node_skin.png" class="ico w-4 h-4" alt=""/>
+          <span>armored</span>
+        </div>
+
+        <!-- Skeleton section -->
+        <div class="px-3 pt-4 pb-1 flex items-center text-2xs uppercase tracking-widest text-inactive font-semibold">
+          <span>Skeleton</span>
+          <div class="ml-auto flex items-center gap-1 normal-case tracking-normal">
+            <button class="tb !w-6 !h-6" title="Show bones">
+              <img src="../../../assets/icons/export/24/bone_toggle.png" class="ico w-[14px] h-[14px]" alt="bones"/>
+            </button>
+            <button class="tb !w-6 !h-6" title="Show bounding boxes">
+              <img src="../../../assets/icons/export/24/bbox.png" class="ico w-[14px] h-[14px] opacity-60" alt="bbox"/>
+            </button>
+          </div>
+        </div>
+
+        <!-- Tree body -->
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <span class="text-inactive w-3 text-center">▾</span>
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-on-surface">root</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer indent">
+          <span class="text-inactive w-3 text-center">▾</span>
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+          <span>torso</span>
+        </div>
+
+        <!-- Slot + attachments (nested) -->
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer" style="padding-left: 36px;">
+          <span class="text-inactive w-3 text-center">▾</span>
+          <img src="../../../assets/icons/export/24/node_slot.png" class="ico w-4 h-4" alt=""/>
+          <span>slot_torso</span>
+          <img src="../../../assets/icons/export/24/eye.png" class="ico w-[14px] h-[14px] ml-auto mr-3 opacity-90" alt=""/>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_region.png" class="ico w-4 h-4" alt=""/>
+          <span>torso_default</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">region</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_mesh.png" class="ico w-4 h-4" alt=""/>
+          <span>torso_cloth</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">mesh</span>
+        </div>
+
+        <!-- Arm branch -->
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer" style="padding-left: 36px;">
+          <span class="text-inactive w-3 text-center">▾</span>
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+          <span>arm_l</span>
+          <span class="ml-auto mr-3 text-2xs mono text-tertiary-container flex items-center gap-1">
+            <img src="../../../assets/icons/export/24/status_warn.png" class="ico w-3 h-3" alt=""/>
+            weight warn
+          </span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer" style="padding-left: 60px;">
+          <span class="text-inactive w-3 text-center">▸</span>
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-75" alt=""/>
+          <span class="text-secondary">forearm_l</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_point.png" class="ico w-4 h-4" alt=""/>
+          <span>hand_anchor</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">point</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_linked.png" class="ico w-4 h-4" alt=""/>
+          <span>fx_sparkle</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">linked</span>
+        </div>
+
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer" style="padding-left: 36px;">
+          <span class="text-inactive w-3 text-center">▸</span>
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+          <span class="text-secondary">arm_r</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer" style="padding-left: 36px;">
+          <span class="text-inactive w-3 text-center">▾</span>
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+          <span>head</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_bbox.png" class="ico w-4 h-4" alt=""/>
+          <span>hitbox_head</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">bbox</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_clip.png" class="ico w-4 h-4" alt=""/>
+          <span>clip_helmet</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">clip</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 py-1 cursor-pointer text-secondary" style="padding-left: 60px;">
+          <img src="../../../assets/icons/export/24/att_path.png" class="ico w-4 h-4" alt=""/>
+          <span>path_hair</span>
+          <span class="ml-auto mr-3 text-2xs mono text-inactive">path</span>
+        </div>
+
+        <!-- Constraints section -->
+        <div class="px-3 pt-4 pb-1 text-2xs uppercase tracking-widest text-inactive font-semibold">Constraints</div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/constraint_ik.png" class="ico w-4 h-4" alt=""/>
+          <span>ik_arm_l</span>
+          <span class="ml-auto text-2xs mono text-inactive">IK</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/constraint_path.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-secondary">path_hair_follow</span>
+          <span class="ml-auto text-2xs mono text-inactive">Path</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/constraint_xform.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-secondary">tf_shadow_mirror</span>
+          <span class="ml-auto text-2xs mono text-inactive">TF</span>
+        </div>
+        <div class="tree-row flex items-center gap-2 px-3 py-1 cursor-pointer">
+          <img src="../../../assets/icons/export/24/constraint_physics.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-secondary">phys_cape</span>
+          <span class="ml-auto text-2xs mono text-inactive">Phys</span>
+        </div>
+      </div>
+
+      <!-- Properties (bottom half of left column) -->
+      <div class="border-t border-surface-lowest bg-surface-low" style="flex: 0 0 280px;">
+        <div class="flex items-end h-9 bg-surface-low border-b border-surface-lowest pl-2">
+          <button class="tab">Runtime Assets</button>
+          <button class="tab">Constraints</button>
+          <button class="tab active">Properties</button>
+        </div>
+        <div class="px-4 py-3 space-y-3 data">
+          <div class="flex items-center gap-2 text-xs text-on-surface-variant">
+            <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4" alt=""/>
+            <span class="text-on-surface font-medium">torso</span>
+            <span class="ml-auto text-2xs mono text-inactive">bone · root › torso</span>
+          </div>
+
+          <!-- Position -->
+          <div>
+            <div class="text-2xs uppercase tracking-widest text-inactive mb-1.5 flex items-center gap-1">
+              <img src="../../../assets/icons/export/24/prop_translate.png" class="ico w-3 h-3 opacity-70" alt=""/>
+              Translation
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <label class="block">
+                <span class="text-[10px] mono text-inactive">X</span>
+                <input value="0.00" class="w-full mt-0.5 bg-transparent border-0 border-b-2 border-surface-high pb-1 px-0 text-sm text-primary-container mono focus:border-primary-container focus:ring-0" />
+              </label>
+              <label class="block">
+                <span class="text-[10px] mono text-inactive">Y</span>
+                <input value="128.50" class="w-full mt-0.5 bg-transparent border-0 border-b-2 border-surface-high pb-1 px-0 text-sm text-on-surface mono focus:border-primary-container focus:ring-0" />
+              </label>
+            </div>
+          </div>
+
+          <!-- Rotation -->
+          <div>
+            <div class="text-2xs uppercase tracking-widest text-inactive mb-1.5 flex items-center gap-1">
+              <img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-3 h-3 opacity-70" alt=""/>
+              Rotation
+            </div>
+            <input value="-4.20°" class="w-full bg-transparent border-0 border-b-2 border-surface-high pb-1 px-0 text-sm text-on-surface mono focus:border-primary-container focus:ring-0" />
+          </div>
+
+          <!-- Scale + Shear -->
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <div class="text-2xs uppercase tracking-widest text-inactive mb-1.5 flex items-center gap-1">
+                <img src="../../../assets/icons/export/24/prop_scale.png" class="ico w-3 h-3 opacity-70" alt=""/>Scale
+              </div>
+              <input value="1.00, 1.00" class="w-full bg-transparent border-0 border-b-2 border-surface-high pb-1 px-0 text-sm text-on-surface mono focus:border-primary-container focus:ring-0" />
+            </div>
+            <div>
+              <div class="text-2xs uppercase tracking-widest text-inactive mb-1.5 flex items-center gap-1">
+                <img src="../../../assets/icons/export/24/prop_shear.png" class="ico w-3 h-3 opacity-70" alt=""/>Shear
+              </div>
+              <input value="0.00, 0.00" class="w-full bg-transparent border-0 border-b-2 border-surface-high pb-1 px-0 text-sm text-on-surface mono focus:border-primary-container focus:ring-0" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ==================== RIGHT COLUMN (Viewport + Timeline) ==================== -->
+    <section class="flex flex-col">
+
+      <!-- ==================== VIEWPORT TOOLBAR ==================== -->
+      <div class="flex items-center gap-1 h-11 bg-surface-low border-b border-surface-lowest px-3">
+        <!-- Playback cluster -->
+        <div class="flex items-center gap-0.5 pr-2 border-r border-surface-high/60">
+          <button class="tb" title="Rewind">
+            <img src="../../../assets/icons/export/24/rewind.png" class="ico w-[18px] h-[18px]" alt="rewind"/>
+          </button>
+          <button class="tb" title="Previous keyframe">
+            <img src="../../../assets/icons/export/24/prev_key.png" class="ico w-[18px] h-[18px]" alt="prev"/>
+          </button>
+          <!-- Play as CTA when active -->
+          <button class="tb on" title="Play (Space)">
+            <img src="../../../assets/icons/export/24/play.png" class="ico w-[18px] h-[18px]" alt="play"/>
+          </button>
+          <button class="tb" title="Pause">
+            <img src="../../../assets/icons/export/24/pause.png" class="ico w-[18px] h-[18px] opacity-70" alt="pause"/>
+          </button>
+          <button class="tb" title="Stop">
+            <img src="../../../assets/icons/export/24/stop.png" class="ico w-[18px] h-[18px] opacity-70" alt="stop"/>
+          </button>
+          <button class="tb" title="Next keyframe">
+            <img src="../../../assets/icons/export/24/next_key.png" class="ico w-[18px] h-[18px]" alt="next"/>
+          </button>
+          <button class="tb on" title="Loop">
+            <img src="../../../assets/icons/export/24/loop.png" class="ico w-[18px] h-[18px]" alt="loop"/>
+          </button>
+        </div>
+
+        <!-- Keyframe cluster -->
+        <div class="flex items-center gap-0.5 px-2 border-r border-surface-high/60">
+          <button class="tb" title="Add keyframe">
+            <img src="../../../assets/icons/export/24/add_key.png" class="ico w-[18px] h-[18px]" alt="add"/>
+          </button>
+          <button class="tb" title="Remove keyframe">
+            <img src="../../../assets/icons/export/24/remove_key.png" class="ico w-[18px] h-[18px]" alt="remove"/>
+          </button>
+        </div>
+
+        <!-- Weight paint cluster -->
+        <div class="flex items-center gap-0.5 px-2 border-r border-surface-high/60">
+          <button class="tb on" title="Weight brush">
+            <img src="../../../assets/icons/export/24/weight_brush.png" class="ico w-[18px] h-[18px]" alt="brush"/>
+          </button>
+          <button class="tb" title="Weight erase">
+            <img src="../../../assets/icons/export/24/weight_erase.png" class="ico w-[18px] h-[18px] opacity-75" alt="erase"/>
+          </button>
+          <button class="tb" title="Weight smooth">
+            <img src="../../../assets/icons/export/24/weight_smooth.png" class="ico w-[18px] h-[18px] opacity-75" alt="smooth"/>
+          </button>
+        </div>
+
+        <!-- Overlays cluster -->
+        <div class="flex items-center gap-0.5 px-2 border-r border-surface-high/60">
+          <button class="tb on" title="Onion skin">
+            <img src="../../../assets/icons/export/24/onion_skin.png" class="ico w-[18px] h-[18px]" alt="onion"/>
+          </button>
+          <button class="tb" title="Mesh wireframe">
+            <img src="../../../assets/icons/export/24/mesh_wire.png" class="ico w-[18px] h-[18px] opacity-75" alt="wire"/>
+          </button>
+          <button class="tb" title="Bounding boxes">
+            <img src="../../../assets/icons/export/24/bbox.png" class="ico w-[18px] h-[18px] opacity-75" alt="bbox"/>
+          </button>
+          <button class="tb" title="Bone toggle">
+            <img src="../../../assets/icons/export/24/bone_toggle.png" class="ico w-[18px] h-[18px]" alt="bones"/>
+          </button>
+          <button class="tb" title="Performance HUD">
+            <img src="../../../assets/icons/export/24/perf_hud.png" class="ico w-[18px] h-[18px] opacity-75" alt="hud"/>
+          </button>
+        </div>
+
+        <!-- Zoom cluster -->
+        <div class="flex items-center gap-0.5 px-2">
+          <button class="tb" title="Zoom to fit">
+            <img src="../../../assets/icons/export/24/zoom_fit.png" class="ico w-[18px] h-[18px]" alt="fit"/>
+          </button>
+          <button class="tb" title="Zoom 1:1">
+            <img src="../../../assets/icons/export/24/zoom_one.png" class="ico w-[18px] h-[18px]" alt="1:1"/>
+          </button>
+          <span class="data text-xs text-on-surface-variant mono ml-1">124%</span>
+        </div>
+
+        <!-- Right side: time display + mode toggle -->
+        <div class="ml-auto flex items-center gap-4">
+          <div class="data text-xs text-on-surface-variant mono">
+            <span class="text-on-surface">00:00.824</span>
+            <span class="text-inactive"> / </span>
+            <span class="text-inactive">00:02.000</span>
+          </div>
+          <div class="flex items-center rounded-sm overflow-hidden bg-surface-highest">
+            <button class="px-3 py-1 text-xs text-inactive hover:text-on-surface">Setup</button>
+            <button class="px-3 py-1 text-xs cta font-medium">Animate</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== VIEWPORT CANVAS ==================== -->
+      <div class="relative flex-1 bg-surface-lowest overflow-hidden" style="height: 460px;">
+        <!-- Grid -->
+        <svg class="absolute inset-0 w-full h-full" aria-hidden="true">
+          <defs>
+            <pattern id="g" x="0" y="0" width="48" height="48" patternUnits="userSpaceOnUse">
+              <path d="M48 0H0V48" fill="none" stroke="#1d2026" stroke-width="1"/>
+            </pattern>
+            <pattern id="g2" x="0" y="0" width="240" height="240" patternUnits="userSpaceOnUse">
+              <path d="M240 0H0V240" fill="none" stroke="#272a30" stroke-width="1"/>
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#g)"/>
+          <rect width="100%" height="100%" fill="url(#g2)"/>
+
+          <!-- Origin axes -->
+          <line x1="50%" y1="0" x2="50%" y2="100%" stroke="#434654" stroke-width="1" stroke-dasharray="2,6"/>
+          <line x1="0" y1="60%" x2="100%" y2="60%" stroke="#434654" stroke-width="1" stroke-dasharray="2,6"/>
+        </svg>
+
+        <!-- Character skeleton illustration (bones as simple primitives) -->
+        <svg class="absolute inset-0 w-full h-full" viewBox="0 0 1360 460" preserveAspectRatio="xMidYMid meet">
+          <!-- Onion skin previous pose (ghost) -->
+          <g opacity="0.25" stroke="#b3c5ff" fill="none" stroke-width="2">
+            <line x1="680" y1="270" x2="680" y2="150"/>
+            <line x1="680" y1="180" x2="620" y2="235"/>
+            <line x1="680" y1="180" x2="738" y2="235"/>
+          </g>
+          <!-- Onion skin next pose (ghost) -->
+          <g opacity="0.25" stroke="#ffb3ad" fill="none" stroke-width="2">
+            <line x1="680" y1="270" x2="682" y2="150"/>
+            <line x1="680" y1="180" x2="638" y2="228"/>
+            <line x1="680" y1="180" x2="722" y2="232"/>
+          </g>
+
+          <!-- Current pose bones (solid) -->
+          <g stroke="#608bff" stroke-width="2.5" fill="none">
+            <!-- spine -->
+            <line x1="680" y1="270" x2="680" y2="150"/>
+            <!-- head -->
+            <circle cx="680" cy="130" r="22" stroke="#608bff" fill="#0b0e14"/>
+            <!-- arms -->
+            <line x1="680" y1="180" x2="628" y2="230" stroke-width="3"/>
+            <line x1="628" y1="230" x2="600" y2="280"/>
+            <line x1="680" y1="180" x2="732" y2="230"/>
+            <line x1="732" y1="230" x2="760" y2="280"/>
+            <!-- legs -->
+            <line x1="680" y1="270" x2="650" y2="340"/>
+            <line x1="650" y1="340" x2="640" y2="405"/>
+            <line x1="680" y1="270" x2="712" y2="340"/>
+            <line x1="712" y1="340" x2="720" y2="405"/>
+          </g>
+          <!-- Joints -->
+          <g fill="#b3c5ff">
+            <circle cx="680" cy="270" r="4"/>
+            <circle cx="680" cy="180" r="3"/>
+            <circle cx="628" cy="230" r="3"/>
+            <circle cx="732" cy="230" r="3"/>
+            <circle cx="650" cy="340" r="3"/>
+            <circle cx="712" cy="340" r="3"/>
+          </g>
+          <!-- Selected bone (torso) highlight -->
+          <rect x="675" y="148" width="10" height="124" fill="none" stroke="#ff5450" stroke-width="1" stroke-dasharray="3,2"/>
+          <circle cx="680" cy="270" r="8" fill="none" stroke="#ff5450" stroke-width="1.5"/>
+
+          <!-- IK target indicator on arm_l -->
+          <g transform="translate(600, 280)">
+            <circle r="9" fill="none" stroke="#ffb3ad" stroke-width="1.5"/>
+            <line x1="-5" y1="0" x2="5" y2="0" stroke="#ffb3ad" stroke-width="1.5"/>
+            <line x1="0" y1="-5" x2="0" y2="5" stroke="#ffb3ad" stroke-width="1.5"/>
+          </g>
+
+          <!-- Weight brush cursor -->
+          <g transform="translate(720, 232)">
+            <circle r="36" fill="rgba(179,197,255,0.08)" stroke="#b3c5ff" stroke-width="1" stroke-dasharray="4,3"/>
+            <circle r="18" fill="rgba(179,197,255,0.14)" stroke="#b3c5ff" stroke-width="1"/>
+          </g>
+        </svg>
+
+        <!-- Top-left: selection info chip -->
+        <div class="absolute top-3 left-3 glass rounded-sm px-3 py-2 text-xs data flex items-center gap-2">
+          <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4" alt=""/>
+          <span class="text-on-surface">torso</span>
+          <span class="text-inactive">·</span>
+          <span class="mono text-on-surface-variant">pos 0.00, 128.50</span>
+          <span class="text-inactive">·</span>
+          <span class="mono text-on-surface-variant">rot -4.20°</span>
+        </div>
+
+        <!-- Top-right: perf HUD -->
+        <div class="absolute top-3 right-3 glass rounded-sm px-3 py-2 text-2xs mono space-y-0.5 min-w-[180px]">
+          <div class="flex items-center gap-1.5 pb-1 mb-1 border-b border-outline-variant/30">
+            <img src="../../../assets/icons/export/24/perf_hud.png" class="ico w-3 h-3 opacity-80" alt=""/>
+            <span class="uppercase tracking-widest text-inactive">Perf HUD</span>
+          </div>
+          <div class="flex justify-between"><span class="text-inactive">fps</span><span class="text-primary">120.3</span></div>
+          <div class="flex justify-between"><span class="text-inactive">frame</span><span>8.31 ms</span></div>
+          <div class="flex justify-between"><span class="text-inactive">draw calls</span><span>7</span></div>
+          <div class="flex justify-between"><span class="text-inactive">bones</span><span>42</span></div>
+          <div class="flex justify-between"><span class="text-inactive">attachments</span><span>28</span></div>
+        </div>
+
+        <!-- Bottom-left: onion skin legend -->
+        <div class="absolute bottom-3 left-3 glass rounded-sm px-3 py-2 text-2xs flex items-center gap-3">
+          <img src="../../../assets/icons/export/24/onion_skin.png" class="ico w-4 h-4" alt=""/>
+          <span class="flex items-center gap-1.5"><span class="w-3 h-[2px] bg-primary opacity-40"></span>prev −0.5s</span>
+          <span class="flex items-center gap-1.5"><span class="w-3 h-[2px] bg-tertiary opacity-40"></span>next +0.5s</span>
+        </div>
+
+        <!-- Bottom-right: status badge -->
+        <div class="absolute bottom-3 right-3 flex items-center gap-2">
+          <div class="glass rounded-sm px-2.5 py-1.5 text-2xs flex items-center gap-1.5 text-tertiary-container">
+            <img src="../../../assets/icons/export/24/status_warn.png" class="ico w-3.5 h-3.5" alt=""/>
+            weight sum &gt; 1.0 on vertex #418
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== TIMELINE ==================== -->
+      <div class="bg-surface-low border-t border-surface-lowest" style="height: 260px;">
+
+        <!-- Timeline header -->
+        <div class="flex items-center h-9 bg-surface-low border-b border-surface-lowest px-3">
+          <span class="text-2xs uppercase tracking-widest text-inactive font-semibold mr-4">Timeline</span>
+          <span class="text-xs text-on-surface data">idle</span>
+          <span class="ml-3 text-2xs mono text-inactive">30 fps · 2.00s · 60 frames</span>
+          <div class="ml-auto flex items-center gap-1">
+            <button class="tb" title="Add property track">
+              <img src="../../../assets/icons/export/24/add_key.png" class="ico w-[16px] h-[16px]" alt="add"/>
+            </button>
+            <button class="tb" title="Move up">
+              <img src="../../../assets/icons/export/24/move_up.png" class="ico w-[16px] h-[16px] opacity-70" alt="up"/>
+            </button>
+            <button class="tb" title="Move down">
+              <img src="../../../assets/icons/export/24/move_down.png" class="ico w-[16px] h-[16px] opacity-70" alt="down"/>
+            </button>
+          </div>
+        </div>
+
+        <!-- Ruler -->
+        <div class="grid" style="grid-template-columns: 280px 1fr;">
+          <div class="bg-surface-low"></div>
+          <div class="relative h-7 bg-surface-lowest border-b border-surface-lowest">
+            <svg class="absolute inset-0 w-full h-full">
+              <!-- major ticks every 0.25s, minor every 0.05s. Content width ~ 1040px for 2s -->
+              <!-- 2s window, 9 major ticks (0, 0.25 .. 2.0) -->
+              <g stroke="#434654" stroke-width="1">
+                <line x1="0" y1="14" x2="0" y2="28"/>
+                <line x1="12.5%" y1="14" x2="12.5%" y2="28"/>
+                <line x1="25%" y1="14" x2="25%" y2="28"/>
+                <line x1="37.5%" y1="14" x2="37.5%" y2="28"/>
+                <line x1="50%" y1="14" x2="50%" y2="28"/>
+                <line x1="62.5%" y1="14" x2="62.5%" y2="28"/>
+                <line x1="75%" y1="14" x2="75%" y2="28"/>
+                <line x1="87.5%" y1="14" x2="87.5%" y2="28"/>
+                <line x1="100%" y1="14" x2="100%" y2="28"/>
+              </g>
+              <g stroke="#272a30" stroke-width="1">
+                <line x1="6.25%" y1="20" x2="6.25%" y2="28"/>
+                <line x1="18.75%" y1="20" x2="18.75%" y2="28"/>
+                <line x1="31.25%" y1="20" x2="31.25%" y2="28"/>
+                <line x1="43.75%" y1="20" x2="43.75%" y2="28"/>
+                <line x1="56.25%" y1="20" x2="56.25%" y2="28"/>
+                <line x1="68.75%" y1="20" x2="68.75%" y2="28"/>
+                <line x1="81.25%" y1="20" x2="81.25%" y2="28"/>
+                <line x1="93.75%" y1="20" x2="93.75%" y2="28"/>
+              </g>
+              <g fill="#8d90a0" font-size="9" font-family="JetBrains Mono, monospace">
+                <text x="4" y="12">0.00</text>
+                <text x="12.5%" y="12" dx="4">0.25</text>
+                <text x="25%" y="12" dx="4">0.50</text>
+                <text x="37.5%" y="12" dx="4">0.75</text>
+                <text x="50%" y="12" dx="4">1.00</text>
+                <text x="62.5%" y="12" dx="4">1.25</text>
+                <text x="75%" y="12" dx="4">1.50</text>
+                <text x="87.5%" y="12" dx="4">1.75</text>
+              </g>
+            </svg>
+            <div class="playhead" style="left: 41.2%;"></div>
+          </div>
+        </div>
+
+        <!-- Track rows -->
+        <div class="overflow-y-auto scroll" style="max-height: 190px;">
+          <!-- root -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-3 pr-2 h-full data text-xs">
+              <span class="text-inactive w-3 text-center">▾</span>
+              <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4" alt=""/>
+              <span class="text-on-surface">root</span>
+              <div class="ml-auto flex items-center gap-1">
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_translate.png" class="ico w-3 h-3" alt="T"/></span>
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-3 h-3" alt="R"/></span>
+              </div>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[4%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[52%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[96%]"><span class="kf prim"></span></div>
+              <!-- interpolation line -->
+              <div class="absolute top-1/2 -translate-y-[1px] left-[4%] right-[4%] h-[1px] bg-primary/20"></div>
+            </div>
+          </div>
+
+          <!-- torso (selected) -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr; background: #1d2026; box-shadow: inset 2px 0 0 #608bff;">
+            <div class="flex items-center gap-2 pl-6 pr-2 h-full data text-xs">
+              <span class="text-inactive w-3 text-center">▾</span>
+              <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4" alt=""/>
+              <span class="text-on-surface font-medium">torso</span>
+              <div class="ml-auto flex items-center gap-1">
+                <span class="pt bg-primary/20"><img src="../../../assets/icons/export/24/prop_translate.png" class="ico w-3 h-3" alt="T"/></span>
+                <span class="pt bg-primary/20"><img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-3 h-3" alt="R"/></span>
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_scale.png" class="ico w-3 h-3" alt="S"/></span>
+              </div>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[4%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[22%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[41.2%]"><span class="kf active"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[65%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[96%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-[1px] left-[4%] right-[4%] h-[1px] bg-primary/30"></div>
+            </div>
+          </div>
+
+          <!-- arm_l -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-9 pr-2 h-full data text-xs">
+              <span class="text-inactive w-3 text-center">▸</span>
+              <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+              <span class="text-secondary">arm_l</span>
+              <img src="../../../assets/icons/export/24/status_warn.png" class="ico w-3 h-3 ml-1 opacity-80" alt=""/>
+              <div class="ml-auto flex items-center gap-1">
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-3 h-3" alt="R"/></span>
+              </div>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[14%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[38%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[68%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[90%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-[1px] left-[14%] right-[10%] h-[1px] bg-primary/20"></div>
+            </div>
+          </div>
+
+          <!-- arm_r -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-9 pr-2 h-full data text-xs">
+              <span class="text-inactive w-3 text-center">▸</span>
+              <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+              <span class="text-secondary">arm_r</span>
+              <div class="ml-auto flex items-center gap-1">
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-3 h-3" alt="R"/></span>
+              </div>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[16%]"><span class="kf sec"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[40%]"><span class="kf sec"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[72%]"><span class="kf sec"></span></div>
+            </div>
+          </div>
+
+          <!-- head (slot track) -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-9 pr-2 h-full data text-xs">
+              <span class="text-inactive w-3 text-center">▾</span>
+              <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-4 h-4 opacity-85" alt=""/>
+              <span>head</span>
+              <div class="ml-auto flex items-center gap-1">
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-3 h-3" alt="R"/></span>
+              </div>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[0%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[50%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[99%]"><span class="kf prim"></span></div>
+            </div>
+          </div>
+
+          <!-- slot: slot_torso color track -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-12 pr-2 h-full data text-xs">
+              <img src="../../../assets/icons/export/24/node_slot.png" class="ico w-4 h-4" alt=""/>
+              <span class="text-secondary">slot_torso</span>
+              <div class="ml-auto flex items-center gap-1">
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_color.png" class="ico w-3 h-3" alt="Color"/></span>
+                <span class="pt bg-surface-high/60"><img src="../../../assets/icons/export/24/prop_order.png" class="ico w-3 h-3" alt="Order"/></span>
+              </div>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[8%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[58%]"><span class="kf prim"></span></div>
+            </div>
+          </div>
+
+          <!-- IK constraint mix track -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-3 pr-2 h-full data text-xs">
+              <img src="../../../assets/icons/export/24/constraint_ik.png" class="ico w-4 h-4" alt=""/>
+              <span>ik_arm_l</span>
+              <span class="text-2xs mono text-inactive ml-1">mix</span>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[0%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[30%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[75%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-[1px] left-[0%] right-[25%] h-[1px] bg-primary/20"></div>
+            </div>
+          </div>
+
+          <!-- Physics constraint track -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-3 pr-2 h-full data text-xs">
+              <img src="../../../assets/icons/export/24/constraint_physics.png" class="ico w-4 h-4" alt=""/>
+              <span>phys_cape</span>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <!-- continuous indicator -->
+              <div class="absolute top-1/2 -translate-y-[2px] left-[0%] right-0 h-[4px] bg-tertiary/15 rounded-sm"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[0%]"><span class="kf prim"></span></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[100%]" style="margin-left:-4px"><span class="kf prim"></span></div>
+            </div>
+          </div>
+
+          <!-- Events track -->
+          <div class="tl-row grid items-center h-7" style="grid-template-columns: 280px 1fr;">
+            <div class="flex items-center gap-2 pl-3 pr-2 h-full data text-xs">
+              <img src="../../../assets/icons/export/24/prop_event.png" class="ico w-4 h-4" alt=""/>
+              <span>events</span>
+            </div>
+            <div class="relative h-full border-l border-surface-lowest">
+              <div class="playhead" style="left: 41.2%;"></div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[20%] flex items-center gap-1">
+                <span class="kf prim" style="background: #a6e4a1;"></span>
+                <span class="text-2xs mono text-on-surface-variant" style="transform: rotate(0)">footstep</span>
+              </div>
+              <div class="absolute top-1/2 -translate-y-1/2 left-[70%] flex items-center gap-1">
+                <span class="kf prim" style="background: #a6e4a1;"></span>
+                <span class="text-2xs mono text-on-surface-variant">footstep</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ======================================================================= -->
+<!-- ICON INVENTORY LEGEND                                                     -->
+<!-- ======================================================================= -->
+<div class="mx-auto max-w-[1680px] mt-12 grid grid-cols-4 gap-6">
+
+  <!-- P1: Viewport tools -->
+  <section class="bg-surface-low rounded-sm p-5">
+    <div class="flex items-baseline justify-between mb-3">
+      <h3 class="text-sm font-semibold text-on-surface">P1 · Viewport Tools</h3>
+      <span class="text-2xs mono text-inactive">27 icons</span>
+    </div>
+    <div class="grid grid-cols-6 gap-2">
+      <!-- 9 playback -->
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/play.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">play</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/pause.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">pause</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/stop.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">stop</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/rewind.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">rewind</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prev_key.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">prev_key</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/next_key.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">next_key</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/add_key.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">add_key</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/remove_key.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">remove_key</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/loop.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">loop</span>
+      </div>
+      <!-- overlays -->
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/onion_skin.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">onion</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/mesh_wire.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">mesh_wire</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/bbox.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">bbox</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/bone_toggle.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">bone</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/perf_hud.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">perf_hud</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/eye.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">eye</span>
+      </div>
+      <!-- weight paint -->
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/weight_brush.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">w_brush</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/weight_erase.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">w_erase</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/weight_smooth.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">w_smooth</span>
+      </div>
+      <!-- zoom -->
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/zoom_fit.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">zoom_fit</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/zoom_one.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">zoom_1:1</span>
+      </div>
+      <!-- file ops -->
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/save.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">save</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/export.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">export</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/reload.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">reload</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/undo.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">undo</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/redo.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">redo</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/move_up.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">move_up</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/move_down.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">move_dn</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- P2: Tree view -->
+  <section class="bg-surface-low rounded-sm p-5">
+    <div class="flex items-baseline justify-between mb-3">
+      <h3 class="text-sm font-semibold text-on-surface">P2 · Tree / Hierarchy</h3>
+      <span class="text-2xs mono text-inactive">14 icons</span>
+    </div>
+    <div class="grid grid-cols-6 gap-2">
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/node_bone.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">bone</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/node_slot.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">slot</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/node_skin.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">skin</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/node_anim.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">anim</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_region.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">region</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_mesh.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">mesh</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_linked.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">linked</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_point.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">point</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_bbox.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">bbox</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_clip.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">clip</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/att_path.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">path</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/constraint_ik.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">ik</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/constraint_path.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">c_path</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/constraint_xform.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">xform</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- P3: Property + status -->
+  <section class="bg-surface-low rounded-sm p-5">
+    <div class="flex items-baseline justify-between mb-3">
+      <h3 class="text-sm font-semibold text-on-surface">P3 · Property / Status</h3>
+      <span class="text-2xs mono text-inactive">10 icons</span>
+    </div>
+    <div class="grid grid-cols-6 gap-2">
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_rotate.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">rotate</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_translate.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">trans</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_scale.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">scale</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_shear.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">shear</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_color.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">color</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_order.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">order</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/prop_event.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">event</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/status_warn.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">warn</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/status_error.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">error</span>
+      </div>
+      <div class="flex flex-col items-center gap-1 p-2 rounded-sm bg-surface-lowest">
+        <img src="../../../assets/icons/export/24/constraint_physics.png" class="ico w-5 h-5" alt=""/>
+        <span class="text-[9px] mono text-inactive">physics</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Color variant showcase -->
+  <section class="bg-surface-low rounded-sm p-5">
+    <div class="flex items-baseline justify-between mb-3">
+      <h3 class="text-sm font-semibold text-on-surface">Color Variants</h3>
+      <span class="text-2xs mono text-inactive">4 states</span>
+    </div>
+    <div class="space-y-3">
+      <div>
+        <div class="text-2xs uppercase tracking-widest text-inactive mb-2">primary · default</div>
+        <div class="flex items-center gap-3 p-3 rounded-sm bg-surface-lowest">
+          <img src="../../../assets/icons/processed/primary/play.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/primary/onion_skin.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/primary/save.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/primary/constraint_ik.png" class="ico w-6 h-6" alt=""/>
+          <span class="ml-auto text-2xs mono text-primary">#b3c5ff</span>
+        </div>
+      </div>
+      <div>
+        <div class="text-2xs uppercase tracking-widest text-inactive mb-2">secondary · idle rows</div>
+        <div class="flex items-center gap-3 p-3 rounded-sm bg-surface-lowest">
+          <img src="../../../assets/icons/processed/secondary/play.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/secondary/onion_skin.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/secondary/save.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/secondary/constraint_ik.png" class="ico w-6 h-6" alt=""/>
+          <span class="ml-auto text-2xs mono text-secondary">#bec7dc</span>
+        </div>
+      </div>
+      <div>
+        <div class="text-2xs uppercase tracking-widest text-inactive mb-2">active · focused / cta</div>
+        <div class="flex items-center gap-3 p-3 rounded-sm bg-surface-lowest">
+          <img src="../../../assets/icons/processed/active/play.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/active/onion_skin.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/active/save.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/active/constraint_ik.png" class="ico w-6 h-6" alt=""/>
+          <span class="ml-auto text-2xs mono text-primary-container">#608bff</span>
+        </div>
+      </div>
+      <div>
+        <div class="text-2xs uppercase tracking-widest text-inactive mb-2">inactive · disabled</div>
+        <div class="flex items-center gap-3 p-3 rounded-sm bg-surface-lowest">
+          <img src="../../../assets/icons/processed/inactive/play.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/inactive/onion_skin.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/inactive/save.png" class="ico w-6 h-6" alt=""/>
+          <img src="../../../assets/icons/processed/inactive/constraint_ik.png" class="ico w-6 h-6" alt=""/>
+          <span class="ml-auto text-2xs mono text-inactive">#8d9199</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Footer note -->
+<div class="mx-auto max-w-[1680px] mt-10 text-2xs mono text-inactive flex items-center justify-between">
+  <span>docs/stitch/maroow_integrated/code.html · all icons at assets/icons/export/24/*.png</span>
+  <span>Charcoal Studio · "The Digital Architect"</span>
+</div>
+
+</main>
+</body>
+</html>

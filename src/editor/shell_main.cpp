@@ -44,6 +44,10 @@
 
 namespace marrow::editor::shell {
 
+// ── Editor Fonts ──
+ImFont* g_font_regular = nullptr;
+ImFont* g_font_semibold = nullptr;
+
 void print_usage(std::string_view executable_name) {
     std::cout << "Usage: " << executable_name
               << " [project.marrow] [--auto-close <frames>] [--verify-launch-focus]\n"
@@ -356,32 +360,138 @@ void materialize_temp_project_runtime_assets(
 void apply_editor_theme() {
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    ImVec4* colors = style.Colors;
+    ImVec4* c = style.Colors;
 
-    colors[ImGuiCol_WindowBg] = ImVec4(0.09f, 0.10f, 0.12f, 1.0f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.12f, 0.13f, 0.15f, 1.0f);
-    colors[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.13f, 0.15f, 1.0f);
-    colors[ImGuiCol_Header] = ImVec4(0.49f, 0.31f, 0.16f, 0.80f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.67f, 0.43f, 0.23f, 0.90f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.79f, 0.56f, 0.29f, 0.90f);
-    colors[ImGuiCol_Button] = ImVec4(0.49f, 0.31f, 0.16f, 0.70f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.67f, 0.43f, 0.23f, 0.90f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.79f, 0.56f, 0.29f, 1.00f);
-    colors[ImGuiCol_Tab] = ImVec4(0.15f, 0.16f, 0.18f, 1.0f);
-    colors[ImGuiCol_TabHovered] = ImVec4(0.67f, 0.43f, 0.23f, 0.75f);
-    colors[ImGuiCol_TabActive] = ImVec4(0.49f, 0.31f, 0.16f, 0.95f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.11f, 0.13f, 1.0f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.14f, 0.15f, 0.17f, 1.0f);
-    colors[ImGuiCol_DockingPreview] = ImVec4(0.79f, 0.56f, 0.29f, 0.55f);
+    // ── Surface Hierarchy (Charcoal Studio) ──
+    c[ImGuiCol_WindowBg]           = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);  // #1A1D23
+    c[ImGuiCol_ChildBg]            = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);  // #22262E
+    c[ImGuiCol_PopupBg]            = ImVec4(0.133f, 0.149f, 0.180f, 0.95f);
+    c[ImGuiCol_MenuBarBg]          = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);
+    c[ImGuiCol_DockingEmptyBg]     = ImVec4(0.063f, 0.075f, 0.098f, 1.0f);  // #101319
 
-    style.WindowRounding = 6.0f;
-    style.ChildRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.WindowPadding = ImVec2(10.0f, 10.0f);
-    style.FramePadding = ImVec2(8.0f, 5.0f);
-    style.ItemSpacing = ImVec2(8.0f, 6.0f);
+    // ── Header ──
+    c[ImGuiCol_Header]             = ImVec4(0.165f, 0.184f, 0.227f, 1.0f);  // #2A2F3A
+    c[ImGuiCol_HeaderHovered]      = ImVec4(0.200f, 0.224f, 0.275f, 1.0f);
+    c[ImGuiCol_HeaderActive]       = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);  // #4A7BF7
+
+    // ── Widget ──
+    c[ImGuiCol_Button]             = ImVec4(0.200f, 0.227f, 0.278f, 1.0f);  // #333A47
+    c[ImGuiCol_ButtonHovered]      = ImVec4(0.239f, 0.271f, 0.337f, 1.0f);  // #3D4556
+    c[ImGuiCol_ButtonActive]       = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
+    c[ImGuiCol_FrameBg]            = ImVec4(0.200f, 0.227f, 0.278f, 1.0f);
+    c[ImGuiCol_FrameBgHovered]     = ImVec4(0.239f, 0.271f, 0.337f, 1.0f);
+    c[ImGuiCol_FrameBgActive]      = ImVec4(0.290f, 0.482f, 0.969f, 0.67f);
+    c[ImGuiCol_CheckMark]          = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
+    c[ImGuiCol_SliderGrab]         = ImVec4(0.290f, 0.482f, 0.969f, 0.80f);
+    c[ImGuiCol_SliderGrabActive]   = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
+
+    // ── Selection ──
+    c[ImGuiCol_TextSelectedBg]     = ImVec4(0.290f, 0.482f, 0.969f, 0.35f);
+
+    // ── Tab ──
+    c[ImGuiCol_Tab]                = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);  // #22262E
+    c[ImGuiCol_TabHovered]         = ImVec4(0.239f, 0.271f, 0.337f, 1.0f);
+    c[ImGuiCol_TabActive]          = ImVec4(0.165f, 0.184f, 0.227f, 1.0f);  // #2A2F3A
+    c[ImGuiCol_TabUnfocused]       = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);
+    c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);
+
+    // ── Title Bar ──
+    c[ImGuiCol_TitleBg]            = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);
+    c[ImGuiCol_TitleBgActive]      = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);
+    c[ImGuiCol_TitleBgCollapsed]   = ImVec4(0.063f, 0.075f, 0.098f, 0.75f);
+
+    // ── Scrollbar ──
+    c[ImGuiCol_ScrollbarBg]        = ImVec4(0.102f, 0.114f, 0.137f, 0.53f);
+    c[ImGuiCol_ScrollbarGrab]      = ImVec4(0.314f, 0.345f, 0.408f, 1.0f);  // #505868
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.408f, 0.439f, 0.502f, 1.0f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.494f, 0.722f, 1.000f, 1.0f);
+
+    // ── Separator, Border ──
+    c[ImGuiCol_Separator]          = ImVec4(0.180f, 0.204f, 0.251f, 1.0f);  // #2E3440
+    c[ImGuiCol_SeparatorHovered]   = ImVec4(0.290f, 0.482f, 0.969f, 0.78f);
+    c[ImGuiCol_SeparatorActive]    = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
+    c[ImGuiCol_Border]             = ImVec4(0.227f, 0.251f, 0.314f, 0.50f); // #3A4050
+
+    // ── Resize Grip ──
+    c[ImGuiCol_ResizeGrip]         = ImVec4(0.290f, 0.482f, 0.969f, 0.20f);
+    c[ImGuiCol_ResizeGripHovered]  = ImVec4(0.290f, 0.482f, 0.969f, 0.67f);
+    c[ImGuiCol_ResizeGripActive]   = ImVec4(0.290f, 0.482f, 0.969f, 0.95f);
+
+    // ── Docking ──
+    c[ImGuiCol_DockingPreview]     = ImVec4(0.290f, 0.482f, 0.969f, 0.70f);
+
+    // ── Text ──
+    c[ImGuiCol_Text]               = ImVec4(0.878f, 0.894f, 0.925f, 1.0f);  // #E0E4EC
+    c[ImGuiCol_TextDisabled]       = ImVec4(0.533f, 0.569f, 0.647f, 1.0f);  // #8891A5
+
+    // ── Table ──
+    c[ImGuiCol_TableRowBg]         = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_TableRowBgAlt]      = ImVec4(0.133f, 0.149f, 0.180f, 0.30f);
+    c[ImGuiCol_TableBorderStrong]  = ImVec4(0.227f, 0.251f, 0.314f, 1.0f);
+    c[ImGuiCol_TableBorderLight]   = ImVec4(0.180f, 0.204f, 0.251f, 1.0f);
+
+    // ── Style Vars ──
+    style.WindowRounding    = 2.0f;
+    style.ChildRounding     = 2.0f;
+    style.FrameRounding     = 2.0f;
+    style.PopupRounding     = 2.0f;
+    style.TabRounding       = 2.0f;
+    style.GrabRounding      = 2.0f;
+    style.ScrollbarRounding = 2.0f;
+    style.WindowBorderSize  = 0.0f;
+    style.ChildBorderSize   = 0.0f;
+    style.FrameBorderSize   = 0.0f;
+    style.TabBorderSize     = 0.0f;
+    style.WindowPadding     = ImVec2(8.0f, 8.0f);
+    style.FramePadding      = ImVec2(8.0f, 4.0f);
+    style.ItemSpacing       = ImVec2(8.0f, 4.0f);
+    style.ItemInnerSpacing  = ImVec2(4.0f, 4.0f);
+    style.ScrollbarSize     = 12.0f;
+    style.GrabMinSize       = 8.0f;
+}
+
+void load_editor_fonts() {
+    ImGuiIO& io = ImGui::GetIO();
+
+    constexpr float kBaseFontSize = 15.0f;
+
+    auto find_font_path = [](const char* filename) -> std::string {
+        const std::string candidates[] = {
+            std::string("fonts/") + filename,
+            std::string("assets/fonts/") + filename,
+            std::string("../assets/fonts/") + filename,
+        };
+        for (const auto& path : candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(path, ec)) {
+                return path;
+            }
+        }
+        return {};
+    };
+
+    const std::string regular_path = find_font_path("Pretendard-Regular.otf");
+    const std::string semibold_path = find_font_path("Pretendard-SemiBold.otf");
+
+    if (!regular_path.empty()) {
+        ImFontConfig cfg;
+        cfg.OversampleH = 2;
+        cfg.OversampleV = 1;
+        g_font_regular = io.Fonts->AddFontFromFileTTF(
+            regular_path.c_str(), kBaseFontSize, &cfg);
+    }
+
+    if (!semibold_path.empty()) {
+        g_font_semibold = io.Fonts->AddFontFromFileTTF(
+            semibold_path.c_str(), kBaseFontSize);
+    }
+
+    if (!g_font_regular) {
+        g_font_regular = io.Fonts->AddFontDefaultVector();
+    }
+    if (!g_font_semibold) {
+        g_font_semibold = g_font_regular;
+    }
 }
 
 void ensure_default_dock_layout(
@@ -452,6 +562,43 @@ void ensure_default_dock_layout(
 
 float clamp_zoom(float zoom) {
     return std::max(0.2f, std::min(zoom, 6.0f));
+}
+
+void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
+    if (!state->preview_skeleton) {
+        return;
+    }
+    const auto& transforms = state->preview_skeleton->bone_world_transforms();
+    if (transforms.empty()) {
+        return;
+    }
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
+    for (const auto& t : transforms) {
+        min_x = std::min(min_x, t.world_x);
+        max_x = std::max(max_x, t.world_x);
+        min_y = std::min(min_y, t.world_y);
+        max_y = std::max(max_y, t.world_y);
+    }
+    const float margin = 1.2f;
+    const float bounds_w = (max_x - min_x) * margin;
+    const float bounds_h = (max_y - min_y) * margin;
+    const float center_x = (min_x + max_x) * 0.5f;
+    const float center_y = (min_y + max_y) * 0.5f;
+    if (canvas_size.x < 1.0f || canvas_size.y < 1.0f) {
+        return;
+    }
+    const float zoom_x = canvas_size.x / std::max(bounds_w, 1.0f);
+    const float zoom_y = canvas_size.y / std::max(bounds_h, 1.0f);
+    state->viewport.zoom = static_cast<double>(
+        clamp_zoom(std::min(zoom_x, zoom_y)));
+    state->viewport.pan_x =
+        static_cast<double>(canvas_size.x * 0.5f - center_x * state->viewport.zoom);
+    state->viewport.pan_y =
+        static_cast<double>(canvas_size.y * 0.5f + center_y * state->viewport.zoom);
+    state->status_message = "Framed skeleton to viewport";
 }
 
 std::optional<std::string_view> selected_bone_name(const ShellState& state) {
@@ -4219,6 +4366,31 @@ void handle_project_history_shortcuts(ShellState* state) {
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, ImGuiInputFlags_RouteGlobal)) {
         redo_project_change(state);
     }
+
+    // Space: Play/Pause
+    if (ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_RouteGlobal)) {
+        if (selected_animation(*state) != nullptr) {
+            state->timeline_playing = !state->timeline_playing;
+            if (state->timeline_playing) {
+                refresh_preview_pose(state);
+            }
+            state->status_message =
+                std::string(state->timeline_playing ? "Playing " : "Paused ") +
+                state->selected_animation_name;
+        }
+    }
+
+    // Home: Reset to 0
+    if (ImGui::Shortcut(ImGuiKey_Home, ImGuiInputFlags_RouteGlobal)) {
+        state->timeline_playing = false;
+        scrub_timeline_time(state, 0.0, "Shortcut", true);
+    }
+
+    // F: Frame skeleton to viewport
+    if (ImGui::Shortcut(ImGuiKey_F, ImGuiInputFlags_RouteGlobal)) {
+        const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+        auto_frame_skeleton(state, canvas_size);
+    }
 }
 
 bool save_project_file(ShellState* state, bool update_status_message) {
@@ -5120,6 +5292,37 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
             [](marrow::editor::DebugOverlaySettings* settings) {
                 settings->bounding_boxes = !settings->bounding_boxes;
             });
+        ImGui::Separator();
+        if (ImGui::MenuItem("Zoom to Fit", "F", false, viewport_settings_available)) {
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            auto_frame_skeleton(state, avail);
+        }
+        if (ImGui::MenuItem("Reset Viewport", nullptr, false, viewport_settings_available)) {
+            state->viewport.zoom = 1.0;
+            state->viewport.pan_x = 0.0;
+            state->viewport.pan_y = 0.0;
+            state->status_message = "Reset viewport to 1:1";
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Window")) {
+        if (ImGui::MenuItem("Reset Layout")) {
+            state->default_dock_layout_initialized = false;
+            state->status_message = "Reset dock layout";
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("Keyboard Shortcuts")) {
+            state->status_message =
+                "Shortcuts: Ctrl+Z Undo | Ctrl+Shift+Z Redo | Space Play/Pause | "
+                "Home Reset | F Frame | RMB Pan | Wheel Zoom";
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("Maroow Editor v1.0");
+        ImGui::TextDisabled("Spine 4.2 compatible");
         ImGui::EndMenu();
     }
 
@@ -8052,8 +8255,18 @@ void draw_timeline_window(ShellState* state) {
 
             ImGui::TableSetColumnIndex(0);
             const bool selected = timeline_track_matches_selection(*state, track);
+            const char* track_prefix = "";
+            if (track.id.find(":Rotate") != std::string::npos) { track_prefix = "[R] "; }
+            else if (track.id.find(":Translate") != std::string::npos) { track_prefix = "[T] "; }
+            else if (track.id.find(":Scale") != std::string::npos) { track_prefix = "[S] "; }
+            else if (track.id.find(":Shear") != std::string::npos) { track_prefix = "[H] "; }
+            else if (track.id.find(":Color") != std::string::npos) { track_prefix = "[C] "; }
+            else if (track.id.find(":Attachment") != std::string::npos) { track_prefix = "[A] "; }
+            else if (track.id.find(":deform:") != std::string::npos) { track_prefix = "[M] "; }
+            else if (track.id.find("draw_order") != std::string::npos) { track_prefix = "[D] "; }
+            else if (track.id.find("event") != std::string::npos) { track_prefix = "[E] "; }
             const std::string label =
-                track.label + " (" + std::to_string(track.key_times.size()) + ")";
+                std::string(track_prefix) + track.label + " (" + std::to_string(track.key_times.size()) + ")";
             if (ImGui::Selectable(label.c_str(), selected)) {
                 state->timeline_playing = false;
                 focus_timeline_track(
@@ -8439,263 +8652,59 @@ void draw_viewport_window(ShellState* state) {
     }
     ImGui::Separator();
 
-    if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Onion Skin")) {
-        const auto& onion_skin = state->viewport.onion_skin;
-        bool onion_enabled = onion_skin.enabled;
-        if (ImGui::Checkbox("Enabled##onion_skin", &onion_enabled)) {
-            apply_onion_skin_edit(
-                state,
-                std::string(onion_enabled ? "Enabled" : "Disabled") + " onion skinning",
-                "viewport:onion-skin:enabled",
-                false,
-                [&](marrow::editor::OnionSkinSettings* settings) {
-                    settings->enabled = onion_enabled;
-                });
+    // ── Viewport Toolbar ──
+    if (state->load_result && state->preview_skeleton) {
+        const ImVec2 pre_toolbar_avail = ImGui::GetContentRegionAvail();
+        if (ImGui::SmallButton("Fit")) {
+            auto_frame_skeleton(state, pre_toolbar_avail);
         }
-
-        int mode_index = onion_skin.mode == marrow::editor::OnionSkinMode::Frame ? 0 : 1;
-        constexpr const char* kOnionSkinModes[] = {"Frame", "Keyframe"};
-        if (ImGui::Combo(
-                "Mode##onion_skin",
-                &mode_index,
-                kOnionSkinModes,
-                IM_ARRAYSIZE(kOnionSkinModes))) {
-            apply_onion_skin_edit(
-                state,
-                std::string("Set onion skin mode to ") + kOnionSkinModes[mode_index],
-                "viewport:onion-skin:mode",
-                false,
-                [&](marrow::editor::OnionSkinSettings* settings) {
-                    settings->mode = mode_index == 0 ? marrow::editor::OnionSkinMode::Frame
-                                                     : marrow::editor::OnionSkinMode::Keyframe;
-                });
+        ImGui::SameLine();
+        if (ImGui::SmallButton("1:1")) {
+            state->viewport.zoom = 1.0;
+            state->viewport.pan_x = 0.0;
+            state->viewport.pan_y = 0.0;
+            state->status_message = "Reset viewport to 1:1";
         }
-
-        bool anchor_to_zero = onion_skin.anchor_to_zero;
-        if (mode_index != 0) {
-            ImGui::BeginDisabled();
-        }
-        if (ImGui::Checkbox("Anchor To Frame 0##onion_skin", &anchor_to_zero)) {
-            apply_onion_skin_edit(
-                state,
-                std::string(anchor_to_zero ? "Enabled" : "Disabled") + " onion-skin anchoring",
-                "viewport:onion-skin:anchor",
-                false,
-                [&](marrow::editor::OnionSkinSettings* settings) {
-                    settings->anchor_to_zero = anchor_to_zero;
-                });
-        }
-        if (mode_index != 0) {
-            ImGui::EndDisabled();
-        }
-
-        int before_count = onion_skin.before_count;
-        const bool before_changed =
-            ImGui::SliderInt("Before Ghosts##onion_skin", &before_count, 0, 6);
-        apply_coalesced_onion_skin_drag(
-            state,
-            before_changed,
-            "Updated onion-skin before ghost count",
-            "viewport:onion-skin:before",
-            false,
-            [&](marrow::editor::OnionSkinSettings* settings) {
-                settings->before_count = before_count;
-            });
-
-        int after_count = onion_skin.after_count;
-        const bool after_changed =
-            ImGui::SliderInt("After Ghosts##onion_skin", &after_count, 0, 6);
-        apply_coalesced_onion_skin_drag(
-            state,
-            after_changed,
-            "Updated onion-skin after ghost count",
-            "viewport:onion-skin:after",
-            false,
-            [&](marrow::editor::OnionSkinSettings* settings) {
-                settings->after_count = after_count;
-            });
-
-        int step = onion_skin.step;
-        const char* step_label = mode_index == 0 ? "Frame Step##onion_skin"
-                                                 : "Keyframe Stride##onion_skin";
-        const bool step_changed = ImGui::SliderInt(step_label, &step, 1, 12);
-        apply_coalesced_onion_skin_drag(
-            state,
-            step_changed,
-            "Updated onion-skin sampling step",
-            "viewport:onion-skin:step",
-            false,
-            [&](marrow::editor::OnionSkinSettings* settings) {
-                settings->step = step;
-            });
-
-        ImGui::TextDisabled(
-            "Before ghosts render cool blue, after ghosts render warm red, and alpha falls off with distance.");
-        if (state->selected_animation_name.empty()) {
-            ImGui::TextDisabled("Select an animation to preview ghost frames.");
-        }
-        ImGui::Separator();
-    }
-
-    if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Debug Overlay")) {
-        const auto& debug_overlay = state->viewport.debug_overlay;
-        const auto draw_toggle = [&](const char* label,
-                                     const char* status_label,
-                                     bool value,
-                                     std::string_view group,
-                                     auto mutate) {
-            bool edited = value;
-            if (ImGui::Checkbox(label, &edited)) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        {
+            bool bones_on = state->viewport.debug_overlay.bones;
+            if (ImGui::SmallButton(bones_on ? "[B]" : " B ")) {
                 apply_debug_overlay_edit(
                     state,
-                    std::string(edited ? "Enabled " : "Disabled ") + status_label,
-                    std::string(group),
+                    std::string(bones_on ? "Disabled" : "Enabled") + " bones",
+                    "viewport:debug-overlay:bones",
                     false,
-                    [&](marrow::editor::DebugOverlaySettings* settings) {
-                        mutate(settings, edited);
+                    [bones_on](marrow::editor::DebugOverlaySettings* s) {
+                        s->bones = !bones_on;
                     });
             }
-        };
-
-        draw_toggle(
-            "Bones##debug_overlay",
-            "bones",
-            debug_overlay.bones,
-            "viewport:debug-overlay:bones",
-            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
-                settings->bones = value;
-            });
-        draw_toggle(
-            "IK Constraints##debug_overlay",
-            "IK constraints",
-            debug_overlay.ik_constraints,
-            "viewport:debug-overlay:ik",
-            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
-                settings->ik_constraints = value;
-            });
-        draw_toggle(
-            "Path Constraints##debug_overlay",
-            "path constraints",
-            debug_overlay.path_constraints,
-            "viewport:debug-overlay:path",
-            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
-                settings->path_constraints = value;
-            });
-        draw_toggle(
-            "Physics Constraints##debug_overlay",
-            "physics constraints",
-            debug_overlay.physics_constraints,
-            "viewport:debug-overlay:physics",
-            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
-                settings->physics_constraints = value;
-            });
-        draw_toggle(
-            "Mesh Wireframes##debug_overlay",
-            "mesh wireframes",
-            debug_overlay.mesh_wireframes,
-            "viewport:debug-overlay:meshes",
-            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
-                settings->mesh_wireframes = value;
-            });
-        draw_toggle(
-            "Bounding Boxes##debug_overlay",
-            "bounding boxes",
-            debug_overlay.bounding_boxes,
-            "viewport:debug-overlay:bounds",
-            [](marrow::editor::DebugOverlaySettings* settings, bool value) {
-                settings->bounding_boxes = value;
-            });
-        ImGui::TextDisabled(
-            "Each layer can be toggled independently to inspect authored bones, constraints, meshes, and bounds.");
-        ImGui::Separator();
-    }
-
-    if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Performance HUD")) {
-        bool hud_enabled = state->hud_overlay_enabled;
-        if (ImGui::Checkbox("Enabled##performance_hud", &hud_enabled)) {
-            state->hud_overlay_enabled = hud_enabled;
-            if (!hud_enabled) {
-                state->hud_overlay_frame.reset();
+        }
+        ImGui::SameLine();
+        {
+            bool onion_on = state->viewport.onion_skin.enabled;
+            if (ImGui::SmallButton(onion_on ? "[O]" : " O ")) {
+                apply_onion_skin_edit(
+                    state,
+                    std::string(onion_on ? "Disabled" : "Enabled") + " onion skinning",
+                    "viewport:onion-skin:enabled",
+                    false,
+                    [onion_on](marrow::editor::OnionSkinSettings* s) {
+                        s->enabled = !onion_on;
+                    });
             }
         }
-        ImGui::TextDisabled(
-            "Profiles animation, transforms, skinning, and render prep for the current preview pose.");
-        ImGui::Separator();
-    }
-
-    if (state->load_result && state->load_result.project != nullptr &&
-        ImGui::CollapsingHeader("Weight Paint")) {
-        bool tool_enabled = state->weight_paint.enabled;
-        if (ImGui::Checkbox("Enable Tool##weight_paint", &tool_enabled)) {
-            state->weight_paint.enabled = tool_enabled;
-            if (!tool_enabled) {
-                finish_weight_paint_stroke(state);
+        ImGui::SameLine();
+        {
+            bool hud_on = state->hud_overlay_enabled;
+            if (ImGui::SmallButton(hud_on ? "[H]" : " H ")) {
+                state->hud_overlay_enabled = !hud_on;
+                if (hud_on) {
+                    state->hud_overlay_frame.reset();
+                }
             }
         }
-
-        int mode_index = 0;
-        switch (state->weight_paint.mode) {
-        case WeightPaintMode::Paint:
-            mode_index = 0;
-            break;
-        case WeightPaintMode::Erase:
-            mode_index = 1;
-            break;
-        case WeightPaintMode::Smooth:
-            mode_index = 2;
-            break;
-        }
-        constexpr const char* kWeightPaintModes[] = {"Paint", "Erase", "Smooth"};
-        if (ImGui::Combo(
-                "Mode##weight_paint",
-                &mode_index,
-                kWeightPaintModes,
-                IM_ARRAYSIZE(kWeightPaintModes))) {
-            state->weight_paint.mode =
-                mode_index == 0 ? WeightPaintMode::Paint
-                : mode_index == 1 ? WeightPaintMode::Erase
-                                  : WeightPaintMode::Smooth;
-        }
-
-        ImGui::SliderFloat(
-            "Radius##weight_paint",
-            &state->weight_paint.radius_pixels,
-            8.0f,
-            160.0f,
-            "%.0f px");
-        ImGui::SliderFloat(
-            "Strength##weight_paint",
-            &state->weight_paint.strength,
-            0.05f,
-            1.0f,
-            "%.2f");
-        ImGui::Checkbox("Show Heat Map##weight_paint", &state->weight_paint.show_heatmap);
-
-        if (paint_target.has_value()) {
-            ImGui::Text(
-                "Preview mesh: %s",
-                paint_target->display_attachment_name.c_str());
-            ImGui::Text(
-                "Editing source: %s / %s",
-                paint_target->source_skin_name.c_str(),
-                paint_target->source_attachment_name.c_str());
-        } else {
-            ImGui::TextDisabled(
-                "Select a slot whose preview attachment uses mesh geometry to paint weights.");
-        }
-
-        if (state->selected_bone_index.has_value() &&
-            *state->selected_bone_index < state->load_result.skeleton_data->bones().size()) {
-            ImGui::Text(
-                "Active bone: %s",
-                state->load_result.skeleton_data->bones()[*state->selected_bone_index].name.c_str());
-        } else {
-            ImGui::TextDisabled("Select an active bone for paint, erase, and heat-map preview.");
-        }
-        ImGui::Separator();
     }
 
     const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
@@ -8880,6 +8889,219 @@ void draw_viewport_window(ShellState* state) {
     ImGui::End();
 }
 
+void draw_viewport_settings(ShellState* state) {
+    if (!state->load_result || !state->load_result.project) {
+        return;
+    }
+
+    const std::optional<MeshWeightPaintTarget> paint_target =
+        state->load_result ? current_mesh_weight_paint_target(*state) : std::nullopt;
+
+    if (ImGui::CollapsingHeader("Onion Skin##settings")) {
+        const auto& onion_skin = state->viewport.onion_skin;
+        bool onion_enabled = onion_skin.enabled;
+        if (ImGui::Checkbox("Enabled##onion_skin", &onion_enabled)) {
+            apply_onion_skin_edit(
+                state,
+                std::string(onion_enabled ? "Enabled" : "Disabled") + " onion skinning",
+                "viewport:onion-skin:enabled",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->enabled = onion_enabled;
+                });
+        }
+
+        int mode_index = onion_skin.mode == marrow::editor::OnionSkinMode::Frame ? 0 : 1;
+        constexpr const char* kOnionSkinModes[] = {"Frame", "Keyframe"};
+        if (ImGui::Combo(
+                "Mode##onion_skin",
+                &mode_index,
+                kOnionSkinModes,
+                IM_ARRAYSIZE(kOnionSkinModes))) {
+            apply_onion_skin_edit(
+                state,
+                std::string("Set onion skin mode to ") + kOnionSkinModes[mode_index],
+                "viewport:onion-skin:mode",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->mode = mode_index == 0 ? marrow::editor::OnionSkinMode::Frame
+                                                     : marrow::editor::OnionSkinMode::Keyframe;
+                });
+        }
+
+        bool anchor_to_zero = onion_skin.anchor_to_zero;
+        if (mode_index != 0) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Checkbox("Anchor To Frame 0##onion_skin", &anchor_to_zero)) {
+            apply_onion_skin_edit(
+                state,
+                std::string(anchor_to_zero ? "Enabled" : "Disabled") + " onion-skin anchoring",
+                "viewport:onion-skin:anchor",
+                false,
+                [&](marrow::editor::OnionSkinSettings* settings) {
+                    settings->anchor_to_zero = anchor_to_zero;
+                });
+        }
+        if (mode_index != 0) {
+            ImGui::EndDisabled();
+        }
+
+        int before_count = onion_skin.before_count;
+        const bool before_changed =
+            ImGui::SliderInt("Before Ghosts##onion_skin", &before_count, 0, 6);
+        apply_coalesced_onion_skin_drag(
+            state,
+            before_changed,
+            "Updated onion-skin before ghost count",
+            "viewport:onion-skin:before",
+            false,
+            [&](marrow::editor::OnionSkinSettings* settings) {
+                settings->before_count = before_count;
+            });
+
+        int after_count = onion_skin.after_count;
+        const bool after_changed =
+            ImGui::SliderInt("After Ghosts##onion_skin", &after_count, 0, 6);
+        apply_coalesced_onion_skin_drag(
+            state,
+            after_changed,
+            "Updated onion-skin after ghost count",
+            "viewport:onion-skin:after",
+            false,
+            [&](marrow::editor::OnionSkinSettings* settings) {
+                settings->after_count = after_count;
+            });
+
+        int step = onion_skin.step;
+        const char* step_label = mode_index == 0 ? "Frame Step##onion_skin"
+                                                 : "Keyframe Stride##onion_skin";
+        const bool step_changed = ImGui::SliderInt(step_label, &step, 1, 12);
+        apply_coalesced_onion_skin_drag(
+            state,
+            step_changed,
+            "Updated onion-skin sampling step",
+            "viewport:onion-skin:step",
+            false,
+            [&](marrow::editor::OnionSkinSettings* settings) {
+                settings->step = step;
+            });
+
+        ImGui::TextDisabled(
+            "Before ghosts render cool blue, after ghosts render warm red.");
+    }
+
+    if (ImGui::CollapsingHeader("Debug Overlay##settings")) {
+        const auto& debug_overlay = state->viewport.debug_overlay;
+        const auto draw_toggle = [&](const char* label,
+                                     const char* status_label,
+                                     bool value,
+                                     std::string_view group,
+                                     auto mutate) {
+            bool edited = value;
+            if (ImGui::Checkbox(label, &edited)) {
+                apply_debug_overlay_edit(
+                    state,
+                    std::string(edited ? "Enabled " : "Disabled ") + status_label,
+                    std::string(group),
+                    false,
+                    [&](marrow::editor::DebugOverlaySettings* settings) {
+                        mutate(settings, edited);
+                    });
+            }
+        };
+
+        draw_toggle(
+            "Bones##debug_overlay", "bones",
+            debug_overlay.bones, "viewport:debug-overlay:bones",
+            [](marrow::editor::DebugOverlaySettings* s, bool v) { s->bones = v; });
+        draw_toggle(
+            "IK Constraints##debug_overlay", "IK constraints",
+            debug_overlay.ik_constraints, "viewport:debug-overlay:ik",
+            [](marrow::editor::DebugOverlaySettings* s, bool v) { s->ik_constraints = v; });
+        draw_toggle(
+            "Path Constraints##debug_overlay", "path constraints",
+            debug_overlay.path_constraints, "viewport:debug-overlay:path",
+            [](marrow::editor::DebugOverlaySettings* s, bool v) { s->path_constraints = v; });
+        draw_toggle(
+            "Physics Constraints##debug_overlay", "physics constraints",
+            debug_overlay.physics_constraints, "viewport:debug-overlay:physics",
+            [](marrow::editor::DebugOverlaySettings* s, bool v) { s->physics_constraints = v; });
+        draw_toggle(
+            "Mesh Wireframes##debug_overlay", "mesh wireframes",
+            debug_overlay.mesh_wireframes, "viewport:debug-overlay:meshes",
+            [](marrow::editor::DebugOverlaySettings* s, bool v) { s->mesh_wireframes = v; });
+        draw_toggle(
+            "Bounding Boxes##debug_overlay", "bounding boxes",
+            debug_overlay.bounding_boxes, "viewport:debug-overlay:bounds",
+            [](marrow::editor::DebugOverlaySettings* s, bool v) { s->bounding_boxes = v; });
+    }
+
+    if (ImGui::CollapsingHeader("Performance HUD##settings")) {
+        bool hud_enabled = state->hud_overlay_enabled;
+        if (ImGui::Checkbox("Enabled##performance_hud", &hud_enabled)) {
+            state->hud_overlay_enabled = hud_enabled;
+            if (!hud_enabled) {
+                state->hud_overlay_frame.reset();
+            }
+        }
+        ImGui::TextDisabled("Profiles animation, transforms, skinning, and render prep.");
+    }
+
+    if (ImGui::CollapsingHeader("Weight Paint##settings")) {
+        bool tool_enabled = state->weight_paint.enabled;
+        if (ImGui::Checkbox("Enable Tool##weight_paint", &tool_enabled)) {
+            state->weight_paint.enabled = tool_enabled;
+            if (!tool_enabled) {
+                finish_weight_paint_stroke(state);
+            }
+        }
+
+        int mode_index = 0;
+        switch (state->weight_paint.mode) {
+        case WeightPaintMode::Paint:  mode_index = 0; break;
+        case WeightPaintMode::Erase:  mode_index = 1; break;
+        case WeightPaintMode::Smooth: mode_index = 2; break;
+        }
+        constexpr const char* kWeightPaintModes[] = {"Paint", "Erase", "Smooth"};
+        if (ImGui::Combo(
+                "Mode##weight_paint",
+                &mode_index,
+                kWeightPaintModes,
+                IM_ARRAYSIZE(kWeightPaintModes))) {
+            state->weight_paint.mode =
+                mode_index == 0 ? WeightPaintMode::Paint
+                : mode_index == 1 ? WeightPaintMode::Erase
+                                  : WeightPaintMode::Smooth;
+        }
+
+        ImGui::SliderFloat(
+            "Radius##weight_paint", &state->weight_paint.radius_pixels,
+            8.0f, 160.0f, "%.0f px");
+        ImGui::SliderFloat(
+            "Strength##weight_paint", &state->weight_paint.strength,
+            0.05f, 1.0f, "%.2f");
+        ImGui::Checkbox("Show Heat Map##weight_paint", &state->weight_paint.show_heatmap);
+
+        if (paint_target.has_value()) {
+            ImGui::Text("Preview mesh: %s", paint_target->display_attachment_name.c_str());
+            ImGui::Text("Editing source: %s / %s",
+                paint_target->source_skin_name.c_str(),
+                paint_target->source_attachment_name.c_str());
+        } else {
+            ImGui::TextDisabled("Select a mesh slot to paint weights.");
+        }
+
+        if (state->selected_bone_index.has_value() &&
+            *state->selected_bone_index < state->load_result.skeleton_data->bones().size()) {
+            ImGui::Text("Active bone: %s",
+                state->load_result.skeleton_data->bones()[*state->selected_bone_index].name.c_str());
+        } else {
+            ImGui::TextDisabled("Select a bone for paint target.");
+        }
+    }
+}
+
 void draw_inspector_window(ShellState* state) {
     ImGui::Begin(kPropertiesWindowTitle);
 
@@ -8892,15 +9114,6 @@ void draw_inspector_window(ShellState* state) {
     const auto& skeleton = *state->load_result.skeleton_data;
     const auto children = build_bone_children(skeleton);
     const auto& world_transforms = state->preview_skeleton->bone_world_transforms();
-
-    ImGui::Text("Viewport pan: %.1f, %.1f", state->viewport.pan_x, state->viewport.pan_y);
-    ImGui::Text("Viewport zoom: %.2f", state->viewport.zoom);
-    ImGui::Text(
-        "Timeline: %s @ %s / %s",
-        state->selected_animation_name.empty() ? "<setup pose>" : state->selected_animation_name.c_str(),
-        format_time_seconds(state->timeline_time_seconds).c_str(),
-        format_time_seconds(timeline_preview_duration(*state)).c_str());
-    ImGui::Separator();
 
     if (ImGui::CollapsingHeader("Bones", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::BeginChild("inspector_bones", ImVec2(0.0f, 140.0f), true);
@@ -8971,7 +9184,14 @@ void draw_inspector_window(ShellState* state) {
             }
             ImGui::Text("Inherit: %s", inherit_label);
             ImGui::Separator();
+            ImGui::PushStyleColor(
+                ImGuiCol_ChildBg, ImVec4(0.165f, 0.184f, 0.227f, 0.50f));
+            ImGui::BeginChild(
+                "local_pose_editor", ImVec2(0, 0),
+                ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_FrameStyle);
             ImGui::TextUnformatted("Local Pose");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(editable)");
             {
                 auto& local_pose =
                     state->preview_skeleton->bone_poses()[bone_index].local_pose;
@@ -9027,6 +9247,8 @@ void draw_inspector_window(ShellState* state) {
                     state->preview_skeleton->update_world_transforms();
                 }
             }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
             ImGui::Separator();
             ImGui::TextUnformatted("World Pose");
             ImGui::Text(
@@ -9276,6 +9498,8 @@ void draw_inspector_window(ShellState* state) {
         }
     }
 
+    draw_viewport_settings(state);
+
     ImGui::End();
 }
 
@@ -9309,7 +9533,7 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     int framebuffer_height = 0;
     glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
     glViewport(0, 0, framebuffer_width, framebuffer_height);
-    glClearColor(0.07f, 0.08f, 0.10f, 1.0f);
+    glClearColor(0.063f, 0.075f, 0.098f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
@@ -9384,6 +9608,7 @@ int main(int argc, char** argv) {
     io.IniFilename = nullptr;
 
     apply_editor_theme();
+    load_editor_fonts();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
