@@ -465,6 +465,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
+    src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
 )
 
@@ -487,6 +488,27 @@ add_custom_command(TARGET marrow_editor_shell POST_BUILD
         $<TARGET_FILE_DIR:marrow_editor_shell>/fonts
     COMMENT "Copying editor fonts to build directory"
 )
+
+file(GLOB MARROW_EDITOR_ICON_SOURCES
+    "${CMAKE_SOURCE_DIR}/assets/icons/export/white_48/*.png")
+
+set(MARROW_EDITOR_ICON_STAMP
+    "${CMAKE_CURRENT_BINARY_DIR}/marrow_editor_icons.stamp")
+
+add_custom_command(
+    OUTPUT ${MARROW_EDITOR_ICON_STAMP}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/assets/icons/export/white_48
+        ${CMAKE_CURRENT_BINARY_DIR}/icons
+    COMMAND ${CMAKE_COMMAND} -E touch ${MARROW_EDITOR_ICON_STAMP}
+    DEPENDS ${MARROW_EDITOR_ICON_SOURCES}
+    COMMENT "Copying editor icons to build directory"
+    VERBATIM
+)
+
+add_custom_target(marrow_editor_icons ALL
+    DEPENDS ${MARROW_EDITOR_ICON_STAMP})
+add_dependencies(marrow_editor_shell marrow_editor_icons)
 
 if(DOXYGEN_FOUND)
     add_custom_target(marrow_docs

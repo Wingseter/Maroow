@@ -21,6 +21,7 @@ struct GLFWwindow;
 
 #include "imgui.h"
 
+#include "icon_registry.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/project.hpp"
@@ -419,6 +420,8 @@ struct ShellState {
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
     std::optional<marrow::runtime::ProfilerFrame> hud_overlay_frame;
+    marrow::editor::IconRegistry icons{};
+    std::array<char, 128> hierarchy_filter{};
 };
 
 constexpr char kProjectWindowTitle[] = "Project";

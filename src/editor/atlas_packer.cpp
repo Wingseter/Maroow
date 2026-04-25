@@ -1,4 +1,5 @@
 #include "atlas_packer.hpp"
+#include "image_io.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1027,6 +1028,21 @@ PackedAtlasArtifactResult build_packed_atlas_artifact(
     artifact.image_bytes = std::move(png_bytes);
     result.artifact = std::move(artifact);
     return result;
+}
+
+std::optional<std::string> load_png_rgba8_raw(
+    const std::filesystem::path& path,
+    std::vector<std::uint8_t>* rgba8_out,
+    int* width_out,
+    int* height_out) {
+    ImageRgba image;
+    if (auto error = load_png_rgba8(path, &image)) {
+        return error;
+    }
+    *rgba8_out = std::move(image.rgba8);
+    *width_out = image.width;
+    *height_out = image.height;
+    return std::nullopt;
 }
 
 } // namespace marrow::editor::detail
