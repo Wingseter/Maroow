@@ -35,6 +35,8 @@
 #include "macos_app_focus.hpp"
 #include "shell_types.hpp"
 #include "viewport_renderer.hpp"
+#include "agent_socket.hpp"
+#include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/module.hpp"
 #include "marrow/editor/project.hpp"
@@ -53,10 +55,11 @@ ImFont* g_font_semibold = nullptr;
 
 void print_usage(std::string_view executable_name) {
     std::cout << "Usage: " << executable_name
-              << " [project.marrow] [--auto-close <frames>] [--verify-launch-focus]\n"
+              << " [project.marrow] [--auto-close <frames>] [--agent-port <port>] [--verify-launch-focus]\n"
                  "       "
               << executable_name
               << " --project <project.marrow> [--auto-close <frames>] "
+                 "[--agent-port <port>] [--agent-token <secret>] "
                  "[--verify-launch-focus]\n"
                  "Launch the Marrow Dear ImGui editor shell using GLFW and OpenGL.\n";
 }
@@ -112,6 +115,35 @@ ParseResult parse_arguments(int argc, char** argv) {
             }
 
             result.options.auto_close_frames = value;
+            continue;
+        }
+
+        if (argument == "--agent-port") {
+            if (index + 1 >= argc) {
+                std::cerr << "--agent-port requires a port number.\n";
+                print_usage(argv[0]);
+                return result;
+            }
+
+            const std::optional<int> value = parse_positive_integer(argv[++index]);
+            if (!value.has_value()) {
+                std::cerr << "--agent-port expects a positive integer.\n";
+                print_usage(argv[0]);
+                return result;
+            }
+
+            result.options.agent_port = value;
+            continue;
+        }
+
+        if (argument == "--agent-token") {
+            if (index + 1 >= argc) {
+                std::cerr << "--agent-token requires a value.\n";
+                print_usage(argv[0]);
+                return result;
+            }
+
+            result.options.agent_token = argv[++index];
             continue;
         }
 
@@ -762,18 +794,7 @@ void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
     state->status_message = "Framed skeleton to viewport";
 }
 
-std::optional<std::string_view> selected_bone_name(const ShellState& state) {
-    if (!state.load_result || !state.selected_bone_index.has_value()) {
-        return std::nullopt;
-    }
-
-    const auto& bones = state.load_result.skeleton_data->bones();
-    if (*state.selected_bone_index >= bones.size()) {
-        return std::nullopt;
-    }
-
-    return bones[*state.selected_bone_index].name;
-}
+// selected_bone_name moved to shell_core.cpp
 
 void select_bone(
     ShellState* state,
@@ -924,149 +945,7 @@ bool apply_preview_skin_selection(
     return true;
 }
 
-EditAction::EditAction(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge)
-    : kind_(kind),
-      label_(std::move(label)),
-      group_(std::move(group)),
-      allow_merge_(allow_merge) {}
-
-EditActionKind EditAction::kind() const {
-    return kind_;
-}
-
-const std::string& EditAction::label() const {
-    return label_;
-}
-
-const std::string& EditAction::group() const {
-    return group_;
-}
-
-bool EditAction::allow_merge() const {
-    return allow_merge_;
-}
-
-SnapshotEditAction::SnapshotEditAction(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    EditorHistorySnapshot before,
-    EditorHistorySnapshot after)
-    : EditAction(kind, std::move(label), std::move(group), allow_merge),
-      before_(std::move(before)),
-      after_(std::move(after)) {}
-
-bool SnapshotEditAction::undo(ShellState* state) const {
-    return apply_history_snapshot(state, before_);
-}
-
-bool SnapshotEditAction::redo(ShellState* state) const {
-    return apply_history_snapshot(state, after_);
-}
-
-bool SnapshotEditAction::merge_from(const EditAction& action) {
-    if (!allow_merge_ || group_.empty() || !action.allow_merge() ||
-        action.kind() != kind_ || action.group() != group_) {
-        return false;
-    }
-
-    const auto* snapshot_action = dynamic_cast<const SnapshotEditAction*>(&action);
-    if (snapshot_action == nullptr) {
-        return false;
-    }
-
-    after_ = snapshot_action->after_;
-    label_ = snapshot_action->label();
-    return true;
-}
-
-bool UndoStack::can_undo() const {
-    return !undo_actions_.empty();
-}
-
-bool UndoStack::can_redo() const {
-    return !redo_actions_.empty();
-}
-
-std::size_t UndoStack::undo_count() const {
-    return undo_actions_.size();
-}
-
-std::size_t UndoStack::redo_count() const {
-    return redo_actions_.size();
-}
-
-void UndoStack::clear() {
-    undo_actions_.clear();
-    redo_actions_.clear();
-}
-
-const EditAction* UndoStack::peek_undo() const {
-    return undo_actions_.empty() ? nullptr : undo_actions_.back().get();
-}
-
-const EditAction* UndoStack::peek_redo() const {
-    return redo_actions_.empty() ? nullptr : redo_actions_.back().get();
-}
-
-void UndoStack::push(std::unique_ptr<EditAction> action) {
-    if (!action) {
-        return;
-    }
-
-    redo_actions_.clear();
-    if (!undo_actions_.empty() && undo_actions_.back()->merge_from(*action)) {
-        return;
-    }
-
-    if (undo_actions_.size() >= kMaxDepth) {
-        undo_actions_.erase(undo_actions_.begin());
-    }
-    undo_actions_.push_back(std::move(action));
-}
-
-bool UndoStack::undo(ShellState* state, std::string* label_out) {
-    if (undo_actions_.empty()) {
-        return false;
-    }
-
-    std::unique_ptr<EditAction> action = std::move(undo_actions_.back());
-    undo_actions_.pop_back();
-    if (!action->undo(state)) {
-        undo_actions_.push_back(std::move(action));
-        return false;
-    }
-
-    if (label_out != nullptr) {
-        *label_out = action->label();
-    }
-    redo_actions_.push_back(std::move(action));
-    return true;
-}
-
-bool UndoStack::redo(ShellState* state, std::string* label_out) {
-    if (redo_actions_.empty()) {
-        return false;
-    }
-
-    std::unique_ptr<EditAction> action = std::move(redo_actions_.back());
-    redo_actions_.pop_back();
-    if (!action->redo(state)) {
-        redo_actions_.push_back(std::move(action));
-        return false;
-    }
-
-    if (label_out != nullptr) {
-        *label_out = action->label();
-    }
-    undo_actions_.push_back(std::move(action));
-    return true;
-}
+// EditAction and UndoStack implementations moved to shell_core.cpp
 
 bool attachment_selection_equal(
     const std::optional<AttachmentSelection>& left,
@@ -1083,157 +962,19 @@ bool attachment_selection_equal(
         left->attachment_name == right->attachment_name;
 }
 
-EditorHistorySnapshot capture_history_snapshot(
-    const ShellState& state,
-    bool include_serialized_project) {
-    EditorHistorySnapshot snapshot;
-    if (state.load_result.project != nullptr) {
-        snapshot.project = *state.load_result.project;
-        if (include_serialized_project) {
-            snapshot.serialized_project =
-                marrow::editor::serialize_project(*state.load_result.project);
-        }
-    }
-    snapshot.preview_skin_names = state.preview_skin_names;
-    snapshot.preview_slot_overrides = state.preview_slot_overrides;
-    return snapshot;
-}
+// capture_history_snapshot moved to shell_core.cpp
 
-bool history_snapshots_equal(
-    const EditorHistorySnapshot& left,
-    const EditorHistorySnapshot& right) {
-    if (left.serialized_project != right.serialized_project ||
-        left.preview_skin_names != right.preview_skin_names ||
-        left.preview_slot_overrides.size() != right.preview_slot_overrides.size()) {
-        return false;
-    }
+// history_snapshots_equal moved to shell_core.cpp
 
-    for (std::size_t index = 0; index < left.preview_slot_overrides.size(); ++index) {
-        if (!attachment_selection_equal(
-                left.preview_slot_overrides[index],
-                right.preview_slot_overrides[index])) {
-            return false;
-        }
-    }
+// assign_history_snapshot moved to shell_core.cpp
 
-    return true;
-}
+// restore_history_snapshot moved to shell_core.cpp
 
-void assign_history_snapshot(
-    ShellState* state,
-    const EditorHistorySnapshot& snapshot) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return;
-    }
+// apply_history_snapshot moved to shell_core.cpp
 
-    *state->load_result.project = snapshot.project;
-    state->viewport.onion_skin = snapshot.project.editor_metadata.viewport.onion_skin;
-    state->preview_skin_names = snapshot.preview_skin_names;
-    state->preview_slot_overrides = snapshot.preview_slot_overrides;
-}
+// make_edit_action moved to shell_core.cpp
 
-void restore_history_snapshot(
-    ShellState* state,
-    const EditorHistorySnapshot& snapshot) {
-    if (state == nullptr) {
-        return;
-    }
-
-    assign_history_snapshot(state, snapshot);
-    rebuild_project_runtime(state);
-}
-
-bool apply_history_snapshot(ShellState* state, const EditorHistorySnapshot& snapshot) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const EditorHistorySnapshot current = capture_history_snapshot(*state, false);
-    assign_history_snapshot(state, snapshot);
-    if (!rebuild_project_runtime(state)) {
-        const std::string rebuild_error = state->error_message;
-        restore_history_snapshot(state, current);
-        state->error_message = rebuild_error;
-        return false;
-    }
-
-    return true;
-}
-
-std::unique_ptr<EditAction> make_edit_action(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    const EditorHistorySnapshot& before,
-    const EditorHistorySnapshot& after) {
-    if (history_snapshots_equal(before, after)) {
-        return nullptr;
-    }
-
-    switch (kind) {
-    case EditActionKind::MoveBone:
-        return std::make_unique<MoveBoneAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    case EditActionKind::AddKeyframe:
-        return std::make_unique<AddKeyframeAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    case EditActionKind::RemoveKeyframe:
-        return std::make_unique<RemoveKeyframeAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    case EditActionKind::EditProperty:
-        return std::make_unique<EditPropertyAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    }
-
-    return nullptr;
-}
-
-bool record_action_from_snapshots(
-    ShellState* state,
-    const EditorHistorySnapshot& before,
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const EditorHistorySnapshot after = capture_history_snapshot(*state);
-    state->command_stack.push(
-        make_edit_action(
-            kind,
-            label,
-            std::move(group),
-            allow_merge,
-            before,
-            after));
-    update_project_dirty_state(state);
-    state->error_message.clear();
-    state->status_message = std::move(label);
-    return true;
-}
+// record_action_from_snapshots moved to shell_core.cpp
 
 template <typename MutateFn>
 bool execute_viewport_setting_edit_action(
@@ -2485,30 +2226,7 @@ std::string format_slot_color(const marrow::runtime::SlotColor& color) {
     return stream.str();
 }
 
-std::vector<std::string> normalize_preview_skin_names(
-    const marrow::runtime::SkeletonData& skeleton,
-    const std::vector<std::string>& skin_names) {
-    std::vector<std::string> normalized;
-    for (const std::string& skin_name : skin_names) {
-        const auto skin_index = skeleton.find_skin_index(skin_name);
-        if (!skin_index.has_value() || is_default_skin_index(skeleton, *skin_index)) {
-            continue;
-        }
-
-        if (std::find(normalized.begin(), normalized.end(), skin_name) == normalized.end()) {
-            normalized.push_back(skin_name);
-        }
-    }
-
-    std::sort(
-        normalized.begin(),
-        normalized.end(),
-        [&skeleton](const std::string& lhs, const std::string& rhs) {
-            return skeleton.find_skin_index(lhs).value_or(0) <
-                skeleton.find_skin_index(rhs).value_or(0);
-        });
-    return normalized;
-}
+// normalize_preview_skin_names moved to shell_core.cpp
 
 std::string preview_skin_summary(
     const marrow::runtime::SkeletonData& skeleton,
@@ -3441,83 +3159,11 @@ std::optional<std::size_t> draw_order_position(
     return static_cast<std::size_t>(std::distance(draw_order.begin(), it));
 }
 
-const marrow::runtime::AnimationData* selected_animation(const ShellState& state) {
-    if (!state.load_result || state.selected_animation_name.empty()) {
-        return nullptr;
-    }
+// selected_animation moved to shell_core.cpp
 
-    return state.load_result.skeleton_data->find_animation(state.selected_animation_name);
-}
+// queued_preview_animation moved to shell_core.cpp
 
-double selected_animation_duration(const ShellState& state) {
-    const marrow::runtime::AnimationData* animation = selected_animation(state);
-    return animation != nullptr ? std::max(animation->duration(), 0.0) : 0.0;
-}
-
-const marrow::runtime::AnimationData* queued_preview_animation(const ShellState& state) {
-    if (!state.load_result || state.preview_queued_animation_name.empty()) {
-        return nullptr;
-    }
-
-    const auto* animation =
-        state.load_result.skeleton_data->find_animation(state.preview_queued_animation_name);
-    if (animation == nullptr || animation->name == state.selected_animation_name) {
-        return nullptr;
-    }
-
-    return animation;
-}
-
-std::string default_queued_preview_animation_name(const ShellState& state) {
-    if (!state.load_result) {
-        return {};
-    }
-
-    for (const auto& animation : state.load_result.skeleton_data->animations()) {
-        if (animation.name != state.selected_animation_name) {
-            return animation.name;
-        }
-    }
-
-    return {};
-}
-
-void normalize_state_preview_settings(ShellState* state) {
-    if (state == nullptr || !state->load_result) {
-        return;
-    }
-
-    if (state->preview_custom_mix_duration < 0.0) {
-        state->preview_custom_mix_duration = 0.0;
-    }
-    if (state->preview_queue_delay < 0.0) {
-        state->preview_queue_delay = 0.0;
-    }
-
-    const auto* queued_animation = queued_preview_animation(*state);
-    if (queued_animation == nullptr) {
-        state->preview_queued_animation_name = default_queued_preview_animation_name(*state);
-        if (state->preview_queued_animation_name.empty()) {
-            state->preview_queue_enabled = false;
-        }
-    }
-}
-
-double timeline_preview_duration(const ShellState& state) {
-    const double primary_duration = selected_animation_duration(state);
-    if (!state.preview_queue_enabled) {
-        return primary_duration;
-    }
-
-    const auto* queued_animation = queued_preview_animation(state);
-    if (queued_animation == nullptr) {
-        return primary_duration;
-    }
-
-    return std::max(0.0, primary_duration) +
-        std::max(0.0, state.preview_queue_delay) +
-        std::max(0.0, queued_animation->duration());
-}
+// normalize_state_preview_settings and timeline_preview_duration moved to shell_core.cpp
 
 template <typename Timeline>
 void append_timeline_key_times(
@@ -4350,96 +3996,9 @@ double clamp_existing_non_decreasing_key_time(
     return std::clamp(desired_time, minimum_time, keyframes[key_index + 1].time);
 }
 
-bool rebuild_project_runtime(ShellState* state) {
-    if (!state->load_result || state->load_result.project == nullptr ||
-        state->load_result.base_skeleton_document == nullptr) {
-        return false;
-    }
+// rebuild_project_runtime moved to shell_core.cpp
 
-    std::optional<marrow::runtime::AnimationStateSnapshot> playback_snapshot;
-    if (state->animation_state != nullptr) {
-        playback_snapshot = state->animation_state->capture_state();
-    }
-
-    const auto runtime_result = marrow::editor::build_project_runtime(
-        *state->load_result.project,
-        *state->load_result.base_skeleton_document);
-    if (!runtime_result) {
-        state->error_message = runtime_result.error->format();
-        return false;
-    }
-
-    state->load_result.skeleton_data = runtime_result.skeleton_data;
-    state->preview_skeleton =
-        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
-    state->animation_state =
-        marrow::allocate_unique<marrow::runtime::AnimationState>(
-            state->load_result.skeleton_data);
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->preview_skin_names);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    if (!state->selected_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
-        state->selected_animation_name.clear();
-    }
-    if (state->selected_animation_name.empty() &&
-        !state->load_result.project->editor_metadata.active_animation.empty() &&
-        state->load_result.skeleton_data->find_animation(
-            state->load_result.project->editor_metadata.active_animation) != nullptr) {
-        state->selected_animation_name = state->load_result.project->editor_metadata.active_animation;
-    }
-    if (state->selected_animation_name.empty() &&
-        !state->load_result.skeleton_data->animations().empty()) {
-        state->selected_animation_name =
-            state->load_result.skeleton_data->animations().front().name;
-    }
-    normalize_state_preview_settings(state);
-
-    if (state->selected_bone_index.has_value() &&
-        *state->selected_bone_index >= state->load_result.skeleton_data->bones().size()) {
-        state->selected_bone_index.reset();
-    }
-    if (state->selected_slot_index.has_value() &&
-        *state->selected_slot_index >= state->load_result.skeleton_data->slots().size()) {
-        state->selected_slot_index.reset();
-        state->selected_attachment.reset();
-    }
-    validate_selected_constraint(state);
-
-    bool restored_playback = false;
-    if (playback_snapshot.has_value()) {
-        for (const auto& track_root : playback_snapshot->track_roots) {
-            if (!track_root.has_value()) {
-                continue;
-            }
-            restored_playback = restore_preview_playback(state, *playback_snapshot);
-            break;
-        }
-    }
-
-    if (!restored_playback && !refresh_preview_pose(state)) {
-        return false;
-    }
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
-    }
-
-    state->error_message.clear();
-    return true;
-}
-
-void update_project_dirty_state(ShellState* state) {
-    if (!state->load_result || state->load_result.project == nullptr) {
-        state->project_dirty = false;
-        return;
-    }
-
-    state->project_dirty =
-        marrow::editor::serialize_project(*state->load_result.project) !=
-        state->saved_project_snapshot;
-}
+// update_project_dirty_state moved to shell_core.cpp
 
 bool apply_project_command_change(
     ShellState* state,
@@ -4554,69 +4113,8 @@ void handle_project_history_shortcuts(ShellState* state) {
     }
 }
 
-bool save_project_file(ShellState* state, bool update_status_message) {
-    if (!state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const auto save_result =
-        marrow::editor::save_project(*state->load_result.project, state->project_path);
-    if (!save_result) {
-        state->error_message = save_result.error->format();
-        state->status_message = "Project save failed";
-        return false;
-    }
-
-    state->load_result.project = save_result.project;
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
-    state->project_dirty = false;
-    state->error_message.clear();
-    if (update_status_message) {
-        state->status_message = "Saved project to " + state->project_path.string();
-    }
-    return true;
-}
-
-bool export_runtime_assets_file(ShellState* state, bool update_status_message) {
-    if (!state->load_result || state->load_result.project == nullptr ||
-        state->load_result.base_skeleton_document == nullptr) {
-        return false;
-    }
-
-    marrow::editor::ProjectExportOptions export_options;
-    if (state->export_binary_output) {
-        export_options.binary_output_path =
-            state->load_result.project->resolved_export_binary_path();
-    }
-
-    const auto export_result = marrow::editor::export_runtime_assets(
-        *state->load_result.project,
-        *state->load_result.base_skeleton_document,
-        export_options);
-    if (!export_result) {
-        state->error_message = export_result.error->format();
-        state->status_message = "Runtime export failed";
-        return false;
-    }
-
-    state->error_message.clear();
-    if (update_status_message) {
-        std::string message = "Exported runtime assets to " + export_result.path.string();
-        if (!export_result.atlas_paths.empty()) {
-            message += " with " + std::to_string(export_result.atlas_paths.size()) +
-                " atlas file";
-            if (export_result.atlas_paths.size() != 1U) {
-                message += "s";
-            }
-        }
-        if (export_result.binary_path.has_value()) {
-            message += " and " + export_result.binary_path->filename().string();
-        }
-        state->status_message = std::move(message);
-    }
-    return true;
-}
+// save_project_file moved to shell_core.cpp
+// export_runtime_assets_file moved to shell_core.cpp
 
 std::optional<std::size_t> preview_root_bone_index(
     const marrow::runtime::SkeletonData& skeleton) {
@@ -5220,120 +4718,7 @@ RuntimeAssetPollOutcome poll_runtime_asset_changes(ShellState* state) {
     return RuntimeAssetPollOutcome::Reloaded;
 }
 
-bool reload_project(ShellState* state) {
-    std::optional<std::string> previous_selection_name;
-    if (const auto selection_name = selected_bone_name(*state)) {
-        previous_selection_name = std::string(*selection_name);
-    }
-    std::optional<std::string> previous_slot_name;
-    if (state->load_result && state->selected_slot_index.has_value() &&
-        *state->selected_slot_index < state->load_result.skeleton_data->slots().size()) {
-        previous_slot_name =
-            state->load_result.skeleton_data->slots()[*state->selected_slot_index].name;
-    }
-    const std::string previous_animation_name = state->selected_animation_name;
-    const double previous_timeline_time = state->timeline_time_seconds;
-    const bool previous_timeline_loop = state->timeline_loop;
-    const bool previous_timeline_playing = state->timeline_playing;
-
-    state->load_result = marrow::editor::load_project(state->project_path);
-    state->preview_skeleton.reset();
-    state->animation_state.reset();
-    state->selected_bone_index.reset();
-    state->selected_slot_index.reset();
-    state->selected_attachment.reset();
-    state->selected_timeline_track_id.reset();
-    state->selected_constraint.reset();
-    state->preview_skin_names.clear();
-    state->preview_slot_overrides.clear();
-    state->selected_animation_name.clear();
-    state->timeline_time_seconds = 0.0;
-    state->timeline_loop = previous_timeline_loop;
-    state->timeline_playing = false;
-    state->command_stack.clear();
-    state->pending_edit_action.reset();
-    reset_weight_paint_stroke(state);
-    state->project_dirty = false;
-    state->saved_project_snapshot.clear();
-    state->error_message.clear();
-
-    if (!state->load_result) {
-        state->status_message = "Project load failed";
-        if (state->load_result.error.has_value()) {
-            state->error_message = state->load_result.error->format();
-        } else {
-            state->error_message = "Unknown project load failure.";
-        }
-        return false;
-    }
-
-    state->viewport = state->load_result.project->editor_metadata.viewport;
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
-    state->preview_skeleton =
-        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
-    state->animation_state =
-        marrow::allocate_unique<marrow::runtime::AnimationState>(
-            state->load_result.skeleton_data);
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->load_result.project->editor_metadata.preview_skins);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    const auto& animations = state->load_result.skeleton_data->animations();
-    if (!previous_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(previous_animation_name) != nullptr) {
-        state->selected_animation_name = previous_animation_name;
-    } else if (!state->load_result.project->editor_metadata.active_animation.empty() &&
-               state->load_result.skeleton_data->find_animation(
-                   state->load_result.project->editor_metadata.active_animation) != nullptr) {
-        state->selected_animation_name = state->load_result.project->editor_metadata.active_animation;
-    } else if (!animations.empty()) {
-        state->selected_animation_name = animations.front().name;
-    }
-    normalize_state_preview_settings(state);
-    if (!state->selected_animation_name.empty()) {
-        state->timeline_time_seconds = std::clamp(
-            previous_timeline_time,
-            0.0,
-            timeline_preview_duration(*state));
-        state->timeline_playing = previous_timeline_playing;
-    }
-    if (!refresh_preview_pose(state)) {
-        state->status_message = "Project load failed";
-        return false;
-    }
-
-    if (previous_selection_name.has_value()) {
-        state->selected_bone_index =
-            state->load_result.skeleton_data->find_bone_index(*previous_selection_name);
-    }
-    if (!state->selected_bone_index.has_value() &&
-        !state->load_result.skeleton_data->bones().empty()) {
-        state->selected_bone_index = 0;
-    }
-    if (previous_slot_name.has_value()) {
-        state->selected_slot_index =
-            state->load_result.skeleton_data->find_slot_index(*previous_slot_name);
-    }
-    if (!state->selected_slot_index.has_value() &&
-        !state->load_result.skeleton_data->slots().empty()) {
-        state->selected_slot_index = 0;
-    }
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
-    }
-    validate_selected_constraint(state);
-
-    std::ostringstream stream;
-    stream << "Loaded "
-           << state->load_result.project->editor_metadata.name
-           << " from "
-           << state->project_path.string();
-    state->status_message = stream.str();
-    reset_runtime_asset_watch(state);
-    return true;
-}
+// reload_project moved to shell_core.cpp
 
 void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state) {
     if (!ImGui::BeginMainMenuBar()) {
@@ -5356,14 +4741,20 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
                 "Ctrl+Z",
                 false,
                 state->command_stack.can_undo())) {
-            undo_project_change(state);
+            namespace json = marrow::runtime::json;
+            json::Value::Object cmd_obj;
+            cmd_obj.emplace("op", json::Value("undo", {}));
+            AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
         }
         if (ImGui::MenuItem(
                 "Redo",
                 "Ctrl+Shift+Z / Ctrl+Y",
                 false,
                 state->command_stack.can_redo())) {
-            redo_project_change(state);
+            namespace json = marrow::runtime::json;
+            json::Value::Object cmd_obj;
+            cmd_obj.emplace("op", json::Value("redo", {}));
+            AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
         }
         ImGui::EndMenu();
     }
@@ -5491,10 +4882,16 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
     ImGui::TextDisabled("|");
     const bool project_loaded = state->load_result.project != nullptr;
     if (icon_button(state->icons, Icon::Save, "Save project", false, !project_loaded)) {
-        save_project_file(state, true);
+        namespace json = marrow::runtime::json;
+        json::Value::Object cmd_obj;
+        cmd_obj.emplace("op", json::Value("save", {}));
+        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
     }
     if (icon_button(state->icons, Icon::Export, "Export runtime assets", false, !project_loaded)) {
-        export_runtime_assets_file(state, true);
+        namespace json = marrow::runtime::json;
+        json::Value::Object cmd_obj;
+        cmd_obj.emplace("op", json::Value("export_runtime", {}));
+        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
     }
     if (icon_button(state->icons, Icon::Reload, "Reload project", false, !project_loaded)) {
         *reload_requested = true;
@@ -5506,7 +4903,10 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
             "Undo (Ctrl+Z)",
             false,
             !state->command_stack.can_undo())) {
-        undo_project_change(state);
+        namespace json = marrow::runtime::json;
+        json::Value::Object cmd_obj;
+        cmd_obj.emplace("op", json::Value("undo", {}));
+        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
     }
     if (icon_button(
             state->icons,
@@ -5514,7 +4914,10 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
             "Redo (Ctrl+Shift+Z)",
             false,
             !state->command_stack.can_redo())) {
-        redo_project_change(state);
+        namespace json = marrow::runtime::json;
+        json::Value::Object cmd_obj;
+        cmd_obj.emplace("op", json::Value("redo", {}));
+        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
     }
 
     ImGui::TextDisabled("|");
@@ -5829,43 +5232,34 @@ void draw_constraints_window(ShellState* state) {
 
                 int chain_length = static_cast<int>(display_edit.bone_names.size());
                 if (ImGui::RadioButton("1 Bone", chain_length == 1)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        auto& edit = project->ik_constraint_edits[*edit_index];
-                        if (edit.bone_names.size() > 1U) {
-                            edit.bone_names.resize(1U);
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Ik,
-                                edit.name,
-                                "IK constraint edit failed",
-                                "Updated IK chain length on " + edit.name);
-                        }
+                    if (display_edit.bone_names.size() > 1U) {
+                        namespace json = marrow::runtime::json;
+                        json::Value::Object cmd_obj;
+                        cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                        json::Value::Object args_obj;
+                        args_obj.emplace("name", json::Value(selected_name, {}));
+                        json::Value::Array bone_names_arr;
+                        bone_names_arr.push_back(json::Value(display_edit.bone_names[0], {}));
+                        args_obj.emplace("bone_names", json::Value(std::move(bone_names_arr), {}));
+                        cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                     }
                 }
                 ImGui::SameLine();
                 if (ImGui::RadioButton("2 Bones", chain_length == 2)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        auto& edit = project->ik_constraint_edits[*edit_index];
-                        if (edit.bone_names.size() < 2U) {
-                            if (!append_direct_child_name(&edit.bone_names)) {
-                                if (const auto chain = preferred_chain(skeleton, {"ik_upper", "ik_lower"})) {
-                                    edit.bone_names = *chain;
-                                }
-                            }
-                            if (edit.bone_names.size() >= 2U) {
-                                commit_constraint_change(
-                                    previous_project,
-                                    ConstraintEditKind::Ik,
-                                    edit.name,
-                                    "IK constraint edit failed",
-                                    "Updated IK chain length on " + edit.name);
-                            } else {
-                                *project = previous_project;
-                                state->status_message =
-                                    "Could not extend the IK chain to a valid two-bone setup";
-                            }
+                    if (display_edit.bone_names.size() < 2U) {
+                        std::vector<std::string> new_bones = display_edit.bone_names;
+                        if (append_direct_child_name(&new_bones)) {
+                            namespace json = marrow::runtime::json;
+                            json::Value::Object cmd_obj;
+                            cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                            json::Value::Object args_obj;
+                            args_obj.emplace("name", json::Value(selected_name, {}));
+                            json::Value::Array bone_names_arr;
+                            for (const auto& b : new_bones) bone_names_arr.push_back(json::Value(b, {}));
+                            args_obj.emplace("bone_names", json::Value(std::move(bone_names_arr), {}));
+                            cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                            AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                         }
                     }
                 }
@@ -5874,31 +5268,31 @@ void draw_constraints_window(ShellState* state) {
                     std::string edited_bone = display_edit.bone_names[bone_index];
                     const std::string label = "Bone " + std::to_string(bone_index + 1U);
                     if (draw_string_combo(label.c_str(), bone_options, &edited_bone)) {
-                        const marrow::editor::ProjectData previous_project = *project;
-                        if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                            project->ik_constraint_edits[*edit_index].bone_names[bone_index] = edited_bone;
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Ik,
-                                project->ik_constraint_edits[*edit_index].name,
-                                "IK constraint edit failed",
-                                "Updated IK bone selection on " + selected_name);
+                        namespace json = marrow::runtime::json;
+                        json::Value::Object cmd_obj;
+                        cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                        json::Value::Object args_obj;
+                        args_obj.emplace("name", json::Value(selected_name, {}));
+                        json::Value::Array bone_names_arr;
+                        for (std::size_t i = 0; i < display_edit.bone_names.size(); ++i) {
+                            bone_names_arr.push_back(json::Value(i == bone_index ? edited_bone : display_edit.bone_names[i], {}));
                         }
+                        args_obj.emplace("bone_names", json::Value(std::move(bone_names_arr), {}));
+                        cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                     }
                 }
 
                 std::string edited_target = display_edit.target_bone_name;
                 if (draw_string_combo("Target", bone_options, &edited_target)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        project->ik_constraint_edits[*edit_index].target_bone_name = edited_target;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Ik,
-                            project->ik_constraint_edits[*edit_index].name,
-                            "IK constraint edit failed",
-                            "Updated IK target on " + selected_name);
-                    }
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("target", json::Value(edited_target, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                 }
 
                 double edited_mix = display_edit.mix;
@@ -5926,16 +5320,14 @@ void draw_constraints_window(ShellState* state) {
 
                 bool bend_positive = display_edit.bend_positive;
                 if (ImGui::Checkbox("Bend Positive", &bend_positive)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        project->ik_constraint_edits[*edit_index].bend_positive = bend_positive;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Ik,
-                            project->ik_constraint_edits[*edit_index].name,
-                            "IK constraint edit failed",
-                            "Updated IK bend direction on " + selected_name);
-                    }
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("bend_positive", json::Value(bend_positive, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                 }
             }
 
@@ -7820,38 +7212,31 @@ void draw_transform_timeline_editor(
     };
 
     if (ImGui::Button("Add Key At Playhead")) {
-        const marrow::editor::ProjectData previous_project = *state->load_result.project;
-        const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-        if (edit_index.has_value()) {
-            auto& editable_track =
-                state->load_result.project->transform_timeline_edits[*edit_index];
-            if (const auto insert_time = insertable_key_time(
-                    editable_track.keyframes,
-                    state->timeline_time_seconds,
-                    duration_seconds)) {
-                marrow::editor::TransformKeyframeEdit new_key =
-                    sample_transform_keyframe(*state, *track);
-                new_key.time = *insert_time;
-                const auto iterator = std::upper_bound(
-                    editable_track.keyframes.begin(),
-                    editable_track.keyframes.end(),
-                    new_key.time,
-                    [](double time, const marrow::editor::TransformKeyframeEdit& keyframe) {
-                        return time < keyframe.time;
-                    });
-                editable_track.keyframes.insert(iterator, std::move(new_key));
-                commit_project_change(
-                    previous_project,
-                    EditActionKind::AddKeyframe,
-                    track_group(),
-                    false,
-                    "Added a " + std::string(transform_channel_label(*track->transform_channel)) +
-                        " key on " + bone_name);
-            } else {
-                *state->load_result.project = previous_project;
-                state->status_message = "Could not place a new key between existing keyframes";
-            }
+        const auto sampled = sample_transform_keyframe(*state, *track);
+        namespace json = marrow::runtime::json;
+        json::Value::Object cmd_obj;
+        cmd_obj.emplace("op", json::Value("set_transform", {}));
+        json::Value::Object args_obj;
+        args_obj.emplace("animation", json::Value(track->animation_name, {}));
+        args_obj.emplace("bone", json::Value(bone_name, {}));
+        
+        const char* channel_name = "rotate";
+        switch (*track->transform_channel) {
+            case marrow::editor::TransformTimelineChannel::Rotate: channel_name = "rotate"; break;
+            case marrow::editor::TransformTimelineChannel::Translate: channel_name = "translate"; break;
+            case marrow::editor::TransformTimelineChannel::Scale: channel_name = "scale"; break;
+            case marrow::editor::TransformTimelineChannel::Shear: channel_name = "shear"; break;
         }
+        args_obj.emplace("channel", json::Value(channel_name, {}));
+        args_obj.emplace("time", json::Value(state->timeline_time_seconds, {}));
+        if (*track->transform_channel == marrow::editor::TransformTimelineChannel::Rotate) {
+            args_obj.emplace("angle", json::Value(sampled.angle, {}));
+        } else {
+            args_obj.emplace("x", json::Value(sampled.x, {}));
+            args_obj.emplace("y", json::Value(sampled.y, {}));
+        }
+        cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
     }
 
     ImGui::BeginChild("transform_key_editor", ImVec2(0.0f, 250.0f), true);
@@ -7865,22 +7250,24 @@ void draw_transform_timeline_editor(
                 ImGuiTreeNodeFlags_DefaultOpen)) {
             if (display_edit.keyframes.size() > 1U &&
                 ImGui::Button("Remove Key##transform")) {
-                const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                if (const auto edit_index =
-                        ensure_transform_timeline_edit_index(state, *track)) {
-                    auto& editable_track =
-                        state->load_result.project->transform_timeline_edits[*edit_index];
-                    editable_track.keyframes.erase(
-                        editable_track.keyframes.begin() + static_cast<std::ptrdiff_t>(key_index));
-                    commit_project_change(
-                        previous_project,
-                        EditActionKind::RemoveKeyframe,
-                        track_group(),
-                        false,
-                        "Removed a " +
-                            std::string(transform_channel_label(*track->transform_channel)) +
-                            " key on " + bone_name);
+                namespace json = marrow::runtime::json;
+                json::Value::Object cmd_obj;
+                cmd_obj.emplace("op", json::Value("remove_transform_keyframe", {}));
+                json::Value::Object args_obj;
+                args_obj.emplace("animation", json::Value(track->animation_name, {}));
+                args_obj.emplace("bone", json::Value(bone_name, {}));
+                
+                const char* channel_name = "rotate";
+                switch (*track->transform_channel) {
+                    case marrow::editor::TransformTimelineChannel::Rotate: channel_name = "rotate"; break;
+                    case marrow::editor::TransformTimelineChannel::Translate: channel_name = "translate"; break;
+                    case marrow::editor::TransformTimelineChannel::Scale: channel_name = "scale"; break;
+                    case marrow::editor::TransformTimelineChannel::Shear: channel_name = "shear"; break;
                 }
+                args_obj.emplace("channel", json::Value(channel_name, {}));
+                args_obj.emplace("time", json::Value(display_key.time, {}));
+                cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
             }
 
             double edited_time = display_key.time;
@@ -10295,6 +9682,15 @@ int main(int argc, char** argv) {
         shell_state.viewport_renderer.error_message = *viewport_error;
     }
 
+    AgentSocketServer agent_server;
+    if (parse_result.options.agent_port.has_value()) {
+        if (!agent_server.start(*parse_result.options.agent_port,
+                                parse_result.options.agent_token)) {
+            std::cerr << "Failed to start AI Agent server on port "
+                      << *parse_result.options.agent_port << std::endl;
+        }
+    }
+
     {
         std::error_code ec;
         std::filesystem::path icon_root = "icons";
@@ -10315,6 +9711,9 @@ int main(int argc, char** argv) {
     int rendered_frames = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        agent_server.drain_commands(&shell_state);
+
         render_shell_frame(window, &shell_state);
         glfwSwapBuffers(window);
 

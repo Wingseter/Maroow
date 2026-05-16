@@ -204,6 +204,13 @@ Value* find_member(Value& object, std::string_view key);
 std::string serialize_pretty(const Value& value, int indent_size = 2);
 
 /**
+ * @brief Serializes a JSON value compactly onto a single line.
+ * @param value JSON value to serialize.
+ * @return Compact JSON text.
+ */
+std::string serialize_compact(const Value& value);
+
+/**
  * @brief Builds a validation error tied to a JSON path and source location.
  * @param document Source document used for excerpts and file paths.
  * @param location Location where validation failed.

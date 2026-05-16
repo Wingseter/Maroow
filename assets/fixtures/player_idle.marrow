@@ -1,66 +1,164 @@
 {
-  "marrow": "1.0",
-  "runtime": {
-    "skeleton": "player_idle.mskl",
-    "atlases": [
-      "player_idle.matl"
+  "constraint_edits": {
+    "ik": [
+      {
+        "bendPositive": true,
+        "bones": [
+          "ik_upper",
+          "ik_lower"
+        ],
+        "compress": false,
+        "mix": 0.75,
+        "name": "editor_arm_reach",
+        "softness": 0,
+        "stretch": false,
+        "target": "ik_target"
+      }
+    ],
+    "path": [
+      {
+        "bones": [
+          "path_a",
+          "path_b",
+          "path_c"
+        ],
+        "name": "editor_guide_follow",
+        "position": 0.1,
+        "rotateMix": 1,
+        "slot": "guide",
+        "spacing": 0.3,
+        "spacingMode": "percent",
+        "translateMix": 1
+      }
+    ],
+    "physics": [
+      {
+        "bones": [
+          "ribbon_01",
+          "ribbon_02"
+        ],
+        "damping": 4,
+        "gravity": {
+          "x": 0,
+          "y": -24
+        },
+        "inertia": 0.85,
+        "limit": 30,
+        "massInverse": 1,
+        "mix": 1,
+        "name": "editor_ribbon_secondary",
+        "rotate": 1,
+        "scaleX": 0.35,
+        "shearX": 0,
+        "step": 0.0166666667,
+        "strength": 18,
+        "wind": {
+          "x": 12,
+          "y": 0
+        },
+        "x": 1,
+        "y": 1
+      }
+    ],
+    "transform": [
+      {
+        "bones": [
+          "transform_target"
+        ],
+        "name": "editor_transform_follow",
+        "offset": {
+          "rotation": 15,
+          "scaleX": 0.2,
+          "scaleY": -0.1,
+          "shearX": 5,
+          "shearY": -2,
+          "x": -10,
+          "y": 20
+        },
+        "rotateMix": 0.5,
+        "scaleMix": 1,
+        "shearMix": 0.75,
+        "source": "transform_source",
+        "translateMix": 0.25
+      }
     ]
   },
   "editor": {
-    "name": "player_idle_fixture",
     "active_animation": "idle",
+    "export_directory": "exports",
+    "name": "player_idle_fixture",
+    "notes": "Minimal Marrow editor project referencing the canonical runtime fixture pair.",
     "preview_skins": [
       "default"
     ],
-    "export_directory": "exports",
-    "notes": "Minimal Marrow editor project referencing the canonical runtime fixture pair.",
     "viewport": {
-      "pan_x": 0,
-      "pan_y": 0,
-      "zoom": 1,
-      "onion_skin": {
-        "enabled": false,
-        "mode": "frame",
-        "anchor": false,
-        "before": 3,
-        "after": 3,
-        "step": 1
-      },
       "debug_overlay": {
         "bones": true,
+        "bounds": true,
         "ik": true,
-        "path": true,
-        "physics": true,
         "meshes": true,
-        "bounds": true
-      }
+        "path": true,
+        "physics": true
+      },
+      "onion_skin": {
+        "after": 3,
+        "anchor": false,
+        "before": 3,
+        "enabled": false,
+        "mode": "frame",
+        "step": 1
+      },
+      "pan_x": 0,
+      "pan_y": 0,
+      "zoom": 1
     }
   },
-    "timeline_edits": {
-        "animations": {
-            "idle": {
-                "bones": {
+  "marrow": "1.0",
+  "runtime": {
+    "atlases": [
+      "player_idle.matl"
+    ],
+    "skeleton": "player_idle.mskl"
+  },
+  "timeline_edits": {
+    "animations": {
+      "idle": {
+        "bones": {
+          "arm_l": {
+            "rotate": [
+              {
+                "angle": 90,
+                "curve": "linear",
+                "time": 0.25
+              },
+              {
+                "angle": 45,
+                "curve": "linear",
+                "time": 0.5
+              }
+            ]
+          },
           "spine": {
             "rotate": [
               {
-                "time": 0,
                 "angle": 0,
                 "curve": [
-                  0.33,
+                  0.330000013113022,
                   0,
-                  0.67,
+                  0.670000016689301,
                   1
-                ]
+                ],
+                "time": 0
               },
               {
-                "time": 0.5,
                 "angle": 8,
-                "curve": "stepped"
+                "curve": "stepped",
+                "time": 0.5
               },
               {
-                "time": 1,
                 "angle": -2,
-                "curve": "linear"
+                "curve": "linear",
+                "time": 1
               }
             ]
           }
@@ -69,6 +167,7 @@
           "body": {
             "body_mesh": [
               {
+                "curve": "linear",
                 "time": 0,
                 "vertices": [
                   0,
@@ -79,10 +178,10 @@
                   0,
                   0,
                   0
-                ],
-                "curve": "linear"
+                ]
               },
               {
+                "curve": "linear",
                 "time": 0.5,
                 "vertices": [
                   0,
@@ -93,10 +192,10 @@
                   20,
                   -4,
                   10
-                ],
-                "curve": "linear"
+                ]
               },
               {
+                "curve": "stepped",
                 "time": 1,
                 "vertices": [
                   0,
@@ -107,15 +206,13 @@
                   0,
                   0,
                   0
-                ],
-                "curve": "stepped"
+                ]
               }
             ]
-                }
-            },
+          }
+        },
         "drawOrder": [
           {
-            "time": 0,
             "slots": [
               "body",
               "arm_l",
@@ -124,10 +221,10 @@
               "spawn_anchor",
               "hurtbox",
               "guide"
-            ]
+            ],
+            "time": 0
           },
           {
-            "time": 0.5,
             "slots": [
               "body",
               "fx_mask",
@@ -136,10 +233,10 @@
               "spawn_anchor",
               "hurtbox",
               "guide"
-            ]
+            ],
+            "time": 0.5
           },
           {
-            "time": 1,
             "slots": [
               "body",
               "arm_l",
@@ -148,115 +245,32 @@
               "spawn_anchor",
               "hurtbox",
               "guide"
-            ]
+            ],
+            "time": 1
           }
         ],
         "events": [
           {
-            "time": 0.25,
-            "name": "footstep",
             "int": 7,
-            "string": "editor_left"
-          },
-          {
-            "time": 0.25,
-            "name": "dust_vfx",
-            "float": 0.9,
-            "string": "editor_dust"
-          },
-          {
-            "time": 0.8,
             "name": "footstep",
+            "string": "editor_left",
+            "time": 0.25
+          },
+          {
+            "float": 0.9,
+            "name": "dust_vfx",
+            "string": "editor_dust",
+            "time": 0.25
+          },
+          {
+            "balance": -0.2,
             "int": 8,
+            "name": "footstep",
             "string": "editor_right",
-            "balance": -0.2
+            "time": 0.8
           }
         ]
-        }
+      }
     }
-  },
-  "mesh_edits": {
-    "weights": []
-  },
-  "constraint_edits": {
-        "ik": [
-            {
-                "name": "editor_arm_reach",
-                "bones": [
-                    "ik_upper",
-                    "ik_lower"
-                ],
-                "target": "ik_target",
-                "mix": 1.0,
-                "bendPositive": true
-            }
-        ],
-        "path": [
-            {
-                "name": "editor_guide_follow",
-                "slot": "guide",
-                "bones": [
-                    "path_a",
-                    "path_b",
-                    "path_c"
-                ],
-                "position": 0.1,
-                "spacing": 0.3,
-                "spacingMode": "percent",
-                "rotateMix": 1.0,
-                "translateMix": 1.0
-            }
-        ],
-        "transform": [
-            {
-                "name": "editor_transform_follow",
-                "source": "transform_source",
-                "bones": [
-                    "transform_target"
-                ],
-                "rotateMix": 0.5,
-                "translateMix": 0.25,
-                "scaleMix": 1.0,
-                "shearMix": 0.75,
-                "offset": {
-                    "rotation": 15,
-                    "x": -10,
-                    "y": 20,
-                    "scaleX": 0.2,
-                    "scaleY": -0.1,
-                    "shearX": 5,
-                    "shearY": -2
-                }
-            }
-        ],
-        "physics": [
-            {
-                "name": "editor_ribbon_secondary",
-                "bones": [
-                    "ribbon_01",
-                    "ribbon_02"
-                ],
-                "step": 0.0166666667,
-                "x": 1.0,
-                "y": 1.0,
-                "rotate": 1.0,
-                "scaleX": 0.35,
-                "shearX": 0.0,
-                "limit": 30.0,
-                "inertia": 0.85,
-                "damping": 4.0,
-                "strength": 18.0,
-                "massInverse": 1.0,
-                "gravity": {
-                    "x": 0,
-                    "y": -24
-                },
-                "wind": {
-                    "x": 12,
-                    "y": 0
-                },
-                "mix": 1.0
-            }
-        ]
   }
 }

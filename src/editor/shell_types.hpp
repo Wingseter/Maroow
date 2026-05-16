@@ -35,6 +35,8 @@ struct Options {
     std::filesystem::path project_path{"assets/fixtures/player_idle.marrow"};
     std::optional<int> auto_close_frames;
     bool verify_launch_focus{false};
+    std::optional<int> agent_port;
+    std::string agent_token;
 };
 
 enum class ParseStatus {
@@ -480,9 +482,16 @@ const char* attachment_kind_name(marrow::runtime::AttachmentKind kind);
 const char* sequence_playback_mode_name(marrow::runtime::SequencePlaybackMode mode);
 const char* onion_skin_mode_name(marrow::editor::OnionSkinMode mode);
 std::string format_slot_color(const marrow::runtime::SlotColor& color);
+std::optional<std::string_view> selected_bone_name(const ShellState& state);
+const marrow::runtime::AnimationData* selected_animation(const ShellState& state);
+double selected_animation_duration(const ShellState& state);
+double timeline_preview_duration(const ShellState& state);
+void normalize_state_preview_settings(ShellState* state);
+bool rebuild_project_runtime(ShellState* state);
+
 std::vector<std::string> normalize_preview_skin_names(
     const marrow::runtime::SkeletonData& skeleton,
-    const std::vector<std::string>& skin_names);
+    const std::vector<std::string>& preview_skin_names);
 std::string preview_skin_summary(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names);

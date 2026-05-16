@@ -624,6 +624,66 @@ void serialize_value(
     }
 }
 
+void serialize_compact_value(
+    const Value& value,
+    std::ostringstream* output) {
+    switch (value.type()) {
+    case Value::Type::Null:
+        *output << "null";
+        return;
+    case Value::Type::Boolean:
+        *output << (value.as_boolean() ? "true" : "false");
+        return;
+    case Value::Type::Number: {
+        std::ostringstream number_stream;
+        number_stream << std::setprecision(15) << value.as_number();
+        *output << number_stream.str();
+        return;
+    }
+    case Value::Type::String:
+        *output << '\"' << escape_json_string(value.as_string()) << '\"';
+        return;
+    case Value::Type::Array: {
+        const Value::Array& array = value.as_array();
+        if (array.empty()) {
+            *output << "[]";
+            return;
+        }
+
+        *output << "[";
+        for (std::size_t index = 0; index < array.size(); ++index) {
+            serialize_compact_value(array[index], output);
+            if (index + 1 < array.size()) {
+                *output << ',';
+            }
+        }
+        *output << ']';
+        return;
+    }
+    case Value::Type::Object: {
+        const Value::Object& object = value.as_object();
+        if (object.empty()) {
+            *output << "{}";
+            return;
+        }
+
+        *output << "{";
+        std::size_t index = 0;
+        for (const auto& [key, member_value] : object) {
+            *output << '\"' << escape_json_string(key) << "\":";
+            serialize_compact_value(member_value, output);
+            if (index + 1 < object.size()) {
+                *output << ',';
+            }
+            ++index;
+        }
+        *output << '}';
+        return;
+    }
+    }
+}
+
+
 } // namespace
 
 Value::Value()
@@ -833,6 +893,12 @@ Value* find_member(Value& object, std::string_view key) {
     }
 
     return &iterator->second;
+}
+
+std::string serialize_compact(const Value& value) {
+    std::ostringstream output;
+    serialize_compact_value(value, &output);
+    return output.str();
 }
 
 std::string serialize_pretty(const Value& value, int indent_size) {

@@ -40,7 +40,7 @@ find_package(Doxygen QUIET)
 
 set(MARROW_DOXYGEN_CONFIG ${PROJECT_BINARY_DIR}/Doxyfile)
 configure_file(
-    ${PROJECT_SOURCE_DIR}/docs/Doxyfile.in
+    ${PROJECT_SOURCE_DIR}/docs/root1/Doxyfile.in
     ${MARROW_DOXYGEN_CONFIG}
     @ONLY
 )
@@ -215,11 +215,15 @@ add_library(marrow_c STATIC
 target_include_directories(marrow_c
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+        ${MARROW_IMGUI_DIR}
 )
 
 target_link_libraries(marrow_c
     PUBLIC
         marrow_renderer
+        marrow_editor
 )
 
 target_link_libraries(marrow_renderer
@@ -284,11 +288,17 @@ add_library(marrow_editor STATIC
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/agent_dispatch.cpp
+    src/editor/icon_registry.cpp
+    src/editor/shell_core.cpp
 )
 
 target_include_directories(marrow_editor
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+        ${MARROW_IMGUI_DIR}
 )
 
 target_link_libraries(marrow_editor
@@ -296,6 +306,7 @@ target_link_libraries(marrow_editor
         marrow_runtime
     PRIVATE
         ZLIB::ZLIB
+        ${MARROW_OPENGL_LIBRARIES}
 )
 
 add_executable(marrow_bootstrap
@@ -461,12 +472,22 @@ target_link_libraries(marrow_psd_import_smoke
         marrow_renderer
 )
 
+add_executable(marrow_agent_dispatch_smoke
+    src/samples/agent_dispatch_smoke.cpp
+)
+
+target_link_libraries(marrow_agent_dispatch_smoke
+    PRIVATE
+        marrow_c
+)
+
 add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
     src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
+    src/editor/agent_socket.cpp
 )
 
 target_link_libraries(marrow_editor_shell
@@ -490,7 +511,7 @@ add_custom_command(TARGET marrow_editor_shell POST_BUILD
 )
 
 file(GLOB MARROW_EDITOR_ICON_SOURCES
-    "${CMAKE_SOURCE_DIR}/assets/icons/export/white_48/*.png")
+    "${CMAKE_CURRENT_BINARY_DIR}/icons/*.png")
 
 set(MARROW_EDITOR_ICON_STAMP
     "${CMAKE_CURRENT_BINARY_DIR}/marrow_editor_icons.stamp")
