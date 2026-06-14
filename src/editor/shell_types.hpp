@@ -21,6 +21,7 @@ struct GLFWwindow;
 
 #include "imgui.h"
 
+#include "icon_registry.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/project.hpp"
@@ -30,10 +31,14 @@ struct GLFWwindow;
 
 namespace marrow::editor::shell {
 
+class AgentSocketServer;
+
 struct Options {
     std::filesystem::path project_path{"assets/fixtures/player_idle.marrow"};
     std::optional<int> auto_close_frames;
     bool verify_launch_focus{false};
+    std::optional<int> agent_port;
+    std::string agent_token;
 };
 
 enum class ParseStatus {
@@ -131,12 +136,17 @@ struct RuntimeAssetWatchEntry {
     std::optional<std::filesystem::file_time_type> write_time;
 };
 
+// Bump when the default split changes so a fresh rebuild is forced.
+constexpr int kDockLayoutVersion = 3;
+
 struct DockLayoutState {
     ImGuiID dockspace_id{0};
     ImGuiID viewport_node_id{0};
     ImGuiID timeline_node_id{0};
     ImGuiID hierarchy_node_id{0};
     ImGuiID properties_node_id{0};
+    ImGuiID agent_node_id{0};
+    int layout_version{0};
 };
 
 struct AttachmentSelection {
@@ -419,7 +429,20 @@ struct ShellState {
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
     std::optional<marrow::runtime::ProfilerFrame> hud_overlay_frame;
+    marrow::editor::IconRegistry icons{};
+    std::array<char, 128> hierarchy_filter{};
+    // Active Constraints type tab: 0=IK 1=Path 2=Transform 3=Physics.
+    int constraints_tab{0};
+    // Agent surface — optional, closed by default (Ctrl+L / toolbar toggle).
+    // The socket can be turned on/off at runtime from the panel.
+    AgentSocketServer* agent_server{nullptr};
+    std::optional<int> agent_listen_port;  // last/CLI port
+    std::string agent_token;               // from --agent-token (optional)
+    bool show_agent_panel{false};
+    bool agent_panel_was_open{false};
 };
+
+constexpr int kDefaultAgentPort = 9876;
 
 constexpr char kProjectWindowTitle[] = "Project";
 constexpr char kRuntimeAssetsWindowTitle[] = "Runtime Assets";
@@ -428,6 +451,7 @@ constexpr char kHierarchyWindowTitle[] = "Hierarchy";
 constexpr char kTimelineWindowTitle[] = "Timeline";
 constexpr char kViewportWindowTitle[] = "Viewport";
 constexpr char kPropertiesWindowTitle[] = "Properties";
+constexpr char kAgentWindowTitle[] = "Agent";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};
@@ -477,9 +501,16 @@ const char* attachment_kind_name(marrow::runtime::AttachmentKind kind);
 const char* sequence_playback_mode_name(marrow::runtime::SequencePlaybackMode mode);
 const char* onion_skin_mode_name(marrow::editor::OnionSkinMode mode);
 std::string format_slot_color(const marrow::runtime::SlotColor& color);
+std::optional<std::string_view> selected_bone_name(const ShellState& state);
+const marrow::runtime::AnimationData* selected_animation(const ShellState& state);
+double selected_animation_duration(const ShellState& state);
+double timeline_preview_duration(const ShellState& state);
+void normalize_state_preview_settings(ShellState* state);
+bool rebuild_project_runtime(ShellState* state);
+
 std::vector<std::string> normalize_preview_skin_names(
     const marrow::runtime::SkeletonData& skeleton,
-    const std::vector<std::string>& skin_names);
+    const std::vector<std::string>& preview_skin_names);
 std::string preview_skin_summary(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names);

@@ -14,6 +14,7 @@ typedef struct MarrowSkeletonData MarrowSkeletonData;
 typedef struct MarrowAtlasData MarrowAtlasData;
 typedef struct MarrowSkeleton MarrowSkeleton;
 typedef struct MarrowAnimState MarrowAnimState;
+typedef struct MarrowProject MarrowProject;
 typedef struct MarrowSkeletonBounds MarrowSkeletonBounds;
 typedef struct MarrowRenderCommandList MarrowRenderCommandList;
 
@@ -870,6 +871,35 @@ MarrowStatusCode marrow_render_command_list_get_event_ref(
     const MarrowRenderCommandList* command_list,
     size_t event_index,
     MarrowRenderEventRef* out_event_ref);
+
+/* Editor project handles are used for headless manipulation and AI agent
+   dispatch. They maintain an internal undo stack and project state. */
+/**
+ * @brief Loads an editor project from a `.marrow` file.
+ * @param path Path to the editor project file.
+ * @param out_project Receives the loaded project handle.
+ * @return Status code describing success or failure.
+ */
+MarrowStatusCode marrow_editor_project_load(
+    const char* path,
+    MarrowProject** out_project);
+/**
+ * @brief Destroys an editor project handle.
+ * @param project Project handle to destroy. `NULL` is allowed.
+ * @return Status code describing success or failure.
+ */
+MarrowStatusCode marrow_editor_project_destroy(MarrowProject* project);
+/**
+ * @brief Dispatches a JSON command to mutate the editor project state.
+ * @param project Project handle to update.
+ * @param json_command JSON command string: { "op": "...", "args": { ... } }
+ * @param out_result_json Receives a borrowed string view for the result JSON.
+ * @return Status code describing success or failure.
+ */
+MarrowStatusCode marrow_editor_agent_dispatch(
+    MarrowProject* project,
+    const char* json_command,
+    MarrowStringView* out_result_json);
 
 #ifdef __cplusplus
 }

@@ -10,10 +10,13 @@
 #include <vector>
 
 #include "marrow/allocator.hpp"
+#include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
 #include "marrow/runtime/atlas.hpp"
+#include "marrow/runtime/json.hpp"
 #include "marrow/runtime/skeleton.hpp"
+#include "shell_types.hpp"
 
 struct MarrowSkeletonData {
     explicit MarrowSkeletonData(
@@ -45,6 +48,14 @@ struct MarrowAnimState {
     marrow::UniquePtr<marrow::runtime::AnimationState> value;
     MarrowAnimationStateListener listener{nullptr};
     void* listener_user_data{nullptr};
+};
+
+struct MarrowProject {
+    explicit MarrowProject(std::unique_ptr<marrow::editor::shell::ShellState> value_in)
+        : value(std::move(value_in)) {}
+
+    std::unique_ptr<marrow::editor::shell::ShellState> value;
+    std::string last_dispatch_result;
 };
 
 struct MarrowSkeletonBounds {
@@ -1358,6 +1369,28 @@ MarrowStatusCode marrow_render_command_list_get_projection(
     return MARROW_STATUS_OK;
 }
 
+MarrowStatusCode marrow_render_command_list_get_event_ref(
+    const MarrowRenderCommandList* command_list,
+    size_t event_index,
+    MarrowRenderEventRef* out_event_ref) {
+    if (command_list == nullptr || out_event_ref == nullptr) {
+        return fail_invalid_argument(
+            "marrow_render_command_list_get_event_ref requires non-null handles.");
+    }
+    if (const MarrowStatusCode status =
+            require_index(command_list->value.ordered_events, event_index, "render event");
+        status != MARROW_STATUS_OK) {
+        return status;
+    }
+
+    const marrow::renderer::RenderCommandEventRef& event =
+        command_list->value.ordered_events[event_index];
+    out_event_ref->kind = to_c_render_event_kind(event.kind);
+    out_event_ref->index = event.index;
+    clear_last_error_message();
+    return MARROW_STATUS_OK;
+}
+
 MarrowStatusCode marrow_render_command_list_copy_bone_palette(
     const MarrowRenderCommandList* command_list,
     float* out_bone_palette,
@@ -1536,26 +1569,69 @@ MarrowStatusCode marrow_render_command_list_copy_clip_indices(
         });
 }
 
-MarrowStatusCode marrow_render_command_list_get_event_ref(
-    const MarrowRenderCommandList* command_list,
-    size_t event_index,
-    MarrowRenderEventRef* out_event_ref) {
-    if (command_list == nullptr || out_event_ref == nullptr) {
+MarrowStatusCode marrow_editor_project_load(
+    const char* path,
+    MarrowProject** out_project) {
+    if (path == nullptr || out_project == nullptr) {
         return fail_invalid_argument(
-            "marrow_render_command_list_get_event_ref requires non-null handles.");
-    }
-    if (const MarrowStatusCode status =
-            require_index(command_list->value.ordered_events, event_index, "render event");
-        status != MARROW_STATUS_OK) {
-        return status;
+            "marrow_editor_project_load requires non-null path and output pointers.");
     }
 
-    const marrow::renderer::RenderCommandEventRef& event =
-        command_list->value.ordered_events[event_index];
-    out_event_ref->kind = to_c_render_event_kind(event.kind);
-    out_event_ref->index = event.index;
+    try {
+        auto shell_state = std::make_unique<marrow::editor::shell::ShellState>();
+        shell_state->project_path = path;
+        if (!marrow::editor::shell::reload_project(shell_state.get())) {
+            return fail(MARROW_STATUS_IO_ERROR, "Failed to load project: " + std::string(path));
+        }
+
+        *out_project = marrow::allocate_object<MarrowProject>(std::move(shell_state));
+        clear_last_error_message();
+        return MARROW_STATUS_OK;
+    } catch (const std::exception& error) {
+        return map_exception(error);
+    }
+}
+
+MarrowStatusCode marrow_editor_project_destroy(MarrowProject* project) {
+    marrow::destroy_object(project);
     clear_last_error_message();
     return MARROW_STATUS_OK;
+}
+
+MarrowStatusCode marrow_editor_agent_dispatch(
+    MarrowProject* project,
+    const char* json_command,
+    MarrowStringView* out_result_json) {
+    if (project == nullptr || json_command == nullptr || out_result_json == nullptr) {
+        return fail_invalid_argument(
+            "marrow_editor_agent_dispatch requires non-null handles.");
+    }
+
+    try {
+        const auto parse_result = marrow::runtime::json::parse_document(json_command);
+        if (!parse_result) {
+            return fail(MARROW_STATUS_PARSE_ERROR, parse_result.error->format());
+        }
+
+        const marrow::editor::shell::AgentDispatchResult result =
+            marrow::editor::shell::AgentCommandDispatcher::dispatch(
+                project->value.get(),
+                parse_result.document->root);
+
+        marrow::runtime::json::Value::Object result_obj;
+        result_obj.emplace("ok", marrow::runtime::json::Value(result.ok, {}));
+        result_obj.emplace("message", marrow::runtime::json::Value(result.message, {}));
+        result_obj.emplace("scene_delta", result.scene_delta);
+
+        project->last_dispatch_result =
+            marrow::runtime::json::serialize_pretty(marrow::runtime::json::Value(std::move(result_obj), {}));
+
+        *out_result_json = to_string_view(project->last_dispatch_result);
+        clear_last_error_message();
+        return MARROW_STATUS_OK;
+    } catch (const std::exception& error) {
+        return map_exception(error);
+    }
 }
 
 } // extern "C"

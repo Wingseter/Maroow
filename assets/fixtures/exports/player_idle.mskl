@@ -43,6 +43,20 @@
     },
     "idle": {
       "bones": {
+        "arm_l": {
+          "rotate": [
+            {
+              "angle": 90,
+              "curve": "linear",
+              "time": 0.25
+            },
+            {
+              "angle": 45,
+              "curve": "linear",
+              "time": 0.5
+            }
+          ]
+        },
         "root": {
           "translate": [
             {
@@ -81,6 +95,11 @@
               "angle": 8,
               "curve": "stepped",
               "time": 0.5
+            },
+            {
+              "angle": 30,
+              "curve": "linear",
+              "time": 0.75
             },
             {
               "angle": -2,
@@ -415,7 +434,7 @@
         "ik_lower"
       ],
       "compress": false,
-      "mix": 1,
+      "mix": 0.75,
       "name": "editor_arm_reach",
       "softness": 0,
       "stretch": false,

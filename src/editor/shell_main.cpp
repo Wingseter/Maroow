@@ -33,8 +33,12 @@
 #include "imgui_internal.h"
 
 #include "macos_app_focus.hpp"
+#include "shell_theme.hpp"
 #include "shell_types.hpp"
+#include "shell_widgets.hpp"
 #include "viewport_renderer.hpp"
+#include "agent_socket.hpp"
+#include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/module.hpp"
 #include "marrow/editor/project.hpp"
@@ -44,16 +48,23 @@
 
 namespace marrow::editor::shell {
 
-// ── Editor Fonts ──
+using marrow::editor::Icon;
+using marrow::editor::IconRegistry;
+
+// ── Editor Fonts (declared extern in shell_theme.hpp) ──
 ImFont* g_font_regular = nullptr;
 ImFont* g_font_semibold = nullptr;
+ImFont* g_font_small = nullptr;
+ImFont* g_font_display = nullptr;
+ImFont* g_font_mono = nullptr;
 
 void print_usage(std::string_view executable_name) {
     std::cout << "Usage: " << executable_name
-              << " [project.marrow] [--auto-close <frames>] [--verify-launch-focus]\n"
+              << " [project.marrow] [--auto-close <frames>] [--agent-port <port>] [--verify-launch-focus]\n"
                  "       "
               << executable_name
               << " --project <project.marrow> [--auto-close <frames>] "
+                 "[--agent-port <port>] [--agent-token <secret>] "
                  "[--verify-launch-focus]\n"
                  "Launch the Marrow Dear ImGui editor shell using GLFW and OpenGL.\n";
 }
@@ -109,6 +120,35 @@ ParseResult parse_arguments(int argc, char** argv) {
             }
 
             result.options.auto_close_frames = value;
+            continue;
+        }
+
+        if (argument == "--agent-port") {
+            if (index + 1 >= argc) {
+                std::cerr << "--agent-port requires a port number.\n";
+                print_usage(argv[0]);
+                return result;
+            }
+
+            const std::optional<int> value = parse_positive_integer(argv[++index]);
+            if (!value.has_value()) {
+                std::cerr << "--agent-port expects a positive integer.\n";
+                print_usage(argv[0]);
+                return result;
+            }
+
+            result.options.agent_port = value;
+            continue;
+        }
+
+        if (argument == "--agent-token") {
+            if (index + 1 >= argc) {
+                std::cerr << "--agent-token requires a value.\n";
+                print_usage(argv[0]);
+                return result;
+            }
+
+            result.options.agent_token = argv[++index];
             continue;
         }
 
@@ -362,73 +402,92 @@ void apply_editor_theme() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* c = style.Colors;
 
-    // ── Surface Hierarchy (Charcoal Studio) ──
-    c[ImGuiCol_WindowBg]           = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);  // #1A1D23
-    c[ImGuiCol_ChildBg]            = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);  // #22262E
-    c[ImGuiCol_PopupBg]            = ImVec4(0.133f, 0.149f, 0.180f, 0.95f);
-    c[ImGuiCol_MenuBarBg]          = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);
-    c[ImGuiCol_DockingEmptyBg]     = ImVec4(0.063f, 0.075f, 0.098f, 1.0f);  // #101319
+    // Charcoal Studio v2 tokens — single source in shell_theme.hpp.
+    namespace t = marrow::editor::shell::theme;
+    const ImVec4 surface_lowest  = t::kSurfaceLowest;
+    const ImVec4 surface         = t::kSurface;
+    const ImVec4 surface_low     = t::kSurfaceLow;
+    const ImVec4 surface_default = t::kSurfaceDefault;
+    const ImVec4 surface_high    = t::kSurfaceHigh;
+    const ImVec4 surface_highest = t::kSurfaceHighest;
+    const ImVec4 surface_bright  = t::kSurfaceBright;
+    const ImVec4 primary         = t::kPrimary;
+    const ImVec4 primary_active  = t::kPrimaryContainer;
+    const ImVec4 on_surface      = t::kOnSurface;
+    const ImVec4 inactive        = t::kInactive;
+    const ImVec4 outline_variant = t::kOutlineVariant;
 
-    // ── Header ──
-    c[ImGuiCol_Header]             = ImVec4(0.165f, 0.184f, 0.227f, 1.0f);  // #2A2F3A
-    c[ImGuiCol_HeaderHovered]      = ImVec4(0.200f, 0.224f, 0.275f, 1.0f);
-    c[ImGuiCol_HeaderActive]       = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);  // #4A7BF7
+    // Surface hierarchy (no-line rule: boundaries via tonal shift)
+    c[ImGuiCol_WindowBg]           = surface;
+    c[ImGuiCol_ChildBg]            = surface_low;
+    c[ImGuiCol_PopupBg]            = ImVec4(surface_highest.x, surface_highest.y, surface_highest.z, 0.95f);
+    c[ImGuiCol_MenuBarBg]          = surface_low;
+    c[ImGuiCol_DockingEmptyBg]     = surface_lowest;
 
-    // ── Widget ──
-    c[ImGuiCol_Button]             = ImVec4(0.200f, 0.227f, 0.278f, 1.0f);  // #333A47
-    c[ImGuiCol_ButtonHovered]      = ImVec4(0.239f, 0.271f, 0.337f, 1.0f);  // #3D4556
-    c[ImGuiCol_ButtonActive]       = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
-    c[ImGuiCol_FrameBg]            = ImVec4(0.200f, 0.227f, 0.278f, 1.0f);
-    c[ImGuiCol_FrameBgHovered]     = ImVec4(0.239f, 0.271f, 0.337f, 1.0f);
-    c[ImGuiCol_FrameBgActive]      = ImVec4(0.290f, 0.482f, 0.969f, 0.67f);
-    c[ImGuiCol_CheckMark]          = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
-    c[ImGuiCol_SliderGrab]         = ImVec4(0.290f, 0.482f, 0.969f, 0.80f);
-    c[ImGuiCol_SliderGrabActive]   = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
+    // Header (tree / collapsing header)
+    c[ImGuiCol_Header]             = surface_default;
+    c[ImGuiCol_HeaderHovered]      = surface_high;
+    c[ImGuiCol_HeaderActive]       = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.85f);
 
-    // ── Selection ──
-    c[ImGuiCol_TextSelectedBg]     = ImVec4(0.290f, 0.482f, 0.969f, 0.35f);
+    // Button
+    c[ImGuiCol_Button]             = surface_high;
+    c[ImGuiCol_ButtonHovered]      = surface_bright;
+    c[ImGuiCol_ButtonActive]       = primary_active;
 
-    // ── Tab ──
-    c[ImGuiCol_Tab]                = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);  // #22262E
-    c[ImGuiCol_TabHovered]         = ImVec4(0.239f, 0.271f, 0.337f, 1.0f);
-    c[ImGuiCol_TabActive]          = ImVec4(0.165f, 0.184f, 0.227f, 1.0f);  // #2A2F3A
-    c[ImGuiCol_TabUnfocused]       = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);
-    c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);
+    // Frame (input)
+    c[ImGuiCol_FrameBg]            = surface_high;
+    c[ImGuiCol_FrameBgHovered]     = surface_bright;
+    c[ImGuiCol_FrameBgActive]      = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.67f);
 
-    // ── Title Bar ──
-    c[ImGuiCol_TitleBg]            = ImVec4(0.102f, 0.114f, 0.137f, 1.0f);
-    c[ImGuiCol_TitleBgActive]      = ImVec4(0.133f, 0.149f, 0.180f, 1.0f);
-    c[ImGuiCol_TitleBgCollapsed]   = ImVec4(0.063f, 0.075f, 0.098f, 0.75f);
+    // Checkmark / slider
+    c[ImGuiCol_CheckMark]          = primary_active;
+    c[ImGuiCol_SliderGrab]         = primary;
+    c[ImGuiCol_SliderGrabActive]   = primary_active;
 
-    // ── Scrollbar ──
-    c[ImGuiCol_ScrollbarBg]        = ImVec4(0.102f, 0.114f, 0.137f, 0.53f);
-    c[ImGuiCol_ScrollbarGrab]      = ImVec4(0.314f, 0.345f, 0.408f, 1.0f);  // #505868
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.408f, 0.439f, 0.502f, 1.0f);
-    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.494f, 0.722f, 1.000f, 1.0f);
+    // Selection
+    c[ImGuiCol_TextSelectedBg]     = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.35f);
 
-    // ── Separator, Border ──
-    c[ImGuiCol_Separator]          = ImVec4(0.180f, 0.204f, 0.251f, 1.0f);  // #2E3440
-    c[ImGuiCol_SeparatorHovered]   = ImVec4(0.290f, 0.482f, 0.969f, 0.78f);
-    c[ImGuiCol_SeparatorActive]    = ImVec4(0.290f, 0.482f, 0.969f, 1.0f);
-    c[ImGuiCol_Border]             = ImVec4(0.227f, 0.251f, 0.314f, 0.50f); // #3A4050
+    // Tab
+    c[ImGuiCol_Tab]                = surface_low;
+    c[ImGuiCol_TabHovered]         = surface_high;
+    c[ImGuiCol_TabActive]          = surface_default;
+    c[ImGuiCol_TabUnfocused]       = surface;
+    c[ImGuiCol_TabUnfocusedActive] = surface_low;
 
-    // ── Resize Grip ──
-    c[ImGuiCol_ResizeGrip]         = ImVec4(0.290f, 0.482f, 0.969f, 0.20f);
-    c[ImGuiCol_ResizeGripHovered]  = ImVec4(0.290f, 0.482f, 0.969f, 0.67f);
-    c[ImGuiCol_ResizeGripActive]   = ImVec4(0.290f, 0.482f, 0.969f, 0.95f);
+    // Title bar
+    c[ImGuiCol_TitleBg]            = surface_low;
+    c[ImGuiCol_TitleBgActive]      = surface_default;
+    c[ImGuiCol_TitleBgCollapsed]   = ImVec4(surface.x, surface.y, surface.z, 0.75f);
 
-    // ── Docking ──
-    c[ImGuiCol_DockingPreview]     = ImVec4(0.290f, 0.482f, 0.969f, 0.70f);
+    // Scrollbar
+    c[ImGuiCol_ScrollbarBg]        = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_ScrollbarGrab]      = surface_highest;
+    c[ImGuiCol_ScrollbarGrabHovered] = outline_variant;
+    c[ImGuiCol_ScrollbarGrabActive]  = primary_active;
 
-    // ── Text ──
-    c[ImGuiCol_Text]               = ImVec4(0.878f, 0.894f, 0.925f, 1.0f);  // #E0E4EC
-    c[ImGuiCol_TextDisabled]       = ImVec4(0.533f, 0.569f, 0.647f, 1.0f);  // #8891A5
+    // Separator (ghost border — 20% opacity of outline_variant)
+    c[ImGuiCol_Separator]          = ImVec4(outline_variant.x, outline_variant.y, outline_variant.z, 0.30f);
+    c[ImGuiCol_SeparatorHovered]   = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.78f);
+    c[ImGuiCol_SeparatorActive]    = primary_active;
+    c[ImGuiCol_Border]             = ImVec4(outline_variant.x, outline_variant.y, outline_variant.z, 0.20f);
 
-    // ── Table ──
+    // Resize grip
+    c[ImGuiCol_ResizeGrip]         = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.20f);
+    c[ImGuiCol_ResizeGripHovered]  = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.67f);
+    c[ImGuiCol_ResizeGripActive]   = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.95f);
+
+    // Docking preview overlay
+    c[ImGuiCol_DockingPreview]     = ImVec4(primary_active.x, primary_active.y, primary_active.z, 0.50f);
+
+    // Text
+    c[ImGuiCol_Text]               = on_surface;
+    c[ImGuiCol_TextDisabled]       = inactive;
+
+    // Table (v2 zebra: even rows a faint white lift, odd rows transparent)
     c[ImGuiCol_TableRowBg]         = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_TableRowBgAlt]      = ImVec4(0.133f, 0.149f, 0.180f, 0.30f);
-    c[ImGuiCol_TableBorderStrong]  = ImVec4(0.227f, 0.251f, 0.314f, 1.0f);
-    c[ImGuiCol_TableBorderLight]   = ImVec4(0.180f, 0.204f, 0.251f, 1.0f);
+    c[ImGuiCol_TableRowBgAlt]      = ImVec4(1.0f, 1.0f, 1.0f, 0.018f);
+    c[ImGuiCol_TableBorderStrong]  = ImVec4(outline_variant.x, outline_variant.y, outline_variant.z, 0.40f);
+    c[ImGuiCol_TableBorderLight]   = ImVec4(outline_variant.x, outline_variant.y, outline_variant.z, 0.20f);
 
     // ── Style Vars ──
     style.WindowRounding    = 2.0f;
@@ -448,6 +507,147 @@ void apply_editor_theme() {
     style.ItemInnerSpacing  = ImVec2(4.0f, 4.0f);
     style.ScrollbarSize     = 12.0f;
     style.GrabMinSize       = 8.0f;
+}
+
+// Toolbar-sized icon button. Returns true when clicked. When `active` is true,
+// the button renders with the primary_active background (toggle-on state). When
+// `disabled` is true, the button is desaturated and non-interactive.
+bool icon_button(
+    const marrow::editor::IconRegistry& icons,
+    marrow::editor::Icon icon,
+    const char* tooltip,
+    bool active = false,
+    bool disabled = false,
+    float size = 20.0f) {
+    const ImTextureID texture = icons.get(icon);
+    const std::string_view stem = marrow::editor::icon_filename_stem(icon);
+    ImGui::PushID(stem.data(), stem.data() + stem.size());
+
+    if (disabled) {
+        ImGui::BeginDisabled();
+    }
+
+    // Tint: primary when active, on-surface otherwise. Disabled reduces alpha.
+    namespace t = marrow::editor::shell::theme;
+    const ImVec4 tint = active
+        ? t::kPrimary
+        : t::with_alpha(t::kOnSurface, disabled ? 0.35f : 0.90f);
+    const ImVec4 bg = active
+        ? t::with_alpha(t::kPrimaryContainer, 0.20f)
+        : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    bool clicked = false;
+    if (texture != 0) {
+        clicked = ImGui::ImageButton(
+            stem.data(),
+            texture,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            bg,
+            tint);
+    } else {
+        // Fallback: first char of stem in brackets when texture missing.
+        char label[4] = {'[', stem.empty() ? '?' : stem[0], ']', '\0'};
+        clicked = ImGui::Button(label);
+    }
+
+    if (disabled) {
+        ImGui::EndDisabled();
+    }
+
+    if (tooltip != nullptr && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+
+    ImGui::PopID();
+    return clicked;
+}
+
+// Inline icon + text. Icon sized to text line height so it aligns with baseline.
+void icon_label(
+    const marrow::editor::IconRegistry& icons,
+    marrow::editor::Icon icon,
+    const char* text,
+    float alpha = 0.90f) {
+    const ImTextureID tex = icons.get(icon);
+    const float size = ImGui::GetTextLineHeight();
+    if (tex != 0) {
+        ImGui::ImageWithBg(
+            tex,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
+            ImVec4(0.882f, 0.886f, 0.918f, alpha));
+        ImGui::SameLine(0.0f, 6.0f);
+    }
+    ImGui::TextUnformatted(text);
+}
+
+// TreeNodeEx with leading icon. `id` is the hidden stable id (use "##bone_42" or
+// similar). `label` is what's rendered visibly after the icon.
+bool icon_tree_node(
+    const marrow::editor::IconRegistry& icons,
+    const char* id,
+    marrow::editor::Icon icon,
+    const char* label,
+    ImGuiTreeNodeFlags flags,
+    bool* out_clicked = nullptr) {
+    const bool open = ImGui::TreeNodeEx(id, flags);
+    if (out_clicked != nullptr) {
+        *out_clicked = ImGui::IsItemClicked();
+    }
+    ImGui::SameLine(0.0f, 4.0f);
+    const ImTextureID tex = icons.get(icon);
+    const float size = ImGui::GetTextLineHeight();
+    if (tex != 0) {
+        ImGui::ImageWithBg(
+            tex,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
+            ImVec4(0.882f, 0.886f, 0.918f, 0.90f));
+        ImGui::SameLine(0.0f, 6.0f);
+    }
+    ImGui::TextUnformatted(label);
+    return open;
+}
+
+// Selectable row with leading icon.
+bool icon_selectable(
+    const marrow::editor::IconRegistry& icons,
+    marrow::editor::Icon icon,
+    const char* label,
+    bool selected) {
+    const ImTextureID tex = icons.get(icon);
+    const float size = ImGui::GetTextLineHeight();
+    const float icon_w = tex != 0 ? size + 6.0f : 0.0f;
+    const float row_y = ImGui::GetCursorPosY();
+
+    const bool clicked = ImGui::Selectable(
+        (std::string("##") + label).c_str(),
+        selected,
+        0,
+        ImVec2(0.0f, size));
+
+    ImGui::SetCursorPosY(row_y);
+    if (tex != 0) {
+        ImGui::ImageWithBg(
+            tex,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
+            ImVec4(0.882f, 0.886f, 0.918f, 0.90f));
+        ImGui::SameLine(0.0f, 6.0f);
+    } else {
+        ImGui::Dummy(ImVec2(icon_w, 0.0f));
+        ImGui::SameLine(0.0f, 0.0f);
+    }
+    ImGui::TextUnformatted(label);
+    return clicked;
 }
 
 void load_editor_fonts() {
@@ -473,24 +673,64 @@ void load_editor_fonts() {
     const std::string regular_path = find_font_path("Pretendard-Regular.otf");
     const std::string semibold_path = find_font_path("Pretendard-SemiBold.otf");
 
+    ImFontConfig cfg;
+    cfg.OversampleH = 2;
+    cfg.OversampleV = 1;
+
+    // Base body font MUST be added first — ImGui uses it as the default.
     if (!regular_path.empty()) {
-        ImFontConfig cfg;
-        cfg.OversampleH = 2;
-        cfg.OversampleV = 1;
         g_font_regular = io.Fonts->AddFontFromFileTTF(
             regular_path.c_str(), kBaseFontSize, &cfg);
     }
-
-    if (!semibold_path.empty()) {
-        g_font_semibold = io.Fonts->AddFontFromFileTTF(
-            semibold_path.c_str(), kBaseFontSize);
-    }
-
     if (!g_font_regular) {
         g_font_regular = io.Fonts->AddFontDefaultVector();
     }
+
+    // Charcoal v2 type scale. Conservative sizes around the 15px base so the
+    // existing layouts do not regress; helpers opt into these accents.
+    if (!semibold_path.empty()) {
+        g_font_semibold = io.Fonts->AddFontFromFileTTF(
+            semibold_path.c_str(), kBaseFontSize, &cfg);
+    }
     if (!g_font_semibold) {
         g_font_semibold = g_font_regular;
+    }
+
+    if (!regular_path.empty()) {
+        g_font_small = io.Fonts->AddFontFromFileTTF(
+            regular_path.c_str(), 12.0f, &cfg);
+    }
+    if (!g_font_small) {
+        g_font_small = g_font_regular;
+    }
+
+    if (!semibold_path.empty()) {
+        g_font_display = io.Fonts->AddFontFromFileTTF(
+            semibold_path.c_str(), 22.0f, &cfg);
+    }
+    if (!g_font_display) {
+        g_font_display = g_font_semibold;
+    }
+
+    // Data scale (coords / time). Prefer a bundled monospace if present;
+    // otherwise reuse the body font (Pretendard renders tabular figures well).
+    const char* kMonoCandidates[] = {
+        "JetBrainsMono-Regular.ttf", "JetBrainsMono-Regular.otf",
+        "IBMPlexMono-Regular.ttf",   "SpaceMono-Regular.ttf",
+    };
+    std::string mono_path;
+    for (const char* name : kMonoCandidates) {
+        mono_path = find_font_path(name);
+        if (!mono_path.empty()) {
+            break;
+        }
+    }
+    if (!mono_path.empty()) {
+        g_font_mono = io.Fonts->AddFontFromFileTTF(
+            mono_path.c_str(), 14.0f, &cfg);
+    }
+    if (!g_font_mono) {
+        g_font_mono = g_font_regular;
     }
 }
 
@@ -504,6 +744,7 @@ void ensure_default_dock_layout(
 
     if (state->default_dock_layout_initialized &&
         state->dock_layout.dockspace_id == dockspace_id &&
+        state->dock_layout.layout_version == kDockLayoutVersion &&
         ImGui::DockBuilderGetNode(dockspace_id) != nullptr) {
         return;
     }
@@ -516,47 +757,50 @@ void ensure_default_dock_layout(
     ImGui::DockBuilderSetNodePos(dockspace_id, viewport->WorkPos);
     ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
 
+    // Charcoal v2 shell. Two columns by default; the Agent column only exists
+    // while the (optional) Agent panel is open, so closing it reclaims space.
+    //   ┌ left ≈22% ┬ center (viewport / timeline) ┬ right ≈26% (Agent*) ┐
+    //   │ Hier|Proj │ Viewport                     │ Agent  (* if open)  │
+    //   │ Props|RT… │ Timeline                     │                     │
     ImGuiID dock_center_id = dockspace_id;
     ImGuiID dock_left_id = 0;
+    ImGuiID dock_right_id = 0;
     ImGuiID dock_bottom_id = 0;
     ImGuiID dock_left_bottom_id = 0;
     ImGui::DockBuilderSplitNode(
-        dock_center_id,
-        ImGuiDir_Left,
-        0.28f,
-        &dock_left_id,
+        dock_center_id, ImGuiDir_Left, 0.22f, &dock_left_id, &dock_center_id);
+    if (state->show_agent_panel) {
+        // 0.26 of the original width = 0.333 of the remaining 0.78 node.
+        ImGui::DockBuilderSplitNode(
+            dock_center_id, ImGuiDir_Right, 0.333f, &dock_right_id,
+            &dock_center_id);
+    }
+    ImGui::DockBuilderSplitNode(
+        dock_center_id, ImGuiDir_Down, 0.30f, &dock_bottom_id,
         &dock_center_id);
     ImGui::DockBuilderSplitNode(
-        dock_center_id,
-        ImGuiDir_Down,
-        0.30f,
-        &dock_bottom_id,
-        &dock_center_id);
-    ImGui::DockBuilderSplitNode(
-        dock_left_id,
-        ImGuiDir_Down,
-        0.48f,
-        &dock_left_bottom_id,
+        dock_left_id, ImGuiDir_Down, 0.50f, &dock_left_bottom_id,
         &dock_left_id);
 
     state->dock_layout.viewport_node_id = dock_center_id;
     state->dock_layout.timeline_node_id = dock_bottom_id;
     state->dock_layout.hierarchy_node_id = dock_left_id;
     state->dock_layout.properties_node_id = dock_left_bottom_id;
+    state->dock_layout.agent_node_id = dock_right_id;
 
-    ImGui::DockBuilderDockWindow(kViewportWindowTitle, state->dock_layout.viewport_node_id);
-    ImGui::DockBuilderDockWindow(kTimelineWindowTitle, state->dock_layout.timeline_node_id);
-    ImGui::DockBuilderDockWindow(kProjectWindowTitle, state->dock_layout.hierarchy_node_id);
-    ImGui::DockBuilderDockWindow(kHierarchyWindowTitle, state->dock_layout.hierarchy_node_id);
-    ImGui::DockBuilderDockWindow(
-        kRuntimeAssetsWindowTitle,
-        state->dock_layout.properties_node_id);
-    ImGui::DockBuilderDockWindow(
-        kConstraintsWindowTitle,
-        state->dock_layout.properties_node_id);
-    ImGui::DockBuilderDockWindow(kPropertiesWindowTitle, state->dock_layout.properties_node_id);
+    ImGui::DockBuilderDockWindow(kViewportWindowTitle, dock_center_id);
+    ImGui::DockBuilderDockWindow(kTimelineWindowTitle, dock_bottom_id);
+    ImGui::DockBuilderDockWindow(kHierarchyWindowTitle, dock_left_id);
+    ImGui::DockBuilderDockWindow(kProjectWindowTitle, dock_left_id);
+    ImGui::DockBuilderDockWindow(kPropertiesWindowTitle, dock_left_bottom_id);
+    ImGui::DockBuilderDockWindow(kRuntimeAssetsWindowTitle, dock_left_bottom_id);
+    ImGui::DockBuilderDockWindow(kConstraintsWindowTitle, dock_left_bottom_id);
+    if (state->show_agent_panel) {
+        ImGui::DockBuilderDockWindow(kAgentWindowTitle, dock_right_id);
+    }
     ImGui::DockBuilderFinish(dockspace_id);
 
+    state->dock_layout.layout_version = kDockLayoutVersion;
     state->default_dock_layout_initialized = true;
 }
 
@@ -601,18 +845,7 @@ void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
     state->status_message = "Framed skeleton to viewport";
 }
 
-std::optional<std::string_view> selected_bone_name(const ShellState& state) {
-    if (!state.load_result || !state.selected_bone_index.has_value()) {
-        return std::nullopt;
-    }
-
-    const auto& bones = state.load_result.skeleton_data->bones();
-    if (*state.selected_bone_index >= bones.size()) {
-        return std::nullopt;
-    }
-
-    return bones[*state.selected_bone_index].name;
-}
+// selected_bone_name moved to shell_core.cpp
 
 void select_bone(
     ShellState* state,
@@ -763,149 +996,7 @@ bool apply_preview_skin_selection(
     return true;
 }
 
-EditAction::EditAction(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge)
-    : kind_(kind),
-      label_(std::move(label)),
-      group_(std::move(group)),
-      allow_merge_(allow_merge) {}
-
-EditActionKind EditAction::kind() const {
-    return kind_;
-}
-
-const std::string& EditAction::label() const {
-    return label_;
-}
-
-const std::string& EditAction::group() const {
-    return group_;
-}
-
-bool EditAction::allow_merge() const {
-    return allow_merge_;
-}
-
-SnapshotEditAction::SnapshotEditAction(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    EditorHistorySnapshot before,
-    EditorHistorySnapshot after)
-    : EditAction(kind, std::move(label), std::move(group), allow_merge),
-      before_(std::move(before)),
-      after_(std::move(after)) {}
-
-bool SnapshotEditAction::undo(ShellState* state) const {
-    return apply_history_snapshot(state, before_);
-}
-
-bool SnapshotEditAction::redo(ShellState* state) const {
-    return apply_history_snapshot(state, after_);
-}
-
-bool SnapshotEditAction::merge_from(const EditAction& action) {
-    if (!allow_merge_ || group_.empty() || !action.allow_merge() ||
-        action.kind() != kind_ || action.group() != group_) {
-        return false;
-    }
-
-    const auto* snapshot_action = dynamic_cast<const SnapshotEditAction*>(&action);
-    if (snapshot_action == nullptr) {
-        return false;
-    }
-
-    after_ = snapshot_action->after_;
-    label_ = snapshot_action->label();
-    return true;
-}
-
-bool UndoStack::can_undo() const {
-    return !undo_actions_.empty();
-}
-
-bool UndoStack::can_redo() const {
-    return !redo_actions_.empty();
-}
-
-std::size_t UndoStack::undo_count() const {
-    return undo_actions_.size();
-}
-
-std::size_t UndoStack::redo_count() const {
-    return redo_actions_.size();
-}
-
-void UndoStack::clear() {
-    undo_actions_.clear();
-    redo_actions_.clear();
-}
-
-const EditAction* UndoStack::peek_undo() const {
-    return undo_actions_.empty() ? nullptr : undo_actions_.back().get();
-}
-
-const EditAction* UndoStack::peek_redo() const {
-    return redo_actions_.empty() ? nullptr : redo_actions_.back().get();
-}
-
-void UndoStack::push(std::unique_ptr<EditAction> action) {
-    if (!action) {
-        return;
-    }
-
-    redo_actions_.clear();
-    if (!undo_actions_.empty() && undo_actions_.back()->merge_from(*action)) {
-        return;
-    }
-
-    if (undo_actions_.size() >= kMaxDepth) {
-        undo_actions_.erase(undo_actions_.begin());
-    }
-    undo_actions_.push_back(std::move(action));
-}
-
-bool UndoStack::undo(ShellState* state, std::string* label_out) {
-    if (undo_actions_.empty()) {
-        return false;
-    }
-
-    std::unique_ptr<EditAction> action = std::move(undo_actions_.back());
-    undo_actions_.pop_back();
-    if (!action->undo(state)) {
-        undo_actions_.push_back(std::move(action));
-        return false;
-    }
-
-    if (label_out != nullptr) {
-        *label_out = action->label();
-    }
-    redo_actions_.push_back(std::move(action));
-    return true;
-}
-
-bool UndoStack::redo(ShellState* state, std::string* label_out) {
-    if (redo_actions_.empty()) {
-        return false;
-    }
-
-    std::unique_ptr<EditAction> action = std::move(redo_actions_.back());
-    redo_actions_.pop_back();
-    if (!action->redo(state)) {
-        redo_actions_.push_back(std::move(action));
-        return false;
-    }
-
-    if (label_out != nullptr) {
-        *label_out = action->label();
-    }
-    undo_actions_.push_back(std::move(action));
-    return true;
-}
+// EditAction and UndoStack implementations moved to shell_core.cpp
 
 bool attachment_selection_equal(
     const std::optional<AttachmentSelection>& left,
@@ -922,157 +1013,19 @@ bool attachment_selection_equal(
         left->attachment_name == right->attachment_name;
 }
 
-EditorHistorySnapshot capture_history_snapshot(
-    const ShellState& state,
-    bool include_serialized_project) {
-    EditorHistorySnapshot snapshot;
-    if (state.load_result.project != nullptr) {
-        snapshot.project = *state.load_result.project;
-        if (include_serialized_project) {
-            snapshot.serialized_project =
-                marrow::editor::serialize_project(*state.load_result.project);
-        }
-    }
-    snapshot.preview_skin_names = state.preview_skin_names;
-    snapshot.preview_slot_overrides = state.preview_slot_overrides;
-    return snapshot;
-}
+// capture_history_snapshot moved to shell_core.cpp
 
-bool history_snapshots_equal(
-    const EditorHistorySnapshot& left,
-    const EditorHistorySnapshot& right) {
-    if (left.serialized_project != right.serialized_project ||
-        left.preview_skin_names != right.preview_skin_names ||
-        left.preview_slot_overrides.size() != right.preview_slot_overrides.size()) {
-        return false;
-    }
+// history_snapshots_equal moved to shell_core.cpp
 
-    for (std::size_t index = 0; index < left.preview_slot_overrides.size(); ++index) {
-        if (!attachment_selection_equal(
-                left.preview_slot_overrides[index],
-                right.preview_slot_overrides[index])) {
-            return false;
-        }
-    }
+// assign_history_snapshot moved to shell_core.cpp
 
-    return true;
-}
+// restore_history_snapshot moved to shell_core.cpp
 
-void assign_history_snapshot(
-    ShellState* state,
-    const EditorHistorySnapshot& snapshot) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return;
-    }
+// apply_history_snapshot moved to shell_core.cpp
 
-    *state->load_result.project = snapshot.project;
-    state->viewport.onion_skin = snapshot.project.editor_metadata.viewport.onion_skin;
-    state->preview_skin_names = snapshot.preview_skin_names;
-    state->preview_slot_overrides = snapshot.preview_slot_overrides;
-}
+// make_edit_action moved to shell_core.cpp
 
-void restore_history_snapshot(
-    ShellState* state,
-    const EditorHistorySnapshot& snapshot) {
-    if (state == nullptr) {
-        return;
-    }
-
-    assign_history_snapshot(state, snapshot);
-    rebuild_project_runtime(state);
-}
-
-bool apply_history_snapshot(ShellState* state, const EditorHistorySnapshot& snapshot) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const EditorHistorySnapshot current = capture_history_snapshot(*state, false);
-    assign_history_snapshot(state, snapshot);
-    if (!rebuild_project_runtime(state)) {
-        const std::string rebuild_error = state->error_message;
-        restore_history_snapshot(state, current);
-        state->error_message = rebuild_error;
-        return false;
-    }
-
-    return true;
-}
-
-std::unique_ptr<EditAction> make_edit_action(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    const EditorHistorySnapshot& before,
-    const EditorHistorySnapshot& after) {
-    if (history_snapshots_equal(before, after)) {
-        return nullptr;
-    }
-
-    switch (kind) {
-    case EditActionKind::MoveBone:
-        return std::make_unique<MoveBoneAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    case EditActionKind::AddKeyframe:
-        return std::make_unique<AddKeyframeAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    case EditActionKind::RemoveKeyframe:
-        return std::make_unique<RemoveKeyframeAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    case EditActionKind::EditProperty:
-        return std::make_unique<EditPropertyAction>(
-            kind,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            before,
-            after);
-    }
-
-    return nullptr;
-}
-
-bool record_action_from_snapshots(
-    ShellState* state,
-    const EditorHistorySnapshot& before,
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const EditorHistorySnapshot after = capture_history_snapshot(*state);
-    state->command_stack.push(
-        make_edit_action(
-            kind,
-            label,
-            std::move(group),
-            allow_merge,
-            before,
-            after));
-    update_project_dirty_state(state);
-    state->error_message.clear();
-    state->status_message = std::move(label);
-    return true;
-}
+// record_action_from_snapshots moved to shell_core.cpp
 
 template <typename MutateFn>
 bool execute_viewport_setting_edit_action(
@@ -2324,30 +2277,7 @@ std::string format_slot_color(const marrow::runtime::SlotColor& color) {
     return stream.str();
 }
 
-std::vector<std::string> normalize_preview_skin_names(
-    const marrow::runtime::SkeletonData& skeleton,
-    const std::vector<std::string>& skin_names) {
-    std::vector<std::string> normalized;
-    for (const std::string& skin_name : skin_names) {
-        const auto skin_index = skeleton.find_skin_index(skin_name);
-        if (!skin_index.has_value() || is_default_skin_index(skeleton, *skin_index)) {
-            continue;
-        }
-
-        if (std::find(normalized.begin(), normalized.end(), skin_name) == normalized.end()) {
-            normalized.push_back(skin_name);
-        }
-    }
-
-    std::sort(
-        normalized.begin(),
-        normalized.end(),
-        [&skeleton](const std::string& lhs, const std::string& rhs) {
-            return skeleton.find_skin_index(lhs).value_or(0) <
-                skeleton.find_skin_index(rhs).value_or(0);
-        });
-    return normalized;
-}
+// normalize_preview_skin_names moved to shell_core.cpp
 
 std::string preview_skin_summary(
     const marrow::runtime::SkeletonData& skeleton,
@@ -3280,83 +3210,11 @@ std::optional<std::size_t> draw_order_position(
     return static_cast<std::size_t>(std::distance(draw_order.begin(), it));
 }
 
-const marrow::runtime::AnimationData* selected_animation(const ShellState& state) {
-    if (!state.load_result || state.selected_animation_name.empty()) {
-        return nullptr;
-    }
+// selected_animation moved to shell_core.cpp
 
-    return state.load_result.skeleton_data->find_animation(state.selected_animation_name);
-}
+// queued_preview_animation moved to shell_core.cpp
 
-double selected_animation_duration(const ShellState& state) {
-    const marrow::runtime::AnimationData* animation = selected_animation(state);
-    return animation != nullptr ? std::max(animation->duration(), 0.0) : 0.0;
-}
-
-const marrow::runtime::AnimationData* queued_preview_animation(const ShellState& state) {
-    if (!state.load_result || state.preview_queued_animation_name.empty()) {
-        return nullptr;
-    }
-
-    const auto* animation =
-        state.load_result.skeleton_data->find_animation(state.preview_queued_animation_name);
-    if (animation == nullptr || animation->name == state.selected_animation_name) {
-        return nullptr;
-    }
-
-    return animation;
-}
-
-std::string default_queued_preview_animation_name(const ShellState& state) {
-    if (!state.load_result) {
-        return {};
-    }
-
-    for (const auto& animation : state.load_result.skeleton_data->animations()) {
-        if (animation.name != state.selected_animation_name) {
-            return animation.name;
-        }
-    }
-
-    return {};
-}
-
-void normalize_state_preview_settings(ShellState* state) {
-    if (state == nullptr || !state->load_result) {
-        return;
-    }
-
-    if (state->preview_custom_mix_duration < 0.0) {
-        state->preview_custom_mix_duration = 0.0;
-    }
-    if (state->preview_queue_delay < 0.0) {
-        state->preview_queue_delay = 0.0;
-    }
-
-    const auto* queued_animation = queued_preview_animation(*state);
-    if (queued_animation == nullptr) {
-        state->preview_queued_animation_name = default_queued_preview_animation_name(*state);
-        if (state->preview_queued_animation_name.empty()) {
-            state->preview_queue_enabled = false;
-        }
-    }
-}
-
-double timeline_preview_duration(const ShellState& state) {
-    const double primary_duration = selected_animation_duration(state);
-    if (!state.preview_queue_enabled) {
-        return primary_duration;
-    }
-
-    const auto* queued_animation = queued_preview_animation(state);
-    if (queued_animation == nullptr) {
-        return primary_duration;
-    }
-
-    return std::max(0.0, primary_duration) +
-        std::max(0.0, state.preview_queue_delay) +
-        std::max(0.0, queued_animation->duration());
-}
+// normalize_state_preview_settings and timeline_preview_duration moved to shell_core.cpp
 
 template <typename Timeline>
 void append_timeline_key_times(
@@ -4189,96 +4047,9 @@ double clamp_existing_non_decreasing_key_time(
     return std::clamp(desired_time, minimum_time, keyframes[key_index + 1].time);
 }
 
-bool rebuild_project_runtime(ShellState* state) {
-    if (!state->load_result || state->load_result.project == nullptr ||
-        state->load_result.base_skeleton_document == nullptr) {
-        return false;
-    }
+// rebuild_project_runtime moved to shell_core.cpp
 
-    std::optional<marrow::runtime::AnimationStateSnapshot> playback_snapshot;
-    if (state->animation_state != nullptr) {
-        playback_snapshot = state->animation_state->capture_state();
-    }
-
-    const auto runtime_result = marrow::editor::build_project_runtime(
-        *state->load_result.project,
-        *state->load_result.base_skeleton_document);
-    if (!runtime_result) {
-        state->error_message = runtime_result.error->format();
-        return false;
-    }
-
-    state->load_result.skeleton_data = runtime_result.skeleton_data;
-    state->preview_skeleton =
-        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
-    state->animation_state =
-        marrow::allocate_unique<marrow::runtime::AnimationState>(
-            state->load_result.skeleton_data);
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->preview_skin_names);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    if (!state->selected_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
-        state->selected_animation_name.clear();
-    }
-    if (state->selected_animation_name.empty() &&
-        !state->load_result.project->editor_metadata.active_animation.empty() &&
-        state->load_result.skeleton_data->find_animation(
-            state->load_result.project->editor_metadata.active_animation) != nullptr) {
-        state->selected_animation_name = state->load_result.project->editor_metadata.active_animation;
-    }
-    if (state->selected_animation_name.empty() &&
-        !state->load_result.skeleton_data->animations().empty()) {
-        state->selected_animation_name =
-            state->load_result.skeleton_data->animations().front().name;
-    }
-    normalize_state_preview_settings(state);
-
-    if (state->selected_bone_index.has_value() &&
-        *state->selected_bone_index >= state->load_result.skeleton_data->bones().size()) {
-        state->selected_bone_index.reset();
-    }
-    if (state->selected_slot_index.has_value() &&
-        *state->selected_slot_index >= state->load_result.skeleton_data->slots().size()) {
-        state->selected_slot_index.reset();
-        state->selected_attachment.reset();
-    }
-    validate_selected_constraint(state);
-
-    bool restored_playback = false;
-    if (playback_snapshot.has_value()) {
-        for (const auto& track_root : playback_snapshot->track_roots) {
-            if (!track_root.has_value()) {
-                continue;
-            }
-            restored_playback = restore_preview_playback(state, *playback_snapshot);
-            break;
-        }
-    }
-
-    if (!restored_playback && !refresh_preview_pose(state)) {
-        return false;
-    }
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
-    }
-
-    state->error_message.clear();
-    return true;
-}
-
-void update_project_dirty_state(ShellState* state) {
-    if (!state->load_result || state->load_result.project == nullptr) {
-        state->project_dirty = false;
-        return;
-    }
-
-    state->project_dirty =
-        marrow::editor::serialize_project(*state->load_result.project) !=
-        state->saved_project_snapshot;
-}
+// update_project_dirty_state moved to shell_core.cpp
 
 bool apply_project_command_change(
     ShellState* state,
@@ -4386,6 +4157,15 @@ void handle_project_history_shortcuts(ShellState* state) {
         scrub_timeline_time(state, 0.0, "Shortcut", true);
     }
 
+    // Ctrl+L: toggle the optional Agent panel.
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_L,
+                        ImGuiInputFlags_RouteGlobal)) {
+        state->show_agent_panel = !state->show_agent_panel;
+        state->status_message =
+            state->show_agent_panel ? "Agent panel opened (Ctrl+L)"
+                                    : "Agent panel closed (Ctrl+L)";
+    }
+
     // F: Frame skeleton to viewport
     if (ImGui::Shortcut(ImGuiKey_F, ImGuiInputFlags_RouteGlobal)) {
         const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
@@ -4393,69 +4173,8 @@ void handle_project_history_shortcuts(ShellState* state) {
     }
 }
 
-bool save_project_file(ShellState* state, bool update_status_message) {
-    if (!state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const auto save_result =
-        marrow::editor::save_project(*state->load_result.project, state->project_path);
-    if (!save_result) {
-        state->error_message = save_result.error->format();
-        state->status_message = "Project save failed";
-        return false;
-    }
-
-    state->load_result.project = save_result.project;
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
-    state->project_dirty = false;
-    state->error_message.clear();
-    if (update_status_message) {
-        state->status_message = "Saved project to " + state->project_path.string();
-    }
-    return true;
-}
-
-bool export_runtime_assets_file(ShellState* state, bool update_status_message) {
-    if (!state->load_result || state->load_result.project == nullptr ||
-        state->load_result.base_skeleton_document == nullptr) {
-        return false;
-    }
-
-    marrow::editor::ProjectExportOptions export_options;
-    if (state->export_binary_output) {
-        export_options.binary_output_path =
-            state->load_result.project->resolved_export_binary_path();
-    }
-
-    const auto export_result = marrow::editor::export_runtime_assets(
-        *state->load_result.project,
-        *state->load_result.base_skeleton_document,
-        export_options);
-    if (!export_result) {
-        state->error_message = export_result.error->format();
-        state->status_message = "Runtime export failed";
-        return false;
-    }
-
-    state->error_message.clear();
-    if (update_status_message) {
-        std::string message = "Exported runtime assets to " + export_result.path.string();
-        if (!export_result.atlas_paths.empty()) {
-            message += " with " + std::to_string(export_result.atlas_paths.size()) +
-                " atlas file";
-            if (export_result.atlas_paths.size() != 1U) {
-                message += "s";
-            }
-        }
-        if (export_result.binary_path.has_value()) {
-            message += " and " + export_result.binary_path->filename().string();
-        }
-        state->status_message = std::move(message);
-    }
-    return true;
-}
+// save_project_file moved to shell_core.cpp
+// export_runtime_assets_file moved to shell_core.cpp
 
 std::optional<std::size_t> preview_root_bone_index(
     const marrow::runtime::SkeletonData& skeleton) {
@@ -5059,125 +4778,140 @@ RuntimeAssetPollOutcome poll_runtime_asset_changes(ShellState* state) {
     return RuntimeAssetPollOutcome::Reloaded;
 }
 
-bool reload_project(ShellState* state) {
-    std::optional<std::string> previous_selection_name;
-    if (const auto selection_name = selected_bone_name(*state)) {
-        previous_selection_name = std::string(*selection_name);
-    }
-    std::optional<std::string> previous_slot_name;
-    if (state->load_result && state->selected_slot_index.has_value() &&
-        *state->selected_slot_index < state->load_result.skeleton_data->slots().size()) {
-        previous_slot_name =
-            state->load_result.skeleton_data->slots()[*state->selected_slot_index].name;
-    }
-    const std::string previous_animation_name = state->selected_animation_name;
-    const double previous_timeline_time = state->timeline_time_seconds;
-    const bool previous_timeline_loop = state->timeline_loop;
-    const bool previous_timeline_playing = state->timeline_playing;
+// reload_project moved to shell_core.cpp
 
-    state->load_result = marrow::editor::load_project(state->project_path);
-    state->preview_skeleton.reset();
-    state->animation_state.reset();
-    state->selected_bone_index.reset();
-    state->selected_slot_index.reset();
-    state->selected_attachment.reset();
-    state->selected_timeline_track_id.reset();
-    state->selected_constraint.reset();
-    state->preview_skin_names.clear();
-    state->preview_slot_overrides.clear();
-    state->selected_animation_name.clear();
-    state->timeline_time_seconds = 0.0;
-    state->timeline_loop = previous_timeline_loop;
-    state->timeline_playing = false;
-    state->command_stack.clear();
-    state->pending_edit_action.reset();
-    reset_weight_paint_stroke(state);
-    state->project_dirty = false;
-    state->saved_project_snapshot.clear();
-    state->error_message.clear();
+// 0 = setup pose, 1 = animation, 2 = weight paint. Derived from existing
+// state (no new mode field) so the ModeStrip stays a faithful mirror.
+enum class ShellMode { Setup = 0, Animation = 1, WeightPaint = 2 };
 
-    if (!state->load_result) {
-        state->status_message = "Project load failed";
-        if (state->load_result.error.has_value()) {
-            state->error_message = state->load_result.error->format();
-        } else {
-            state->error_message = "Unknown project load failure.";
+ShellMode current_shell_mode(const ShellState* state) {
+    if (state->weight_paint.enabled) return ShellMode::WeightPaint;
+    if (!state->selected_animation_name.empty()) return ShellMode::Animation;
+    return ShellMode::Setup;
+}
+
+void apply_shell_mode(ShellState* state, ShellMode mode) {
+    switch (mode) {
+        case ShellMode::Setup:
+            state->weight_paint.enabled = false;
+            state->selected_animation_name.clear();
+            break;
+        case ShellMode::Animation:
+            state->weight_paint.enabled = false;
+            if (state->selected_animation_name.empty() &&
+                state->load_result.skeleton_data != nullptr &&
+                !state->load_result.skeleton_data->animations().empty()) {
+                state->selected_animation_name =
+                    state->load_result.skeleton_data->animations()
+                        .front()
+                        .name;
+            }
+            break;
+        case ShellMode::WeightPaint:
+            state->weight_paint.enabled = true;
+            break;
+    }
+}
+
+// Secondary toolbar tier (below the menu bar): global actions on the left,
+// the ModeStrip centered, drawn as a viewport side bar so the dockspace
+// shrinks to fit beneath it.
+void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
+    namespace t = marrow::editor::shell::theme;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float h = ImGui::GetFrameHeight() + 8.0f;
+    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, t::kSurfaceDefault);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar |
+                                   ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_MenuBar;
+    if (ImGui::BeginViewportSideBar("##ShellToolbar", vp, ImGuiDir_Up, h,
+                                    flags)) {
+        if (ImGui::BeginMenuBar()) {
+            const bool project_loaded =
+                state->load_result.project != nullptr;
+            auto dispatch_op = [&](const char* op) {
+                namespace json = marrow::runtime::json;
+                json::Value::Object cmd_obj;
+                cmd_obj.emplace("op", json::Value(std::string(op), {}));
+                AgentCommandDispatcher::dispatch(
+                    state, json::Value(std::move(cmd_obj), {}));
+            };
+
+            if (icon_button(state->icons, Icon::Save, "Save project", false,
+                            !project_loaded)) {
+                dispatch_op("save");
+            }
+            if (icon_button(state->icons, Icon::Export,
+                            "Export runtime assets", false,
+                            !project_loaded)) {
+                dispatch_op("export_runtime");
+            }
+            if (icon_button(state->icons, Icon::Reload, "Reload project",
+                            false, !project_loaded)) {
+                *reload_requested = true;
+            }
+            ImGui::TextDisabled("|");
+            if (icon_button(state->icons, Icon::Undo, "Undo (Ctrl+Z)", false,
+                            !state->command_stack.can_undo())) {
+                dispatch_op("undo");
+            }
+            if (icon_button(state->icons, Icon::Redo, "Redo (Ctrl+Shift+Z)",
+                            false, !state->command_stack.can_redo())) {
+                dispatch_op("redo");
+            }
+            if (state->project_dirty) {
+                ImGui::SameLine(0.0f, 12.0f);
+                widgets::chip("UNSAVED", widgets::ChipTone::Warn, true);
+            }
+
+            // ModeStrip — centered segmented control.
+            const char* kModes[] = {"SETUP POSE", "ANIMATION",
+                                    "WEIGHT PAINT"};
+            int mode_idx = static_cast<int>(current_shell_mode(state));
+            float strip_w = 16.0f;
+            for (const char* m : kModes) {
+                strip_w += ImGui::CalcTextSize(m).x + 24.0f;
+            }
+            const float center_x =
+                (ImGui::GetWindowWidth() - strip_w) * 0.5f;
+            if (center_x > ImGui::GetCursorPosX()) {
+                ImGui::SameLine(center_x);
+            } else {
+                ImGui::SameLine(0.0f, 24.0f);
+            }
+            if (widgets::seg_toggle("##modestrip", kModes, 3, &mode_idx)) {
+                apply_shell_mode(state, static_cast<ShellMode>(mode_idx));
+            }
+
+            // Context actions (right): Agent panel toggle.
+            const float btn_x = ImGui::GetWindowWidth() - 44.0f;
+            if (btn_x > ImGui::GetCursorPosX()) {
+                ImGui::SameLine(btn_x);
+            } else {
+                ImGui::SameLine(0.0f, 16.0f);
+            }
+            if (icon_button(state->icons, Icon::Eye,
+                            "Toggle Agent panel (Ctrl+L)",
+                            state->show_agent_panel)) {
+                state->show_agent_panel = !state->show_agent_panel;
+            }
+
+            ImGui::EndMenuBar();
         }
-        return false;
     }
-
-    state->viewport = state->load_result.project->editor_metadata.viewport;
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
-    state->preview_skeleton =
-        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
-    state->animation_state =
-        marrow::allocate_unique<marrow::runtime::AnimationState>(
-            state->load_result.skeleton_data);
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->load_result.project->editor_metadata.preview_skins);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    const auto& animations = state->load_result.skeleton_data->animations();
-    if (!previous_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(previous_animation_name) != nullptr) {
-        state->selected_animation_name = previous_animation_name;
-    } else if (!state->load_result.project->editor_metadata.active_animation.empty() &&
-               state->load_result.skeleton_data->find_animation(
-                   state->load_result.project->editor_metadata.active_animation) != nullptr) {
-        state->selected_animation_name = state->load_result.project->editor_metadata.active_animation;
-    } else if (!animations.empty()) {
-        state->selected_animation_name = animations.front().name;
-    }
-    normalize_state_preview_settings(state);
-    if (!state->selected_animation_name.empty()) {
-        state->timeline_time_seconds = std::clamp(
-            previous_timeline_time,
-            0.0,
-            timeline_preview_duration(*state));
-        state->timeline_playing = previous_timeline_playing;
-    }
-    if (!refresh_preview_pose(state)) {
-        state->status_message = "Project load failed";
-        return false;
-    }
-
-    if (previous_selection_name.has_value()) {
-        state->selected_bone_index =
-            state->load_result.skeleton_data->find_bone_index(*previous_selection_name);
-    }
-    if (!state->selected_bone_index.has_value() &&
-        !state->load_result.skeleton_data->bones().empty()) {
-        state->selected_bone_index = 0;
-    }
-    if (previous_slot_name.has_value()) {
-        state->selected_slot_index =
-            state->load_result.skeleton_data->find_slot_index(*previous_slot_name);
-    }
-    if (!state->selected_slot_index.has_value() &&
-        !state->load_result.skeleton_data->slots().empty()) {
-        state->selected_slot_index = 0;
-    }
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
-    }
-    validate_selected_constraint(state);
-
-    std::ostringstream stream;
-    stream << "Loaded "
-           << state->load_result.project->editor_metadata.name
-           << " from "
-           << state->project_path.string();
-    state->status_message = stream.str();
-    reset_runtime_asset_watch(state);
-    return true;
+    ImGui::End();
+    ImGui::PopStyleColor();
 }
 
 void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state) {
     if (!ImGui::BeginMainMenuBar()) {
         return;
     }
+
+    if (g_font_semibold) ImGui::PushFont(g_font_semibold);
+    ImGui::TextColored(marrow::editor::shell::theme::kPrimary, "marrow");
+    if (g_font_semibold) ImGui::PopFont();
+    ImGui::TextDisabled("·");
 
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("Reload Project")) {
@@ -5195,14 +4929,20 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
                 "Ctrl+Z",
                 false,
                 state->command_stack.can_undo())) {
-            undo_project_change(state);
+            namespace json = marrow::runtime::json;
+            json::Value::Object cmd_obj;
+            cmd_obj.emplace("op", json::Value("undo", {}));
+            AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
         }
         if (ImGui::MenuItem(
                 "Redo",
                 "Ctrl+Shift+Z / Ctrl+Y",
                 false,
                 state->command_stack.can_redo())) {
-            redo_project_change(state);
+            namespace json = marrow::runtime::json;
+            json::Value::Object cmd_obj;
+            cmd_obj.emplace("op", json::Value("redo", {}));
+            AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
         }
         ImGui::EndMenu();
     }
@@ -5326,34 +5066,86 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
         ImGui::EndMenu();
     }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted(state->status_message.c_str());
+    // Right cluster: status message + agent presence chip. Global actions
+    // moved to the secondary toolbar tier (draw_shell_toolbar).
+    namespace th = marrow::editor::shell::theme;
+    const bool agent_running =
+        state->agent_server != nullptr && state->agent_server->is_running();
+    char presence[80];
+    if (agent_running) {
+        std::snprintf(presence, sizeof(presence), "AGENT · LISTENING :%d",
+                      state->agent_listen_port.value_or(kDefaultAgentPort));
+    } else {
+        std::snprintf(presence, sizeof(presence), "AGENT · OFF");
+    }
+    const float chip_w =
+        ImGui::CalcTextSize(presence).x + 16.0f + 12.0f;  // pad + dot
+    const float status_w =
+        state->status_message.empty()
+            ? 0.0f
+            : ImGui::CalcTextSize(state->status_message.c_str()).x + 16.0f;
+    const float right_block = chip_w + status_w;
+    const float target_x = ImGui::GetWindowWidth() - right_block - 12.0f;
+    if (target_x > ImGui::GetCursorPosX()) {
+        ImGui::SameLine(target_x);
+    } else {
+        ImGui::SameLine(0.0f, 16.0f);
+    }
+    if (!state->status_message.empty()) {
+        ImGui::TextColored(th::kFaint, "%s", state->status_message.c_str());
+        ImGui::SameLine(0.0f, 16.0f);
+    }
+    widgets::chip(presence,
+                  agent_running ? widgets::ChipTone::Prim
+                                : widgets::ChipTone::Neutral,
+                  true);
+
     ImGui::EndMainMenuBar();
+
+    draw_shell_toolbar(reload_requested, state);
 }
 
 void draw_project_window(bool* reload_requested, ShellState* state) {
     ImGui::Begin(kProjectWindowTitle);
+    widgets::panel_head(state->icons, Icon::NodeAnim, "Project",
+                        state->project_dirty ? "UNSAVED" : nullptr);
 
-    if (ImGui::Button("Reload")) {
+    if (icon_button(state->icons, Icon::Reload, "Reload project")) {
         *reload_requested = true;
     }
-
     ImGui::SameLine();
-    if (ImGui::Button("Save Project")) {
+    if (icon_button(state->icons, Icon::Save, "Save project")) {
         save_project_file(state, true);
     }
-
     ImGui::SameLine();
-    if (ImGui::Button("Export Runtime Assets")) {
+    if (icon_button(state->icons, Icon::Export, "Export runtime assets")) {
         export_runtime_assets_file(state, true);
     }
 
     ImGui::SameLine();
     ImGui::Checkbox("Export .mbin", &state->export_binary_output);
 
-    ImGui::SameLine();
-    ImGui::TextUnformatted(state->project_path.string().c_str());
-    ImGui::Separator();
+    // Project identity card (surface-card tonal lift, no border).
+    {
+        namespace t = marrow::editor::shell::theme;
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, t::kSurfaceCard);
+        ImGui::BeginChild("proj_card", ImVec2(0.0f, 0.0f),
+                          ImGuiChildFlags_AutoResizeY);
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (g_font_small) ImGui::PushFont(g_font_small);
+        ImGui::TextColored(t::kFaint, "PROJECT");
+        if (g_font_small) ImGui::PopFont();
+        const std::string stem = state->project_path.filename().string();
+        ImGui::TextColored(t::kOnSurface, "%s",
+                           stem.empty() ? "(unsaved)" : stem.c_str());
+        ImGui::TextColored(t::kFaint, "%s",
+                           state->project_path.string().c_str());
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    }
 
     if (!state->load_result) {
         ImGui::TextUnformatted("Project data is unavailable.");
@@ -5433,6 +5225,8 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
 
 void draw_runtime_window(const ShellState& state) {
     ImGui::Begin(kRuntimeAssetsWindowTitle);
+    widgets::panel_head(state.icons, Icon::NodeSkin, "Runtime assets",
+                        "READ ONLY");
 
     if (!state.load_result) {
         ImGui::TextUnformatted("Load a valid project to inspect runtime assets.");
@@ -5457,28 +5251,30 @@ void draw_runtime_window(const ShellState& state) {
 
     if (ImGui::CollapsingHeader("Animation Clips", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const auto& animation : skeleton.animations()) {
-            ImGui::BulletText("%s (%.2fs)", animation.name.c_str(), animation.duration());
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "%s  (%.2fs)", animation.name.c_str(), animation.duration());
+            icon_label(state.icons, Icon::NodeAnim, buf, 0.85f);
         }
     }
 
     if (ImGui::CollapsingHeader("Skins", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const auto& skin : skeleton.skins()) {
-            ImGui::BulletText("%s", skin.name.c_str());
+            icon_label(state.icons, Icon::NodeSkin, skin.name.c_str(), 0.85f);
         }
     }
 
     if (ImGui::CollapsingHeader("Constraints", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const auto& constraint : skeleton.ik_constraints()) {
-            ImGui::BulletText("IK: %s", constraint.name.c_str());
+            icon_label(state.icons, Icon::ConstraintIk, constraint.name.c_str(), 0.85f);
         }
         for (const auto& constraint : skeleton.path_constraints()) {
-            ImGui::BulletText("Path: %s", constraint.name.c_str());
+            icon_label(state.icons, Icon::ConstraintPath, constraint.name.c_str(), 0.85f);
         }
         for (const auto& constraint : skeleton.transform_constraints()) {
-            ImGui::BulletText("Transform: %s", constraint.name.c_str());
+            icon_label(state.icons, Icon::ConstraintXform, constraint.name.c_str(), 0.85f);
         }
         for (const auto& constraint : skeleton.physics_constraints()) {
-            ImGui::BulletText("Physics: %s", constraint.name.c_str());
+            icon_label(state.icons, Icon::ConstraintPhysics, constraint.name.c_str(), 0.85f);
         }
     }
 
@@ -5498,6 +5294,7 @@ void draw_runtime_window(const ShellState& state) {
 
 void draw_constraints_window(ShellState* state) {
     ImGui::Begin(kConstraintsWindowTitle);
+    widgets::panel_head(state->icons, Icon::ConstraintIk, "Constraints");
 
     if (!state->load_result || state->load_result.project == nullptr) {
         ImGui::TextUnformatted("Load a valid project to author constraint overrides.");
@@ -5560,8 +5357,16 @@ void draw_constraints_window(ShellState* state) {
         return true;
     };
 
-    if (ImGui::BeginTabBar("constraint_tabs")) {
-        if (ImGui::BeginTabItem("IK")) {
+    {
+        // Type tabs as a segmented accent strip (v2 vocabulary), replacing
+        // the default ImGui tab bar. Active type is persisted in ShellState.
+        static const char* const kConstraintTabs[] = {
+            "IK", "Path", "Transform", "Physics"};
+        widgets::seg_toggle(
+            "##constraint_tabs", kConstraintTabs, 4,
+            &state->constraints_tab);
+        ImGui::Spacing();
+        if (state->constraints_tab == 0) {
             if (ImGui::Button("Add IK Constraint")) {
                 const marrow::editor::ProjectData previous_project = *project;
                 if (const auto new_edit = make_default_ik_constraint_edit(*state)) {
@@ -5587,7 +5392,11 @@ void draw_constraints_window(ShellState* state) {
                     project->find_ik_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
                     constraint.name + (has_project_edit ? "  [project]" : "  [runtime]");
-                if (ImGui::Selectable(label.c_str(), selected)) {
+                if (icon_selectable(
+                        state->icons,
+                        Icon::ConstraintIk,
+                        label.c_str(),
+                        selected)) {
                     select_constraint(state, ConstraintEditKind::Ik, constraint.name, "Constraints", true);
                 }
             }
@@ -5616,43 +5425,34 @@ void draw_constraints_window(ShellState* state) {
 
                 int chain_length = static_cast<int>(display_edit.bone_names.size());
                 if (ImGui::RadioButton("1 Bone", chain_length == 1)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        auto& edit = project->ik_constraint_edits[*edit_index];
-                        if (edit.bone_names.size() > 1U) {
-                            edit.bone_names.resize(1U);
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Ik,
-                                edit.name,
-                                "IK constraint edit failed",
-                                "Updated IK chain length on " + edit.name);
-                        }
+                    if (display_edit.bone_names.size() > 1U) {
+                        namespace json = marrow::runtime::json;
+                        json::Value::Object cmd_obj;
+                        cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                        json::Value::Object args_obj;
+                        args_obj.emplace("name", json::Value(selected_name, {}));
+                        json::Value::Array bone_names_arr;
+                        bone_names_arr.push_back(json::Value(display_edit.bone_names[0], {}));
+                        args_obj.emplace("bone_names", json::Value(std::move(bone_names_arr), {}));
+                        cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                     }
                 }
                 ImGui::SameLine();
                 if (ImGui::RadioButton("2 Bones", chain_length == 2)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        auto& edit = project->ik_constraint_edits[*edit_index];
-                        if (edit.bone_names.size() < 2U) {
-                            if (!append_direct_child_name(&edit.bone_names)) {
-                                if (const auto chain = preferred_chain(skeleton, {"ik_upper", "ik_lower"})) {
-                                    edit.bone_names = *chain;
-                                }
-                            }
-                            if (edit.bone_names.size() >= 2U) {
-                                commit_constraint_change(
-                                    previous_project,
-                                    ConstraintEditKind::Ik,
-                                    edit.name,
-                                    "IK constraint edit failed",
-                                    "Updated IK chain length on " + edit.name);
-                            } else {
-                                *project = previous_project;
-                                state->status_message =
-                                    "Could not extend the IK chain to a valid two-bone setup";
-                            }
+                    if (display_edit.bone_names.size() < 2U) {
+                        std::vector<std::string> new_bones = display_edit.bone_names;
+                        if (append_direct_child_name(&new_bones)) {
+                            namespace json = marrow::runtime::json;
+                            json::Value::Object cmd_obj;
+                            cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                            json::Value::Object args_obj;
+                            args_obj.emplace("name", json::Value(selected_name, {}));
+                            json::Value::Array bone_names_arr;
+                            for (const auto& b : new_bones) bone_names_arr.push_back(json::Value(b, {}));
+                            args_obj.emplace("bone_names", json::Value(std::move(bone_names_arr), {}));
+                            cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                            AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                         }
                     }
                 }
@@ -5661,31 +5461,31 @@ void draw_constraints_window(ShellState* state) {
                     std::string edited_bone = display_edit.bone_names[bone_index];
                     const std::string label = "Bone " + std::to_string(bone_index + 1U);
                     if (draw_string_combo(label.c_str(), bone_options, &edited_bone)) {
-                        const marrow::editor::ProjectData previous_project = *project;
-                        if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                            project->ik_constraint_edits[*edit_index].bone_names[bone_index] = edited_bone;
-                            commit_constraint_change(
-                                previous_project,
-                                ConstraintEditKind::Ik,
-                                project->ik_constraint_edits[*edit_index].name,
-                                "IK constraint edit failed",
-                                "Updated IK bone selection on " + selected_name);
+                        namespace json = marrow::runtime::json;
+                        json::Value::Object cmd_obj;
+                        cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                        json::Value::Object args_obj;
+                        args_obj.emplace("name", json::Value(selected_name, {}));
+                        json::Value::Array bone_names_arr;
+                        for (std::size_t i = 0; i < display_edit.bone_names.size(); ++i) {
+                            bone_names_arr.push_back(json::Value(i == bone_index ? edited_bone : display_edit.bone_names[i], {}));
                         }
+                        args_obj.emplace("bone_names", json::Value(std::move(bone_names_arr), {}));
+                        cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                     }
                 }
 
                 std::string edited_target = display_edit.target_bone_name;
                 if (draw_string_combo("Target", bone_options, &edited_target)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        project->ik_constraint_edits[*edit_index].target_bone_name = edited_target;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Ik,
-                            project->ik_constraint_edits[*edit_index].name,
-                            "IK constraint edit failed",
-                            "Updated IK target on " + selected_name);
-                    }
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("target", json::Value(edited_target, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                 }
 
                 double edited_mix = display_edit.mix;
@@ -5713,23 +5513,20 @@ void draw_constraints_window(ShellState* state) {
 
                 bool bend_positive = display_edit.bend_positive;
                 if (ImGui::Checkbox("Bend Positive", &bend_positive)) {
-                    const marrow::editor::ProjectData previous_project = *project;
-                    if (const auto edit_index = ensure_ik_constraint_edit_index(state, selected_name)) {
-                        project->ik_constraint_edits[*edit_index].bend_positive = bend_positive;
-                        commit_constraint_change(
-                            previous_project,
-                            ConstraintEditKind::Ik,
-                            project->ik_constraint_edits[*edit_index].name,
-                            "IK constraint edit failed",
-                            "Updated IK bend direction on " + selected_name);
-                    }
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("bend_positive", json::Value(bend_positive, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
                 }
             }
 
-            ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Path")) {
+        if (state->constraints_tab == 1) {
             if (ImGui::Button("Add Path Constraint")) {
                 const marrow::editor::ProjectData previous_project = *project;
                 if (const auto new_edit = make_default_path_constraint_edit(*state)) {
@@ -5755,7 +5552,11 @@ void draw_constraints_window(ShellState* state) {
                     project->find_path_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
                     constraint.name + (has_project_edit ? "  [project]" : "  [runtime]");
-                if (ImGui::Selectable(label.c_str(), selected)) {
+                if (icon_selectable(
+                        state->icons,
+                        Icon::ConstraintPath,
+                        label.c_str(),
+                        selected)) {
                     select_constraint(
                         state,
                         ConstraintEditKind::Path,
@@ -5973,10 +5774,9 @@ void draw_constraints_window(ShellState* state) {
                     });
             }
 
-            ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Transform")) {
+        if (state->constraints_tab == 2) {
             if (ImGui::Button("Add Transform Constraint")) {
                 const marrow::editor::ProjectData previous_project = *project;
                 if (const auto new_edit = make_default_transform_constraint_edit(*state)) {
@@ -6002,7 +5802,11 @@ void draw_constraints_window(ShellState* state) {
                     project->find_transform_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
                     constraint.name + (has_project_edit ? "  [project]" : "  [runtime]");
-                if (ImGui::Selectable(label.c_str(), selected)) {
+                if (icon_selectable(
+                        state->icons,
+                        Icon::ConstraintXform,
+                        label.c_str(),
+                        selected)) {
                     select_constraint(
                         state,
                         ConstraintEditKind::Transform,
@@ -6251,10 +6055,9 @@ void draw_constraints_window(ShellState* state) {
                     "Updated transform shearY offset on " + selected_name);
             }
 
-            ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Physics")) {
+        if (state->constraints_tab == 3) {
             if (ImGui::Button("Add Physics Constraint")) {
                 const marrow::editor::ProjectData previous_project = *project;
                 if (const auto new_edit = make_default_physics_constraint_edit(*state)) {
@@ -6280,7 +6083,11 @@ void draw_constraints_window(ShellState* state) {
                     project->find_physics_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
                     constraint.name + (has_project_edit ? "  [project]" : "  [runtime]");
-                if (ImGui::Selectable(label.c_str(), selected)) {
+                if (icon_selectable(
+                        state->icons,
+                        Icon::ConstraintPhysics,
+                        label.c_str(),
+                        selected)) {
                     select_constraint(
                         state,
                         ConstraintEditKind::Physics,
@@ -6491,50 +6298,186 @@ void draw_constraints_window(ShellState* state) {
                     "Updated physics wind Y on " + selected_name);
             }
 
-            ImGui::EndTabItem();
         }
-
-        ImGui::EndTabBar();
     }
 
     ImGui::End();
+}
+
+// Maps each bone_index to slot_indices whose bone_index matches.
+std::vector<std::vector<std::size_t>> build_bone_slots(
+    const marrow::runtime::SkeletonData& skeleton) {
+    std::vector<std::vector<std::size_t>> bone_slots(skeleton.bones().size());
+    for (std::size_t slot_index = 0; slot_index < skeleton.slots().size(); ++slot_index) {
+        const std::size_t bone_index = skeleton.slots()[slot_index].bone_index;
+        if (bone_index < bone_slots.size()) {
+            bone_slots[bone_index].push_back(slot_index);
+        }
+    }
+    return bone_slots;
+}
+
+Icon icon_for_attachment_kind(marrow::runtime::AttachmentKind kind) {
+    switch (kind) {
+    case marrow::runtime::AttachmentKind::Region:      return Icon::AttRegion;
+    case marrow::runtime::AttachmentKind::Mesh:        return Icon::AttMesh;
+    case marrow::runtime::AttachmentKind::LinkedMesh:  return Icon::AttLinked;
+    case marrow::runtime::AttachmentKind::Point:       return Icon::AttPoint;
+    case marrow::runtime::AttachmentKind::BoundingBox: return Icon::AttBbox;
+    case marrow::runtime::AttachmentKind::Clipping:    return Icon::AttClip;
+    case marrow::runtime::AttachmentKind::Path:        return Icon::AttPath;
+    }
+    return Icon::AttRegion;
+}
+
+void draw_slot_hierarchy_node(
+    ShellState* state,
+    const marrow::runtime::SkeletonData& skeleton,
+    std::size_t slot_index) {
+    const auto& slot = skeleton.slots()[slot_index];
+    const std::vector<SlotAttachmentReference> attachments =
+        collect_slot_attachments(skeleton, slot_index);
+    const bool slot_selected =
+        state->selected_slot_index.has_value() &&
+        *state->selected_slot_index == slot_index &&
+        !state->selected_attachment.has_value();
+
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+                               ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (slot_selected) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+    if (attachments.empty()) {
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    }
+
+    ImGui::PushID(static_cast<int>(slot_index) ^ 0x40000000);
+    bool row_clicked = false;
+    const bool open = icon_tree_node(
+        state->icons,
+        "##slot",
+        Icon::NodeSlot,
+        slot.name.c_str(),
+        flags,
+        &row_clicked);
+    if (row_clicked) {
+        select_slot(state, std::optional<std::size_t>(slot_index), "Hierarchy", true);
+    }
+
+    if (open && !(flags & ImGuiTreeNodeFlags_NoTreePushOnOpen)) {
+        for (const SlotAttachmentReference& ref : attachments) {
+            if (ref.attachment == nullptr) continue;
+            const bool attach_selected =
+                state->selected_attachment.has_value() &&
+                state->selected_attachment->slot_index == slot_index &&
+                state->selected_attachment->skin_index == ref.skin_index &&
+                state->selected_attachment->attachment_name == ref.attachment->name;
+            ImGuiTreeNodeFlags leaf_flags = ImGuiTreeNodeFlags_Leaf |
+                                            ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                            ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (attach_selected) {
+                leaf_flags |= ImGuiTreeNodeFlags_Selected;
+            }
+            ImGui::PushID(ref.attachment->name.c_str());
+            bool leaf_clicked = false;
+            icon_tree_node(
+                state->icons,
+                "##att",
+                icon_for_attachment_kind(ref.attachment->kind),
+                ref.attachment->name.c_str(),
+                leaf_flags,
+                &leaf_clicked);
+            if (leaf_clicked) {
+                AttachmentSelection sel;
+                sel.slot_index = slot_index;
+                sel.skin_index = ref.skin_index;
+                sel.attachment_name = ref.attachment->name;
+                select_attachment(state, sel, "Hierarchy", true);
+            }
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
 }
 
 void draw_hierarchy_node(
     ShellState* state,
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::vector<std::size_t>>& children,
+    const std::vector<std::vector<std::size_t>>& bone_slots,
+    const std::vector<std::size_t>& active_path,
     std::size_t bone_index) {
+    namespace t = marrow::editor::shell::theme;
     const auto& bone = skeleton.bones()[bone_index];
     const bool selected =
         state->selected_bone_index.has_value() && *state->selected_bone_index == bone_index;
+    // On the active path = this bone is the selected one or an ancestor of it.
+    const bool on_path =
+        std::find(active_path.begin(), active_path.end(), bone_index) !=
+        active_path.end();
+    const bool has_child_bones = !children[bone_index].empty();
+    const bool has_slots = !bone_slots[bone_index].empty();
+    const bool has_children_rows = has_child_bones || has_slots;
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
     if (selected) {
         flags |= ImGuiTreeNodeFlags_Selected;
     }
-    if (children[bone_index].empty()) {
+    if (!has_children_rows) {
         flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-    } else {
+    } else if (has_child_bones) {
         flags |= ImGuiTreeNodeFlags_DefaultOpen;
     }
 
     ImGui::PushID(static_cast<int>(bone_index));
-    const bool open = ImGui::TreeNodeEx(
-        "bone",
+    const bool inactive =
+        state->preview_skeleton && !state->preview_skeleton->is_bone_active(bone_index);
+    const std::string display_name =
+        bone.name + (inactive ? " (inactive)" : "");
+
+    // Active-path nodes (ancestors of the selection) read brighter so the
+    // trail from root to the selected bone is legible at a glance.
+    const bool tint_label = on_path && !selected;
+    if (tint_label) {
+        ImGui::PushStyleColor(ImGuiCol_Text, t::kPrimary);
+    }
+    const ImVec2 node_origin = ImGui::GetCursorScreenPos();
+    bool row_clicked = false;
+    const bool open = icon_tree_node(
+        state->icons,
+        "##bone",
+        Icon::NodeBone,
+        display_name.c_str(),
         flags,
-        "%s%s",
-        bone.name.c_str(),
-        state->preview_skeleton && !state->preview_skeleton->is_bone_active(bone_index)
-            ? " (inactive)"
-            : "");
-    if (ImGui::IsItemClicked()) {
+        &row_clicked);
+    if (tint_label) {
+        ImGui::PopStyleColor();
+    }
+    if (row_clicked) {
         select_bone(state, bone_index, "Hierarchy", true);
     }
 
     if (open && !(flags & ImGuiTreeNodeFlags_NoTreePushOnOpen)) {
+        // Depth-rail: one continuous vertical guide per level, no branch
+        // ticks. Coloured to the active path when the selection lives in
+        // this subtree.
+        const float rail_x =
+            node_origin.x + ImGui::GetStyle().IndentSpacing * 0.5f;
+        const float rail_top = ImGui::GetCursorScreenPos().y;
         for (const std::size_t child_index : children[bone_index]) {
-            draw_hierarchy_node(state, skeleton, children, child_index);
+            draw_hierarchy_node(
+                state, skeleton, children, bone_slots, active_path,
+                child_index);
         }
+        for (const std::size_t slot_index : bone_slots[bone_index]) {
+            draw_slot_hierarchy_node(state, skeleton, slot_index);
+        }
+        const float rail_bottom = ImGui::GetCursorScreenPos().y;
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(rail_x, rail_top),
+            ImVec2(rail_x, rail_bottom),
+            t::u32(on_path ? t::kPrimaryDim : t::kOutlineFaint),
+            1.0f);
         ImGui::TreePop();
     }
     ImGui::PopID();
@@ -6542,6 +6485,7 @@ void draw_hierarchy_node(
 
 void draw_hierarchy_window(ShellState* state) {
     ImGui::Begin(kHierarchyWindowTitle);
+    widgets::panel_head(state->icons, Icon::NodeBone, "Hierarchy");
 
     if (!state->load_result) {
         ImGui::TextUnformatted("Load a valid project to inspect skeleton bones.");
@@ -6551,16 +6495,127 @@ void draw_hierarchy_window(ShellState* state) {
 
     const auto& skeleton = *state->load_result.skeleton_data;
     const auto children = build_bone_children(skeleton);
-    ImGui::Text("Bones: %zu", skeleton.bones().size());
+    const auto bone_slots = build_bone_slots(skeleton);
+
+    // Walk parent links from the selection up to the root: every bone on
+    // this chain is rendered as part of the active path.
+    std::vector<std::size_t> active_path;
+    if (state->selected_bone_index.has_value()) {
+        std::optional<std::size_t> walk = state->selected_bone_index;
+        while (walk.has_value() && *walk < skeleton.bones().size()) {
+            active_path.push_back(*walk);
+            walk = skeleton.bones()[*walk].parent_index;
+        }
+    }
+
+    // Search input — ghost style (transparent frame, primary focus line).
+    widgets::ghost_input_push();
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint(
+        "##hierarchy_search",
+        "Search bones, slots…",
+        state->hierarchy_filter.data(),
+        state->hierarchy_filter.size());
+    widgets::ghost_input_pop();
+
+    ImGui::TextDisabled("Bones: %zu · Slots: %zu",
+        skeleton.bones().size(), skeleton.slots().size());
     ImGui::Separator();
 
-    for (std::size_t bone_index = 0; bone_index < skeleton.bones().size(); ++bone_index) {
-        if (!skeleton.bones()[bone_index].parent_index.has_value()) {
-            draw_hierarchy_node(state, skeleton, children, bone_index);
+    const std::string_view filter_sv(state->hierarchy_filter.data());
+    const bool has_filter = !filter_sv.empty();
+
+    if (has_filter) {
+        // Flat list of matches across bones + slots.
+        auto contains_case_insensitive = [](std::string_view haystack,
+                                            std::string_view needle) {
+            if (needle.empty()) return true;
+            for (std::size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+                bool match = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    const char a = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(haystack[i + j])));
+                    const char b = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(needle[j])));
+                    if (a != b) { match = false; break; }
+                }
+                if (match) return true;
+            }
+            return false;
+        };
+        int matches = 0;
+        for (std::size_t bone_index = 0; bone_index < skeleton.bones().size(); ++bone_index) {
+            const auto& bone = skeleton.bones()[bone_index];
+            if (!contains_case_insensitive(bone.name, filter_sv)) continue;
+            const bool selected =
+                state->selected_bone_index.has_value() &&
+                *state->selected_bone_index == bone_index;
+            ImGui::PushID(static_cast<int>(bone_index));
+            if (icon_selectable(state->icons, Icon::NodeBone, bone.name.c_str(), selected)) {
+                select_bone(state, bone_index, "Hierarchy", true);
+            }
+            ImGui::PopID();
+            ++matches;
+        }
+        for (std::size_t slot_index = 0; slot_index < skeleton.slots().size(); ++slot_index) {
+            const auto& slot = skeleton.slots()[slot_index];
+            if (!contains_case_insensitive(slot.name, filter_sv)) continue;
+            const bool selected =
+                state->selected_slot_index.has_value() &&
+                *state->selected_slot_index == slot_index;
+            ImGui::PushID(static_cast<int>(10000 + slot_index));
+            if (icon_selectable(state->icons, Icon::NodeSlot, slot.name.c_str(), selected)) {
+                select_slot(state, std::optional<std::size_t>(slot_index), "Hierarchy", true);
+            }
+            ImGui::PopID();
+            ++matches;
+        }
+        if (matches == 0) {
+            ImGui::TextDisabled("No matches");
+        }
+    } else {
+        for (std::size_t bone_index = 0; bone_index < skeleton.bones().size(); ++bone_index) {
+            if (!skeleton.bones()[bone_index].parent_index.has_value()) {
+                draw_hierarchy_node(
+                    state, skeleton, children, bone_slots, active_path,
+                    bone_index);
+            }
         }
     }
 
     ImGui::End();
+}
+
+// Maps a track id to the property icon shown next to it in the timeline label
+// column. Detection mirrors the string prefix logic in draw_transform_timeline.
+marrow::editor::Icon track_property_icon(const std::string& track_id) {
+    if (track_id.find(":Rotate") != std::string::npos)      return Icon::PropRotate;
+    if (track_id.find(":Translate") != std::string::npos)   return Icon::PropTranslate;
+    if (track_id.find(":Scale") != std::string::npos)       return Icon::PropScale;
+    if (track_id.find(":Shear") != std::string::npos)       return Icon::PropShear;
+    if (track_id.find(":Color") != std::string::npos)       return Icon::PropColor;
+    if (track_id.find(":Attachment") != std::string::npos)  return Icon::AttRegion;
+    if (track_id.find(":deform:") != std::string::npos)     return Icon::AttMesh;
+    if (track_id.find("draw_order") != std::string::npos)   return Icon::PropOrder;
+    if (track_id.find("event") != std::string::npos)        return Icon::PropEvent;
+    return Icon::NodeBone;
+}
+
+// A muted left-edge accent grouping tracks by property family. Stays within
+// the restrained v2 palette: transform family → primary-dim, colour → the
+// tertiary accent, structural (attachment/order/event) → secondary. Used as a
+// 2px rail so unselected lanes still read as grouped without new hues.
+ImU32 track_group_accent(const std::string& track_id) {
+    if (track_id.find(":Rotate") != std::string::npos ||
+        track_id.find(":Translate") != std::string::npos ||
+        track_id.find(":Scale") != std::string::npos ||
+        track_id.find(":Shear") != std::string::npos) {
+        return IM_COL32(0x52, 0x69, 0xa8, 0x80);  // primary-dim @ 50%
+    }
+    if (track_id.find(":Color") != std::string::npos) {
+        return IM_COL32(0xa8, 0x46, 0x43, 0x80);  // tertiary-dim @ 50%
+    }
+    return IM_COL32(0xbe, 0xc7, 0xdc, 0x4D);      // secondary @ 30%
 }
 
 void draw_timeline_lane(
@@ -6578,36 +6633,68 @@ void draw_timeline_lane(
     const ImVec2 rect_min = ImGui::GetItemRectMin();
     const ImVec2 rect_max = ImGui::GetItemRectMax();
     const float rect_width = std::max(1.0f, rect_max.x - rect_min.x);
-    draw_list->AddRectFilled(
-        rect_min,
-        rect_max,
-        selected ? IM_COL32(78, 52, 25, 230) : IM_COL32(28, 31, 36, 235),
-        4.0f);
-    draw_list->AddRect(
-        rect_min,
-        rect_max,
-        selected ? IM_COL32(230, 180, 97, 255) : IM_COL32(74, 80, 88, 255),
-        4.0f);
 
+    // Charcoal Studio lane: transparent when unselected (table zebra shows
+    // through), subtle primary tint when selected. No opaque border — ghost
+    // 20% outline_variant instead.
+    if (selected) {
+        draw_list->AddRectFilled(
+            rect_min,
+            rect_max,
+            IM_COL32(0x60, 0x8b, 0xff, 0x1F),  // primary-container @ ~12%
+            2.0f);
+        draw_list->AddLine(
+            ImVec2(rect_min.x, rect_min.y),
+            ImVec2(rect_min.x, rect_max.y),
+            IM_COL32(0x60, 0x8b, 0xff, 0xFF),  // primary-container solid
+            2.0f);
+    } else {
+        // Property-group accent rail (muted; selection overrides it above).
+        draw_list->AddLine(
+            ImVec2(rect_min.x, rect_min.y),
+            ImVec2(rect_min.x, rect_max.y),
+            track_group_accent(track.id),
+            2.0f);
+    }
+
+    // Subtle quarter-ticks (outline_variant @ 30%)
     for (int tick_index = 1; tick_index < 4; ++tick_index) {
         const float normalized = static_cast<float>(tick_index) / 4.0f;
         const float tick_x = rect_min.x + (rect_width * normalized);
         draw_list->AddLine(
             ImVec2(tick_x, rect_min.y + 2.0f),
             ImVec2(tick_x, rect_max.y - 2.0f),
-            IM_COL32(56, 61, 69, 180));
+            IM_COL32(0x43, 0x46, 0x54, 0x4D));  // outline_variant @ 30%
     }
 
+    // Horizontal interpolation hint line connecting keyframes
+    if (track.key_times.size() >= 2) {
+        const float first_normalized = duration_seconds > 0.0
+            ? static_cast<float>(std::clamp(track.key_times.front() / duration_seconds, 0.0, 1.0))
+            : 0.0f;
+        const float last_normalized = duration_seconds > 0.0
+            ? static_cast<float>(std::clamp(track.key_times.back() / duration_seconds, 0.0, 1.0))
+            : 0.0f;
+        const float line_y = (rect_min.y + rect_max.y) * 0.5f;
+        draw_list->AddLine(
+            ImVec2(rect_min.x + rect_width * first_normalized, line_y),
+            ImVec2(rect_min.x + rect_width * last_normalized, line_y),
+            IM_COL32(0xb3, 0xc5, 0xff, 0x26));  // primary @ ~15%
+    }
+
+    // Playhead: tertiary-container red (#ff5450)
     if (duration_seconds > 0.0) {
         const float playhead_x = rect_min.x +
             static_cast<float>(state->timeline_time_seconds / duration_seconds) * rect_width;
         draw_list->AddLine(
             ImVec2(playhead_x, rect_min.y),
             ImVec2(playhead_x, rect_max.y),
-            IM_COL32(247, 204, 114, 255),
-            2.0f);
+            IM_COL32(0xff, 0x54, 0x50, 0xFF),
+            1.0f);
     }
 
+    // Keyframe diamonds: primary normally, tertiary-container at playhead,
+    // secondary on unselected rows for hierarchy.
     const float marker_half = 4.0f;
     for (const double key_time : track.key_times) {
         const float normalized = duration_seconds > 0.0
@@ -6616,21 +6703,28 @@ void draw_timeline_lane(
         const float marker_x = rect_min.x + (rect_width * normalized);
         const bool near_playhead =
             std::abs(key_time - state->timeline_time_seconds) <= 1e-6;
-        const ImU32 fill_color = near_playhead
-            ? IM_COL32(250, 233, 188, 255)
-            : IM_COL32(221, 164, 72, 255);
-        const ImU32 outline_color = IM_COL32(37, 40, 46, 255);
+        ImU32 fill_color;
+        if (near_playhead) {
+            fill_color = IM_COL32(0xff, 0x54, 0x50, 0xFF);   // tertiary-container
+        } else if (selected) {
+            fill_color = IM_COL32(0xb3, 0xc5, 0xff, 0xFF);   // primary
+        } else {
+            fill_color = IM_COL32(0xbe, 0xc7, 0xdc, 0xD0);   // secondary @ 82%
+        }
+        const ImU32 outline_color = IM_COL32(0x10, 0x13, 0x19, 0xFF);  // surface
+        const float cx = marker_x;
+        const float cy = (rect_min.y + rect_max.y) * 0.5f;
         draw_list->AddQuadFilled(
-            ImVec2(marker_x, rect_min.y + 4.0f),
-            ImVec2(marker_x + marker_half, rect_min.y + 4.0f + marker_half),
-            ImVec2(marker_x, rect_min.y + 4.0f + (marker_half * 2.0f)),
-            ImVec2(marker_x - marker_half, rect_min.y + 4.0f + marker_half),
+            ImVec2(cx,                cy - marker_half),
+            ImVec2(cx + marker_half,  cy),
+            ImVec2(cx,                cy + marker_half),
+            ImVec2(cx - marker_half,  cy),
             fill_color);
         draw_list->AddQuad(
-            ImVec2(marker_x, rect_min.y + 4.0f),
-            ImVec2(marker_x + marker_half, rect_min.y + 4.0f + marker_half),
-            ImVec2(marker_x, rect_min.y + 4.0f + (marker_half * 2.0f)),
-            ImVec2(marker_x - marker_half, rect_min.y + 4.0f + marker_half),
+            ImVec2(cx,                cy - marker_half),
+            ImVec2(cx + marker_half,  cy),
+            ImVec2(cx,                cy + marker_half),
+            ImVec2(cx - marker_half,  cy),
             outline_color,
             1.0f);
     }
@@ -7359,38 +7453,31 @@ void draw_transform_timeline_editor(
     };
 
     if (ImGui::Button("Add Key At Playhead")) {
-        const marrow::editor::ProjectData previous_project = *state->load_result.project;
-        const auto edit_index = ensure_transform_timeline_edit_index(state, *track);
-        if (edit_index.has_value()) {
-            auto& editable_track =
-                state->load_result.project->transform_timeline_edits[*edit_index];
-            if (const auto insert_time = insertable_key_time(
-                    editable_track.keyframes,
-                    state->timeline_time_seconds,
-                    duration_seconds)) {
-                marrow::editor::TransformKeyframeEdit new_key =
-                    sample_transform_keyframe(*state, *track);
-                new_key.time = *insert_time;
-                const auto iterator = std::upper_bound(
-                    editable_track.keyframes.begin(),
-                    editable_track.keyframes.end(),
-                    new_key.time,
-                    [](double time, const marrow::editor::TransformKeyframeEdit& keyframe) {
-                        return time < keyframe.time;
-                    });
-                editable_track.keyframes.insert(iterator, std::move(new_key));
-                commit_project_change(
-                    previous_project,
-                    EditActionKind::AddKeyframe,
-                    track_group(),
-                    false,
-                    "Added a " + std::string(transform_channel_label(*track->transform_channel)) +
-                        " key on " + bone_name);
-            } else {
-                *state->load_result.project = previous_project;
-                state->status_message = "Could not place a new key between existing keyframes";
-            }
+        const auto sampled = sample_transform_keyframe(*state, *track);
+        namespace json = marrow::runtime::json;
+        json::Value::Object cmd_obj;
+        cmd_obj.emplace("op", json::Value("set_transform", {}));
+        json::Value::Object args_obj;
+        args_obj.emplace("animation", json::Value(track->animation_name, {}));
+        args_obj.emplace("bone", json::Value(bone_name, {}));
+        
+        const char* channel_name = "rotate";
+        switch (*track->transform_channel) {
+            case marrow::editor::TransformTimelineChannel::Rotate: channel_name = "rotate"; break;
+            case marrow::editor::TransformTimelineChannel::Translate: channel_name = "translate"; break;
+            case marrow::editor::TransformTimelineChannel::Scale: channel_name = "scale"; break;
+            case marrow::editor::TransformTimelineChannel::Shear: channel_name = "shear"; break;
         }
+        args_obj.emplace("channel", json::Value(channel_name, {}));
+        args_obj.emplace("time", json::Value(state->timeline_time_seconds, {}));
+        if (*track->transform_channel == marrow::editor::TransformTimelineChannel::Rotate) {
+            args_obj.emplace("angle", json::Value(sampled.angle, {}));
+        } else {
+            args_obj.emplace("x", json::Value(sampled.x, {}));
+            args_obj.emplace("y", json::Value(sampled.y, {}));
+        }
+        cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+        AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
     }
 
     ImGui::BeginChild("transform_key_editor", ImVec2(0.0f, 250.0f), true);
@@ -7404,22 +7491,24 @@ void draw_transform_timeline_editor(
                 ImGuiTreeNodeFlags_DefaultOpen)) {
             if (display_edit.keyframes.size() > 1U &&
                 ImGui::Button("Remove Key##transform")) {
-                const marrow::editor::ProjectData previous_project = *state->load_result.project;
-                if (const auto edit_index =
-                        ensure_transform_timeline_edit_index(state, *track)) {
-                    auto& editable_track =
-                        state->load_result.project->transform_timeline_edits[*edit_index];
-                    editable_track.keyframes.erase(
-                        editable_track.keyframes.begin() + static_cast<std::ptrdiff_t>(key_index));
-                    commit_project_change(
-                        previous_project,
-                        EditActionKind::RemoveKeyframe,
-                        track_group(),
-                        false,
-                        "Removed a " +
-                            std::string(transform_channel_label(*track->transform_channel)) +
-                            " key on " + bone_name);
+                namespace json = marrow::runtime::json;
+                json::Value::Object cmd_obj;
+                cmd_obj.emplace("op", json::Value("remove_transform_keyframe", {}));
+                json::Value::Object args_obj;
+                args_obj.emplace("animation", json::Value(track->animation_name, {}));
+                args_obj.emplace("bone", json::Value(bone_name, {}));
+                
+                const char* channel_name = "rotate";
+                switch (*track->transform_channel) {
+                    case marrow::editor::TransformTimelineChannel::Rotate: channel_name = "rotate"; break;
+                    case marrow::editor::TransformTimelineChannel::Translate: channel_name = "translate"; break;
+                    case marrow::editor::TransformTimelineChannel::Scale: channel_name = "scale"; break;
+                    case marrow::editor::TransformTimelineChannel::Shear: channel_name = "shear"; break;
                 }
+                args_obj.emplace("channel", json::Value(channel_name, {}));
+                args_obj.emplace("time", json::Value(display_key.time, {}));
+                cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                AgentCommandDispatcher::dispatch(state, json::Value(std::move(cmd_obj), {}));
             }
 
             double edited_time = display_key.time;
@@ -8020,6 +8109,7 @@ void draw_mesh_deform_timeline_editor(
 
 void draw_timeline_window(ShellState* state) {
     ImGui::Begin(kTimelineWindowTitle);
+    widgets::panel_head(state->icons, Icon::NodeAnim, "Timeline");
 
     if (!state->load_result || !state->preview_skeleton) {
         ImGui::TextUnformatted("Load a valid project to scrub and inspect keyed animation tracks.");
@@ -8040,13 +8130,15 @@ void draw_timeline_window(ShellState* state) {
     if (ImGui::BeginCombo("Animation", combo_label.c_str())) {
         for (const auto& animation : skeleton.animations()) {
             const bool selected = state->selected_animation_name == animation.name;
-            if (ImGui::Selectable(animation.name.c_str(), selected)) {
+            ImGui::PushID(animation.name.c_str());
+            if (icon_selectable(state->icons, Icon::NodeAnim, animation.name.c_str(), selected)) {
                 state->timeline_playing = false;
                 set_selected_animation(state, animation.name, "Timeline", true, true);
             }
             if (selected) {
                 ImGui::SetItemDefaultFocus();
             }
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -8058,6 +8150,11 @@ void draw_timeline_window(ShellState* state) {
         state->status_message = std::move(status_message);
     };
 
+    // Preview options collapse by default — scrubbing the clip is the
+    // primary action; queueing/mix overrides are advanced.
+    const bool preview_opts_open =
+        widgets::section_header("Preview options", nullptr, false);
+    if (preview_opts_open) {
     bool queue_enabled = state->preview_queue_enabled;
     if (ImGui::Checkbox("Queue Next Clip", &queue_enabled)) {
         state->preview_queue_enabled = queue_enabled;
@@ -8085,7 +8182,12 @@ void draw_timeline_window(ShellState* state) {
                 }
                 const bool selected =
                     state->preview_queued_animation_name == preview_animation.name;
-                if (ImGui::Selectable(preview_animation.name.c_str(), selected)) {
+                ImGui::PushID(preview_animation.name.c_str());
+                if (icon_selectable(
+                        state->icons,
+                        Icon::NodeAnim,
+                        preview_animation.name.c_str(),
+                        selected)) {
                     state->preview_queued_animation_name = preview_animation.name;
                     apply_state_preview_change(
                         "Queued " + preview_animation.name + " after " +
@@ -8094,6 +8196,7 @@ void draw_timeline_window(ShellState* state) {
                 if (selected) {
                     ImGui::SetItemDefaultFocus();
                 }
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }
@@ -8132,6 +8235,7 @@ void draw_timeline_window(ShellState* state) {
             }
         }
     }
+    }  // preview_opts_open
 
     const marrow::runtime::AnimationData* animation = selected_animation(*state);
     const double duration_seconds = timeline_preview_duration(*state);
@@ -8139,7 +8243,38 @@ void draw_timeline_window(ShellState* state) {
         animation != nullptr ? build_timeline_tracks(skeleton, *animation)
                              : std::vector<TimelineTrackRow>{};
 
-    if (ImGui::Button(state->timeline_playing ? "Pause" : "Play")) {
+    if (icon_button(
+            state->icons,
+            Icon::Rewind,
+            "Reset to start",
+            false,
+            animation == nullptr)) {
+        state->timeline_playing = false;
+        scrub_timeline_time(state, 0.0, "Timeline", true);
+    }
+    ImGui::SameLine();
+    if (icon_button(
+            state->icons,
+            Icon::PrevKey,
+            "Previous keyframe",
+            false,
+            animation == nullptr)) {
+        if (const auto previous_key = adjacent_key_time(
+                tracks,
+                state->timeline_time_seconds,
+                false)) {
+            state->timeline_playing = false;
+            scrub_timeline_time(state, *previous_key, "Timeline", true);
+        }
+    }
+    ImGui::SameLine();
+    const Icon play_icon = state->timeline_playing ? Icon::Pause : Icon::Play;
+    if (icon_button(
+            state->icons,
+            play_icon,
+            state->timeline_playing ? "Pause" : "Play",
+            state->timeline_playing,
+            animation == nullptr)) {
         if (animation != nullptr) {
             const bool was_playing = state->timeline_playing;
             state->timeline_playing = !state->timeline_playing;
@@ -8166,30 +8301,12 @@ void draw_timeline_window(ShellState* state) {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Reset")) {
-        state->timeline_playing = false;
-        scrub_timeline_time(state, 0.0, "Timeline", true);
-    }
-    ImGui::SameLine();
-    bool loop_enabled = state->timeline_loop;
-    if (ImGui::Checkbox("Loop", &loop_enabled)) {
-        state->timeline_loop = loop_enabled;
-        refresh_preview_pose(state);
-        state->status_message =
-            std::string(loop_enabled ? "Enabled" : "Disabled") + " timeline looping";
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Prev Key")) {
-        if (const auto previous_key = adjacent_key_time(
-                tracks,
-                state->timeline_time_seconds,
-                false)) {
-            state->timeline_playing = false;
-            scrub_timeline_time(state, *previous_key, "Timeline", true);
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Next Key")) {
+    if (icon_button(
+            state->icons,
+            Icon::NextKey,
+            "Next keyframe",
+            false,
+            animation == nullptr)) {
         if (const auto next_key = adjacent_key_time(
                 tracks,
                 state->timeline_time_seconds,
@@ -8197,6 +8314,49 @@ void draw_timeline_window(ShellState* state) {
             state->timeline_playing = false;
             scrub_timeline_time(state, *next_key, "Timeline", true);
         }
+    }
+    ImGui::SameLine();
+    if (icon_button(
+            state->icons,
+            Icon::Loop,
+            "Toggle looping",
+            state->timeline_loop)) {
+        state->timeline_loop = !state->timeline_loop;
+        refresh_preview_pose(state);
+        state->status_message =
+            std::string(state->timeline_loop ? "Enabled" : "Disabled") + " timeline looping";
+    }
+
+    // Separator between playback and keyframe clusters
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+
+    // Add / Remove keyframe — navigation helpers that jump to the per-track
+    // keyframe editor below. Disabled when no track is selected. Actual
+    // add/remove lives in the track-specific editor since each track type
+    // (transform / deform / draw-order / event) has its own keyframe model.
+    const bool has_selected_track = state->selected_timeline_track_id.has_value();
+    if (icon_button(
+            state->icons,
+            Icon::AddKey,
+            has_selected_track
+                ? "Scroll to track editor to add keyframe at playhead"
+                : "Select a track first to add keyframes",
+            false,
+            !has_selected_track)) {
+        state->status_message = "Use the track editor below to add a keyframe at the playhead";
+    }
+    ImGui::SameLine();
+    if (icon_button(
+            state->icons,
+            Icon::RemoveKey,
+            has_selected_track
+                ? "Scroll to track editor to remove keyframe at playhead"
+                : "Select a track first to remove keyframes",
+            false,
+            !has_selected_track)) {
+        state->status_message = "Use the track editor below to remove the keyframe nearest the playhead";
     }
 
     double slider_time = state->timeline_time_seconds;
@@ -8255,19 +8415,11 @@ void draw_timeline_window(ShellState* state) {
 
             ImGui::TableSetColumnIndex(0);
             const bool selected = timeline_track_matches_selection(*state, track);
-            const char* track_prefix = "";
-            if (track.id.find(":Rotate") != std::string::npos) { track_prefix = "[R] "; }
-            else if (track.id.find(":Translate") != std::string::npos) { track_prefix = "[T] "; }
-            else if (track.id.find(":Scale") != std::string::npos) { track_prefix = "[S] "; }
-            else if (track.id.find(":Shear") != std::string::npos) { track_prefix = "[H] "; }
-            else if (track.id.find(":Color") != std::string::npos) { track_prefix = "[C] "; }
-            else if (track.id.find(":Attachment") != std::string::npos) { track_prefix = "[A] "; }
-            else if (track.id.find(":deform:") != std::string::npos) { track_prefix = "[M] "; }
-            else if (track.id.find("draw_order") != std::string::npos) { track_prefix = "[D] "; }
-            else if (track.id.find("event") != std::string::npos) { track_prefix = "[E] "; }
+            const Icon track_icon = track_property_icon(track.id);
             const std::string label =
-                std::string(track_prefix) + track.label + " (" + std::to_string(track.key_times.size()) + ")";
-            if (ImGui::Selectable(label.c_str(), selected)) {
+                track.label + "  (" + std::to_string(track.key_times.size()) + ")";
+            ImGui::PushID(track.id.c_str());
+            if (icon_selectable(state->icons, track_icon, label.c_str(), selected)) {
                 state->timeline_playing = false;
                 focus_timeline_track(
                     state,
@@ -8276,6 +8428,7 @@ void draw_timeline_window(ShellState* state) {
                     "Timeline",
                     true);
             }
+            ImGui::PopID();
 
             ImGui::TableSetColumnIndex(1);
             draw_timeline_lane(state, track, duration_seconds);
@@ -8547,17 +8700,42 @@ void draw_viewport_annotations(
         }
     }
 
+    // ── Glass selection chip (top-left) ──
     if (state.selected_bone_index.has_value() &&
         *state.selected_bone_index < bones.size()) {
         std::ostringstream selection_stream;
         selection_stream << bones[*state.selected_bone_index].name
-                         << "  pan(" << static_cast<int>(state.viewport.pan_x) << ", "
+                         << "  ·  pan(" << static_cast<int>(state.viewport.pan_x) << ", "
                          << static_cast<int>(state.viewport.pan_y) << ")"
-                         << "  zoom " << state.viewport.zoom;
+                         << "  ·  zoom " << state.viewport.zoom;
+        const std::string chip_text = selection_stream.str();
+        const ImVec2 text_size = ImGui::CalcTextSize(chip_text.c_str());
+        const float pad_x = 10.0f;
+        const float pad_y = 6.0f;
+        const ImVec2 chip_min(
+            layout.canvas_origin.x + 10.0f,
+            layout.canvas_origin.y + 10.0f);
+        const ImVec2 chip_max(
+            chip_min.x + text_size.x + pad_x * 2.0f,
+            chip_min.y + text_size.y + pad_y * 2.0f);
+        // Glass background: surface-highest @ 85% opacity
+        draw_list->AddRectFilled(
+            chip_min,
+            chip_max,
+            IM_COL32(0x32, 0x35, 0x3b, 0xD9),
+            2.0f);
+        // Ghost border: outline-variant @ 20% opacity
+        draw_list->AddRect(
+            chip_min,
+            chip_max,
+            IM_COL32(0x43, 0x46, 0x54, 0x33),
+            2.0f,
+            0,
+            1.0f);
         draw_list->AddText(
-            ImVec2(layout.canvas_origin.x + 14.0f, layout.canvas_origin.y + 12.0f),
-            IM_COL32(244, 230, 197, 255),
-            selection_stream.str().c_str());
+            ImVec2(chip_min.x + pad_x, chip_min.y + pad_y),
+            IM_COL32(0xe1, 0xe2, 0xea, 0xFF),
+            chip_text.c_str());
     }
 
     const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
@@ -8593,20 +8771,104 @@ void draw_viewport_annotations(
             debug_stream.str().c_str());
     }
 
+    // ── Glass perf HUD (top-right) ──
     if (state.hud_overlay_enabled && state.hud_overlay_frame.has_value()) {
         const std::vector<std::string> hud_lines =
             marrow::runtime::profiler_hud_lines(*state.hud_overlay_frame);
-        float hud_y = layout.canvas_origin.y + 48.0f;
-        if (!enabled_layers.empty()) {
-            hud_y += 18.0f;
+        const float line_height = ImGui::GetTextLineHeight();
+        const float line_spacing = line_height + 2.0f;
+        const float pad_x = 10.0f;
+        const float pad_y = 6.0f;
+        const char* title = "PERF HUD";
+        const ImVec2 title_size = ImGui::CalcTextSize(title);
+        float max_line_width = title_size.x;
+        for (const std::string& line : hud_lines) {
+            const ImVec2 s = ImGui::CalcTextSize(line.c_str());
+            max_line_width = std::max(max_line_width, s.x);
         }
+        const float title_block = title_size.y + 4.0f + 1.0f;  // title + gap + divider
+        const float body_block = static_cast<float>(hud_lines.size()) * line_spacing;
+        const float chip_w = max_line_width + pad_x * 2.0f;
+        const float chip_h = title_block + 4.0f + body_block + pad_y * 2.0f;
+        const ImVec2 chip_max(layout.canvas_end.x - 10.0f, layout.canvas_origin.y + 10.0f + chip_h);
+        const ImVec2 chip_min(chip_max.x - chip_w, layout.canvas_origin.y + 10.0f);
+        draw_list->AddRectFilled(
+            chip_min,
+            chip_max,
+            IM_COL32(0x32, 0x35, 0x3b, 0xD9),
+            2.0f);
+        draw_list->AddRect(
+            chip_min,
+            chip_max,
+            IM_COL32(0x43, 0x46, 0x54, 0x33),
+            2.0f,
+            0,
+            1.0f);
+        // Title
+        draw_list->AddText(
+            ImVec2(chip_min.x + pad_x, chip_min.y + pad_y),
+            IM_COL32(0x8d, 0x90, 0xa0, 0xFF),
+            title);
+        // Divider line
+        const float divider_y = chip_min.y + pad_y + title_size.y + 3.0f;
+        draw_list->AddLine(
+            ImVec2(chip_min.x + pad_x, divider_y),
+            ImVec2(chip_max.x - pad_x, divider_y),
+            IM_COL32(0x43, 0x46, 0x54, 0x66),
+            1.0f);
+        // Body lines
+        float line_y = divider_y + 4.0f;
         for (const std::string& line : hud_lines) {
             draw_list->AddText(
-                ImVec2(layout.canvas_origin.x + 14.0f, hud_y),
-                IM_COL32(227, 236, 205, 232),
+                ImVec2(chip_min.x + pad_x, line_y),
+                IM_COL32(0xc3, 0xc6, 0xd6, 0xFF),
                 line.c_str());
-            hud_y += 18.0f;
+            line_y += line_spacing;
         }
+    }
+
+    // ── Glass onion skin legend (bottom-left) ──
+    if (state.viewport.onion_skin.enabled) {
+        const char* legend_text = "Onion skin  ·  prev  ·  next";
+        const ImVec2 text_size = ImGui::CalcTextSize(legend_text);
+        const float pad_x = 10.0f;
+        const float pad_y = 6.0f;
+        const ImVec2 chip_min(
+            layout.canvas_origin.x + 10.0f,
+            layout.canvas_end.y - 10.0f - (text_size.y + pad_y * 2.0f));
+        const ImVec2 chip_max(
+            chip_min.x + text_size.x + pad_x * 2.0f,
+            layout.canvas_end.y - 10.0f);
+        draw_list->AddRectFilled(
+            chip_min,
+            chip_max,
+            IM_COL32(0x32, 0x35, 0x3b, 0xD9),
+            2.0f);
+        draw_list->AddRect(
+            chip_min,
+            chip_max,
+            IM_COL32(0x43, 0x46, 0x54, 0x33),
+            2.0f,
+            0,
+            1.0f);
+        draw_list->AddText(
+            ImVec2(chip_min.x + pad_x, chip_min.y + pad_y),
+            IM_COL32(0xc3, 0xc6, 0xd6, 0xFF),
+            legend_text);
+        // Colored dots for prev (primary) and next (tertiary)
+        const float dot_y = chip_min.y + pad_y + text_size.y * 0.5f;
+        const ImVec2 prev_size = ImGui::CalcTextSize("prev  ·  next");
+        const float prev_dot_x = chip_max.x - pad_x - prev_size.x - 8.0f;
+        draw_list->AddCircleFilled(
+            ImVec2(prev_dot_x, dot_y),
+            3.0f,
+            IM_COL32(0xb3, 0xc5, 0xff, 0x80));  // primary @ 50%
+        const ImVec2 next_size = ImGui::CalcTextSize("next");
+        const float next_dot_x = chip_max.x - pad_x - next_size.x - 8.0f;
+        draw_list->AddCircleFilled(
+            ImVec2(next_dot_x, dot_y),
+            3.0f,
+            IM_COL32(0xff, 0xb3, 0xad, 0x80));  // tertiary @ 50%
     }
 
     if (mesh_weight_overlay != nullptr) {
@@ -8628,6 +8890,18 @@ void draw_viewport_annotations(
 
 void draw_viewport_window(ShellState* state) {
     ImGui::Begin(kViewportWindowTitle);
+
+    // No scene → editorial empty state, no chrome.
+    if (!state->load_result) {
+        widgets::empty_hero(
+            "VIEWPORT",
+            "Nothing staged",
+            "Open a .marrow project to preview the rig. The viewport "
+            "renders the runtime skeleton, onion skins and weight heatmaps.");
+        ImGui::End();
+        return;
+    }
+
     const std::optional<MeshWeightPaintTarget> paint_target =
         state->load_result ? current_mesh_weight_paint_target(*state) : std::nullopt;
     const bool weight_tool_ready =
@@ -8639,27 +8913,15 @@ void draw_viewport_window(ShellState* state) {
     const std::string preview_label =
         state->selected_animation_name.empty() ? std::string("Setup pose preview")
                                                : "Animation preview / " + state->selected_animation_name;
-    ImGui::TextUnformatted(preview_label.c_str());
-    ImGui::SameLine();
-    ImGui::TextDisabled(
-        "%s  RMB drag pan  Wheel zoom",
-        weight_tool_ready ? "LMB brush weights" : "LMB select");
-    if (!state->selected_animation_name.empty()) {
-        ImGui::TextDisabled(
-            "%s / %s",
-            format_time_seconds(state->timeline_time_seconds).c_str(),
-            format_time_seconds(timeline_preview_duration(*state)).c_str());
-    }
-    ImGui::Separator();
 
     // ── Viewport Toolbar ──
     if (state->load_result && state->preview_skeleton) {
         const ImVec2 pre_toolbar_avail = ImGui::GetContentRegionAvail();
-        if (ImGui::SmallButton("Fit")) {
+        if (icon_button(state->icons, Icon::ZoomFit, "Zoom to fit")) {
             auto_frame_skeleton(state, pre_toolbar_avail);
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton("1:1")) {
+        if (icon_button(state->icons, Icon::ZoomOne, "Zoom 1:1")) {
             state->viewport.zoom = 1.0;
             state->viewport.pan_x = 0.0;
             state->viewport.pan_y = 0.0;
@@ -8669,8 +8931,8 @@ void draw_viewport_window(ShellState* state) {
         ImGui::TextDisabled("|");
         ImGui::SameLine();
         {
-            bool bones_on = state->viewport.debug_overlay.bones;
-            if (ImGui::SmallButton(bones_on ? "[B]" : " B ")) {
+            const bool bones_on = state->viewport.debug_overlay.bones;
+            if (icon_button(state->icons, Icon::BoneToggle, "Toggle bone overlay", bones_on)) {
                 apply_debug_overlay_edit(
                     state,
                     std::string(bones_on ? "Disabled" : "Enabled") + " bones",
@@ -8683,8 +8945,8 @@ void draw_viewport_window(ShellState* state) {
         }
         ImGui::SameLine();
         {
-            bool onion_on = state->viewport.onion_skin.enabled;
-            if (ImGui::SmallButton(onion_on ? "[O]" : " O ")) {
+            const bool onion_on = state->viewport.onion_skin.enabled;
+            if (icon_button(state->icons, Icon::OnionSkin, "Toggle onion skin", onion_on)) {
                 apply_onion_skin_edit(
                     state,
                     std::string(onion_on ? "Disabled" : "Enabled") + " onion skinning",
@@ -8697,8 +8959,8 @@ void draw_viewport_window(ShellState* state) {
         }
         ImGui::SameLine();
         {
-            bool hud_on = state->hud_overlay_enabled;
-            if (ImGui::SmallButton(hud_on ? "[H]" : " H ")) {
+            const bool hud_on = state->hud_overlay_enabled;
+            if (icon_button(state->icons, Icon::PerfHud, "Toggle performance HUD", hud_on)) {
                 state->hud_overlay_enabled = !hud_on;
                 if (hud_on) {
                     state->hud_overlay_frame.reset();
@@ -8872,6 +9134,41 @@ void draw_viewport_window(ShellState* state) {
             ImVec2(canvas_origin.x + 16.0f, canvas_origin.y + 16.0f),
             IM_COL32(240, 232, 213, 255),
             "Project load failed. Reload a valid .marrow file.");
+    }
+
+    // ── Floating translucent header (top-left, overlaid on the canvas) ──
+    {
+        std::string hint =
+            std::string(weight_tool_ready ? "LMB brush weights" : "LMB select") +
+            "   ·   RMB pan   ·   Wheel zoom";
+        if (!state->selected_animation_name.empty()) {
+            hint += "   ·   " +
+                    format_time_seconds(state->timeline_time_seconds) + " / " +
+                    format_time_seconds(timeline_preview_duration(*state));
+        }
+        const ImVec2 title_size = ImGui::CalcTextSize(preview_label.c_str());
+        const ImVec2 hint_size = ImGui::CalcTextSize(hint.c_str());
+        const float pad_x = 12.0f;
+        const float pad_y = 8.0f;
+        const float gap_y = 4.0f;
+        const float body_w = std::max(title_size.x, hint_size.x);
+        const ImVec2 head_min(canvas_origin.x + 10.0f, canvas_origin.y + 10.0f);
+        const ImVec2 head_max(
+            head_min.x + body_w + pad_x * 2.0f,
+            head_min.y + title_size.y + hint_size.y + gap_y + pad_y * 2.0f);
+        draw_list->AddRectFilled(
+            head_min, head_max, IM_COL32(0x32, 0x35, 0x3b, 0xD9), 4.0f);
+        draw_list->AddRect(
+            head_min, head_max, IM_COL32(0x43, 0x46, 0x54, 0x33), 4.0f, 0, 1.0f);
+        draw_list->AddText(
+            ImVec2(head_min.x + pad_x, head_min.y + pad_y),
+            IM_COL32(0xe1, 0xe2, 0xea, 0xFF),
+            preview_label.c_str());
+        draw_list->AddText(
+            ImVec2(head_min.x + pad_x,
+                   head_min.y + pad_y + title_size.y + gap_y),
+            IM_COL32(0x9a, 0x9e, 0xab, 0xFF),
+            hint.c_str());
     }
 
     if (hovered_bone.has_value() && state->load_result) {
@@ -9057,22 +9354,22 @@ void draw_viewport_settings(ShellState* state) {
             }
         }
 
-        int mode_index = 0;
-        switch (state->weight_paint.mode) {
-        case WeightPaintMode::Paint:  mode_index = 0; break;
-        case WeightPaintMode::Erase:  mode_index = 1; break;
-        case WeightPaintMode::Smooth: mode_index = 2; break;
+        // 3-icon toggle group (Paint / Erase / Smooth)
+        const bool mode_paint = state->weight_paint.mode == WeightPaintMode::Paint;
+        const bool mode_erase = state->weight_paint.mode == WeightPaintMode::Erase;
+        const bool mode_smooth = state->weight_paint.mode == WeightPaintMode::Smooth;
+        ImGui::TextDisabled("Mode");
+        ImGui::SameLine(0.0f, 10.0f);
+        if (icon_button(state->icons, Icon::WeightBrush, "Paint weights", mode_paint)) {
+            state->weight_paint.mode = WeightPaintMode::Paint;
         }
-        constexpr const char* kWeightPaintModes[] = {"Paint", "Erase", "Smooth"};
-        if (ImGui::Combo(
-                "Mode##weight_paint",
-                &mode_index,
-                kWeightPaintModes,
-                IM_ARRAYSIZE(kWeightPaintModes))) {
-            state->weight_paint.mode =
-                mode_index == 0 ? WeightPaintMode::Paint
-                : mode_index == 1 ? WeightPaintMode::Erase
-                                  : WeightPaintMode::Smooth;
+        ImGui::SameLine(0.0f, 4.0f);
+        if (icon_button(state->icons, Icon::WeightErase, "Erase weights", mode_erase)) {
+            state->weight_paint.mode = WeightPaintMode::Erase;
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        if (icon_button(state->icons, Icon::WeightSmooth, "Smooth weights", mode_smooth)) {
+            state->weight_paint.mode = WeightPaintMode::Smooth;
         }
 
         ImGui::SliderFloat(
@@ -9104,6 +9401,7 @@ void draw_viewport_settings(ShellState* state) {
 
 void draw_inspector_window(ShellState* state) {
     ImGui::Begin(kPropertiesWindowTitle);
+    widgets::panel_head(state->icons, Icon::PropTranslate, "Properties");
 
     if (!state->load_result || !state->preview_skeleton) {
         ImGui::TextUnformatted("Load a valid project to inspect setup-pose data.");
@@ -9115,6 +9413,35 @@ void draw_inspector_window(ShellState* state) {
     const auto children = build_bone_children(skeleton);
     const auto& world_transforms = state->preview_skeleton->bone_world_transforms();
 
+    // Persistent context strip — what is currently being inspected.
+    {
+        namespace t = marrow::editor::shell::theme;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, t::kSurfaceCard);
+        ImGui::BeginChild("props_ctx", ImVec2(0.0f, 0.0f),
+                          ImGuiChildFlags_AutoResizeY);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        if (state->selected_bone_index.has_value() &&
+            *state->selected_bone_index < skeleton.bones().size()) {
+            widgets::context_line(
+                state->icons, Icon::NodeBone, t::kPrimary,
+                skeleton.bones()[*state->selected_bone_index].name.c_str(),
+                "bone");
+        } else {
+            ImGui::TextColored(t::kFaint, "No bone selected");
+        }
+        if (state->selected_slot_index.has_value() &&
+            *state->selected_slot_index < skeleton.slots().size()) {
+            widgets::context_line(
+                state->icons, Icon::NodeSlot, t::kTertiaryDim,
+                skeleton.slots()[*state->selected_slot_index].name.c_str(),
+                "slot");
+        }
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    }
+
     if (ImGui::CollapsingHeader("Bones", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::BeginChild("inspector_bones", ImVec2(0.0f, 140.0f), true);
         for (std::size_t bone_index = 0; bone_index < skeleton.bones().size(); ++bone_index) {
@@ -9125,11 +9452,11 @@ void draw_inspector_window(ShellState* state) {
             if (bone.parent_index.has_value() && *bone.parent_index < skeleton.bones().size()) {
                 label += " <- " + skeleton.bones()[*bone.parent_index].name;
             }
-            if (ImGui::Selectable(
-                    (label + "##inspector_bone_" + std::to_string(bone_index)).c_str(),
-                    selected)) {
+            ImGui::PushID(static_cast<int>(bone_index));
+            if (icon_selectable(state->icons, Icon::NodeBone, label.c_str(), selected)) {
                 select_bone(state, bone_index, "Inspector", true);
             }
+            ImGui::PopID();
         }
         ImGui::EndChild();
 
@@ -9151,19 +9478,35 @@ void draw_inspector_window(ShellState* state) {
                 yes_no(state->preview_skeleton->is_bone_active(bone_index)));
             ImGui::Separator();
             ImGui::TextUnformatted("Setup Pose");
-            ImGui::Text(
-                "Translate: (%.1f, %.1f)",
-                static_cast<double>(setup_pose.x),
-                static_cast<double>(setup_pose.y));
-            ImGui::Text("Rotation: %.1f deg", static_cast<double>(setup_pose.rotation));
-            ImGui::Text(
-                "Scale: (%.2f, %.2f)",
-                static_cast<double>(setup_pose.scale_x),
-                static_cast<double>(setup_pose.scale_y));
-            ImGui::Text(
-                "Shear: (%.1f, %.1f)",
-                static_cast<double>(setup_pose.shear_x),
-                static_cast<double>(setup_pose.shear_y));
+            {
+                char buf[128];
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "Translate: (%.1f, %.1f)",
+                    static_cast<double>(setup_pose.x),
+                    static_cast<double>(setup_pose.y));
+                icon_label(state->icons, Icon::PropTranslate, buf, 0.75f);
+
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "Rotation: %.1f deg",
+                    static_cast<double>(setup_pose.rotation));
+                icon_label(state->icons, Icon::PropRotate, buf, 0.75f);
+
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "Scale: (%.2f, %.2f)",
+                    static_cast<double>(setup_pose.scale_x),
+                    static_cast<double>(setup_pose.scale_y));
+                icon_label(state->icons, Icon::PropScale, buf, 0.75f);
+
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "Shear: (%.1f, %.1f)",
+                    static_cast<double>(setup_pose.shear_x),
+                    static_cast<double>(setup_pose.shear_y));
+                icon_label(state->icons, Icon::PropShear, buf, 0.75f);
+            }
             const char* inherit_label = "normal";
             switch (bone.inherit) {
             case marrow::runtime::BoneInherit::Normal:
@@ -9185,7 +9528,7 @@ void draw_inspector_window(ShellState* state) {
             ImGui::Text("Inherit: %s", inherit_label);
             ImGui::Separator();
             ImGui::PushStyleColor(
-                ImGuiCol_ChildBg, ImVec4(0.165f, 0.184f, 0.227f, 0.50f));
+                ImGuiCol_ChildBg, ImVec4(0.098f, 0.110f, 0.133f, 0.50f));
             ImGui::BeginChild(
                 "local_pose_editor", ImVec2(0, 0),
                 ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_FrameStyle);
@@ -9196,6 +9539,28 @@ void draw_inspector_window(ShellState* state) {
                 auto& local_pose =
                     state->preview_skeleton->bone_poses()[bone_index].local_pose;
                 bool pose_changed = false;
+
+                // Ghost input: transparent FrameBg + bottom underline that
+                // illuminates to primary-container when focused.
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+                    ImVec4(0.212f, 0.224f, 0.251f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive,
+                    ImVec4(0.376f, 0.545f, 1.000f, 0.20f));
+
+                auto ghost_underline = [](bool active) {
+                    const ImVec2 rmin = ImGui::GetItemRectMin();
+                    const ImVec2 rmax = ImGui::GetItemRectMax();
+                    const ImU32 color = active
+                        ? IM_COL32(0x60, 0x8b, 0xff, 0xFF)   // primary-container
+                        : IM_COL32(0x27, 0x2a, 0x30, 0xFF);  // surface-high
+                    ImGui::GetWindowDrawList()->AddLine(
+                        ImVec2(rmin.x, rmax.y - 1.0f),
+                        ImVec2(rmax.x, rmax.y - 1.0f),
+                        color,
+                        2.0f);
+                };
+
                 float translate[2] = {local_pose.x, local_pose.y};
                 if (ImGui::DragFloat2(
                         "Translate##bone_local",
@@ -9208,6 +9573,8 @@ void draw_inspector_window(ShellState* state) {
                     local_pose.y = translate[1];
                     pose_changed = true;
                 }
+                ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
+
                 float rotation = local_pose.rotation;
                 if (ImGui::DragFloat(
                         "Rotation##bone_local",
@@ -9219,6 +9586,8 @@ void draw_inspector_window(ShellState* state) {
                     local_pose.rotation = rotation;
                     pose_changed = true;
                 }
+                ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
+
                 float scale[2] = {local_pose.scale_x, local_pose.scale_y};
                 if (ImGui::DragFloat2(
                         "Scale##bone_local",
@@ -9231,6 +9600,8 @@ void draw_inspector_window(ShellState* state) {
                     local_pose.scale_y = scale[1];
                     pose_changed = true;
                 }
+                ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
+
                 float shear[2] = {local_pose.shear_x, local_pose.shear_y};
                 if (ImGui::DragFloat2(
                         "Shear##bone_local",
@@ -9243,6 +9614,10 @@ void draw_inspector_window(ShellState* state) {
                     local_pose.shear_y = shear[1];
                     pose_changed = true;
                 }
+                ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
+
+                ImGui::PopStyleColor(3);
+
                 if (pose_changed) {
                     state->preview_skeleton->update_world_transforms();
                 }
@@ -9503,6 +9878,98 @@ void draw_inspector_window(ShellState* state) {
     ImGui::End();
 }
 
+// Agent surface — optional, closed by default (Ctrl+L / toolbar toggle).
+// The socket can be switched on/off here at runtime; the live op feed,
+// ops/sec and attribution highlights remain a later step (actual agent
+// control happens from Claude Code, not from this panel).
+void draw_agent_window(ShellState* state) {
+    namespace t = marrow::editor::shell::theme;
+    // Pass the open flag so the window's [x] also toggles it off.
+    if (!ImGui::Begin(kAgentWindowTitle, &state->show_agent_panel)) {
+        ImGui::End();
+        return;
+    }
+
+    widgets::panel_head(state->icons, Icon::Eye, "Agent");
+
+    const bool running =
+        state->agent_server != nullptr && state->agent_server->is_running();
+    const int port = state->agent_listen_port.value_or(kDefaultAgentPort);
+
+    // Status card (surface_card tonal lift, no border).
+    {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, t::kSurfaceCard);
+        ImGui::BeginChild("agent_conn", ImVec2(0.0f, 56.0f), true);
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        ImGui::TextColored(running ? t::kPrimary : t::kFaint, "●");
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::BeginGroup();
+        if (running) {
+            char label[64];
+            std::snprintf(label, sizeof(label), "Listening · :%d", port);
+            ImGui::TextColored(t::kOnSurface, "%s", label);
+            ImGui::TextColored(t::kFaint,
+                               state->agent_token.empty()
+                                   ? "Localhost only · awaiting handshake."
+                                   : "Localhost · token · awaiting handshake.");
+        } else {
+            ImGui::TextColored(t::kOnSurface, "Socket off");
+            ImGui::TextColored(t::kFaint,
+                               "Start the socket to let an AI agent connect.");
+        }
+        ImGui::EndGroup();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    // Socket on/off control.
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    if (state->agent_server == nullptr) {
+        ImGui::TextColored(t::kFaint, "Socket unavailable in this build.");
+    } else if (running) {
+        ImGui::PushStyleColor(ImGuiCol_Button, t::kStateErrBg);
+        ImGui::PushStyleColor(ImGuiCol_Text, t::kTertiary);
+        if (ImGui::Button("Stop socket", ImVec2(-1.0f, 0.0f))) {
+            state->agent_server->stop();
+            state->status_message = "Agent socket stopped";
+        }
+        ImGui::PopStyleColor(2);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, t::kPrimaryContainer);
+        ImGui::PushStyleColor(ImGuiCol_Text, t::kSurfaceLowest);
+        char start_label[48];
+        std::snprintf(start_label, sizeof(start_label),
+                      "Start socket on :%d", port);
+        if (ImGui::Button(start_label, ImVec2(-1.0f, 0.0f))) {
+            if (state->agent_server->start(port, state->agent_token)) {
+                state->agent_listen_port = port;
+                state->status_message = "Agent socket listening";
+            } else {
+                state->status_message = "Agent socket failed to start";
+            }
+        }
+        ImGui::PopStyleColor(2);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+    if (widgets::section_header("Activity", running ? "live" : "off")) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, t::kSurfaceLow);
+        ImGui::BeginChild("agent_feed", ImVec2(0.0f, 0.0f), false);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(
+            t::kFaint,
+            "Operations will stream here once an agent connects. The live "
+            "feed, ops/sec and attribution highlights arrive in the next "
+            "step — this panel is observation-only for now.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::End();
+}
+
 void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -9516,6 +9983,25 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
     const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
     ensure_default_dock_layout(shell_state, dockspace_id, main_viewport);
+
+    // Mode environment wash — a barely-there full-viewport tint that shifts
+    // with the working mode (Charcoal v2: setup=none, anim/paint=blue).
+    {
+        namespace t = marrow::editor::shell::theme;
+        ImVec4 wash = t::kModeSetup;
+        switch (current_shell_mode(shell_state)) {
+            case ShellMode::Animation:   wash = t::kModeAnimation; break;
+            case ShellMode::WeightPaint: wash = t::kModePaint; break;
+            case ShellMode::Setup:       wash = t::kModeSetup; break;
+        }
+        if (wash.w > 0.0f) {
+            ImGui::GetBackgroundDrawList()->AddRectFilled(
+                main_viewport->WorkPos,
+                ImVec2(main_viewport->WorkPos.x + main_viewport->WorkSize.x,
+                       main_viewport->WorkPos.y + main_viewport->WorkSize.y),
+                t::u32(wash));
+        }
+    }
     draw_project_window(&reload_requested, shell_state);
     draw_runtime_window(*shell_state);
     draw_constraints_window(shell_state);
@@ -9523,6 +10009,15 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     draw_hierarchy_window(shell_state);
     draw_viewport_window(shell_state);
     draw_inspector_window(shell_state);
+    // Agent panel is closed by default; toggling rebuilds the dock layout so
+    // the column appears/disappears (no permanent empty slot when closed).
+    if (shell_state->show_agent_panel != shell_state->agent_panel_was_open) {
+        shell_state->agent_panel_was_open = shell_state->show_agent_panel;
+        shell_state->default_dock_layout_initialized = false;
+    }
+    if (shell_state->show_agent_panel) {
+        draw_agent_window(shell_state);
+    }
 
     if (reload_requested) {
         reload_project(shell_state);
@@ -9614,15 +10109,49 @@ int main(int argc, char** argv) {
 
     ShellState shell_state;
     shell_state.project_path = parse_result.options.project_path;
+    shell_state.agent_listen_port = parse_result.options.agent_port;
     reload_project(&shell_state);
     if (const auto viewport_error =
             initialize_viewport_renderer(&shell_state.viewport_renderer)) {
         shell_state.viewport_renderer.error_message = *viewport_error;
     }
 
+    AgentSocketServer agent_server;
+    shell_state.agent_server = &agent_server;
+    shell_state.agent_token = parse_result.options.agent_token;
+    if (parse_result.options.agent_port.has_value()) {
+        if (!agent_server.start(*parse_result.options.agent_port,
+                                parse_result.options.agent_token)) {
+            std::cerr << "Failed to start AI Agent server on port "
+                      << *parse_result.options.agent_port << std::endl;
+        }
+        // Explicit --agent-port implies the user wants the panel visible.
+        shell_state.show_agent_panel = true;
+    }
+
+    {
+        std::error_code ec;
+        std::filesystem::path icon_root = "icons";
+        if (!std::filesystem::exists(icon_root, ec)) {
+            icon_root = "assets/icons/export/white_48";
+        }
+        const int loaded = shell_state.icons.load_all(icon_root);
+        if (loaded < static_cast<int>(marrow::editor::Icon::Count)) {
+            std::fprintf(
+                stderr,
+                "[icon_registry] loaded %d/%d icons from %s\n",
+                loaded,
+                static_cast<int>(marrow::editor::Icon::Count),
+                icon_root.string().c_str());
+        }
+    }
+
     int rendered_frames = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        agent_server.drain_commands(&shell_state);
+
         render_shell_frame(window, &shell_state);
         glfwSwapBuffers(window);
 
