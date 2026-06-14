@@ -485,6 +485,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
+    src/editor/shell_widgets.cpp
     src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
     src/editor/agent_socket.cpp

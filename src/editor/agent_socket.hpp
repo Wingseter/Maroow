@@ -39,6 +39,9 @@ public:
     bool start(int port, std::string token = "");
     void stop();
 
+    /** @brief True while the listener thread is bound and accepting. */
+    bool is_running() const noexcept { return running_.load(); }
+
     /**
      * @brief Drains pending agent commands and executes them on the shell state.
      * Must be called from the main UI thread.

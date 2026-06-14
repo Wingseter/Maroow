@@ -31,6 +31,8 @@ struct GLFWwindow;
 
 namespace marrow::editor::shell {
 
+class AgentSocketServer;
+
 struct Options {
     std::filesystem::path project_path{"assets/fixtures/player_idle.marrow"};
     std::optional<int> auto_close_frames;
@@ -134,12 +136,17 @@ struct RuntimeAssetWatchEntry {
     std::optional<std::filesystem::file_time_type> write_time;
 };
 
+// Bump when the default split changes so a fresh rebuild is forced.
+constexpr int kDockLayoutVersion = 3;
+
 struct DockLayoutState {
     ImGuiID dockspace_id{0};
     ImGuiID viewport_node_id{0};
     ImGuiID timeline_node_id{0};
     ImGuiID hierarchy_node_id{0};
     ImGuiID properties_node_id{0};
+    ImGuiID agent_node_id{0};
+    int layout_version{0};
 };
 
 struct AttachmentSelection {
@@ -424,7 +431,18 @@ struct ShellState {
     std::optional<marrow::runtime::ProfilerFrame> hud_overlay_frame;
     marrow::editor::IconRegistry icons{};
     std::array<char, 128> hierarchy_filter{};
+    // Active Constraints type tab: 0=IK 1=Path 2=Transform 3=Physics.
+    int constraints_tab{0};
+    // Agent surface — optional, closed by default (Ctrl+L / toolbar toggle).
+    // The socket can be turned on/off at runtime from the panel.
+    AgentSocketServer* agent_server{nullptr};
+    std::optional<int> agent_listen_port;  // last/CLI port
+    std::string agent_token;               // from --agent-token (optional)
+    bool show_agent_panel{false};
+    bool agent_panel_was_open{false};
 };
+
+constexpr int kDefaultAgentPort = 9876;
 
 constexpr char kProjectWindowTitle[] = "Project";
 constexpr char kRuntimeAssetsWindowTitle[] = "Runtime Assets";
@@ -433,6 +451,7 @@ constexpr char kHierarchyWindowTitle[] = "Hierarchy";
 constexpr char kTimelineWindowTitle[] = "Timeline";
 constexpr char kViewportWindowTitle[] = "Viewport";
 constexpr char kPropertiesWindowTitle[] = "Properties";
+constexpr char kAgentWindowTitle[] = "Agent";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};
