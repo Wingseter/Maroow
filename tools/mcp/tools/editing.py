@@ -14,12 +14,12 @@ def get_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="save",
-            description="Save the project",
+            description="Request editor approval to save the project",
             inputSchema={"type": "object", "properties": {}}
         ),
         types.Tool(
             name="export_runtime",
-            description="Export the project to runtime assets (.mskl, .matl).",
+            description="Request editor approval to export runtime assets (.mskl, .matl, optional .mbin).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -45,6 +45,37 @@ def get_tools() -> list[types.Tool]:
                     "y": {"type": "number"}
                 },
                 "required": ["animation", "bone", "channel", "time"]
+            }
+        ),
+        types.Tool(
+            name="set_draw_order_keyframe",
+            description="Create or replace a draw-order keyframe with the complete slot stack.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string"},
+                    "time": {"type": "number"},
+                    "slots": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Every skeleton slot exactly once, in draw order."
+                    },
+                    "merge": {"type": "boolean"},
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["animation", "time", "slots"]
+            }
+        ),
+        types.Tool(
+            name="remove_draw_order_keyframe",
+            description="Remove a draw-order keyframe at an exact time.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string"},
+                    "time": {"type": "number"}
+                },
+                "required": ["animation", "time"]
             }
         ),
         types.Tool(

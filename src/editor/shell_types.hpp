@@ -388,6 +388,31 @@ struct PendingEditAction {
     EditorHistorySnapshot before_snapshot;
 };
 
+enum class AgentReviewKind {
+    SaveProject,
+    ExportRuntime,
+};
+
+struct AgentReviewRequest {
+    std::uint64_t id{0};
+    AgentReviewKind kind{AgentReviewKind::SaveProject};
+    std::string label;
+    std::filesystem::path target_path;
+    bool binary_output{false};
+    bool allowed{false};
+    std::string message;
+};
+
+struct AgentActivityEntry {
+    std::uint64_t id{0};
+    std::string op;
+    std::string category;
+    bool ok{false};
+    bool mutating{false};
+    bool requires_review{false};
+    std::string message;
+};
+
 struct ShellState {
     std::filesystem::path project_path;
     marrow::editor::ViewportState viewport{};
@@ -440,6 +465,10 @@ struct ShellState {
     std::string agent_token;               // from --agent-token (optional)
     bool show_agent_panel{false};
     bool agent_panel_was_open{false};
+    std::uint64_t next_agent_activity_id{1};
+    std::uint64_t next_agent_review_id{1};
+    std::vector<AgentActivityEntry> agent_activity_log;
+    std::vector<AgentReviewRequest> agent_review_queue;
 };
 
 constexpr int kDefaultAgentPort = 9876;

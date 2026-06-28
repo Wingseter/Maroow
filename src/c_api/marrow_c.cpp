@@ -1618,13 +1618,9 @@ MarrowStatusCode marrow_editor_agent_dispatch(
                 project->value.get(),
                 parse_result.document->root);
 
-        marrow::runtime::json::Value::Object result_obj;
-        result_obj.emplace("ok", marrow::runtime::json::Value(result.ok, {}));
-        result_obj.emplace("message", marrow::runtime::json::Value(result.message, {}));
-        result_obj.emplace("scene_delta", result.scene_delta);
-
         project->last_dispatch_result =
-            marrow::runtime::json::serialize_pretty(marrow::runtime::json::Value(std::move(result_obj), {}));
+            marrow::runtime::json::serialize_pretty(
+                marrow::editor::shell::AgentCommandDispatcher::result_to_json(result));
 
         *out_result_json = to_string_view(project->last_dispatch_result);
         clear_last_error_message();

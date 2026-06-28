@@ -67,15 +67,12 @@ void AgentSocketServer::drain_commands(ShellState* state) {
 
         auto dispatch_result = AgentCommandDispatcher::dispatch(state, req.command);
 
-        json::Value::Object res_obj;
-        res_obj.emplace("ok", json::Value(dispatch_result.ok, {}));
-        res_obj.emplace("message", json::Value(dispatch_result.message, {}));
-        res_obj.emplace("scene_delta", std::move(dispatch_result.scene_delta));
-
         json::Value::Object rpc_res;
         rpc_res.emplace("jsonrpc", json::Value(std::string("2.0"), {}));
         rpc_res.emplace("id", json::Value(req.id, {}));
-        rpc_res.emplace("result", json::Value(std::move(res_obj), {}));
+        rpc_res.emplace(
+            "result",
+            AgentCommandDispatcher::result_to_json(std::move(dispatch_result)));
 
         std::lock_guard<std::mutex> lock(response_mutex_);
         responses_.push_back({req.id, json::Value(std::move(rpc_res), {})});

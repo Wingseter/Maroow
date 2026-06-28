@@ -20,6 +20,11 @@ bool result_ok(const MarrowStringView& result) {
            json.find("\"ok\":true") != std::string::npos;
 }
 
+bool result_contains(const MarrowStringView& result, const char* needle) {
+    const std::string json(result.data ? result.data : "", result.size);
+    return json.find(needle) != std::string::npos;
+}
+
 bool dispatch(MarrowProject* project, const char* label, const char* cmd) {
     MarrowStringView result{};
     const MarrowStatusCode status =
@@ -37,6 +42,33 @@ bool dispatch(MarrowProject* project, const char* label, const char* cmd) {
     if (!result_ok(result)) {
         std::cerr << "[FAIL] " << label << ": dispatcher returned ok=false -> "
                   << payload << std::endl;
+        return false;
+    }
+    std::cout << "[ OK ] " << label << std::endl;
+    return true;
+}
+
+bool dispatch_contains(
+    MarrowProject* project,
+    const char* label,
+    const char* cmd,
+    const char* needle) {
+    MarrowStringView result{};
+    const MarrowStatusCode status =
+        marrow_editor_agent_dispatch(project, cmd, &result);
+    if (status != MARROW_STATUS_OK) {
+        MarrowStringView error{};
+        marrow_get_last_error_message(&error);
+        std::cerr << "[FAIL] " << label << ": status "
+                  << static_cast<int>(status) << " - "
+                  << std::string(error.data ? error.data : "", error.size)
+                  << std::endl;
+        return false;
+    }
+    const std::string payload(result.data ? result.data : "", result.size);
+    if (!result_ok(result) || payload.find(needle) == std::string::npos) {
+        std::cerr << "[FAIL] " << label << ": expected successful payload containing "
+                  << needle << " -> " << payload << std::endl;
         return false;
     }
     std::cout << "[ OK ] " << label << std::endl;
@@ -66,19 +98,58 @@ int main(int argc, char** argv) {
     bool pass = true;
 
     // 1. Inspection round-trip.
-    pass &= dispatch(project, "scene.describe", "{\"op\":\"scene.describe\"}");
+    pass &= dispatch_contains(
+        project,
+        "operations.list",
+        "{\"op\":\"operations.list\"}",
+        "set_draw_order_keyframe");
+    pass &= dispatch_contains(project, "scene.describe", "{\"op\":\"scene.describe\"}", "slot_count");
     pass &= dispatch(project, "bones.list", "{\"op\":\"bones.list\"}");
     pass &= dispatch(project, "animation.list", "{\"op\":\"animation.list\"}");
+    pass &= dispatch_contains(project, "slots.list", "{\"op\":\"slots.list\"}", "spark_fx");
+    pass &= dispatch_contains(project, "skins.list", "{\"op\":\"skins.list\"}", "mesh_base");
+    pass &= dispatch_contains(project, "attachments.list", "{\"op\":\"attachments.list\"}", "body_mesh");
+    pass &= dispatch_contains(project, "constraints.list", "{\"op\":\"constraints.list\"}", "editor_arm_reach");
+    pass &= dispatch_contains(
+        project,
+        "timeline.describe",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}",
+        "draw_order_keyframes");
+    pass &= dispatch_contains(
+        project,
+        "mesh.describe",
+        "{\"op\":\"mesh.describe\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}",
+        "vertex_count");
+    pass &= dispatch_contains(
+        project,
+        "project.diagnostics",
+        "{\"op\":\"project.diagnostics\"}",
+        "error_count");
 
     // 2. Real mutation: add a rotate keyframe to idle/spine.
     pass &= dispatch(
         project, "set_transform",
         "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
         "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.75,\"angle\":30}}");
+    pass &= dispatch(
+        project,
+        "set_draw_order_keyframe",
+        "{\"op\":\"set_draw_order_keyframe\",\"args\":{\"animation\":\"idle\","
+        "\"time\":0.75,\"slots\":[\"arm_l\",\"body\",\"fx_mask\",\"spark_fx\","
+        "\"spawn_anchor\",\"hurtbox\",\"guide\"]}}");
+    pass &= dispatch(
+        project,
+        "remove_draw_order_keyframe",
+        "{\"op\":\"remove_draw_order_keyframe\",\"args\":{\"animation\":\"idle\","
+        "\"time\":0.75}}");
 
-    // 3. Export round-trip with the mutation applied.
-    pass &= dispatch(project, "export_runtime",
-                     "{\"op\":\"export_runtime\",\"args\":{\"binary\":true}}");
+    // 3. Export is now review-gated for agents and must not write immediately.
+    pass &= dispatch_contains(
+        project,
+        "export_runtime review",
+        "{\"op\":\"export_runtime\",\"args\":{\"binary\":true}}",
+        "\"required\": true");
 
     // 4. Undo the mutation.
     pass &= dispatch(project, "undo", "{\"op\":\"undo\"}");
