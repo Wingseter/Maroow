@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(Marrow LANGUAGES C CXX)
 
+include(CTest)
+
 if(APPLE)
     enable_language(OBJC)
     enable_language(OBJCXX)
@@ -215,9 +217,6 @@ add_library(marrow_c STATIC
 target_include_directories(marrow_c
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
-    PRIVATE
-        ${PROJECT_SOURCE_DIR}/src/editor
-        ${MARROW_IMGUI_DIR}
 )
 
 target_link_libraries(marrow_c
@@ -288,9 +287,12 @@ add_library(marrow_editor STATIC
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/session.cpp
     src/editor/agent_dispatch.cpp
-    src/editor/icon_registry.cpp
-    src/editor/shell_core.cpp
+    src/editor/agent_handlers_inspection.cpp
+    src/editor/agent_handlers_editing.cpp
+    src/editor/agent_handlers_constraints.cpp
+    src/editor/agent_handlers_management.cpp
 )
 
 target_include_directories(marrow_editor
@@ -298,7 +300,6 @@ target_include_directories(marrow_editor
         ${PROJECT_SOURCE_DIR}/include
     PRIVATE
         ${PROJECT_SOURCE_DIR}/src/editor
-        ${MARROW_IMGUI_DIR}
 )
 
 target_link_libraries(marrow_editor
@@ -306,7 +307,6 @@ target_link_libraries(marrow_editor
         marrow_runtime
     PRIVATE
         ZLIB::ZLIB
-        ${MARROW_OPENGL_LIBRARIES}
 )
 
 add_executable(marrow_bootstrap
@@ -492,6 +492,17 @@ target_link_libraries(marrow_agent_dispatch_smoke
 
 add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
+    src/editor/shell_core.cpp
+    src/editor/shell_preview.cpp
+    src/editor/shell_asset_watch.cpp
+    src/editor/shell_timeline.cpp
+    src/editor/shell_constraints.cpp
+    src/editor/shell_selection.cpp
+    src/editor/shell_inspector.cpp
+    src/editor/shell_weight_paint.cpp
+    src/editor/shell_viewport_ui.cpp
+    src/editor/shell_project_panels.cpp
+    src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
     src/editor/shell_widgets.cpp
@@ -559,4 +570,80 @@ endif()
 
 if(APPLE)
     target_compile_definitions(marrow_editor_shell PRIVATE GL_SILENCE_DEPRECATION)
+endif()
+
+if(BUILD_TESTING)
+    add_test(
+        NAME marrow.runtime_unit
+        COMMAND marrow_unit_tests
+    )
+    set_tests_properties(marrow.runtime_unit PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.runtime_fixture_smoke
+        COMMAND marrow_fixture_smoke
+            assets/fixtures/player_idle.mskl
+            assets/fixtures/player_idle.matl
+    )
+    set_tests_properties(marrow.runtime_fixture_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;fixture;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.renderer_skip_render_smoke
+        COMMAND marrow_renderer_sample
+            --hud
+            --skip-render
+            assets/fixtures/player_idle.mskl
+            assets/fixtures/player_idle.matl
+    )
+    set_tests_properties(marrow.renderer_skip_render_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.project_smoke
+        COMMAND marrow_project_smoke
+            assets/fixtures/player_idle.marrow
+    )
+    set_tests_properties(marrow.project_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;project;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.agent_dispatch_smoke
+        COMMAND marrow_agent_dispatch_smoke
+    )
+    set_tests_properties(marrow.agent_dispatch_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;agent;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.c_abi_smoke
+        COMMAND marrow_c_smoke
+    )
+    set_tests_properties(marrow.c_abi_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "c-abi;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.editor_shell_smoke
+        COMMAND marrow_editor_shell
+            --project
+            assets/fixtures/player_idle.marrow
+            --auto-close
+            5
+    )
+    set_tests_properties(marrow.editor_shell_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;smoke;noninteractive"
+    )
 endif()

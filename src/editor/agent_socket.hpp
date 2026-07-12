@@ -1,17 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/runtime/json.hpp"
 
 namespace marrow::editor::shell {
-
-struct ShellState;
 
 struct AgentCommandRequest {
     std::string id;
@@ -43,10 +43,10 @@ public:
     bool is_running() const noexcept { return running_.load(); }
 
     /**
-     * @brief Drains pending agent commands and executes them on the shell state.
+     * @brief Drains pending agent commands on the main-thread command context.
      * Must be called from the main UI thread.
      */
-    void drain_commands(ShellState* state);
+    std::size_t drain_commands(marrow::editor::AgentCommandContext& context);
 
 private:
     void listen_loop(int port);

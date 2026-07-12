@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include <sstream>
 
-#include "shell_types.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 
 namespace marrow::editor::shell {
@@ -54,29 +53,35 @@ void AgentSocketServer::stop() {
     }
 }
 
-void AgentSocketServer::drain_commands(ShellState* state) {
+std::size_t AgentSocketServer::drain_commands(
+    marrow::editor::AgentCommandContext& context) {
     std::queue<AgentCommandRequest> local_requests;
     {
         std::lock_guard<std::mutex> lock(request_mutex_);
         std::swap(local_requests, requests_);
     }
 
+    std::size_t dispatched_count = 0U;
     while (!local_requests.empty()) {
         auto req = std::move(local_requests.front());
         local_requests.pop();
 
-        auto dispatch_result = AgentCommandDispatcher::dispatch(state, req.command);
+        auto dispatch_result =
+            marrow::editor::AgentCommandDispatcher::dispatch(context, req.command);
 
         json::Value::Object rpc_res;
         rpc_res.emplace("jsonrpc", json::Value(std::string("2.0"), {}));
         rpc_res.emplace("id", json::Value(req.id, {}));
         rpc_res.emplace(
             "result",
-            AgentCommandDispatcher::result_to_json(std::move(dispatch_result)));
+            marrow::editor::AgentCommandDispatcher::result_to_json(
+                std::move(dispatch_result)));
 
         std::lock_guard<std::mutex> lock(response_mutex_);
         responses_.push_back({req.id, json::Value(std::move(rpc_res), {})});
+        ++dispatched_count;
     }
+    return dispatched_count;
 }
 
 void AgentSocketServer::listen_loop(int port) {

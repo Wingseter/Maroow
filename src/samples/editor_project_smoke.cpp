@@ -1,13 +1,17 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/session.hpp"
 #include "marrow/runtime/animation_compare.hpp"
 
 namespace {
@@ -862,108 +866,360 @@ bool validate_export_round_trip(
 bool validate_undo_redo_cycle(const marrow::editor::ProjectLoadResult& project_result) {
     if (project_result.project == nullptr ||
         project_result.base_skeleton_document == nullptr) {
-        std::cerr << "Undo/redo validation requires a loaded editor project.\n";
+        std::cerr << "EditorSession validation requires a loaded editor project.\n";
         return false;
     }
 
-    const marrow::editor::ProjectData baseline_project = *project_result.project;
-    const std::string baseline_snapshot =
-        marrow::editor::serialize_project(baseline_project);
+    marrow::editor::EditorSession session;
+    const auto opened = session.open(project_result.project->source_path);
+    if (!opened || session.project() == nullptr || session.runtime_data() == nullptr) {
+        std::cerr << "EditorSession could not open the smoke project.\n";
+        return false;
+    }
 
-    marrow::editor::ProjectData edited_project = baseline_project;
-    edited_project.editor_metadata.notes +=
-        edited_project.editor_metadata.notes.empty()
+    const std::string opened_snapshot =
+        marrow::editor::serialize_project(*session.project());
+    const std::string direct_load_snapshot =
+        marrow::editor::serialize_project(*project_result.project);
+    if (opened_snapshot != direct_load_snapshot) {
+        std::cerr << "EditorSession changed the byte serialization of an unchanged .marrow project.\n";
+        return false;
+    }
+    const auto failed_open = session.open(
+        project_result.project->source_path.string() + ".missing-session-smoke");
+    if (failed_open || session.project() == nullptr ||
+        marrow::editor::serialize_project(*session.project()) != opened_snapshot) {
+        std::cerr << "A failed EditorSession open replaced the active project.\n";
+        return false;
+    }
+
+    if (!session.select_animation("idle") || !session.seek(0.2)) {
+        std::cerr << "EditorSession could not prepare reload playback state.\n";
+        return false;
+    }
+    session.set_playing(true);
+    const auto reloaded = session.reload();
+    if (!reloaded || !session.preview_state().playing ||
+        session.preview_state().animation_name != "idle" ||
+        std::abs(session.preview_state().time_seconds - 0.2) > 1e-9) {
+        std::cerr << "EditorSession reload did not retain playback state.\n";
+        return false;
+    }
+    const std::uint64_t runtime_before_advance = session.runtime_revision();
+    const std::uint64_t preview_before_advance = session.preview_revision();
+    if (!session.advance(1.0 / 60.0) ||
+        session.runtime_revision() != runtime_before_advance ||
+        session.preview_revision() <= preview_before_advance ||
+        session.preview_state().time_seconds <= 0.2) {
+        std::cerr << "Incremental preview advancement rebuilt runtime data.\n";
+        return false;
+    }
+    const marrow::runtime::RootMotionDelta root_motion_after_advance =
+        session.preview_root_motion_total();
+    if (!session.set_loop(false) ||
+        std::abs(
+            session.preview_root_motion_total().x - root_motion_after_advance.x) > 1e-9 ||
+        std::abs(
+            session.preview_root_motion_total().y - root_motion_after_advance.y) > 1e-9 ||
+        !session.set_loop(true)) {
+        std::cerr << "Pose-only preview refresh changed cumulative root motion.\n";
+        return false;
+    }
+    session.set_playing(false);
+
+    const std::string baseline_snapshot =
+        marrow::editor::serialize_project(*session.project());
+    const std::uint64_t baseline_project_revision = session.project_revision();
+    const std::uint64_t baseline_runtime_revision = session.runtime_revision();
+
+    {
+        auto no_change = session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "No-op edit",
+            {},
+            false,
+            marrow::editor::EditImpact::Project});
+        const auto result = no_change.commit();
+        if (!result || result.changed || session.can_undo() || session.dirty() ||
+            session.project_revision() != baseline_project_revision ||
+            session.runtime_revision() != baseline_runtime_revision) {
+            std::cerr << "EditorSession recorded or rebuilt a no-change edit.\n";
+            return false;
+        }
+    }
+
+    {
+        auto cancelled = session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Cancelled edit",
+            {},
+            false,
+            marrow::editor::EditImpact::Project});
+        cancelled.project()->editor_metadata.notes += " cancelled";
+        const auto nested = session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Nested edit",
+            {},
+            false,
+            marrow::editor::EditImpact::Project});
+        if (nested || !nested.error().has_value()) {
+            std::cerr << "EditorSession allowed a nested edit transaction.\n";
+            return false;
+        }
+        if (!cancelled.set_preview_skins({"warrior"}) ||
+            cancelled.set_preview_attachment(
+                std::numeric_limits<std::size_t>::max(),
+                std::nullopt,
+                "missing")) {
+            std::cerr << "EditorSession transaction mutator validation was inconsistent.\n";
+            return false;
+        }
+        const auto failed_commit = cancelled.commit();
+        if (failed_commit || session.transaction_active()) {
+            std::cerr << "A failed EditorSession commit left its transaction active.\n";
+            return false;
+        }
+    }
+    if (session.can_undo() || session.dirty() ||
+        marrow::editor::serialize_project(*session.project()) != baseline_snapshot ||
+        session.preview_state().skin_names != std::vector<std::string>{"default"}) {
+        std::cerr << "EditorSession cancellation did not restore the project snapshot.\n";
+        return false;
+    }
+
+    auto edit = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Update project notes",
+        "project-notes",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!edit || edit.project() == nullptr) {
+        std::cerr << "EditorSession did not start a project edit transaction.\n";
+        return false;
+    }
+    edit.project()->editor_metadata.notes +=
+        edit.project()->editor_metadata.notes.empty()
             ? std::string("Undo/redo smoke edit.")
             : std::string(" [undo-redo smoke]");
-
+    const auto committed = edit.commit();
+    if (!committed || !committed.changed || !session.can_undo() || session.can_redo() ||
+        !session.dirty() || session.project_revision() <= baseline_project_revision ||
+        session.runtime_revision() <= baseline_runtime_revision ||
+        std::abs(
+            session.preview_root_motion_total().x - root_motion_after_advance.x) > 1e-9 ||
+        std::abs(
+            session.preview_root_motion_total().y - root_motion_after_advance.y) > 1e-9) {
+        std::cerr << "EditorSession did not commit the project edit atomically.\n";
+        return false;
+    }
     const std::string edited_snapshot =
-        marrow::editor::serialize_project(edited_project);
-    if (edited_snapshot == baseline_snapshot ||
-        edited_project.editor_metadata.notes == baseline_project.editor_metadata.notes) {
-        std::cerr << "Undo/redo validation did not produce a distinct project snapshot.\n";
+        marrow::editor::serialize_project(*session.project());
+
+    const auto undone = session.undo();
+    if (!undone || !undone.changed || session.can_undo() || !session.can_redo() ||
+        session.dirty() ||
+        marrow::editor::serialize_project(*session.project()) != baseline_snapshot) {
+        std::cerr << "EditorSession undo did not restore the project baseline.\n";
+        return false;
+    }
+    const auto redone = session.redo();
+    if (!redone || !redone.changed || !session.can_undo() || session.can_redo() ||
+        !session.dirty() ||
+        marrow::editor::serialize_project(*session.project()) != edited_snapshot) {
+        std::cerr << "EditorSession redo did not restore the edited project.\n";
         return false;
     }
 
-    const auto edited_runtime = marrow::editor::build_project_runtime(
-        edited_project,
-        *project_result.base_skeleton_document);
-    if (!edited_runtime) {
-        std::cerr << edited_runtime.error->format();
+    session.clear_history();
+    const std::uint64_t preview_revision = session.preview_revision();
+    const auto preview_edit = session.set_preview_skins({"warrior"});
+    if (!preview_edit || !preview_edit.changed || !session.can_undo() ||
+        session.preview_state().skin_names != std::vector<std::string>{"warrior"} ||
+        session.preview_revision() <= preview_revision) {
+        std::cerr << "EditorSession did not record the transient preview composition.\n";
+        return false;
+    }
+    const bool dirty_before_preview_undo = session.dirty();
+    if (!session.undo() || session.dirty() != dirty_before_preview_undo ||
+        session.preview_state().skin_names != std::vector<std::string>{"default"}) {
+        std::cerr << "Preview-only undo changed project dirtiness or restored the wrong skin.\n";
         return false;
     }
 
-    auto command = marrow::editor::make_project_command(
-        "Update project notes",
-        baseline_project,
-        edited_project);
-    if (!command.has_value() ||
-        command->before_serialized != baseline_snapshot ||
-        command->after_serialized != edited_snapshot) {
-        std::cerr << "Undo/redo validation did not capture serializable project snapshots.\n";
+    session.clear_history();
+    if (!session.select_animation("idle") || !session.seek(0.2)) {
+        std::cerr << "EditorSession could not prepare playback-retention validation.\n";
+        return false;
+    }
+    const double playback_time = session.preview_state().time_seconds;
+    const std::string rollback_snapshot =
+        marrow::editor::serialize_project(*session.project());
+    auto invalid_edit = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Invalid runtime edit",
+        {},
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (invalid_edit.project()->transform_timeline_edits.empty()) {
+        std::cerr << "EditorSession rollback smoke requires a transform timeline edit.\n";
+        return false;
+    }
+    invalid_edit.project()->transform_timeline_edits.front().bone_name =
+        "__missing_session_smoke_bone__";
+    const auto rejected = invalid_edit.commit();
+    if (rejected || session.can_undo() ||
+        marrow::editor::serialize_project(*session.project()) != rollback_snapshot ||
+        std::abs(session.preview_state().time_seconds - playback_time) > 1e-9) {
+        std::cerr << "EditorSession did not roll back a failed runtime rebuild.\n";
         return false;
     }
 
-    marrow::editor::ProjectCommandStack history;
-    history.push(*command);
-    if (!history.can_undo() || history.can_redo()) {
-        std::cerr << "Undo/redo validation did not record the command on the undo stack.\n";
+    for (int index = 0; index < 2; ++index) {
+        auto merged_edit = session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Merge notes edit",
+            "merge-notes",
+            true,
+            marrow::editor::EditImpact::Project});
+        merged_edit.project()->editor_metadata.notes += " m" + std::to_string(index);
+        if (!merged_edit.commit()) {
+            std::cerr << "EditorSession merge smoke edit failed.\n";
+            return false;
+        }
+    }
+    if (session.undo_count() != 1U) {
+        std::cerr << "EditorSession did not merge compatible history entries.\n";
         return false;
     }
 
-    marrow::editor::ProjectData current_project = edited_project;
-    const auto* undo_command = history.peek_undo();
-    if (undo_command == nullptr) {
-        std::cerr << "Undo/redo validation could not read the pending undo command.\n";
+    session.clear_history();
+    const std::string notes_before_noop_merge = session.project()->editor_metadata.notes;
+    for (int index = 0; index < 2; ++index) {
+        auto noop_merge = session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "No-op merge edit",
+            "noop-merge",
+            true,
+            marrow::editor::EditImpact::Project});
+        noop_merge.project()->editor_metadata.notes =
+            index == 0 ? notes_before_noop_merge + " transient" : notes_before_noop_merge;
+        if (!noop_merge.commit()) {
+            std::cerr << "EditorSession no-op merge edit failed.\n";
+            return false;
+        }
+    }
+    if (session.can_undo()) {
+        std::cerr << "EditorSession retained a merged history entry that returned to baseline.\n";
         return false;
     }
 
-    current_project = undo_command->before_project;
-    const auto undone_runtime = marrow::editor::build_project_runtime(
-        current_project,
-        *project_result.base_skeleton_document);
-    if (!undone_runtime) {
-        std::cerr << undone_runtime.error->format();
-        return false;
+    session.clear_history();
+    for (std::size_t index = 0; index < 101U; ++index) {
+        auto depth_edit = session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "History depth edit",
+            {},
+            false,
+            marrow::editor::EditImpact::Project});
+        depth_edit.project()->editor_metadata.notes += " d" + std::to_string(index);
+        if (!depth_edit.commit()) {
+            std::cerr << "EditorSession history-depth edit failed.\n";
+            return false;
+        }
     }
-    if (marrow::editor::serialize_project(current_project) != baseline_snapshot ||
-        current_project.editor_metadata.notes != baseline_project.editor_metadata.notes) {
-        std::cerr << "Undo/redo validation did not restore the previous project state.\n";
-        return false;
-    }
-
-    history.commit_undo();
-    if (history.can_undo() || !history.can_redo()) {
-        std::cerr << "Undo/redo validation did not move the command onto the redo stack.\n";
-        return false;
-    }
-
-    const auto* redo_command = history.peek_redo();
-    if (redo_command == nullptr) {
-        std::cerr << "Undo/redo validation could not read the pending redo command.\n";
+    if (session.undo_count() != 100U || session.redo_count() != 0U) {
+        std::cerr << "EditorSession did not enforce the 100-entry history cap.\n";
         return false;
     }
 
-    current_project = redo_command->after_project;
-    const auto redone_runtime = marrow::editor::build_project_runtime(
-        current_project,
-        *project_result.base_skeleton_document);
-    if (!redone_runtime) {
-        std::cerr << redone_runtime.error->format();
-        return false;
-    }
-    if (marrow::editor::serialize_project(current_project) != edited_snapshot ||
-        current_project.editor_metadata.notes != edited_project.editor_metadata.notes) {
-        std::cerr << "Undo/redo validation did not restore the redone project state.\n";
+    struct TemporaryDirectoryCleanup {
+        std::filesystem::path path;
+        ~TemporaryDirectoryCleanup() {
+            std::error_code ignored;
+            std::filesystem::remove_all(path, ignored);
+        }
+    };
+    const auto unique_suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    TemporaryDirectoryCleanup temporary{
+        std::filesystem::temp_directory_path() /
+        ("marrow-session-smoke-" + std::to_string(unique_suffix))};
+    const std::size_t history_before_export = session.undo_count();
+    const bool dirty_before_export = session.dirty();
+    marrow::editor::ProjectExportOptions export_options;
+    export_options.skeleton_output_path = temporary.path / "session_export.mskl";
+    export_options.binary_output_path = temporary.path / "session_export.mbin";
+    const auto export_result = session.export_runtime(export_options);
+    if (!export_result || !export_result.binary_path.has_value() ||
+        !marrow::runtime::load_skeleton_data(export_result.path) ||
+        !marrow::runtime::load_skeleton_data(*export_result.binary_path) ||
+        session.undo_count() != history_before_export ||
+        session.dirty() != dirty_before_export) {
+        std::cerr << "EditorSession export changed authoring state or produced invalid runtime data.\n";
         return false;
     }
 
-    history.commit_redo();
-    if (!history.can_undo() || history.can_redo()) {
-        std::cerr << "Undo/redo validation left the command stack in an invalid state.\n";
+    const auto save_result = session.save(temporary.path / "session_project.marrow");
+    if (!save_result || session.dirty() || session.undo_count() != history_before_export ||
+        !marrow::runtime::json::load_document(save_result.project->source_path)) {
+        std::cerr << "EditorSession save did not establish a clean saved baseline.\n";
+        return false;
+    }
+    if (!session.undo() || !session.dirty() || !session.redo() || session.dirty() ||
+        session.project()->source_path != save_result.project->source_path) {
+        std::cerr << "EditorSession undo/redo did not track the saved dirty baseline.\n";
         return false;
     }
 
-    std::cout << "Undo/redo command stack validated.\n";
+    session.clear_history();
+    auto before_save_boundary = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Before save boundary",
+        "save-boundary",
+        true,
+        marrow::editor::EditImpact::Project});
+    before_save_boundary.project()->editor_metadata.notes += " before-save";
+    if (!before_save_boundary.commit() || !session.save()) {
+        std::cerr << "EditorSession could not establish a save merge boundary.\n";
+        return false;
+    }
+    const std::string saved_boundary_notes = session.project()->editor_metadata.notes;
+    auto after_save_boundary = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "After save boundary",
+        "save-boundary",
+        true,
+        marrow::editor::EditImpact::Project});
+    after_save_boundary.project()->editor_metadata.notes += " after-save";
+    if (!after_save_boundary.commit() || session.undo_count() != 2U ||
+        !session.undo() ||
+        session.project()->editor_metadata.notes != saved_boundary_notes) {
+        std::cerr << "EditorSession merged history across a successful save.\n";
+        return false;
+    }
+
+    if (!session.select_animation("idle") || !session.seek(0.35)) {
+        std::cerr << "EditorSession could not prepare animation-selection transient validation.\n";
+        return false;
+    }
+    const marrow::runtime::RootMotionDelta motion_before_selection =
+        session.preview_root_motion_total();
+    if ((std::abs(motion_before_selection.x) < 1e-9 &&
+         std::abs(motion_before_selection.y) < 1e-9) ||
+        !session.select_animation("attack", true) ||
+        std::abs(session.preview_root_motion_delta().x) > 1e-9 ||
+        std::abs(session.preview_root_motion_delta().y) > 1e-9 ||
+        std::abs(session.preview_root_motion_total().x) > 1e-9 ||
+        std::abs(session.preview_root_motion_total().y) > 1e-9 ||
+        !session.preview_events().empty()) {
+        std::cerr << "Animation selection retained stale preview events or root motion.\n";
+        return false;
+    }
+
+    std::cout << "EditorSession transaction, rollback, preview, merge, and history validated.\n";
     return true;
 }
 

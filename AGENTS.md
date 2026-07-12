@@ -33,6 +33,10 @@
 
 - Configure: `cmake -S . -B build`
 - Build: `cmake --build build`
+- Focused CTest guardrail discovery: `ctest --test-dir build -N`
+- Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
+- Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
+- Editor-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L editor`
 - Constraint warning check: `cmake --build build --target marrow_constraint_warning_check`
 - Documentation build (requires Doxygen on `PATH`): `cmake --build build --target marrow_docs`
 - Release benchmark configure: `cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release`
@@ -154,6 +158,35 @@
 - Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation, clipping-mask propagation, sequence frame selection, GPU-skinned weighted-mesh draw preparation, animated slot presentation, slot blend modes, straight-alpha/PMA two-color tint propagation, and the single-color shader fast path from the checked-in fixtures
 - To run the full autonomous loop with Codex against the expanded plan: `ralph build 100`
 
+## Runtime and Renderer Unit Cases
+
+`./build/marrow_unit_tests` currently reports these 24 named cases (validated 2026-07-12):
+
+- `Interpolation Edge Cases`
+- `Constraint Fast Math Approximations`
+- `Animation Float Storage And Constant Pruning`
+- `Animation Timeline Index And Sampling Cursor`
+- `Matrix Composition`
+- `Topological Bone Reorder`
+- `SkeletonData Children Map And Tip Cache`
+- `SIMD World Transform Propagation`
+- `Constraint Hot Path Allocations`
+- `Constraint Dirty Skip Preserves Output`
+- `Constraint Dirty Skip Re-evaluates Only Affected Constraints`
+- `IK Solving`
+- `Physics Stepping`
+- `SkeletonBounds Queries`
+- `Custom Allocator Lifecycle`
+- `AnimationState Snapshot Restore`
+- `Animation Layers`
+- `Concave Stencil Clipping`
+- `Nested Stencil Restoration`
+- `Dynamic Mesh Cache Static Payload And Deform Updates`
+- `Dynamic Mesh Clipping Uses Stencil Only`
+- `PreparedScene Cache Dirty Updates`
+- `Binary Key Quantization And Reduction`
+- `Runtime Profiler Frame`
+
 ## MAR-119 E2E Editor Validation Results
 
 Validated 2026-04-11. All acceptance criteria pass through headless smoke tests and round-trip export verification.
@@ -171,7 +204,7 @@ Validated 2026-04-11. All acceptance criteria pass through headless smoke tests 
 | AC9 | Documentation in AGENTS.md | This section | PASS |
 
 Validated test commands and outputs:
-- `./build/marrow_unit_tests` → 27 tests passed
+- `./build/marrow_unit_tests` → 24 named cases passed (current executable; revalidated 2026-07-12)
 - `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5` → 5 frames rendered
 - `./build/marrow_renderer_sample --auto-close 2` → all blend/clip/mesh/batch validations passed
 - `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin` → export + undo/redo validated

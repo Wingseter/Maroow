@@ -1,205 +1,15 @@
-#include "shell_types.hpp"
+#include "shell_state.hpp"
+#include "shell_asset_watch.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <sstream>
-#include <system_error>
+
+#include "imgui_internal.h"
 
 #include "marrow/editor/project.hpp"
 
 namespace marrow::editor::shell {
-namespace {
-
-std::filesystem::path core_absolutize_path(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return path;
-    }
-    if (path.is_absolute()) {
-        return path.lexically_normal();
-    }
-
-    std::error_code error;
-    const std::filesystem::path current_directory = std::filesystem::current_path(error);
-    if (error) {
-        return path.lexically_normal();
-    }
-
-    return (current_directory / path).lexically_normal();
-}
-
-RuntimeAssetWatchEntry core_runtime_asset_watch_entry(const std::filesystem::path& path) {
-    RuntimeAssetWatchEntry entry;
-    entry.path = core_absolutize_path(path);
-
-    std::error_code error;
-    entry.exists = std::filesystem::exists(entry.path, error);
-    if (error || !entry.exists) {
-        entry.exists = false;
-        return entry;
-    }
-
-    const auto write_time = std::filesystem::last_write_time(entry.path, error);
-    if (!error) {
-        entry.write_time = write_time;
-    }
-    return entry;
-}
-
-std::vector<std::filesystem::path> core_runtime_asset_paths(const ShellState& state) {
-    std::vector<std::filesystem::path> paths;
-    if (!state.load_result || state.load_result.project == nullptr) {
-        return paths;
-    }
-
-    paths.push_back(core_absolutize_path(state.load_result.project->resolved_skeleton_path()));
-    for (const auto& atlas_path : state.load_result.project->resolved_atlas_paths()) {
-        paths.push_back(core_absolutize_path(atlas_path));
-    }
-    return paths;
-}
-
-} // namespace
-
-void reset_runtime_asset_watch(ShellState* state) {
-    if (state == nullptr) {
-        return;
-    }
-
-    const std::vector<std::filesystem::path> paths = core_runtime_asset_paths(*state);
-    state->runtime_asset_watch_entries.clear();
-    state->runtime_asset_watch_entries.reserve(paths.size());
-    for (const auto& path : paths) {
-        state->runtime_asset_watch_entries.push_back(core_runtime_asset_watch_entry(path));
-    }
-}
-
-// EditAction implementations
-EditAction::EditAction(EditActionKind kind, std::string label, std::string group, bool allow_merge)
-    : kind_(kind), label_(std::move(label)), group_(std::move(group)), allow_merge_(allow_merge) {}
-
-EditActionKind EditAction::kind() const { return kind_; }
-const std::string& EditAction::label() const { return label_; }
-const std::string& EditAction::group() const { return group_; }
-bool EditAction::allow_merge() const { return allow_merge_; }
-
-SnapshotEditAction::SnapshotEditAction(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    EditorHistorySnapshot before,
-    EditorHistorySnapshot after)
-    : EditAction(kind, std::move(label), std::move(group), allow_merge),
-      before_(std::move(before)),
-      after_(std::move(after)) {}
-
-bool SnapshotEditAction::undo(ShellState* state) const {
-    return apply_history_snapshot(state, before_);
-}
-
-bool SnapshotEditAction::redo(ShellState* state) const {
-    return apply_history_snapshot(state, after_);
-}
-
-bool SnapshotEditAction::merge_from(const EditAction& action) {
-    if (!allow_merge_ || group_.empty() || !action.allow_merge() ||
-        action.kind() != kind_ || action.group() != group_) {
-        return false;
-    }
-
-    const auto* snapshot_action = dynamic_cast<const SnapshotEditAction*>(&action);
-    if (snapshot_action == nullptr) {
-        return false;
-    }
-
-    after_ = snapshot_action->after_;
-    label_ = snapshot_action->label();
-    return true;
-}
-
-// UndoStack implementation
-bool UndoStack::can_undo() const {
-    return !undo_actions_.empty();
-}
-
-bool UndoStack::can_redo() const {
-    return !redo_actions_.empty();
-}
-
-std::size_t UndoStack::undo_count() const {
-    return undo_actions_.size();
-}
-
-std::size_t UndoStack::redo_count() const {
-    return redo_actions_.size();
-}
-
-void UndoStack::clear() {
-    undo_actions_.clear();
-    redo_actions_.clear();
-}
-
-const EditAction* UndoStack::peek_undo() const {
-    return undo_actions_.empty() ? nullptr : undo_actions_.back().get();
-}
-
-const EditAction* UndoStack::peek_redo() const {
-    return redo_actions_.empty() ? nullptr : redo_actions_.back().get();
-}
-
-void UndoStack::push(std::unique_ptr<EditAction> action) {
-    if (!action) {
-        return;
-    }
-
-    redo_actions_.clear();
-    if (!undo_actions_.empty() && undo_actions_.back()->merge_from(*action)) {
-        return;
-    }
-
-    if (undo_actions_.size() >= kMaxDepth) {
-        undo_actions_.erase(undo_actions_.begin());
-    }
-    undo_actions_.push_back(std::move(action));
-}
-
-bool UndoStack::undo(ShellState* state, std::string* label_out) {
-    if (undo_actions_.empty()) {
-        return false;
-    }
-
-    std::unique_ptr<EditAction> action = std::move(undo_actions_.back());
-    undo_actions_.pop_back();
-    if (!action->undo(state)) {
-        undo_actions_.push_back(std::move(action));
-        return false;
-    }
-
-    if (label_out != nullptr) {
-        *label_out = action->label();
-    }
-    redo_actions_.push_back(std::move(action));
-    return true;
-}
-
-bool UndoStack::redo(ShellState* state, std::string* label_out) {
-    if (redo_actions_.empty()) {
-        return false;
-    }
-
-    std::unique_ptr<EditAction> action = std::move(redo_actions_.back());
-    redo_actions_.pop_back();
-    if (!action->redo(state)) {
-        redo_actions_.push_back(std::move(action));
-        return false;
-    }
-
-    if (label_out != nullptr) {
-        *label_out = action->label();
-    }
-    undo_actions_.push_back(std::move(action));
-    return true;
-}
 
 // Shell Core Helpers
 std::optional<std::string_view> selected_bone_name(const ShellState& state) {
@@ -331,8 +141,33 @@ EditorHistorySnapshot capture_history_snapshot(
                 marrow::editor::serialize_project(*state.load_result.project);
         }
     }
+    snapshot.preview_state.animation_name = state.selected_animation_name;
+    snapshot.preview_state.time_seconds = state.timeline_time_seconds;
+    snapshot.preview_state.loop = state.timeline_loop;
+    snapshot.preview_state.playing = state.timeline_playing;
+    snapshot.preview_state.queue_enabled = state.preview_queue_enabled;
+    snapshot.preview_state.queued_animation_name = state.preview_queued_animation_name;
+    snapshot.preview_state.queue_delay = state.preview_queue_delay;
+    snapshot.preview_state.mix_duration = state.preview_use_custom_mix_duration
+        ? std::optional<double>(state.preview_custom_mix_duration)
+        : std::nullopt;
+    snapshot.preview_state.reverse = state.preview_reverse;
+    snapshot.preview_state.skin_names = state.preview_skin_names;
+    snapshot.preview_state.slot_overrides.resize(state.preview_slot_overrides.size());
+    for (std::size_t slot_index = 0;
+         slot_index < state.preview_slot_overrides.size();
+         ++slot_index) {
+        const auto& selection = state.preview_slot_overrides[slot_index];
+        if (selection.has_value()) {
+            snapshot.preview_state.slot_overrides[slot_index] =
+                marrow::editor::PreviewAttachmentOverride{
+                    selection->skin_index,
+                    selection->attachment_name};
+        }
+    }
     snapshot.preview_skin_names = state.preview_skin_names;
     snapshot.preview_slot_overrides = state.preview_slot_overrides;
+    snapshot.runtime_revision = state.session.runtime_revision();
     return snapshot;
 }
 
@@ -367,6 +202,19 @@ void assign_history_snapshot(
     state->viewport.onion_skin = snapshot.project.editor_metadata.viewport.onion_skin;
     state->preview_skin_names = snapshot.preview_skin_names;
     state->preview_slot_overrides = snapshot.preview_slot_overrides;
+    state->selected_animation_name = snapshot.preview_state.animation_name;
+    state->timeline_time_seconds = snapshot.preview_state.time_seconds;
+    state->timeline_loop = snapshot.preview_state.loop;
+    state->timeline_playing = snapshot.preview_state.playing;
+    state->preview_queue_enabled = snapshot.preview_state.queue_enabled;
+    state->preview_queued_animation_name = snapshot.preview_state.queued_animation_name;
+    state->preview_queue_delay = snapshot.preview_state.queue_delay;
+    state->preview_use_custom_mix_duration = snapshot.preview_state.mix_duration.has_value();
+    state->preview_custom_mix_duration = snapshot.preview_state.mix_duration.value_or(0.0);
+    state->preview_reverse = snapshot.preview_state.reverse;
+    marrow::editor::EditorSessionShellBinding::sync_preview_state(
+        state->session,
+        snapshot.preview_state);
 }
 
 void restore_history_snapshot(
@@ -417,35 +265,58 @@ void update_project_dirty_state(ShellState* state) {
         return;
     }
 
-    state->project_dirty =
-        marrow::editor::serialize_project(*state->load_result.project) !=
-        state->saved_project_snapshot;
+    state->project_dirty = state->session.dirty();
 }
 
-std::unique_ptr<EditAction> make_edit_action(
-    EditActionKind kind,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    const EditorHistorySnapshot& before,
-    const EditorHistorySnapshot& after) {
-    switch (kind) {
-    case EditActionKind::MoveBone:
-        return std::make_unique<MoveBoneAction>(
-            kind, std::move(label), std::move(group), allow_merge, before, after);
-    case EditActionKind::AddKeyframe:
-        return std::make_unique<AddKeyframeAction>(
-            kind, std::move(label), std::move(group), allow_merge, before, after);
-    case EditActionKind::RemoveKeyframe:
-        return std::make_unique<RemoveKeyframeAction>(
-            kind, std::move(label), std::move(group), allow_merge, before, after);
-    case EditActionKind::EditProperty:
-        return std::make_unique<EditPropertyAction>(
-            kind, std::move(label), std::move(group), allow_merge, before, after);
+void sync_shell_from_editor_session(ShellState* state) {
+    if (state == nullptr || !state->session.has_project()) {
+        return;
     }
+    state->preview_skeleton =
+        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
+    state->animation_state =
+        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
 
-    return std::make_unique<SnapshotEditAction>(
-        kind, std::move(label), std::move(group), allow_merge, before, after);
+    const marrow::editor::PreviewState& preview = state->session.preview_state();
+    state->selected_animation_name = preview.animation_name;
+    state->timeline_time_seconds = preview.time_seconds;
+    state->timeline_loop = preview.loop;
+    state->timeline_playing = preview.playing;
+    state->preview_queue_enabled = preview.queue_enabled;
+    state->preview_queued_animation_name = preview.queued_animation_name;
+    state->preview_queue_delay = preview.queue_delay;
+    state->preview_use_custom_mix_duration = preview.mix_duration.has_value();
+    state->preview_custom_mix_duration = preview.mix_duration.value_or(0.0);
+    state->preview_reverse = preview.reverse;
+    state->preview_skin_names = preview.skin_names;
+    state->preview_slot_overrides.assign(preview.slot_overrides.size(), std::nullopt);
+    for (std::size_t slot_index = 0; slot_index < preview.slot_overrides.size(); ++slot_index) {
+        const auto& override_value = preview.slot_overrides[slot_index];
+        if (override_value.has_value()) {
+            state->preview_slot_overrides[slot_index] = AttachmentSelection{
+                slot_index,
+                override_value->skin_index,
+                override_value->attachment_name};
+        }
+    }
+    state->preview_events = state->session.preview_events();
+    state->preview_root_motion_delta = state->session.preview_root_motion_delta();
+    state->preview_root_motion_total = state->session.preview_root_motion_total();
+    state->project_dirty = state->session.dirty();
+    state->observed_project_revision = state->session.project_revision();
+    state->observed_runtime_revision = state->session.runtime_revision();
+    state->observed_preview_revision = state->session.preview_revision();
+}
+
+void sync_shell_from_editor_session_if_revised(ShellState* state) {
+    if (state == nullptr || !state->session.has_project()) {
+        return;
+    }
+    if (state->observed_project_revision != state->session.project_revision() ||
+        state->observed_runtime_revision != state->session.runtime_revision() ||
+        state->observed_preview_revision != state->session.preview_revision()) {
+        sync_shell_from_editor_session(state);
+    }
 }
 
 bool record_action_from_snapshots(
@@ -460,12 +331,85 @@ bool record_action_from_snapshots(
         return false;
     }
 
-    state->command_stack.push(
-        make_edit_action(kind, label, group, allow_merge, before, after));
+    marrow::editor::EditKind session_kind = marrow::editor::EditKind::EditProperty;
+    switch (kind) {
+    case EditActionKind::MoveBone:
+        session_kind = marrow::editor::EditKind::MoveBone;
+        break;
+    case EditActionKind::AddKeyframe:
+        session_kind = marrow::editor::EditKind::AddKeyframe;
+        break;
+    case EditActionKind::RemoveKeyframe:
+        session_kind = marrow::editor::EditKind::RemoveKeyframe;
+        break;
+    case EditActionKind::EditProperty:
+        session_kind = marrow::editor::EditKind::EditProperty;
+        break;
+    }
+
+    if (!marrow::editor::EditorSessionShellBinding::sync_preview_state(
+            state->session,
+            after.preview_state)) {
+        state->error_message = "Failed to synchronize the editor preview state.";
+        restore_history_snapshot(state, before);
+        return false;
+    }
+    const marrow::editor::SessionResult commit_result =
+        marrow::editor::EditorSessionShellBinding::commit_external_edit(
+            state->session,
+            before.project,
+            before.preview_state,
+            marrow::editor::EditDescriptor{
+                session_kind,
+                label,
+                group,
+                allow_merge,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview},
+            state->session.runtime_revision() != before.runtime_revision);
+    if (!commit_result) {
+        state->error_message = commit_result.error->format();
+        state->preview_skeleton =
+            marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
+        state->animation_state =
+            marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
+        return false;
+    }
+    if (!commit_result.changed) {
+        return false;
+    }
+    state->preview_skeleton =
+        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
+    state->animation_state =
+        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
     update_project_dirty_state(state);
     state->error_message.clear();
     state->status_message = std::move(label);
     return true;
+}
+
+void finalize_orphaned_edit_action(ShellState* state) {
+    if (state == nullptr || !state->pending_edit_action.has_value()) {
+        return;
+    }
+    const ImGuiID item_id = state->pending_edit_action->item_id;
+    const ImGuiContext* context = ImGui::GetCurrentContext();
+    const bool item_is_live = context != nullptr &&
+        ImGui::GetActiveID() == item_id && context->ActiveIdIsAlive == item_id;
+    if (item_is_live) {
+        return;
+    }
+
+    PendingEditAction pending = std::move(*state->pending_edit_action);
+    state->pending_edit_action.reset();
+    (void)record_action_from_snapshots(
+        state,
+        pending.before_snapshot,
+        pending.kind,
+        std::move(pending.label),
+        std::move(pending.group),
+        pending.allow_merge);
 }
 
 bool rebuild_project_runtime(ShellState* state) {
@@ -479,21 +423,18 @@ bool rebuild_project_runtime(ShellState* state) {
         playback_snapshot = state->animation_state->capture_state();
     }
 
-    const auto runtime_result = marrow::editor::build_project_runtime(
-        *state->load_result.project,
-        *state->load_result.base_skeleton_document);
+    const marrow::editor::SessionResult runtime_result =
+        marrow::editor::EditorSessionShellBinding::rebuild_runtime_without_history(
+            state->session);
     if (!runtime_result) {
         state->error_message = runtime_result.error->format();
         return false;
     }
-
-    state->load_result.skeleton_data = runtime_result.skeleton_data;
     state->preview_skeleton =
-        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
+        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
     state->animation_state =
-        marrow::allocate_unique<marrow::runtime::AnimationState>(
-            state->load_result.skeleton_data);
-    if (playback_snapshot.has_value()) {
+        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
+    if (playback_snapshot.has_value() && state->animation_state != nullptr) {
         state->animation_state->restore_state(*playback_snapshot);
     }
     state->preview_skin_names = normalize_preview_skin_names(
@@ -511,6 +452,10 @@ bool rebuild_project_runtime(ShellState* state) {
 
 bool reload_project(ShellState* state) {
     if (state == nullptr) return false;
+    if (authoring_gesture_active(*state)) {
+        state->status_message = "Finish the active edit before reloading";
+        return false;
+    }
 
     std::optional<std::string> previous_selection_name;
     if (const auto selection_name = selected_bone_name(*state)) {
@@ -528,9 +473,24 @@ bool reload_project(ShellState* state) {
     const bool previous_timeline_loop = state->timeline_loop;
     const bool previous_timeline_playing = state->timeline_playing;
 
-    state->load_result = marrow::editor::load_project(state->project_path);
-    state->preview_skeleton.reset();
-    state->animation_state.reset();
+    const bool reload_current_project =
+        state->session.has_project() && state->session.project() != nullptr &&
+        state->session.project()->source_path == state->project_path;
+    const marrow::editor::ProjectLoadResult attempted_load = reload_current_project
+        ? state->session.reload()
+        : state->session.open(state->project_path);
+    if (!attempted_load) {
+        state->status_message = "Project load failed";
+        if (attempted_load.error.has_value()) {
+            state->error_message = attempted_load.error->format();
+        } else {
+            state->error_message = "Unknown project load failure.";
+        }
+        return false;
+    }
+
+    state->preview_skeleton = nullptr;
+    state->animation_state = nullptr;
     state->selected_bone_index.reset();
     state->selected_slot_index.reset();
     state->selected_attachment.reset();
@@ -542,31 +502,19 @@ bool reload_project(ShellState* state) {
     state->timeline_time_seconds = 0.0;
     state->timeline_loop = previous_timeline_loop;
     state->timeline_playing = false;
-    state->command_stack.clear();
     state->pending_edit_action.reset();
     
     state->project_dirty = false;
     state->saved_project_snapshot.clear();
     state->error_message.clear();
 
-    if (!state->load_result) {
-        state->status_message = "Project load failed";
-        if (state->load_result.error.has_value()) {
-            state->error_message = state->load_result.error->format();
-        } else {
-            state->error_message = "Unknown project load failure.";
-        }
-        return false;
-    }
-
     state->viewport = state->load_result.project->editor_metadata.viewport;
     state->saved_project_snapshot =
         marrow::editor::serialize_project(*state->load_result.project);
     state->preview_skeleton =
-        marrow::allocate_unique<marrow::runtime::Skeleton>(state->load_result.skeleton_data);
+        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
     state->animation_state =
-        marrow::allocate_unique<marrow::runtime::AnimationState>(
-            state->load_result.skeleton_data);
+        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
     state->preview_skin_names = normalize_preview_skin_names(
         *state->load_result.skeleton_data,
         state->load_result.project->editor_metadata.preview_skins);
@@ -584,12 +532,18 @@ bool reload_project(ShellState* state) {
         state->selected_animation_name = animations.front().name;
     }
     normalize_state_preview_settings(state);
-    if (!state->selected_animation_name.empty()) {
+    if (reload_current_project) {
+        sync_shell_from_editor_session(state);
+    } else if (!state->selected_animation_name.empty()) {
         state->timeline_time_seconds = std::clamp(
             previous_timeline_time,
             0.0,
             timeline_preview_duration(*state));
         state->timeline_playing = previous_timeline_playing;
+        state->session.select_animation(state->selected_animation_name, true);
+        state->session.set_loop(state->timeline_loop);
+        state->session.seek(state->timeline_time_seconds);
+        state->session.set_playing(state->timeline_playing);
     }
     reset_runtime_asset_watch(state);
 
@@ -600,19 +554,21 @@ bool save_project_file(ShellState* state, bool update_status_message) {
     if (!state->load_result || state->load_result.project == nullptr) {
         return false;
     }
+    if (authoring_gesture_active(*state)) {
+        state->status_message = "Finish the active edit before saving";
+        return false;
+    }
 
-    const auto save_result =
-        marrow::editor::save_project(*state->load_result.project, state->project_path);
+    const auto save_result = state->session.save(state->project_path);
     if (!save_result) {
         state->error_message = save_result.error->format();
         state->status_message = "Project save failed";
         return false;
     }
 
-    state->load_result.project = save_result.project;
     state->saved_project_snapshot =
         marrow::editor::serialize_project(*state->load_result.project);
-    state->project_dirty = false;
+    state->project_dirty = state->session.dirty();
     state->error_message.clear();
     if (update_status_message) {
         state->status_message = "Saved project to " + state->project_path.string();
@@ -625,6 +581,10 @@ bool export_runtime_assets_file(ShellState* state, bool update_status_message) {
         state->load_result.base_skeleton_document == nullptr) {
         return false;
     }
+    if (authoring_gesture_active(*state)) {
+        state->status_message = "Finish the active edit before exporting";
+        return false;
+    }
 
     marrow::editor::ProjectExportOptions export_options;
     if (state->export_binary_output) {
@@ -632,10 +592,7 @@ bool export_runtime_assets_file(ShellState* state, bool update_status_message) {
             state->load_result.project->resolved_export_binary_path();
     }
 
-    const auto export_result = marrow::editor::export_runtime_assets(
-        *state->load_result.project,
-        *state->load_result.base_skeleton_document,
-        export_options);
+    const auto export_result = state->session.export_runtime(export_options);
     if (!export_result) {
         state->error_message = export_result.error->format();
         state->status_message = "Runtime export failed";

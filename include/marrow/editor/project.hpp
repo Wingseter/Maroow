@@ -511,51 +511,6 @@ struct ProjectExportResult {
     }
 };
 
-struct ProjectCommand {
-    std::string label;
-    ProjectData before_project;
-    ProjectData after_project;
-    std::string before_serialized;
-    std::string after_serialized;
-};
-
-class ProjectCommandStack {
-public:
-    /// @brief Reports whether an undo command is available.
-    /// @return `true` when the undo stack is not empty.
-    bool can_undo() const;
-    /// @brief Reports whether a redo command is available.
-    /// @return `true` when the redo stack is not empty.
-    bool can_redo() const;
-    /// @brief Returns the number of queued undo commands.
-    /// @return Undo stack depth.
-    std::size_t undo_count() const;
-    /// @brief Returns the number of queued redo commands.
-    /// @return Redo stack depth.
-    std::size_t redo_count() const;
-    /// @brief Clears both undo and redo stacks.
-    void clear();
-    /// @brief Peeks at the next undo command without consuming it.
-    /// @return Pointer to the pending undo command, or `nullptr` when none exists.
-    const ProjectCommand* peek_undo() const;
-    /// @brief Peeks at the next redo command without consuming it.
-    /// @return Pointer to the pending redo command, or `nullptr` when none exists.
-    const ProjectCommand* peek_redo() const;
-    /**
-     * @brief Pushes a new command and clears redo history.
-     * @param command Command snapshot to append.
-     */
-    void push(ProjectCommand command);
-    /// @brief Moves the top undo command onto the redo stack.
-    void commit_undo();
-    /// @brief Moves the top redo command back onto the undo stack.
-    void commit_redo();
-
-private:
-    std::vector<ProjectCommand> undo_commands_;
-    std::vector<ProjectCommand> redo_commands_;
-};
-
 struct ProjectExportOptions {
     std::filesystem::path skeleton_output_path;
     std::optional<std::filesystem::path> binary_output_path;
@@ -605,17 +560,6 @@ ProjectRuntimeResult build_project_runtime(
  * @return Pretty-printed `.marrow` JSON text.
  */
 std::string serialize_project(const ProjectData& project);
-/**
- * @brief Creates an undoable command from two project snapshots.
- * @param label User-facing command label.
- * @param before_project Project state before the edit.
- * @param after_project Project state after the edit.
- * @return Command snapshot, or `std::nullopt` when the edit produces no serialized change.
- */
-std::optional<ProjectCommand> make_project_command(
-    std::string label,
-    const ProjectData& before_project,
-    const ProjectData& after_project);
 /**
  * @brief Saves a project to disk.
  * @param project Project to serialize and save.

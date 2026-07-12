@@ -10,13 +10,14 @@
 #include <vector>
 
 #include "marrow/allocator.hpp"
+#include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/session.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
 #include "marrow/runtime/atlas.hpp"
 #include "marrow/runtime/json.hpp"
 #include "marrow/runtime/skeleton.hpp"
-#include "shell_types.hpp"
 
 struct MarrowSkeletonData {
     explicit MarrowSkeletonData(
@@ -51,10 +52,8 @@ struct MarrowAnimState {
 };
 
 struct MarrowProject {
-    explicit MarrowProject(std::unique_ptr<marrow::editor::shell::ShellState> value_in)
-        : value(std::move(value_in)) {}
-
-    std::unique_ptr<marrow::editor::shell::ShellState> value;
+    marrow::editor::EditorSession session;
+    marrow::editor::AgentControlState agent_control;
     std::string last_dispatch_result;
 };
 
@@ -1578,13 +1577,18 @@ MarrowStatusCode marrow_editor_project_load(
     }
 
     try {
-        auto shell_state = std::make_unique<marrow::editor::shell::ShellState>();
-        shell_state->project_path = path;
-        if (!marrow::editor::shell::reload_project(shell_state.get())) {
+        const auto project_deleter = [](MarrowProject* project) noexcept {
+            marrow::destroy_object(project);
+        };
+        std::unique_ptr<MarrowProject, decltype(project_deleter)> loaded_project(
+            marrow::allocate_object<MarrowProject>(),
+            project_deleter);
+        const auto load_result = loaded_project->session.open(path);
+        if (!load_result) {
             return fail(MARROW_STATUS_IO_ERROR, "Failed to load project: " + std::string(path));
         }
 
-        *out_project = marrow::allocate_object<MarrowProject>(std::move(shell_state));
+        *out_project = loaded_project.release();
         clear_last_error_message();
         return MARROW_STATUS_OK;
     } catch (const std::exception& error) {
@@ -1613,14 +1617,17 @@ MarrowStatusCode marrow_editor_agent_dispatch(
             return fail(MARROW_STATUS_PARSE_ERROR, parse_result.error->format());
         }
 
-        const marrow::editor::shell::AgentDispatchResult result =
-            marrow::editor::shell::AgentCommandDispatcher::dispatch(
-                project->value.get(),
+        marrow::editor::AgentCommandContext context{
+            project->session,
+            project->agent_control};
+        const marrow::editor::AgentDispatchResult result =
+            marrow::editor::AgentCommandDispatcher::dispatch(
+                context,
                 parse_result.document->root);
 
         project->last_dispatch_result =
             marrow::runtime::json::serialize_pretty(
-                marrow::editor::shell::AgentCommandDispatcher::result_to_json(result));
+                marrow::editor::AgentCommandDispatcher::result_to_json(result));
 
         *out_result_json = to_string_view(project->last_dispatch_result);
         clear_last_error_message();

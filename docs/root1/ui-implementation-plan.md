@@ -382,7 +382,7 @@ ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x - rail_width, vp->WorkSize.y));
 ### 3.5 ShellState 확장
 
 ```cpp
-// shell_types.hpp — ShellState에 추가
+// shell_state.hpp — ShellState에 추가
 int active_nav_index{0};
 ```
 

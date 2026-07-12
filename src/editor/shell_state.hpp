@@ -1,0 +1,606 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+struct GLFWwindow;
+
+#if defined(__APPLE__)
+#include <OpenGL/gl3.h>
+#else
+#include <GL/glcorearb.h>
+#endif
+
+#include "imgui.h"
+
+#include "icon_registry.hpp"
+#include "shell_asset_watch.hpp"
+#include "viewport_renderer.hpp"
+#include "marrow/editor/project.hpp"
+#include "marrow/editor/agent_control.hpp"
+#include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/session.hpp"
+#include "session_shell_binding.hpp"
+#include "marrow/renderer/module.hpp"
+#include "marrow/runtime/animation_state.hpp"
+#include "marrow/runtime/profiler.hpp"
+
+namespace marrow::editor::shell {
+
+class AgentSocketServer;
+
+struct Options {
+    std::filesystem::path project_path{"assets/fixtures/player_idle.marrow"};
+    std::optional<int> auto_close_frames;
+    bool verify_launch_focus{false};
+    std::optional<int> agent_port;
+    std::string agent_token;
+};
+
+enum class ParseStatus {
+    Ok,
+    Help,
+    Error,
+};
+
+struct ParseResult {
+    ParseStatus status{ParseStatus::Error};
+    Options options;
+};
+
+struct BoneCanvasNode {
+    std::size_t bone_index{0};
+    std::optional<std::size_t> parent_index;
+    ImVec2 screen_position{};
+    bool active{true};
+};
+
+struct ViewportLayout {
+    ImVec2 canvas_origin{};
+    ImVec2 canvas_size{};
+    ImVec2 canvas_end{};
+    ImVec2 screen_center{};
+    ImVec2 world_origin_screen{};
+    double world_center_x{0.0};
+    double world_center_y{0.0};
+    float pixels_per_unit{1.0f};
+    float render_joint_radius{6.0f};
+    std::vector<BoneCanvasNode> bones;
+};
+
+struct OnionSkinGhostPose {
+    std::vector<BoneCanvasNode> bones;
+    double time_seconds{0.0};
+    int distance_rank{0};
+    bool before_current{true};
+    ImU32 line_color{0};
+    ImU32 fill_color{0};
+    ImU32 outline_color{0};
+};
+
+struct OnionSkinSampleSpec {
+    double time_seconds{0.0};
+    int distance_rank{0};
+    bool before_current{true};
+};
+
+struct OnionSkinTexturedGhost {
+    marrow::renderer::PreparedScene scene;
+    std::array<float, 4> tint_color{};
+};
+
+struct ViewportRenderVertex {
+    float position_x{0.0f};
+    float position_y{0.0f};
+    float color_r{0.0f};
+    float color_g{0.0f};
+    float color_b{0.0f};
+    float color_a{0.0f};
+};
+
+struct ViewportGeometryPass {
+    std::vector<ViewportRenderVertex> line_vertices;
+    std::vector<ViewportRenderVertex> triangle_vertices;
+};
+
+struct ViewportFramebufferSize {
+    int width{0};
+    int height{0};
+};
+
+struct ViewportRenderResources {
+    bool available{false};
+    bool initialization_attempted{false};
+    GLuint framebuffer{0};
+    GLuint color_texture{0};
+    GLuint depth_stencil_renderbuffer{0};
+    GLuint program{0};
+    GLuint vertex_shader{0};
+    GLuint fragment_shader{0};
+    GLuint vao{0};
+    GLuint vbo{0};
+    marrow::editor::ViewportRenderer prepared_scene_renderer{};
+    GLint view_size_location{-1};
+    int framebuffer_width{0};
+    int framebuffer_height{0};
+    std::string error_message;
+};
+
+// Bump when the default split changes so a fresh rebuild is forced.
+constexpr int kDockLayoutVersion = 3;
+
+struct DockLayoutState {
+    ImGuiID dockspace_id{0};
+    ImGuiID viewport_node_id{0};
+    ImGuiID timeline_node_id{0};
+    ImGuiID hierarchy_node_id{0};
+    ImGuiID properties_node_id{0};
+    ImGuiID agent_node_id{0};
+    int layout_version{0};
+};
+
+struct AttachmentSelection {
+    std::size_t slot_index{0};
+    std::optional<std::size_t> skin_index;
+    std::string attachment_name;
+};
+
+struct SlotAttachmentReference {
+    std::size_t slot_index{0};
+    std::optional<std::size_t> skin_index;
+    const marrow::runtime::AttachmentData* attachment{nullptr};
+};
+
+struct MeshWeightInfluenceRow {
+    std::string bone_name;
+    double bind_x{0.0};
+    double bind_y{0.0};
+    double weight{0.0};
+};
+
+struct MeshWeightVertexRow {
+    std::size_t vertex_index{0};
+    double local_x{0.0};
+    double local_y{0.0};
+    std::vector<MeshWeightInfluenceRow> influences;
+};
+
+enum class WeightPaintMode {
+    Paint,
+    Erase,
+    Smooth,
+};
+
+struct WeightPaintSettings {
+    bool enabled{false};
+    WeightPaintMode mode{WeightPaintMode::Paint};
+    float radius_pixels{44.0f};
+    float strength{0.35f};
+    bool show_heatmap{true};
+};
+
+struct MeshWeightPaintTarget {
+    std::size_t slot_index{0};
+    std::optional<std::size_t> source_skin_index;
+    std::string source_skin_name;
+    std::string slot_name;
+    std::string source_attachment_name;
+    std::string display_attachment_name;
+    const marrow::runtime::AttachmentData* source_attachment{nullptr};
+    const marrow::runtime::AttachmentData* display_attachment{nullptr};
+};
+
+struct MeshWeightOverlayVertex {
+    ImVec2 screen_position{};
+    marrow::runtime::MeshWorldVertex world_position{};
+    double weight{0.0};
+};
+
+struct MeshWeightOverlay {
+    MeshWeightPaintTarget target;
+    std::vector<MeshWeightOverlayVertex> vertices;
+    std::vector<std::size_t> triangles;
+    std::vector<std::vector<std::size_t>> neighbors;
+    std::vector<double> vertex_offsets;
+};
+
+struct DebugOverlayLineSegment {
+    ImVec2 start{};
+    ImVec2 end{};
+    ImU32 color{0};
+    float thickness{1.0f};
+};
+
+struct DebugOverlayCircle {
+    ImVec2 center{};
+    float radius{0.0f};
+    ImU32 fill_color{0};
+    ImU32 outline_color{0};
+    float outline_thickness{1.0f};
+};
+
+struct DebugOverlayStats {
+    bool bones_enabled{false};
+    std::size_t ik_constraint_count{0};
+    std::size_t path_constraint_count{0};
+    std::size_t physics_constraint_count{0};
+    std::size_t mesh_attachment_count{0};
+    std::size_t bounding_box_count{0};
+};
+
+struct DebugOverlayGeometry {
+    std::vector<DebugOverlayLineSegment> lines;
+    std::vector<DebugOverlayCircle> circles;
+    DebugOverlayStats stats{};
+};
+
+struct TimelineTrackRow {
+    std::string id;
+    std::string label;
+    std::string animation_name;
+    std::vector<double> key_times;
+    std::optional<std::size_t> bone_index;
+    std::optional<std::size_t> slot_index;
+    std::optional<marrow::editor::TransformTimelineChannel> transform_channel;
+    std::optional<std::string> deform_attachment_name;
+};
+
+enum class ConstraintEditKind {
+    Ik,
+    Path,
+    Transform,
+    Physics,
+};
+
+struct ConstraintSelection {
+    ConstraintEditKind kind{ConstraintEditKind::Ik};
+    std::string name;
+};
+
+struct ShellState;
+
+struct EditorHistorySnapshot {
+    marrow::editor::ProjectData project;
+    std::string serialized_project;
+    marrow::editor::PreviewState preview_state;
+    std::vector<std::string> preview_skin_names;
+    std::vector<std::optional<AttachmentSelection>> preview_slot_overrides;
+    std::uint64_t runtime_revision{0U};
+};
+
+struct MeshWeightStrokeState {
+    bool active{false};
+    bool changed{false};
+    EditorHistorySnapshot before_snapshot;
+    std::string label;
+    std::string group;
+    ImVec2 last_sample_position{};
+    bool has_last_sample{false};
+};
+
+enum class EditActionKind {
+    MoveBone,
+    AddKeyframe,
+    RemoveKeyframe,
+    EditProperty,
+};
+
+bool apply_history_snapshot(ShellState* state, const EditorHistorySnapshot& snapshot);
+
+struct PendingEditAction {
+    ImGuiID item_id{0};
+    EditActionKind kind{EditActionKind::EditProperty};
+    std::string label;
+    std::string group;
+    bool allow_merge{false};
+    EditorHistorySnapshot before_snapshot;
+};
+
+using AgentReviewKind = marrow::editor::AgentReviewKind;
+using AgentReviewRequest = marrow::editor::AgentReviewRequest;
+using AgentActivityEntry = marrow::editor::AgentActivityEntry;
+
+struct ShellState {
+    ShellState()
+        : load_result(marrow::editor::EditorSessionShellBinding::load_result(session)) {}
+
+    ShellState(const ShellState&) = delete;
+    ShellState& operator=(const ShellState&) = delete;
+    ShellState(ShellState&&) = delete;
+    ShellState& operator=(ShellState&&) = delete;
+
+    // UI-free authoring and agent state. Remaining fields own presentation,
+    // selection, gestures, platform resources, and synchronized preview views.
+    marrow::editor::EditorSession session;
+    std::uint64_t observed_project_revision{0U};
+    std::uint64_t observed_runtime_revision{0U};
+    std::uint64_t observed_preview_revision{0U};
+    std::filesystem::path project_path;
+    marrow::editor::ViewportState viewport{};
+    bool hud_overlay_enabled{false};
+    WeightPaintSettings weight_paint{};
+    marrow::editor::ProjectLoadResult& load_result;
+    std::optional<PendingEditAction> pending_edit_action;
+    MeshWeightStrokeState weight_paint_stroke{};
+    ViewportRenderResources viewport_renderer{};
+    DockLayoutState dock_layout{};
+    marrow::runtime::Skeleton* preview_skeleton{nullptr};
+    marrow::runtime::AnimationState* animation_state{nullptr};
+    std::optional<std::size_t> selected_bone_index;
+    std::optional<std::size_t> selected_slot_index;
+    std::optional<AttachmentSelection> selected_attachment;
+    std::optional<std::string> selected_timeline_track_id;
+    std::optional<ConstraintSelection> selected_constraint;
+    std::vector<std::string> preview_skin_names;
+    std::vector<std::optional<AttachmentSelection>> preview_slot_overrides;
+    std::string selected_animation_name;
+    double timeline_time_seconds{0.0};
+    bool timeline_loop{true};
+    bool timeline_playing{false};
+    bool preview_queue_enabled{false};
+    std::string preview_queued_animation_name;
+    double preview_queue_delay{0.0};
+    bool preview_use_custom_mix_duration{false};
+    double preview_custom_mix_duration{0.0};
+    bool preview_reverse{false};
+    marrow::runtime::RootMotionDelta preview_root_motion_delta{};
+    marrow::runtime::RootMotionDelta preview_root_motion_total{};
+    std::vector<marrow::runtime::AnimationEvent> preview_events;
+    bool export_binary_output{false};
+    bool project_dirty{false};
+    bool default_dock_layout_initialized{false};
+    std::string saved_project_snapshot;
+    std::string status_message;
+    std::string error_message;
+    std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
+    std::optional<marrow::runtime::ProfilerFrame> hud_overlay_frame;
+    marrow::editor::IconRegistry icons{};
+    std::array<char, 128> hierarchy_filter{};
+    // Active Constraints type tab: 0=IK 1=Path 2=Transform 3=Physics.
+    int constraints_tab{0};
+    // Agent surface — optional, closed by default (Ctrl+L / toolbar toggle).
+    // The socket can be turned on/off at runtime from the panel.
+    AgentSocketServer* agent_server{nullptr};
+    std::optional<int> agent_listen_port;  // last/CLI port
+    std::string agent_token;               // from --agent-token (optional)
+    bool show_agent_panel{false};
+    bool agent_panel_was_open{false};
+    marrow::editor::AgentControlState agent_control{};
+};
+
+inline bool authoring_gesture_active(const ShellState& state) noexcept {
+    return state.pending_edit_action.has_value() || state.weight_paint_stroke.active;
+}
+
+void sync_shell_from_editor_session(ShellState* state);
+void sync_shell_from_editor_session_if_revised(ShellState* state);
+
+inline marrow::editor::AgentDispatchResult dispatch_agent_command(
+    ShellState* state,
+    const marrow::runtime::json::Value& command) {
+    if (state == nullptr) {
+        marrow::editor::AgentDispatchResult result;
+        result.message = "Editor shell state is unavailable.";
+        result.error_code = "invalid_request";
+        return result;
+    }
+    if (authoring_gesture_active(*state)) {
+        state->status_message = "Finish the active edit before running another command";
+        marrow::editor::AgentDispatchResult result;
+        result.message = state->status_message;
+        result.error_code = "blocked";
+        return result;
+    }
+    marrow::editor::AgentCommandContext context{state->session, state->agent_control};
+    marrow::editor::AgentDispatchResult result =
+        marrow::editor::AgentCommandDispatcher::dispatch(context, command);
+    sync_shell_from_editor_session(state);
+    return result;
+}
+
+constexpr int kDefaultAgentPort = 9876;
+
+constexpr char kProjectWindowTitle[] = "Project";
+constexpr char kRuntimeAssetsWindowTitle[] = "Runtime Assets";
+constexpr char kConstraintsWindowTitle[] = "Constraints";
+constexpr char kHierarchyWindowTitle[] = "Hierarchy";
+constexpr char kTimelineWindowTitle[] = "Timeline";
+constexpr char kViewportWindowTitle[] = "Viewport";
+constexpr char kPropertiesWindowTitle[] = "Properties";
+constexpr char kAgentWindowTitle[] = "Agent";
+constexpr float kBoneJointHitRadiusPixels = 6.0f;
+constexpr float kBoneBodyHitThresholdPixels = 8.0f;
+constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};
+constexpr ImVec2 kViewportImageUv1{1.0f, 0.0f};
+constexpr float kPi = 3.14159265358979323846f;
+constexpr double kOnionSkinFrameRate = 60.0;
+constexpr double kOnionSkinFrameDuration = 1.0 / kOnionSkinFrameRate;
+constexpr const char* kViewportVertexShaderSource = R"(#version 150
+in vec2 a_position;
+in vec4 a_color;
+
+uniform vec2 u_view_size;
+
+out vec4 v_color;
+
+void main() {
+    vec2 normalized_position = vec2(
+        (a_position.x / u_view_size.x) * 2.0 - 1.0,
+        1.0 - ((a_position.y / u_view_size.y) * 2.0));
+    v_color = a_color;
+    gl_Position = vec4(normalized_position, 0.0, 1.0);
+}
+)";
+
+constexpr const char* kViewportFragmentShaderSource = R"(#version 150
+in vec4 v_color;
+
+out vec4 frag_color;
+
+void main() {
+    frag_color = v_color;
+}
+)";
+
+// Shared shell/session helpers.
+std::optional<std::string_view> selected_bone_name(const ShellState& state);
+const marrow::runtime::AnimationData* selected_animation(const ShellState& state);
+double selected_animation_duration(const ShellState& state);
+const marrow::runtime::AnimationData* queued_preview_animation(const ShellState& state);
+std::string default_queued_preview_animation_name(const ShellState& state);
+void normalize_state_preview_settings(ShellState* state);
+double timeline_preview_duration(const ShellState& state);
+std::vector<std::string> normalize_preview_skin_names(
+    const marrow::runtime::SkeletonData& skeleton,
+    const std::vector<std::string>& preview_skin_names);
+
+EditorHistorySnapshot capture_history_snapshot(
+    const ShellState& state,
+    bool include_serialized_project = true);
+bool history_snapshots_equal(
+    const EditorHistorySnapshot& left,
+    const EditorHistorySnapshot& right);
+void restore_history_snapshot(
+    ShellState* state,
+    const EditorHistorySnapshot& snapshot);
+bool record_action_from_snapshots(
+    ShellState* state,
+    const EditorHistorySnapshot& before,
+    EditActionKind kind,
+    std::string label,
+    std::string group,
+    bool allow_merge);
+void finalize_orphaned_edit_action(ShellState* state);
+bool rebuild_project_runtime(ShellState* state);
+void update_project_dirty_state(ShellState* state);
+bool save_project_file(ShellState* state, bool update_status_message);
+bool export_runtime_assets_file(ShellState* state, bool update_status_message);
+bool reload_project(ShellState* state);
+
+// Viewport renderer and geometry helpers.
+std::optional<std::string> initialize_viewport_renderer(
+    ViewportRenderResources* resources);
+void destroy_viewport_renderer(ViewportRenderResources* resources);
+ViewportFramebufferSize viewport_framebuffer_size(
+    const ImVec2& canvas_size,
+    const ImVec2& framebuffer_scale);
+std::optional<std::string> ensure_viewport_framebuffer(
+    ViewportRenderResources* resources,
+    int width,
+    int height);
+std::optional<std::string> render_prepared_scene_framebuffer(
+    const ViewportLayout& layout,
+    const ViewportGeometryPass& background_geometry,
+    const ViewportGeometryPass& overlay_geometry,
+    const std::vector<OnionSkinTexturedGhost>& textured_ghosts,
+    const marrow::renderer::PreparedScene& scene,
+    const std::filesystem::path& atlas_image_path,
+    ViewportRenderResources* resources);
+std::optional<std::string> render_viewport_framebuffer(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
+    std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
+    ViewportRenderResources* resources);
+std::optional<ViewportLayout> build_viewport_layout(
+    const ShellState& state,
+    const ImVec2& canvas_origin,
+    const ImVec2& canvas_size);
+std::vector<OnionSkinGhostPose> build_onion_skin_ghost_poses(
+    const ShellState& state,
+    const ViewportLayout& layout);
+void build_viewport_render_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
+    std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
+    std::vector<ViewportRenderVertex>* line_vertices,
+    std::vector<ViewportRenderVertex>* triangle_vertices);
+DebugOverlayGeometry build_debug_overlay_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout);
+float first_grid_line(float anchor, float minimum, float spacing);
+float squared_distance(const ImVec2& a, const ImVec2& b);
+float point_segment_distance_squared(
+    const ImVec2& point,
+    const ImVec2& segment_start,
+    const ImVec2& segment_end);
+ImVec2 screen_from_world(
+    const ViewportLayout& layout,
+    double world_x,
+    double world_y);
+ImVec2 screen_from_world(
+    const ViewportLayout& layout,
+    float world_x,
+    float world_y);
+ImVec2 local_viewport_position(
+    const ViewportLayout& layout,
+    const ImVec2& screen_position);
+std::array<float, 16> viewport_projection_matrix(const ViewportLayout& layout);
+std::filesystem::path resolve_viewport_atlas_image_path(
+    const ShellState& state,
+    const marrow::renderer::PreparedScene& scene);
+ViewportRenderVertex viewport_vertex(const ImVec2& position, const ImVec4& color);
+void append_colored_line(
+    const ImVec2& start,
+    const ImVec2& end,
+    const ImVec4& color,
+    std::vector<ViewportRenderVertex>* vertices);
+void append_filled_circle(
+    const ImVec2& center,
+    float radius,
+    const ImVec4& fill_color,
+    const ImVec4& outline_color,
+    int segments,
+    std::vector<ViewportRenderVertex>* triangle_vertices,
+    std::vector<ViewportRenderVertex>* line_vertices);
+void append_viewport_pose_geometry(
+    const ViewportLayout& layout,
+    const std::vector<BoneCanvasNode>& bones,
+    float joint_radius,
+    std::optional<std::size_t> selected_bone,
+    std::optional<std::size_t> hovered_bone,
+    ImU32 line_color,
+    ImU32 joint_fill_color,
+    ImU32 joint_outline_color,
+    ImU32 selected_line_color,
+    ImU32 selected_fill_color,
+    ImU32 selected_outline_color,
+    ImU32 hovered_outline_color,
+    std::vector<ViewportRenderVertex>* line_vertices,
+    std::vector<ViewportRenderVertex>* triangle_vertices);
+void build_viewport_background_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const std::vector<OnionSkinGhostPose>& ghost_poses,
+    ViewportGeometryPass* geometry);
+void build_viewport_overlay_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_bone,
+    const MeshWeightOverlay* mesh_weight_overlay,
+    ViewportGeometryPass* geometry);
+std::optional<std::size_t> pick_bone_at_position(
+    const ViewportLayout& layout,
+    const ImVec2& position);
+double onion_skin_alpha(int distance_rank, int total_count);
+
+void ensure_default_dock_layout(
+    ShellState* state,
+    ImGuiID dockspace_id,
+    const ImGuiViewport* viewport);
+void apply_editor_theme();
+
+int run_headless_smoke(const Options& options);
+#if defined(__APPLE__)
+int run_launch_focus_verification();
+#endif
+
+} // namespace marrow::editor::shell

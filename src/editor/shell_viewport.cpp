@@ -17,7 +17,10 @@
 
 #include "imgui.h"
 
-#include "shell_types.hpp"
+#include "shell_state.hpp"
+#include "shell_preview.hpp"
+#include "shell_timeline.hpp"
+#include "shell_weight_paint.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/project.hpp"

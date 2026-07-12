@@ -253,7 +253,7 @@ setup -> skin/linked mesh -> animation FFD -> parameter shapes/deformers -> prep
 
 `Skeleton::current_mesh_vertex_offsets()` remains the animation-FFD-only accessor. Parameter stories should add a separate combined/final offset accessor for mesh evaluation and renderer preparation.
 
-These sections are Maroow-native. They are inspired by parameter modeling workflows, but they do not provide Live2D Cubism Core compatibility, proprietary file loading, SDK ABI compatibility, or Live2D parameter naming compatibility.
+These sections are Maroow-native. They are inspired by parameter modeling workflows, but they do not provide Live2D Cubism Core compatibility, proprietary file loading, SDK ABI compatibility, Live2D parameter naming compatibility, or Live2D importer compatibility.
 
 ## `.matl`
 

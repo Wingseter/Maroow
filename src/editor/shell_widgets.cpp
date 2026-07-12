@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 #include "imgui_internal.h"
 
@@ -278,3 +279,147 @@ void empty_hero(const char* eyebrow, const char* headline, const char* body) {
 }
 
 }  // namespace marrow::editor::shell::widgets
+
+
+namespace marrow::editor::shell {
+
+bool icon_button(
+    const marrow::editor::IconRegistry& icons,
+    marrow::editor::Icon icon,
+    const char* tooltip,
+    bool active,
+    bool disabled,
+    float size) {
+    const ImTextureID texture = icons.get(icon);
+    const std::string_view stem = marrow::editor::icon_filename_stem(icon);
+    ImGui::PushID(stem.data(), stem.data() + stem.size());
+
+    if (disabled) {
+        ImGui::BeginDisabled();
+    }
+
+    // Tint: primary when active, on-surface otherwise. Disabled reduces alpha.
+    namespace t = marrow::editor::shell::theme;
+    const ImVec4 tint = active
+        ? t::kPrimary
+        : t::with_alpha(t::kOnSurface, disabled ? 0.35f : 0.90f);
+    const ImVec4 bg = active
+        ? t::with_alpha(t::kPrimaryContainer, 0.20f)
+        : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    bool clicked = false;
+    if (texture != 0) {
+        clicked = ImGui::ImageButton(
+            stem.data(),
+            texture,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            bg,
+            tint);
+    } else {
+        // Fallback: first char of stem in brackets when texture missing.
+        char label[4] = {'[', stem.empty() ? '?' : stem[0], ']', '\0'};
+        clicked = ImGui::Button(label);
+    }
+
+    if (disabled) {
+        ImGui::EndDisabled();
+    }
+
+    if (tooltip != nullptr && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+
+    ImGui::PopID();
+    return clicked;
+}
+
+// Inline icon + text. Icon sized to text line height so it aligns with baseline.
+void icon_label(
+    const marrow::editor::IconRegistry& icons,
+    marrow::editor::Icon icon,
+    const char* text,
+    float alpha) {
+    const ImTextureID tex = icons.get(icon);
+    const float size = ImGui::GetTextLineHeight();
+    if (tex != 0) {
+        ImGui::ImageWithBg(
+            tex,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
+            ImVec4(0.882f, 0.886f, 0.918f, alpha));
+        ImGui::SameLine(0.0f, 6.0f);
+    }
+    ImGui::TextUnformatted(text);
+}
+
+// TreeNodeEx with leading icon. `id` is the hidden stable id (use "##bone_42" or
+// similar). `label` is what's rendered visibly after the icon.
+bool icon_tree_node(
+    const marrow::editor::IconRegistry& icons,
+    const char* id,
+    marrow::editor::Icon icon,
+    const char* label,
+    ImGuiTreeNodeFlags flags,
+    bool* out_clicked) {
+    const bool open = ImGui::TreeNodeEx(id, flags);
+    if (out_clicked != nullptr) {
+        *out_clicked = ImGui::IsItemClicked();
+    }
+    ImGui::SameLine(0.0f, 4.0f);
+    const ImTextureID tex = icons.get(icon);
+    const float size = ImGui::GetTextLineHeight();
+    if (tex != 0) {
+        ImGui::ImageWithBg(
+            tex,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
+            ImVec4(0.882f, 0.886f, 0.918f, 0.90f));
+        ImGui::SameLine(0.0f, 6.0f);
+    }
+    ImGui::TextUnformatted(label);
+    return open;
+}
+
+// Selectable row with leading icon.
+bool icon_selectable(
+    const marrow::editor::IconRegistry& icons,
+    marrow::editor::Icon icon,
+    const char* label,
+    bool selected) {
+    const ImTextureID tex = icons.get(icon);
+    const float size = ImGui::GetTextLineHeight();
+    const float icon_w = tex != 0 ? size + 6.0f : 0.0f;
+    const float row_y = ImGui::GetCursorPosY();
+
+    const bool clicked = ImGui::Selectable(
+        (std::string("##") + label).c_str(),
+        selected,
+        0,
+        ImVec2(0.0f, size));
+
+    ImGui::SetCursorPosY(row_y);
+    if (tex != 0) {
+        ImGui::ImageWithBg(
+            tex,
+            ImVec2(size, size),
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f),
+            ImVec4(0.0f, 0.0f, 0.0f, 0.0f),
+            ImVec4(0.882f, 0.886f, 0.918f, 0.90f));
+        ImGui::SameLine(0.0f, 6.0f);
+    } else {
+        ImGui::Dummy(ImVec2(icon_w, 0.0f));
+        ImGui::SameLine(0.0f, 0.0f);
+    }
+    ImGui::TextUnformatted(label);
+    return clicked;
+}
+
+
+} // namespace marrow::editor::shell

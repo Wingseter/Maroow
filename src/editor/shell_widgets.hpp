@@ -11,6 +11,36 @@
 
 #include "icon_registry.hpp"
 
+namespace marrow::editor::shell {
+
+bool icon_button(
+    const IconRegistry& icons,
+    Icon icon,
+    const char* tooltip,
+    bool active = false,
+    bool disabled = false,
+    float size = 20.0f);
+void icon_label(
+    const IconRegistry& icons,
+    Icon icon,
+    const char* text,
+    float alpha = 0.90f);
+bool icon_tree_node(
+    const IconRegistry& icons,
+    const char* id,
+    Icon icon,
+    const char* label,
+    ImGuiTreeNodeFlags flags,
+    bool* out_clicked = nullptr);
+bool icon_selectable(
+    const IconRegistry& icons,
+    Icon icon,
+    const char* label,
+    bool selected);
+
+} // namespace marrow::editor::shell
+
+
 namespace marrow::editor::shell::widgets {
 
 // ── Ghost input (transparent frame + 2px underline that lights on focus) ────

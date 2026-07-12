@@ -26,7 +26,17 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
-#include "shell_types.hpp"
+#include "shell_constraints.hpp"
+#include "shell_asset_watch.hpp"
+#include "shell_agent_panel.hpp"
+#include "shell_inspector.hpp"
+#include "shell_project_panels.hpp"
+#include "shell_preview.hpp"
+#include "shell_selection.hpp"
+#include "shell_timeline.hpp"
+#include "shell_weight_paint.hpp"
+#include "shell_viewport_ui.hpp"
+#include "shell_state.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/module.hpp"
@@ -287,6 +297,28 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     if (hot_reload_state.animation_state->get_current(0)->track_time <= pre_reload_track_time) {
         std::cerr << "Hot-reload smoke playback did not continue after reload.\n";
         return false;
+    }
+
+    const auto stable_document = hot_reload_state.load_result.base_skeleton_document;
+    const auto stable_runtime = hot_reload_state.load_result.skeleton_data;
+    const auto stable_atlases = hot_reload_state.load_result.atlas_data;
+    if (!write_text_file(temp_skeleton, "{}\n", &rewrite_error)) {
+        std::cerr << rewrite_error << '\n';
+        return false;
+    }
+    if (poll_runtime_asset_changes(&hot_reload_state) != RuntimeAssetPollOutcome::Failed ||
+        hot_reload_state.load_result.base_skeleton_document.get() != stable_document.get() ||
+        hot_reload_state.load_result.skeleton_data.get() != stable_runtime.get() ||
+        hot_reload_state.load_result.atlas_data.size() != stable_atlases.size() ||
+        hot_reload_state.error_message.empty()) {
+        std::cerr << "Failed hot reload did not retain the previous source/runtime bundle.\n";
+        return false;
+    }
+    for (std::size_t index = 0; index < stable_atlases.size(); ++index) {
+        if (hot_reload_state.load_result.atlas_data[index].get() != stable_atlases[index].get()) {
+            std::cerr << "Failed hot reload replaced a previously loaded atlas.\n";
+            return false;
+        }
     }
 
     return true;
@@ -1029,6 +1061,59 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
+
+    const bool initial_loop = shell_state.timeline_loop;
+    const std::uint64_t initial_preview_revision = shell_state.observed_preview_revision;
+    marrow::editor::PreviewState revised_preview = shell_state.session.preview_state();
+    revised_preview.loop = !initial_loop;
+    if (!marrow::editor::EditorSessionShellBinding::sync_preview_state(
+            shell_state.session,
+            revised_preview) ||
+        shell_state.session.preview_revision() <= initial_preview_revision ||
+        shell_state.timeline_loop != initial_loop) {
+        std::cerr << "Session revision smoke could not stage an out-of-band preview change.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    sync_shell_from_editor_session_if_revised(&shell_state);
+    if (shell_state.timeline_loop == initial_loop ||
+        shell_state.observed_preview_revision != shell_state.session.preview_revision()) {
+        std::cerr << "ShellState did not react to the EditorSession preview revision.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    revised_preview = shell_state.session.preview_state();
+    revised_preview.loop = initial_loop;
+    if (!marrow::editor::EditorSessionShellBinding::sync_preview_state(
+            shell_state.session,
+            revised_preview)) {
+        std::cerr << "Session revision smoke could not restore the preview loop mode.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    sync_shell_from_editor_session_if_revised(&shell_state);
+
+    shell_state.session.clear_history();
+    const std::string notes_before_orphan =
+        shell_state.load_result.project->editor_metadata.notes;
+    shell_state.pending_edit_action = PendingEditAction{
+        0x4d415252U,
+        EditActionKind::EditProperty,
+        "Finalize orphaned smoke edit",
+        "orphaned-smoke-edit",
+        false,
+        capture_history_snapshot(shell_state)};
+    shell_state.load_result.project->editor_metadata.notes += " [orphaned edit]";
+    finalize_orphaned_edit_action(&shell_state);
+    if (shell_state.pending_edit_action.has_value() || !shell_state.session.can_undo() ||
+        shell_state.load_result.project->editor_metadata.notes == notes_before_orphan ||
+        !undo_project_change(&shell_state) ||
+        shell_state.load_result.project->editor_metadata.notes != notes_before_orphan) {
+        std::cerr << "Orphaned shell gesture did not finalize into unified history.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.session.clear_history();
 
     if (!validate_viewport_prepared_scene_renderer_smoke(options.project_path)) {
         ImGui::DestroyContext();
@@ -2369,7 +2454,7 @@ int run_headless_smoke(const Options& options) {
 
         const EditorHistorySnapshot weight_paint_baseline =
             capture_history_snapshot(shell_state);
-        shell_state.command_stack.clear();
+        shell_state.session.clear_history();
         shell_state.pending_edit_action.reset();
         update_project_dirty_state(&shell_state);
 
@@ -2419,8 +2504,8 @@ int run_headless_smoke(const Options& options) {
             current_body_pose();
         const std::optional<double> painted_arm_weight = current_arm_weight(1U);
         const std::optional<double> painted_total_weight = current_vertex_weight_total(1U);
-        if (shell_state.command_stack.undo_count() != 1U ||
-            shell_state.command_stack.redo_count() != 0U ||
+        if (shell_state.session.undo_count() != 1U ||
+            shell_state.session.redo_count() != 0U ||
             shell_state.load_result.project->mesh_weight_attachment_edits.size() != 1U ||
             !painted_overlay.has_value() ||
             !painted_pose.has_value() ||
@@ -2444,8 +2529,8 @@ int run_headless_smoke(const Options& options) {
         const std::optional<double> undone_paint_weight = current_arm_weight(1U);
         const std::optional<marrow::runtime::MeshAttachmentPose> undone_paint_pose =
             current_body_pose();
-        if (shell_state.command_stack.undo_count() != 0U ||
-            shell_state.command_stack.redo_count() != 1U ||
+        if (shell_state.session.undo_count() != 0U ||
+            shell_state.session.redo_count() != 1U ||
             !undone_paint_weight.has_value() ||
             !undone_paint_pose.has_value() ||
             !require_weight_near(*undone_paint_weight, 0.25, 1e-6, "undone painted vertex1 arm weight") ||
@@ -2464,8 +2549,8 @@ int run_headless_smoke(const Options& options) {
         const std::optional<double> redone_paint_weight = current_arm_weight(1U);
         const std::optional<marrow::runtime::MeshAttachmentPose> redone_paint_pose =
             current_body_pose();
-        if (shell_state.command_stack.undo_count() != 1U ||
-            shell_state.command_stack.redo_count() != 0U ||
+        if (shell_state.session.undo_count() != 1U ||
+            shell_state.session.redo_count() != 0U ||
             !redone_paint_weight.has_value() ||
             !redone_paint_pose.has_value() ||
             !require_weight_near(*redone_paint_weight, 0.625, 1e-6, "redone painted vertex1 arm weight") ||
@@ -2496,8 +2581,8 @@ int run_headless_smoke(const Options& options) {
 
         const std::optional<double> erased_arm_weight = current_arm_weight(1U);
         const std::optional<double> erased_total_weight = current_vertex_weight_total(1U);
-        if (shell_state.command_stack.undo_count() != 2U ||
-            shell_state.command_stack.redo_count() != 0U ||
+        if (shell_state.session.undo_count() != 2U ||
+            shell_state.session.redo_count() != 0U ||
             !erased_arm_weight.has_value() ||
             !erased_total_weight.has_value() ||
             !require_weight_near(*erased_arm_weight, 0.0, 1e-6, "erased vertex1 arm weight") ||
@@ -2539,7 +2624,7 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        shell_state.command_stack.clear();
+        shell_state.session.clear_history();
         shell_state.pending_edit_action.reset();
         update_project_dirty_state(&shell_state);
 
@@ -2563,8 +2648,8 @@ int run_headless_smoke(const Options& options) {
 
         const std::optional<double> smoothed_arm_weight = current_arm_weight(0U);
         const std::optional<double> smoothed_total_weight = current_vertex_weight_total(0U);
-        if (shell_state.command_stack.undo_count() != 1U ||
-            shell_state.command_stack.redo_count() != 0U ||
+        if (shell_state.session.undo_count() != 1U ||
+            shell_state.session.redo_count() != 0U ||
             !smoothed_arm_weight.has_value() ||
             !smoothed_total_weight.has_value() ||
             !require_weight_near(*smoothed_arm_weight, 0.3125, 1e-6, "smoothed vertex0 arm weight") ||
@@ -2630,8 +2715,8 @@ int run_headless_smoke(const Options& options) {
         }
 
         if (!undo_project_change(&shell_state) ||
-            shell_state.command_stack.undo_count() != 0U ||
-            shell_state.command_stack.redo_count() != 1U) {
+            shell_state.session.undo_count() != 0U ||
+            shell_state.session.redo_count() != 1U) {
             std::cerr << "Weight paint smoke could not undo the smooth stroke.\n";
             ImGui::DestroyContext();
             return 1;
@@ -2645,8 +2730,8 @@ int run_headless_smoke(const Options& options) {
         }
 
         if (!redo_project_change(&shell_state) ||
-            shell_state.command_stack.undo_count() != 1U ||
-            shell_state.command_stack.redo_count() != 0U) {
+            shell_state.session.undo_count() != 1U ||
+            shell_state.session.redo_count() != 0U) {
             std::cerr << "Weight paint smoke could not redo the smooth stroke.\n";
             ImGui::DestroyContext();
             return 1;
@@ -2667,7 +2752,7 @@ int run_headless_smoke(const Options& options) {
         }
         reset_weight_paint_stroke(&shell_state);
         shell_state.weight_paint.enabled = false;
-        shell_state.command_stack.clear();
+        shell_state.session.clear_history();
         shell_state.pending_edit_action.reset();
         update_project_dirty_state(&shell_state);
     }
@@ -3183,7 +3268,7 @@ int run_headless_smoke(const Options& options) {
                 return 1;
             }
 
-            shell_state.command_stack.clear();
+            shell_state.session.clear_history();
             shell_state.pending_edit_action.reset();
             shell_state.preview_skin_names = {"default"};
             shell_state.preview_slot_overrides.assign(
@@ -3199,56 +3284,6 @@ int run_headless_smoke(const Options& options) {
 
             const EditorHistorySnapshot undo_smoke_baseline =
                 capture_history_snapshot(shell_state);
-            UndoStack merge_stack;
-            {
-                EditorHistorySnapshot merged_before = undo_smoke_baseline;
-                EditorHistorySnapshot merged_mid = undo_smoke_baseline;
-                merged_mid.preview_skin_names.push_back("merge-mid");
-                EditorHistorySnapshot merged_after = merged_mid;
-                merged_after.preview_skin_names.push_back("merge-after");
-                merge_stack.push(make_edit_action(
-                    EditActionKind::MoveBone,
-                    "Merged drag step 1",
-                    "smoke:merge",
-                    true,
-                    merged_before,
-                    merged_mid));
-                merge_stack.push(make_edit_action(
-                    EditActionKind::MoveBone,
-                    "Merged drag step 2",
-                    "smoke:merge",
-                    true,
-                    merged_mid,
-                    merged_after));
-            }
-            if (merge_stack.undo_count() != 1U || merge_stack.redo_count() != 0U ||
-                merge_stack.peek_undo() == nullptr ||
-                merge_stack.peek_undo()->kind() != EditActionKind::MoveBone) {
-                std::cerr << "Undo smoke did not merge grouped drag actions into a single history entry.\n";
-                ImGui::DestroyContext();
-                return 1;
-            }
-
-            UndoStack depth_stack;
-            for (std::size_t action_index = 0; action_index < 101U; ++action_index) {
-                EditorHistorySnapshot before = undo_smoke_baseline;
-                EditorHistorySnapshot after = undo_smoke_baseline;
-                after.preview_skin_names.push_back(
-                    "depth-" + std::to_string(action_index));
-                depth_stack.push(make_edit_action(
-                    EditActionKind::EditProperty,
-                    "Depth smoke " + std::to_string(action_index),
-                    "smoke:depth:" + std::to_string(action_index),
-                    false,
-                    before,
-                    after));
-            }
-            if (depth_stack.undo_count() != 100U || depth_stack.redo_count() != 0U) {
-                std::cerr << "Undo smoke did not cap the history depth at 100 actions.\n";
-                ImGui::DestroyContext();
-                return 1;
-            }
-
             const auto undo_track_group = [&]() {
                 return std::string("timeline:") + spine_track->id;
             };
@@ -3280,6 +3315,8 @@ int run_headless_smoke(const Options& options) {
                 const std::size_t inserted_index = static_cast<std::size_t>(
                     std::distance(rotate_edit.keyframes.begin(), insert_iterator));
                 rotate_edit.keyframes.insert(insert_iterator, inserted_key);
+                const std::uint64_t runtime_revision_before_command =
+                    shell_state.session.runtime_revision();
                 if (!apply_project_command_change(
                         &shell_state,
                         previous_project,
@@ -3289,6 +3326,12 @@ int run_headless_smoke(const Options& options) {
                         false,
                         "Undo smoke add-key action failed")) {
                     std::cerr << "Undo smoke could not record the add-key action.\n";
+                    ImGui::DestroyContext();
+                    return 1;
+                }
+                if (shell_state.session.runtime_revision() !=
+                    runtime_revision_before_command + 1U) {
+                    std::cerr << "Shell command edit rebuilt the session runtime more than once.\n";
                     ImGui::DestroyContext();
                     return 1;
                 }
@@ -3387,8 +3430,8 @@ int run_headless_smoke(const Options& options) {
                     shell_state.preview_skin_names.begin(),
                     shell_state.preview_skin_names.end(),
                     "warrior") != shell_state.preview_skin_names.end();
-                if (shell_state.command_stack.undo_count() != 6U ||
-                    shell_state.command_stack.redo_count() != 0U ||
+                if (shell_state.session.undo_count() != 6U ||
+                    shell_state.session.redo_count() != 0U ||
                     shell_state.load_result.project->transform_timeline_edits[*transform_edit_index]
                             .keyframes.size() != baseline_key_count ||
                     edited_constraint == nullptr ||
@@ -3415,8 +3458,8 @@ int run_headless_smoke(const Options& options) {
                         return 1;
                     }
                 }
-                if (shell_state.command_stack.undo_count() != 0U ||
-                    shell_state.command_stack.redo_count() != 6U ||
+                if (shell_state.session.undo_count() != 0U ||
+                    shell_state.session.redo_count() != 6U ||
                     !history_snapshots_equal(
                         capture_history_snapshot(shell_state),
                         undo_smoke_baseline) ||
@@ -3433,8 +3476,8 @@ int run_headless_smoke(const Options& options) {
                         return 1;
                     }
                 }
-                if (shell_state.command_stack.undo_count() != 6U ||
-                    shell_state.command_stack.redo_count() != 0U ||
+                if (shell_state.session.undo_count() != 6U ||
+                    shell_state.session.redo_count() != 0U ||
                     !history_snapshots_equal(
                         capture_history_snapshot(shell_state),
                         undo_smoke_final)) {
@@ -3444,7 +3487,7 @@ int run_headless_smoke(const Options& options) {
                 }
 
                 if (!undo_project_change(&shell_state) ||
-                    shell_state.command_stack.redo_count() != 1U) {
+                    shell_state.session.redo_count() != 1U) {
                     std::cerr << "Undo smoke could not prepare the redo-clear validation.\n";
                     ImGui::DestroyContext();
                     return 1;
@@ -3466,7 +3509,7 @@ int run_headless_smoke(const Options& options) {
                     ImGui::DestroyContext();
                     return 1;
                 }
-                if (shell_state.command_stack.redo_count() != 0U) {
+                if (shell_state.session.redo_count() != 0U) {
                     std::cerr << "Undo smoke did not clear redo history after a new edit.\n";
                     ImGui::DestroyContext();
                     return 1;
@@ -3483,7 +3526,7 @@ int run_headless_smoke(const Options& options) {
                 ImGui::DestroyContext();
                 return 1;
             }
-            shell_state.command_stack.clear();
+            shell_state.session.clear_history();
             shell_state.pending_edit_action.reset();
             update_project_dirty_state(&shell_state);
             if (shell_state.project_dirty) {

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, documentation, and Maroow-native parameter modeling.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness, including the Maroow-native parameter runtime slices in MAR-120–126. Before parameter authoring begins in MAR-127, MAR-129–140 form an editor architecture gate: establish CTest and behavior baselines, introduce a UI-free EditorSession with unified transactions and preview ownership, migrate the C ABI and agent dispatcher without external changes, then extract feature-owned shell modules. This roadmap preserves C ABI v1, the agent JSON protocol, file formats, serialized output, fixtures, playback, undo grouping, and visible editor workflows; Maroow-native parameter modeling is not Live2D Cubism Core, SDK ABI, proprietary file, or importer compatibility.",
   "qualityGates": [
     "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -2155,7 +2155,8 @@
       "dependsOn": [
         "MAR-119"
       ],
-      "status": "todo"
+      "status": "done",
+      "completedAt": "2026-07-12"
     },
     {
       "id": "MAR-121",
@@ -2271,6 +2272,224 @@
       "status": "todo"
     },
     {
+      "id": "MAR-129",
+      "title": "Register a focused noninteractive CTest guardrail",
+      "description": "Turn the existing direct smoke commands into one focused CTest entrypoint before the editor architecture changes, without replacing or changing any executable's direct command-line behavior.",
+      "acceptanceCriteria": [
+        "The top-level build enables CTest through the standard BUILD_TESTING flow.",
+        "CTest registers exactly seven focused tests: marrow_unit_tests, the player_idle runtime fixture smoke, renderer --hud --skip-render preparation, player_idle project smoke, agent dispatch smoke, C ABI smoke, and the player_idle editor shell auto-close smoke.",
+        "Every registered test uses the source root as its WORKING_DIRECTORY so existing relative fixture paths remain valid.",
+        "Tests carry useful runtime, renderer, editor, agent, project, C-ABI, unit, fixture, smoke, and noninteractive labels as appropriate.",
+        "ctest --test-dir build --output-on-failure is documented in AGENTS.md alongside discovery and useful label-filter commands.",
+        "All pre-existing direct validation commands remain documented and continue to invoke the same executables and arguments.",
+        "AGENTS.md lists the exact 24 named cases currently emitted by marrow_unit_tests and retains the interactive Metal host validation notes."
+      ],
+      "dependsOn": [
+        "MAR-126"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-130",
+      "title": "Characterize editor and agent external behavior",
+      "description": "Expand behavior-focused smoke coverage before moving ownership so the current C ABI, agent protocol, serialization, playback, history, import, export, and visible editor workflows become an executable compatibility baseline.",
+      "acceptanceCriteria": [
+        "Agent dispatch characterization covers all 44 existing operations and asserts every operation name remains callable with its current argument contract.",
+        "Coverage explicitly includes terminate, save/review execution, redo, transform removal, Spine atlas import, PSD import/re-import, and atlas-pack paths that were previously missing.",
+        "Tests assert operation categories, permission failures, status and error codes, error messages, response metadata, affected-target summaries, and JSON result shapes.",
+        "Dry-run tests prove project data, runtime data, preview state, dirty state, revisions, and history remain unchanged.",
+        "Review tests prove queueing, monotonic review IDs, approve/reject behavior, and execution of the originally reviewed command.",
+        "Undo/redo tests preserve existing grouping and merge behavior for user and agent edits.",
+        "Compatibility tests prove byte-identical .marrow serialization and logically equivalent .mskl/.mbin exports for unchanged fixtures.",
+        "Runtime fixture and renderer --skip-render preparation continue to pass for the checked-in player_idle assets without fixture rewrites."
+      ],
+      "dependsOn": [
+        "MAR-129"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-131",
+      "title": "Unify editor mutations under session history",
+      "description": "Introduce the EditorSession transaction and snapshot foundation, route production shell mutations through it, and retire the parallel public ProjectCommand history implementation while preserving current behavior.",
+      "acceptanceCriteria": [
+        "include/marrow/editor/session.hpp introduces a move-only EditorSession and transaction API without UI framework types.",
+        "A non-nestable transaction descriptor records edit kind, label, merge key, merge permission, and project/runtime/preview impact flags.",
+        "A transaction captures the prior project and preview state and commits one atomic history entry only after validation and any required runtime rebuild succeed.",
+        "Cancellation, validation failure, or runtime rebuild failure restores the exact prior project and preview state and creates no history entry.",
+        "A no-change transaction creates no history entry and does not change dirty state or revision counters.",
+        "History remains capped at 100 entries and preserves the current merge-key and grouped-drag behavior.",
+        "Preview skin and attachment composition remains transient and does not mark the project dirty, but remains undoable and redoable.",
+        "Production shell edits use the unified session history, and ProjectCommand, ProjectCommandStack, and make_project_command are removed from the public project API and implementation.",
+        "Session tests cover rollback, no-change edits, preview-only history, merge behavior, the depth cap, and undo/redo restoration."
+      ],
+      "dependsOn": [
+        "MAR-130"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-132",
+      "title": "Move editor playback into a preview controller",
+      "description": "Move animation selection and preview playback ownership out of shell free functions into a private PreviewController used by EditorSession, without changing frame advancement or visible playback behavior.",
+      "acceptanceCriteria": [
+        "A private PreviewController owns selected animation, playback time, loop, queue, mix, reverse, Skeleton, and AnimationState state.",
+        "Seeking, selection changes, preview composition, runtime rebinding, state snapshot, and state restoration are expressed as controller operations rather than shell free functions.",
+        "Normal frame advancement remains incremental through AnimationState update/apply and does not rebuild runtime data.",
+        "Runtime rebinding after a project edit preserves compatible animation selection, playback time, loop/queue/mix/reverse state, and transient preview composition.",
+        "Failed transactions restore the prior preview controller state exactly.",
+        "Shell timeline playback and scrubbing use EditorSession preview controls without directly owning Skeleton or AnimationState.",
+        "Tests cover animation selection, seeking, incremental advancement, looping, queue/mix/reverse state, preview composition, runtime rebinding, and playback retention across undo/redo."
+      ],
+      "dependsOn": [
+        "MAR-131"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-133",
+      "title": "Make EditorSession own authoring state",
+      "description": "Complete the UI-free EditorSession ownership boundary for project lifecycle, compiled runtime data, preview, dirty state, revisions, history, save, and export, then make ShellState compose it.",
+      "acceptanceCriteria": [
+        "EditorSession exposes open, reload, save, and export_runtime lifecycle operations with actionable errors and no ImGui, GLFW, OpenGL, or shell types in its public header.",
+        "Project data, load state, compiled runtime data, PreviewController, dirty baseline, edit transactions, and history are owned by EditorSession.",
+        "Callers receive read-only project and runtime access plus preview controls, undo/redo, dirty state, and save/export operations rather than mutable ownership leaks.",
+        "Monotonic project, runtime, and preview revision counters advance only for their documented impacts.",
+        "Successful save establishes the new dirty baseline, failed save leaves session state unchanged, and export does not silently clear project dirtiness.",
+        "Successful and failed open/reload operations have deterministic ownership and rollback semantics.",
+        "ShellState composes EditorSession and reacts to revision changes for UI cache, selection, viewport, and file-watcher synchronization.",
+        "Session tests cover successful and failed load, dirty baselines, save/export semantics, revision increments, runtime rebuilds, and playback retention."
+      ],
+      "dependsOn": [
+        "MAR-132"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-134",
+      "title": "Migrate the C API and agent control to EditorSession",
+      "description": "Move the opaque C project, socket dispatch, review execution, and agent lifecycle onto EditorSession plus a UI-free AgentControlState while keeping C ABI v1 and the JSON protocol unchanged.",
+      "acceptanceCriteria": [
+        "AgentControlState owns pause/terminate state, current operation, activity log, review queue, and monotonic activity/review IDs without shell or UI dependencies.",
+        "AgentCommandContext contains EditorSession and AgentControlState references, and the C++ dispatcher signature is dispatch(AgentCommandContext&, Value).",
+        "The opaque C MarrowProject owns EditorSession and AgentControlState while every existing C function, status code, ownership rule, and ABI version remains unchanged.",
+        "Socket worker threads continue to queue commands only, and all dispatch and mutation remain main-thread single-writer operations.",
+        "Review approval executes against the same session/control context and preserves the reviewed command's protocol response.",
+        "Project and dispatcher implementation paths no longer include shell_types.hpp or depend on ImGui, GLFW, or OpenGL types.",
+        "C ABI and agent characterization smokes pass without changing fixture files, response JSON, or exported data."
+      ],
+      "dependsOn": [
+        "MAR-133"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-135",
+      "title": "Drive agent dispatch from one operation registry",
+      "description": "Replace dispatcher string branching with one registry that binds operation metadata to handlers, generates operations.list, and delegates cohesive handler groups while preserving exact JSON behavior.",
+      "acceptanceCriteria": [
+        "One registry entry owns each operation's name, category, permissions, review requirement, dry-run metadata, and non-null handler.",
+        "operations.list is generated solely from the registry and preserves existing operation names, ordering, categories, permission metadata, and response shape.",
+        "Dispatcher lookup uses the registry instead of a parallel string if/else chain or independently maintained metadata table.",
+        "Handlers are split into inspection, editing/timeline, constraints, and management/validation modules with narrow private interfaces.",
+        "Tests reject duplicate operation names and handlerless registry entries.",
+        "Every one of the 44 characterized operations resolves to exactly one handler.",
+        "Argument validation, dry-run behavior, review routing, status/error messages, response metadata, undo grouping, and exported results remain byte-for-byte or structurally equivalent as appropriate."
+      ],
+      "dependsOn": [
+        "MAR-134"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-136",
+      "title": "Extract the timeline shell module",
+      "description": "Move timeline models, animation editors, scrubbing, and playback controls out of shell_main.cpp into a feature-owned shell_timeline module backed by EditorSession.",
+      "acceptanceCriteria": [
+        "Timeline row/key models, selection state adapters, editors, and timeline window drawing live in shell_timeline source and narrow private headers.",
+        "Playback, play/pause, looping, reverse, queue/mix controls, seeking, and scrubbing call EditorSession preview APIs.",
+        "Transform, deform, draw-order, event, state-preview, and constraint timeline edits use EditorSession transactions with existing labels and merge behavior.",
+        "Timeline selection remains synchronized with hierarchy, inspector, animation selection, and viewport preview.",
+        "Immediate edit preview and incremental frame playback preserve current behavior without runtime rebuilds during ordinary advancement.",
+        "Editor shell smoke coverage validates playback, scrubbing, keyed edits, grouped undo/redo, and selection synchronization after extraction."
+      ],
+      "dependsOn": [
+        "MAR-135"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-137",
+      "title": "Extract the constraint shell module",
+      "description": "Move constraint selection, default construction, runtime/project conversion, mutation, preview, and panel code into a feature-owned shell_constraints module.",
+      "acceptanceCriteria": [
+        "Constraint type selection, defaults, conversion helpers, mutation helpers, and panel rendering live in shell_constraints source and narrow private headers.",
+        "IK, path, transform, and physics constraint authoring continue to use the existing project schema and runtime conversion rules.",
+        "All constraint mutations use EditorSession transactions and preserve validation, dirty state, preview rebuild, undo grouping, and redo behavior.",
+        "Constraint selection stays synchronized with hierarchy, timeline, inspector, and viewport overlays.",
+        "Constraint preview, debug overlay toggles, and runtime export remain externally unchanged.",
+        "Editor and project smokes cover create/edit/remove, invalid rollback, immediate preview, undo/redo, and export after extraction."
+      ],
+      "dependsOn": [
+        "MAR-136"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-138",
+      "title": "Extract selection and inspector shell modules",
+      "description": "Separate hierarchy and selection coordination from bone, slot, skin, and attachment inspection/editing so each UI feature owns a narrow module rather than shell_main.cpp globals.",
+      "acceptanceCriteria": [
+        "Hierarchy tree drawing and bone, slot, skin, attachment, animation, and constraint selection synchronization live in a private shell_selection module.",
+        "Bone, slot, skin, attachment, and project property inspection/editing live in a private shell_inspector module.",
+        "Selection transitions keep hierarchy, inspector, timeline, viewport picking, and agent-driven changes synchronized.",
+        "Inspector mutations use EditorSession transactions, preserve immediate preview, and retain current edit labels and merge behavior.",
+        "Preview-only skin and attachment composition remains transient, non-dirty, undoable, and visibly synchronized.",
+        "Editor shell smokes validate bone picking, hierarchy changes, inspector edits, skin/attachment selection, and grouped undo/redo after extraction."
+      ],
+      "dependsOn": [
+        "MAR-137"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-139",
+      "title": "Extract weight-paint and viewport shell modules",
+      "description": "Move mesh-weight computation and brush gestures into shell_weight_paint, and move viewport window, settings, overlays, camera, picking, and interaction into shell_viewport-owned interfaces.",
+      "acceptanceCriteria": [
+        "Mesh influence lookup, normalization, brush falloff, paint, erase, smooth, heatmap, and stroke gesture state live in a private shell_weight_paint module.",
+        "Viewport window composition, framebuffer sizing, camera pan/zoom, picking, settings, debug overlays, onion skins, and interaction routing live behind narrow shell_viewport interfaces.",
+        "Paint, erase, and smooth strokes preserve current numeric results, weight normalization, heatmap colors, immediate preview, and one-history-entry gesture grouping.",
+        "Viewport selection and gestures remain synchronized with hierarchy, inspector, timeline, and EditorSession revisions.",
+        "Viewport renderer, icon, widget, OpenGL, and ImGui code is compiled only for the shell-facing target path.",
+        "Editor shell smoke coverage validates paint/erase/smooth, overlays, picking, camera interaction, onion skinning, hot reload, and undo/redo after extraction."
+      ],
+      "dependsOn": [
+        "MAR-138"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-140",
+      "title": "Clean up editor shell composition and target boundaries",
+      "description": "Finish the refactor by extracting project/runtime/agent panels, replacing the God-state compatibility header, removing adapters and duplicate declarations, and enforcing a UI-free marrow_editor library before MAR-127 begins.",
+      "acceptanceCriteria": [
+        "Project lifecycle, runtime/export, and agent activity/review panels live in feature-owned shell modules using EditorSession and AgentControlState interfaces.",
+        "shell_types.hpp is removed and replaced by a UI-only shell_state.hpp plus narrow private feature headers without duplicate cross-module declarations.",
+        "Transitional project, preview, history, and dispatch adapters are removed after all call sites use EditorSession, PreviewController, AgentCommandContext, and the operation registry.",
+        "marrow_editor is UI-free, depends only on marrow_runtime and Zlib, and does not compile shell, icon, widget, viewport, ImGui, GLFW, or OpenGL code.",
+        "Shell, icons, widgets, viewport, and platform code compile only into marrow_editor_shell, with icon_registry.cpp compiled exactly once.",
+        "shell_main.cpp is responsible only for CLI/platform startup, theme and docking setup, frame composition, and shutdown.",
+        "The existing combined C API and renderer targets are not split as part of this story.",
+        "C ABI v1, agent JSON, file formats, serialization, fixtures, playback, undo grouping, save/export, hot reload, and visible editor workflows remain unchanged.",
+        "The full CTest guardrail and the documented direct C ABI, agent, project, runtime fixture, renderer skip-render, and five-frame editor shell commands pass."
+      ],
+      "dependsOn": [
+        "MAR-139"
+      ],
+      "status": "todo"
+    },
+    {
       "id": "MAR-127",
       "title": "Add parameter modeling authoring tools to the editor",
       "description": "Build the editor-facing Parameter Modeling mode for group sliders, deformer editing, keyform capture, expression presets, and lip-sync mapping, with all mutations flowing through snapshots and runtime preview rebuilds.",
@@ -2285,7 +2504,7 @@
         "marrow_project_smoke confirms editor-authored parameter changes export to runtime .mskl/.mbin payloads."
       ],
       "dependsOn": [
-        "MAR-126"
+        "MAR-140"
       ],
       "status": "todo"
     },
