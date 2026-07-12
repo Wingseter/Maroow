@@ -1,6 +1,6 @@
 # Marrow Fixture Assets
 
-These fixtures turn the format examples in [docs/discription.md](discription.md) into checked-in runtime assets that future loader tests can reuse without rewriting sample data.
+These fixtures turn the format examples in [docs/root1/discription.md](discription.md) into checked-in runtime assets that future loader tests can reuse without rewriting sample data.
 
 ## Canonical runtime assets
 
@@ -33,7 +33,21 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 - `assets/fixtures/psd_import_sample.psd`
 - `assets/fixtures/psd_import_sample_reimport.psd`
 
-## Mapping to `docs/discription.md`
+## Planned parameter/deformer fixtures
+
+The MAR-120+ parameter modeling track should add these fixtures without changing `player_idle.*` unless a story explicitly requires it:
+
+- `assets/fixtures/parameter_face_basic.mskl`: minimal bones/slots plus `parameters`, `parameterGroups`, and a 1D mouth-open `parameterShapes` payload.
+- `assets/fixtures/parameter_face_basic.mbin`: binary round-trip of `parameter_face_basic.mskl`.
+- `assets/fixtures/parameter_face_basic.matl`: minimal atlas metadata for the face/mouth regions.
+- `assets/fixtures/parameter_face_basic.marrow`: `.marrow.parameter_model` authoring source used by project export validation.
+- `assets/fixtures/parameter_deformer_grid.mskl`: 2D face-angle parameter fixture for warp-deformer bilinear keyform evaluation.
+- `assets/fixtures/parameter_expression_lipsync.mskl`: expression stack and lip-sync mapping fixture.
+- `assets/fixtures/art_path_stroke.mskl`: atlas-free renderable stroke fixture.
+
+These fixtures should prove optional-empty compatibility first: existing runtime fixtures omit the new sections and must continue to load as an empty parameter model.
+
+## Mapping to `docs/root1/discription.md`
 
 ### `player_idle.mskl`
 
@@ -131,7 +145,7 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 
 ### `player_idle.marrow`
 
-- The minimal `.marrow` fixture covers the editor-side project split implied by sections 4 and 9 in [docs/discription.md](discription.md):
+- The minimal `.marrow` fixture covers the editor-side project split implied by sections 4 and 9 in [docs/root1/discription.md](discription.md):
   - the root `runtime` object points at the canonical `player_idle.mskl` and `player_idle.matl` files without embedding any exported runtime payload inline.
   - the root `editor` object keeps authoring-only metadata such as the project name, preview animation, preview skin set, export directory, free-form notes, and viewport framing.
   - `editor.viewport.onion_skin` persists the editor-only ghost-frame preview state: the on/off toggle, frame-vs-keyframe mode, frame-0 anchoring, before/after counts, and the sampling step.
@@ -191,7 +205,7 @@ Why this is the preferred contributor flow:
 
 ### `ik_constraints.mskl`
 
-- The root-level `ik` array now mirrors the IK Constraint extension in [docs/discription.md](discription.md):
+- The root-level `ik` array now mirrors the IK Constraint extension in [docs/root1/discription.md](discription.md):
   - `arm_positive` and `arm_negative` are two-bone chains with identical reach distances but opposite `bendPositive` values, so the runtime can prove bend direction changes without changing the authored target offset.
   - `turret_reach` is a one-bone full-mix chain that lands exactly on its target bone.
   - `turret_half_mix` reuses the same one-bone layout with `mix: 0.5` so the runtime can prove partial IK blending instead of only full overrides.
@@ -210,7 +224,7 @@ Why this is the preferred contributor flow:
 
 ### `path_transform_constraints.mskl`
 
-- The root-level `path` array mirrors the Path Constraint notes in [docs/discription.md](discription.md):
+- The root-level `path` array mirrors the Path Constraint notes in [docs/root1/discription.md](discription.md):
   - `rope_follow` binds the `guide` slot to a cubic path attachment encoded as two straight Bezier segments, which keeps the authored geometry easy to inspect while still exercising path attachment parsing.
   - the constrained `path_a -> path_b -> path_c` chain uses `position: 0.1` plus `spacingMode: "percent"` and `spacing: 0.3`, so the smoke test can assert exact world-space placements 20, 80, and 140 units along the 200-unit guide.
   - full `rotateMix` and `translateMix` verify both tangent-following rotation and path-position translation in one setup-pose solve.
@@ -221,7 +235,7 @@ Why this is the preferred contributor flow:
 
 ### `physics_constraints.mskl`
 
-- The root-level `physics` array mirrors the Physics Constraint notes in [docs/discription.md](discription.md):
+- The root-level `physics` array mirrors the Physics Constraint notes in [docs/root1/discription.md](discription.md):
   - `ribbon_secondary` constrains the directly chained `ribbon_01 -> ribbon_02` pair, keeping the authored hierarchy small enough to inspect while still providing a multi-bone secondary-motion chain.
   - `inertia: 0.85`, `damping: 4.0`, and `strength: 18.0` give the smoke test a deterministic spring response that visibly lags behind the driven `pivot` bone before settling.
   - the `gravity` and `wind` vectors stay non-zero so the runtime can preserve and step environmental force metadata alongside the spring parameters during the numeric secondary-motion test.
@@ -231,3 +245,4 @@ Why this is the preferred contributor flow:
 
 - Treat these files as the default parser fixtures unless a later story explicitly expands the format.
 - When the `.matl` format is formalized, update this document in the same change so the fixture-to-spec mapping stays explicit.
+- When parameter/deformer stories land, add the matching fixture validation command to AGENTS.md in the same story that introduces the fixture.

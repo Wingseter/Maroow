@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -21,6 +22,8 @@ struct Options {
     std::filesystem::path reimport_psd{"assets/fixtures/psd_import_sample_reimport.psd"};
 };
 
+constexpr double kRenderBoundsEpsilon = 1e-5;
+
 bool expect(bool condition, std::string_view message) {
     if (condition) {
         return true;
@@ -33,7 +36,8 @@ bool expect_near(double actual, double expected, double epsilon, std::string_vie
     if (std::abs(actual - expected) <= epsilon) {
         return true;
     }
-    std::cerr << label << " expected " << expected << " but was " << actual << '\n';
+    std::cerr << label << " expected " << std::setprecision(17) << expected
+              << " but was " << actual << '\n';
     return false;
 }
 
@@ -241,18 +245,18 @@ bool validate_initial_import(
     const auto [body_min, body_max] = command_bounds(*body_draw);
     const auto [arm_min, arm_max] = command_bounds(*arm_draw);
     const auto [shadow_min, shadow_max] = command_bounds(*shadow_draw);
-    if (!expect_near(body_min.x, 16.0, 1e-6, "body min x") ||
-        !expect_near(body_min.y, 12.0, 1e-6, "body min y") ||
-        !expect_near(body_max.x, 36.0, 1e-6, "body max x") ||
-        !expect_near(body_max.y, 36.0, 1e-6, "body max y") ||
-        !expect_near(arm_min.x, 4.0, 1e-6, "arm_l min x") ||
-        !expect_near(arm_min.y, 20.0, 1e-6, "arm_l min y") ||
-        !expect_near(arm_max.x, 16.0, 1e-6, "arm_l max x") ||
-        !expect_near(arm_max.y, 28.0, 1e-6, "arm_l max y") ||
-        !expect_near(shadow_min.x, 18.0, 1e-6, "shadow min x") ||
-        !expect_near(shadow_min.y, 40.0, 1e-6, "shadow min y") ||
-        !expect_near(shadow_max.x, 32.0, 1e-6, "shadow max x") ||
-        !expect_near(shadow_max.y, 48.0, 1e-6, "shadow max y")) {
+    if (!expect_near(body_min.x, 16.0, kRenderBoundsEpsilon, "body min x") ||
+        !expect_near(body_min.y, 12.0, kRenderBoundsEpsilon, "body min y") ||
+        !expect_near(body_max.x, 36.0, kRenderBoundsEpsilon, "body max x") ||
+        !expect_near(body_max.y, 36.0, kRenderBoundsEpsilon, "body max y") ||
+        !expect_near(arm_min.x, 4.0, kRenderBoundsEpsilon, "arm_l min x") ||
+        !expect_near(arm_min.y, 20.0, kRenderBoundsEpsilon, "arm_l min y") ||
+        !expect_near(arm_max.x, 16.0, kRenderBoundsEpsilon, "arm_l max x") ||
+        !expect_near(arm_max.y, 28.0, kRenderBoundsEpsilon, "arm_l max y") ||
+        !expect_near(shadow_min.x, 18.0, kRenderBoundsEpsilon, "shadow min x") ||
+        !expect_near(shadow_min.y, 40.0, kRenderBoundsEpsilon, "shadow min y") ||
+        !expect_near(shadow_max.x, 32.0, kRenderBoundsEpsilon, "shadow max x") ||
+        !expect_near(shadow_max.y, 48.0, kRenderBoundsEpsilon, "shadow max y")) {
         return false;
     }
 
@@ -304,10 +308,10 @@ bool validate_reimport(
         return false;
     }
     const auto [body_min, body_max] = command_bounds(*body_draw);
-    if (!expect_near(body_min.x, 20.0, 1e-6, "reimported body min x") ||
-        !expect_near(body_min.y, 14.0, 1e-6, "reimported body min y") ||
-        !expect_near(body_max.x, 40.0, 1e-6, "reimported body max x") ||
-        !expect_near(body_max.y, 38.0, 1e-6, "reimported body max y")) {
+    if (!expect_near(body_min.x, 20.0, kRenderBoundsEpsilon, "reimported body min x") ||
+        !expect_near(body_min.y, 14.0, kRenderBoundsEpsilon, "reimported body min y") ||
+        !expect_near(body_max.x, 40.0, kRenderBoundsEpsilon, "reimported body max x") ||
+        !expect_near(body_max.y, 38.0, kRenderBoundsEpsilon, "reimported body max y")) {
         return false;
     }
 

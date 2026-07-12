@@ -376,14 +376,6 @@ std::vector<RuntimeAssetWatchEntry> capture_runtime_asset_watch_entries(const Sh
     return entries;
 }
 
-void reset_runtime_asset_watch(ShellState* state) {
-    if (state == nullptr) {
-        return;
-    }
-
-    state->runtime_asset_watch_entries = capture_runtime_asset_watch_entries(*state);
-}
-
 void materialize_temp_project_runtime_assets(
     const ShellState& state,
     marrow::editor::ProjectData* project) {
@@ -1856,13 +1848,21 @@ bool set_preview_skin_enabled(
         state->preview_skin_names.begin(),
         state->preview_skin_names.end(),
         skin_name);
+    const bool already_enabled = existing != state->preview_skin_names.end();
+    if (already_enabled == enabled) {
+        if (update_status_message) {
+            state->status_message =
+                std::string(enabled ? "Preview skin already enabled: "
+                                    : "Preview skin already disabled: ") +
+                skin_name;
+        }
+        return true;
+    }
 
     if (!record_history) {
         if (enabled) {
-            if (existing == state->preview_skin_names.end()) {
-                state->preview_skin_names.push_back(skin_name);
-            }
-        } else if (existing != state->preview_skin_names.end()) {
+            state->preview_skin_names.push_back(skin_name);
+        } else {
             state->preview_skin_names.erase(existing);
         }
         return apply_preview_skin_selection(state, "Skin Preview", update_status_message);
@@ -1877,10 +1877,8 @@ bool set_preview_skin_enabled(
         "Preview skin change failed",
         [&]() {
             if (enabled) {
-                if (existing == state->preview_skin_names.end()) {
-                    state->preview_skin_names.push_back(skin_name);
-                }
-            } else if (existing != state->preview_skin_names.end()) {
+                state->preview_skin_names.push_back(skin_name);
+            } else {
                 state->preview_skin_names.erase(existing);
             }
         });
@@ -3116,6 +3114,11 @@ bool apply_weight_paint_sample(
         state->status_message = "Weight paint stroke failed";
         return false;
     }
+    if (!apply_current_animation_state_to_preview(state)) {
+        *state->load_result.project = previous_project;
+        state->status_message = "Weight paint stroke failed";
+        return false;
+    }
 
     update_project_dirty_state(state);
     state->weight_paint_stroke.changed = true;
@@ -4070,6 +4073,10 @@ bool apply_project_command_change(
         state->status_message = std::move(failure_status);
         return false;
     }
+    if (!apply_current_animation_state_to_preview(state)) {
+        state->status_message = std::move(failure_status);
+        return false;
+    }
 
     return record_action_from_snapshots(
         state,
@@ -4092,6 +4099,11 @@ bool undo_project_change(ShellState* state) {
         update_project_dirty_state(state);
         return false;
     }
+    if (!apply_current_animation_state_to_preview(state)) {
+        state->status_message = "Undo failed";
+        update_project_dirty_state(state);
+        return false;
+    }
 
     update_project_dirty_state(state);
     state->status_message = "Undid " + label;
@@ -4107,6 +4119,11 @@ bool redo_project_change(ShellState* state) {
     if (!state->command_stack.redo(state, &label)) {
         state->status_message =
             state->command_stack.can_redo() ? "Redo failed" : "Nothing to redo";
+        update_project_dirty_state(state);
+        return false;
+    }
+    if (!apply_current_animation_state_to_preview(state)) {
+        state->status_message = "Redo failed";
         update_project_dirty_state(state);
         return false;
     }
@@ -4713,6 +4730,10 @@ bool reload_runtime_source_assets(ShellState* state) {
     state->load_result.atlas_data = std::move(atlas_data);
 
     if (!rebuild_project_runtime(state)) {
+        state->status_message = "Runtime asset hot-reload failed";
+        return false;
+    }
+    if (!apply_current_animation_state_to_preview(state)) {
         state->status_message = "Runtime asset hot-reload failed";
         return false;
     }
@@ -9895,27 +9916,44 @@ void draw_agent_window(ShellState* state) {
     const bool running =
         state->agent_server != nullptr && state->agent_server->is_running();
     const int port = state->agent_listen_port.value_or(kDefaultAgentPort);
+    std::string agent_status = "Off";
+    if (state->agent_terminated) {
+        agent_status = "Blocked";
+    } else if (state->agent_paused) {
+        agent_status = "Paused";
+    } else if (!state->agent_current_op.empty()) {
+        agent_status = "Running";
+    } else if (running && !state->agent_activity_log.empty()) {
+        agent_status = state->agent_activity_log.back().ok ? "Connected" : "Error";
+    } else if (running) {
+        agent_status = "Listening";
+    }
 
     // Status card (surface_card tonal lift, no border).
     {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, t::kSurfaceCard);
-        ImGui::BeginChild("agent_conn", ImVec2(0.0f, 56.0f), true);
+        ImGui::BeginChild("agent_conn", ImVec2(0.0f, 84.0f), true);
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
         ImGui::TextColored(running ? t::kPrimary : t::kFaint, "●");
         ImGui::SameLine(0.0f, 8.0f);
         ImGui::BeginGroup();
         if (running) {
             char label[64];
-            std::snprintf(label, sizeof(label), "Listening · :%d", port);
+            std::snprintf(label, sizeof(label), "%s · :%d", agent_status.c_str(), port);
             ImGui::TextColored(t::kOnSurface, "%s", label);
             ImGui::TextColored(t::kFaint,
                                state->agent_token.empty()
                                    ? "Localhost only · awaiting handshake."
                                    : "Localhost · token · awaiting handshake.");
         } else {
-            ImGui::TextColored(t::kOnSurface, "Socket off");
+            ImGui::TextColored(t::kOnSurface, "%s", agent_status.c_str());
             ImGui::TextColored(t::kFaint,
                                "Start the socket to let an AI agent connect.");
+        }
+        if (!state->agent_current_op.empty()) {
+            ImGui::TextColored(t::kFaint, "Current: %s", state->agent_current_op.c_str());
+        } else if (!state->agent_last_result.empty()) {
+            ImGui::TextColored(t::kFaint, "Last: %s", state->agent_last_result.c_str());
         }
         ImGui::EndGroup();
         ImGui::EndChild();
@@ -9970,7 +10008,19 @@ void draw_agent_window(ShellState* state) {
                     "#%llu %s",
                     static_cast<unsigned long long>(request.id),
                     request.label.c_str());
-                ImGui::TextColored(t::kFaint, "%s", request.target_path.string().c_str());
+                if (!request.op.empty()) {
+                    ImGui::TextColored(t::kFaint, "%s", request.op.c_str());
+                }
+                if (request.target_paths.empty()) {
+                    ImGui::TextColored(t::kFaint, "%s", request.target_path.string().c_str());
+                } else {
+                    for (const auto& target : request.target_paths) {
+                        ImGui::TextColored(t::kFaint, "%s", target.string().c_str());
+                    }
+                }
+                if (!request.args_summary.empty()) {
+                    ImGui::TextColored(t::kFaint, "%s", request.args_summary.c_str());
+                }
                 if (!request.message.empty()) {
                     ImGui::TextColored(
                         request.allowed ? t::kFaint : t::kTertiary,
@@ -9982,9 +10032,13 @@ void draw_agent_window(ShellState* state) {
                         bool ok = false;
                         if (request.kind == AgentReviewKind::SaveProject) {
                             ok = save_project_file(state, true);
-                        } else {
+                        } else if (request.kind == AgentReviewKind::ExportRuntime) {
                             state->export_binary_output = request.binary_output;
                             ok = export_runtime_assets_file(state, true);
+                        } else {
+                            ok = true;
+                            state->status_message = "Approved agent import/pack review #" +
+                                std::to_string(request.id);
                         }
                         if (ok) {
                             state->status_message = "Approved agent request #" +

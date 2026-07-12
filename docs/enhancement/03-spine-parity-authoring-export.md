@@ -24,6 +24,7 @@ Spine import 쪽도 기반이 있다. `docs/root1/research-spine-import-atlas-pa
 cmake -S . -B build
 cmake --build build
 ./build/spine_to_marrow assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl
+./build/spine_to_marrow --report /tmp/spine_import_report.json assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl
 ./build/spine_to_marrow assets/fixtures/spine_import_sample.atlas /tmp/spine_import_sample.matl
 ./build/marrow_spine_import_smoke assets/fixtures/spine_import_sample.json assets/fixtures/spine_import_sample.atlas
 ./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
@@ -107,30 +108,54 @@ Spine ecosystem의 Skeleton Viewer처럼 import 결과를 빠르게 열고, anim
 - [ ] 공식 Spine 4.2 예제 batch 결과를 `marrow_inspect` count와 warning snapshot으로 고정한다.
 - [ ] `docs/root1/research-spine-import-atlas-packing.md`의 정책을 반영해 `.skel`은 Phase 7 전까지 unsupported explicit error로 유지한다.
 
+Report JSON contract:
+
+```json
+{
+  "source_format": "spine_json",
+  "source_path": "assets/fixtures/spine_import_sample.json",
+  "spine_version": "4.2.19",
+  "status": "accepted",
+  "diagnostics": [],
+  "error": null
+}
+```
+
+`status` is one of `accepted`, `accepted_with_warnings`, or `rejected`. Each diagnostic carries `severity`, `code`, `path`, and `message`; unsupported-but-skipped Spine constructs use `severity: "unsupported"`.
+
 검증:
 
 ```bash
 cmake --build build --target spine_to_marrow marrow_spine_import_smoke marrow_inspect
 ./build/marrow_spine_import_smoke assets/fixtures/spine_import_sample.json assets/fixtures/spine_import_sample.atlas
+./build/spine_to_marrow --report /tmp/spine_import_report.json assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl
+python3 -m json.tool /tmp/spine_import_report.json > /dev/null
 mkdir -p /tmp/marrow-spine-batch
-for asset in owl goblins spineboy tank raptor; do ./build/spine_to_marrow assets/spine-examples/$asset/$asset-pro.json /tmp/marrow-spine-batch/$asset.mskl || exit 1; done
+for asset in owl goblins spineboy tank raptor; do ./build/spine_to_marrow --report /tmp/marrow-spine-batch/$asset.report.json assets/spine-examples/$asset/$asset-pro.json /tmp/marrow-spine-batch/$asset.mskl || exit 1; done
 for asset in owl goblins spineboy tank raptor; do ./build/marrow_inspect /tmp/marrow-spine-batch/$asset.mskl | sed -n '1,3p' || exit 1; done
 ```
 
 ### Phase 2: Skeleton Viewer-like Validator MVP
 
-- [ ] `marrow_validator` CLI 또는 `marrow_renderer_sample --validate` mode를 추가해 skeleton, atlas, optional animation, optional skin을 한 번에 받는다.
-- [ ] JSON load, atlas page load, setup pose prepare, animation sample, bounds/event scan을 하나의 report로 출력한다.
-- [ ] `--skip-render`는 CI용 deterministic validation으로 유지하고, interactive host에서는 preview window를 열 수 있게 한다.
-- [ ] failure는 load error, unsupported import field, renderer preparation error, runtime sampling error로 분류한다.
-- [ ] validator report를 machine-readable JSON으로도 출력한다.
+- [x] `marrow_validator` CLI를 추가해 skeleton, atlas, optional animation, optional skin을 한 번에 받는다.
+- [x] JSON load, atlas page load, setup pose prepare, animation sample, bounds/event scan을 하나의 report로 출력한다.
+- [x] `--skip-render`는 CI용 deterministic validation으로 유지하고, interactive host에서는 preview window를 열 수 있게 한다.
+- [x] failure는 load error, unsupported import field, renderer preparation error, runtime sampling error로 분류한다.
+- [x] validator report를 machine-readable JSON으로도 출력한다.
 
 검증:
 
 ```bash
-cmake --build build --target marrow_renderer_sample marrow_fixture_smoke
+cmake --build build --target marrow_validator marrow_renderer_sample marrow_fixture_smoke spine_to_marrow
+./build/marrow_validator --skip-render --report /tmp/player_idle_validator.json assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
+python3 -m json.tool /tmp/player_idle_validator.json > /dev/null
+./build/marrow_validator --skip-render --animation idle --skin default --time 0.2 --report /tmp/player_idle_idle_validator.json assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
 ./build/marrow_renderer_sample --hud --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
 ./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
+./build/spine_to_marrow --report /tmp/spine_import_report.json assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl
+./build/spine_to_marrow assets/fixtures/spine_import_sample.atlas /tmp/spine_import_sample.matl
+./build/marrow_validator --skip-render --import-report /tmp/spine_import_report.json --report /tmp/spine_import_validator.json /tmp/spine_import_sample.mskl /tmp/spine_import_sample_hero_page.matl
+python3 -m json.tool /tmp/spine_import_validator.json > /dev/null
 ```
 
 ### Phase 3: Dopesheet Scalability Slice
@@ -270,7 +295,7 @@ cmake --build build --target spine_to_marrow marrow_inspect marrow_fixture_smoke
 
 - [ ] `spine_to_marrow` import report가 Spine version, accepted status, warnings, unsupported fields를 출력한다.
 - [ ] 공식 Spine 4.2 예제 batch가 import, inspect, fixture smoke, renderer setup validation을 통과한다.
-- [ ] validator가 `.mskl`/`.matl`을 받아 setup pose, animation sample, event/bounds, renderer preparation을 하나의 report로 검증한다.
+- [x] validator가 `.mskl`/`.matl`을 받아 setup pose, animation sample, event/bounds, renderer preparation을 하나의 report로 검증한다.
 - [ ] Dopesheet가 대형 timeline fixture에서 channel filter/fold/range edit를 처리하고 grouped undo/redo를 보존한다.
 - [ ] Graph editor가 linear, stepped, custom bezier curve를 편집하고 `.marrow -> .mskl -> runtime smoke` round-trip을 통과한다.
 - [ ] Export preview가 crop rect, padding, scale, alpha/background 설정을 보여주고 deterministic PNG/JPEG still을 만든다.
@@ -285,11 +310,14 @@ cmake --build build --target spine_to_marrow marrow_inspect marrow_fixture_smoke
 cmake -S . -B build
 cmake --build build
 ./build/marrow_spine_import_smoke assets/fixtures/spine_import_sample.json assets/fixtures/spine_import_sample.atlas
-./build/spine_to_marrow assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl
+./build/spine_to_marrow --report /tmp/spine_import_report.json assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl
+python3 -m json.tool /tmp/spine_import_report.json > /dev/null
 ./build/spine_to_marrow assets/fixtures/spine_import_sample.atlas /tmp/spine_import_sample.matl
-./build/marrow_fixture_smoke /tmp/spine_import_sample.mskl /tmp/spine_import_sample.matl
+./build/marrow_fixture_smoke /tmp/spine_import_sample.mskl /tmp/spine_import_sample_hero_page.matl
 ./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/player_idle_project_export.mskl --export-binary /tmp/player_idle_project_export.mbin
 ./build/marrow_inspect --compare /tmp/player_idle_project_export.mbin /tmp/player_idle_project_export.mskl
+./build/marrow_validator --skip-render --report /tmp/player_idle_validator.json assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
+python3 -m json.tool /tmp/player_idle_validator.json > /dev/null
 ./build/marrow_renderer_sample --hud --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl
 ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2
 mkdir -p /tmp/marrow-spine-batch

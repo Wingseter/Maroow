@@ -391,13 +391,17 @@ struct PendingEditAction {
 enum class AgentReviewKind {
     SaveProject,
     ExportRuntime,
+    ImportOrPack,
 };
 
 struct AgentReviewRequest {
     std::uint64_t id{0};
     AgentReviewKind kind{AgentReviewKind::SaveProject};
+    std::string op;
     std::string label;
     std::filesystem::path target_path;
+    std::vector<std::filesystem::path> target_paths;
+    std::string args_summary;
     bool binary_output{false};
     bool allowed{false};
     std::string message;
@@ -465,6 +469,10 @@ struct ShellState {
     std::string agent_token;               // from --agent-token (optional)
     bool show_agent_panel{false};
     bool agent_panel_was_open{false};
+    bool agent_paused{false};
+    bool agent_terminated{false};
+    std::string agent_current_op;
+    std::string agent_last_result;
     std::uint64_t next_agent_activity_id{1};
     std::uint64_t next_agent_review_id{1};
     std::vector<AgentActivityEntry> agent_activity_log;

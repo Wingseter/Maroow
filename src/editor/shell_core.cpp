@@ -3,10 +3,75 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <system_error>
 
 #include "marrow/editor/project.hpp"
 
 namespace marrow::editor::shell {
+namespace {
+
+std::filesystem::path core_absolutize_path(const std::filesystem::path& path) {
+    if (path.empty()) {
+        return path;
+    }
+    if (path.is_absolute()) {
+        return path.lexically_normal();
+    }
+
+    std::error_code error;
+    const std::filesystem::path current_directory = std::filesystem::current_path(error);
+    if (error) {
+        return path.lexically_normal();
+    }
+
+    return (current_directory / path).lexically_normal();
+}
+
+RuntimeAssetWatchEntry core_runtime_asset_watch_entry(const std::filesystem::path& path) {
+    RuntimeAssetWatchEntry entry;
+    entry.path = core_absolutize_path(path);
+
+    std::error_code error;
+    entry.exists = std::filesystem::exists(entry.path, error);
+    if (error || !entry.exists) {
+        entry.exists = false;
+        return entry;
+    }
+
+    const auto write_time = std::filesystem::last_write_time(entry.path, error);
+    if (!error) {
+        entry.write_time = write_time;
+    }
+    return entry;
+}
+
+std::vector<std::filesystem::path> core_runtime_asset_paths(const ShellState& state) {
+    std::vector<std::filesystem::path> paths;
+    if (!state.load_result || state.load_result.project == nullptr) {
+        return paths;
+    }
+
+    paths.push_back(core_absolutize_path(state.load_result.project->resolved_skeleton_path()));
+    for (const auto& atlas_path : state.load_result.project->resolved_atlas_paths()) {
+        paths.push_back(core_absolutize_path(atlas_path));
+    }
+    return paths;
+}
+
+} // namespace
+
+void reset_runtime_asset_watch(ShellState* state) {
+    if (state == nullptr) {
+        return;
+    }
+
+    const std::vector<std::filesystem::path> paths = core_runtime_asset_paths(*state);
+    state->runtime_asset_watch_entries.clear();
+    state->runtime_asset_watch_entries.reserve(paths.size());
+    for (const auto& path : paths) {
+        state->runtime_asset_watch_entries.push_back(core_runtime_asset_watch_entry(path));
+    }
+}
 
 // EditAction implementations
 EditAction::EditAction(EditActionKind kind, std::string label, std::string group, bool allow_merge)
@@ -428,6 +493,9 @@ bool rebuild_project_runtime(ShellState* state) {
     state->animation_state =
         marrow::allocate_unique<marrow::runtime::AnimationState>(
             state->load_result.skeleton_data);
+    if (playback_snapshot.has_value()) {
+        state->animation_state->restore_state(*playback_snapshot);
+    }
     state->preview_skin_names = normalize_preview_skin_names(
         *state->load_result.skeleton_data,
         state->preview_skin_names);
@@ -437,7 +505,7 @@ bool rebuild_project_runtime(ShellState* state) {
         state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
         state->selected_animation_name.clear();
     }
-    
+
     return true;
 }
 
@@ -523,6 +591,7 @@ bool reload_project(ShellState* state) {
             timeline_preview_duration(*state));
         state->timeline_playing = previous_timeline_playing;
     }
+    reset_runtime_asset_watch(state);
 
     return true;
 }

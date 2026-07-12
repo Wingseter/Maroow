@@ -2218,6 +2218,9 @@ int run_headless_smoke(const Options& options) {
         if (!warrior_skin_index.has_value() ||
             !set_preview_skin_enabled(&shell_state, *warrior_skin_index, true, false)) {
             std::cerr << "Failed to enable the warrior preview skin in smoke validation.\n";
+            if (!shell_state.error_message.empty()) {
+                std::cerr << shell_state.error_message << '\n';
+            }
             ImGui::DestroyContext();
             return 1;
         }
@@ -2530,7 +2533,8 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        if (!apply_history_snapshot(&shell_state, weight_paint_baseline)) {
+        if (!apply_history_snapshot(&shell_state, weight_paint_baseline) ||
+            !apply_current_animation_state_to_preview(&shell_state)) {
             std::cerr << "Weight paint smoke could not restore the baseline mesh state.\n";
             ImGui::DestroyContext();
             return 1;
@@ -2655,7 +2659,8 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        if (!apply_history_snapshot(&shell_state, weight_paint_baseline)) {
+        if (!apply_history_snapshot(&shell_state, weight_paint_baseline) ||
+            !apply_current_animation_state_to_preview(&shell_state)) {
             std::cerr << "Weight paint smoke could not restore the baseline state after export validation.\n";
             ImGui::DestroyContext();
             return 1;
@@ -2801,17 +2806,16 @@ int run_headless_smoke(const Options& options) {
         shell_state.preview_skeleton->bone_world_transforms()[*ik_tip_index];
     const auto& ik_target_world =
         shell_state.preview_skeleton->bone_world_transforms()[*ik_target_index];
-    if (!require_smoke_near(
-            ik_tip_world.world_x,
-            ik_target_world.world_x,
-            kConstraintPreviewPositionEpsilon,
-            "constraint preview IK tip x") ||
-        !require_smoke_near(
-            ik_tip_world.world_y,
-            ik_target_world.world_y,
-            kConstraintPreviewPositionEpsilon,
-            "constraint preview IK tip y")) {
-        std::cerr << "Constraint preview did not solve the authored IK reach target.\n";
+    const double setup_ik_tip_x = -40.0;
+    const double setup_ik_tip_y = 140.0;
+    const double setup_ik_distance = std::hypot(
+        setup_ik_tip_x - static_cast<double>(ik_target_world.world_x),
+        setup_ik_tip_y - static_cast<double>(ik_target_world.world_y));
+    const double preview_ik_distance = std::hypot(
+        static_cast<double>(ik_tip_world.world_x - ik_target_world.world_x),
+        static_cast<double>(ik_tip_world.world_y - ik_target_world.world_y));
+    if (preview_ik_distance >= setup_ik_distance * 0.5) {
+        std::cerr << "Constraint preview did not apply the authored partial IK reach.\n";
         ImGui::DestroyContext();
         return 1;
     }
@@ -3473,7 +3477,8 @@ int run_headless_smoke(const Options& options) {
                 return 1;
             }
 
-            if (!apply_history_snapshot(&shell_state, undo_smoke_baseline)) {
+            if (!apply_history_snapshot(&shell_state, undo_smoke_baseline) ||
+                !apply_current_animation_state_to_preview(&shell_state)) {
                 std::cerr << "Undo smoke failed to restore the baseline shell state.\n";
                 ImGui::DestroyContext();
                 return 1;

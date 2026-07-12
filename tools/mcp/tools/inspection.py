@@ -100,5 +100,65 @@ def get_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {}
             }
+        ),
+        types.Tool(
+            name="export.preview",
+            description="Preview runtime export targets without writing files",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "binary": {"type": "boolean"}
+                }
+            }
+        ),
+        types.Tool(
+            name="runtime.validate",
+            description="Build current project runtime data and return consistency diagnostics",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="compare_runtime_export",
+            description="Temporarily export JSON/binary runtime assets and compare roundtrip metrics",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "binary": {"type": "boolean"}
+                }
+            }
+        ),
+        types.Tool(
+            name="agent.permissions.describe",
+            description="Describe agent permission state, pause state, and pending reviews",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="agent.pause",
+            description="Pause mutating and management operations",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="agent.resume",
+            description="Resume mutating and management operations",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="agent.terminate",
+            description="Terminate the current agent session and clear the running operation marker",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
         )
     ]

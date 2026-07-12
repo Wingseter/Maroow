@@ -23,6 +23,7 @@ It owns:
 - Bone hierarchy and setup-pose transforms.
 - Slots, skins, attachments, constraints, events, and animations.
 - Mix definitions used by `AnimationState`.
+- Optional parameter, parameter group, parameter shape, deformer, art path, expression, and lip-sync definitions once the MAR-120+ parameter track lands.
 
 Why it exists:
 
@@ -47,6 +48,7 @@ It owns:
 - Current mesh deform state.
 - Current draw order.
 - Skin selection, attachment playback time, visibility, and update-throttling state.
+- Per-instance parameter values, parameter revision state, and evaluated parameter/deformer caches once the MAR-120+ parameter track lands.
 
 Use a `Skeleton` when you need one character instance in the world. If you spawn ten enemies that all use the same rig, you normally create ten `Skeleton` objects that all point at one shared `SkeletonData`.
 
@@ -68,6 +70,8 @@ It owns:
 - Snapshot and restore support for track state.
 
 `AnimationState` does not store bone transforms itself. Instead, it evaluates timelines against `SkeletonData` and applies the results onto a `Skeleton`.
+
+Parameter modeling follows the same ownership rule: `SkeletonData` stores immutable definitions, while `Skeleton` owns the mutable parameter value buffer. Expression and lip-sync state are modeled separately from timeline playback so direct runtime inputs, lip-sync inputs, and expression presets can be composed before final clamping.
 
 Typical per-frame flow:
 
@@ -109,6 +113,14 @@ The renderer layer does not load animation files directly. It consumes the curre
 - Clip attachments and ordered clip/draw events.
 - Bone palette data and atlas presentation metadata.
 
+When parameter/deformer support is enabled, preparation consumes the final combined mesh offsets and prepared stroke geometry. The fixed evaluation order is:
+
+```text
+setup -> skin/linked mesh -> animation FFD -> parameter shapes/deformers -> prepared render geometry
+```
+
+Animation FFD offsets stay observable on their own for existing runtime tests and linked-mesh behavior. Parameter-driven shape/deformer output is a later layer used for final mesh evaluation and renderer preparation.
+
 ### `RenderCommandList`
 
 `build_render_command_list()` converts a `PreparedScene` into a more compact GPU submission package:
@@ -130,6 +142,7 @@ It keeps:
 - References to runtime assets.
 - Authoring-only viewport and note state.
 - Unexported timeline, mesh-weight, constraint, and atlas-pack edits.
+- Optional `parameter_model` source data for parameters, groups, blend shapes, deformers, art paths, expressions, and lip-sync mappings.
 
 The editor export step merges that authoring data into runtime-ready `.mskl` or `.mbin` plus `.matl` outputs.
 
@@ -139,3 +152,4 @@ The editor export step merges that authoring data into runtime-ready `.mskl` or 
 - Instantiate `Skeleton` and `AnimationState`.
 - Rebuild renderer input from the current `Skeleton` pose every frame.
 - Treat `.marrow` as source and `.mskl`/`.mbin` + `.matl` as shipped runtime assets.
+- Keep parameter/deformer data Maroow-native; do not represent it as Live2D Core compatibility or proprietary Live2D file loading.

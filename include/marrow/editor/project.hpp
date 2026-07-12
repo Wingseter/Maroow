@@ -115,6 +115,29 @@ struct EventTimelineEdit {
     std::vector<EventKeyframeEdit> keyframes;
 };
 
+struct SlotColorKeyframeEdit {
+    double time{0.0};
+    runtime::SlotColor color{};
+    runtime::Interpolation interpolation{};
+};
+
+struct SlotColorTimelineEdit {
+    std::string animation_name;
+    std::string slot_name;
+    std::vector<SlotColorKeyframeEdit> keyframes;
+};
+
+struct SlotAttachmentKeyframeEdit {
+    double time{0.0};
+    std::optional<std::string> attachment_name;
+};
+
+struct SlotAttachmentTimelineEdit {
+    std::string animation_name;
+    std::string slot_name;
+    std::vector<SlotAttachmentKeyframeEdit> keyframes;
+};
+
 struct IkConstraintEdit {
     std::string name;
     std::vector<std::string> bone_names;
@@ -220,6 +243,8 @@ struct ProjectData {
     std::vector<MeshWeightAttachmentEdit> mesh_weight_attachment_edits;
     std::vector<DrawOrderTimelineEdit> draw_order_timeline_edits;
     std::vector<EventTimelineEdit> event_timeline_edits;
+    std::vector<SlotColorTimelineEdit> slot_color_timeline_edits;
+    std::vector<SlotAttachmentTimelineEdit> slot_attachment_timeline_edits;
     std::vector<IkConstraintEdit> ik_constraint_edits;
     std::vector<PathConstraintEdit> path_constraint_edits;
     std::vector<TransformConstraintEdit> transform_constraint_edits;
@@ -339,6 +364,18 @@ struct ProjectData {
      */
     EventTimelineEdit* find_event_timeline_edit(
         std::string_view animation_name);
+    const SlotColorTimelineEdit* find_slot_color_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name) const;
+    SlotColorTimelineEdit* find_slot_color_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name);
+    const SlotAttachmentTimelineEdit* find_slot_attachment_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name) const;
+    SlotAttachmentTimelineEdit* find_slot_attachment_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name);
     /**
      * @brief Finds an IK constraint edit by name.
      * @param name Constraint name to search.

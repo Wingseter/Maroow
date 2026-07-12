@@ -25,4 +25,4 @@ ralph overview
 ## Notes
 
 - `ralph prd` is also pointed at Codex, but the checked-in PRD is already usable immediately.
-- `docs/discription.md` remains the design source of truth and the checked-in PRD expands it into ordered implementation stories.
+- `docs/root1/discription.md` remains the design source of truth and the checked-in PRD expands it into ordered implementation stories.

@@ -1932,6 +1932,232 @@ std::optional<LoadError> parse_event_timeline_edits(
     return std::nullopt;
 }
 
+std::optional<LoadError> parse_slot_color_keyframes(
+    const Document& document,
+    const Value& timeline_value,
+    std::string_view json_path,
+    std::vector<SlotColorKeyframeEdit>* keyframes_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, timeline_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+    if (timeline_value.as_array().empty()) {
+        return validation_error(
+            document,
+            timeline_value.location(),
+            std::string(json_path),
+            "slot color timeline edits must contain at least one keyframe");
+    }
+
+    std::vector<SlotColorKeyframeEdit> keyframes;
+    keyframes.reserve(timeline_value.as_array().size());
+    double previous_time = 0.0;
+    bool has_previous_time = false;
+    for (std::size_t keyframe_index = 0;
+         keyframe_index < timeline_value.as_array().size();
+         ++keyframe_index) {
+        const Value& keyframe_value = timeline_value.as_array()[keyframe_index];
+        const std::string keyframe_path =
+            std::string(json_path) + "[" + std::to_string(keyframe_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, keyframe_value, Value::Type::Object, keyframe_path)) {
+            return error;
+        }
+
+        SlotColorKeyframeEdit keyframe;
+        if (const auto error = read_required_number(
+                document, keyframe_value, "time", keyframe_path, &keyframe.time)) {
+            return error;
+        }
+        const Value* color_value = nullptr;
+        if (const auto error = marrow::runtime::json::require_member(
+                document,
+                keyframe_value,
+                "color",
+                Value::Type::Object,
+                keyframe_path,
+                &color_value)) {
+            return error;
+        }
+        double r = 1.0;
+        double g = 1.0;
+        double b = 1.0;
+        double a = 1.0;
+        if (const auto error = read_required_number(document, *color_value, "r", keyframe_path + ".color", &r)) {
+            return error;
+        }
+        if (const auto error = read_required_number(document, *color_value, "g", keyframe_path + ".color", &g)) {
+            return error;
+        }
+        if (const auto error = read_required_number(document, *color_value, "b", keyframe_path + ".color", &b)) {
+            return error;
+        }
+        if (const auto error = read_required_number(document, *color_value, "a", keyframe_path + ".color", &a)) {
+            return error;
+        }
+        keyframe.color = runtime::SlotColor{r, g, b, a};
+        if (const auto error = parse_interpolation(
+                document, keyframe_value, keyframe_path, &keyframe.interpolation)) {
+            return error;
+        }
+        if (has_previous_time && keyframe.time <= previous_time) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".time",
+                "slot color timeline edit keyframe times must be strictly increasing");
+        }
+        previous_time = keyframe.time;
+        has_previous_time = true;
+        keyframes.push_back(std::move(keyframe));
+    }
+
+    *keyframes_out = std::move(keyframes);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_slot_attachment_keyframes(
+    const Document& document,
+    const Value& timeline_value,
+    std::string_view json_path,
+    std::vector<SlotAttachmentKeyframeEdit>* keyframes_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, timeline_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+    if (timeline_value.as_array().empty()) {
+        return validation_error(
+            document,
+            timeline_value.location(),
+            std::string(json_path),
+            "slot attachment timeline edits must contain at least one keyframe");
+    }
+
+    std::vector<SlotAttachmentKeyframeEdit> keyframes;
+    keyframes.reserve(timeline_value.as_array().size());
+    double previous_time = 0.0;
+    bool has_previous_time = false;
+    for (std::size_t keyframe_index = 0;
+         keyframe_index < timeline_value.as_array().size();
+         ++keyframe_index) {
+        const Value& keyframe_value = timeline_value.as_array()[keyframe_index];
+        const std::string keyframe_path =
+            std::string(json_path) + "[" + std::to_string(keyframe_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, keyframe_value, Value::Type::Object, keyframe_path)) {
+            return error;
+        }
+
+        SlotAttachmentKeyframeEdit keyframe;
+        if (const auto error = read_required_number(
+                document, keyframe_value, "time", keyframe_path, &keyframe.time)) {
+            return error;
+        }
+        const Value* attachment_value = find_optional_member(keyframe_value, "attachment");
+        if (attachment_value == nullptr) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".attachment",
+                "slot attachment keyframes require attachment string or null");
+        }
+        if (attachment_value->is_string()) {
+            keyframe.attachment_name = attachment_value->as_string();
+        } else if (!attachment_value->is_null()) {
+            return validation_error(
+                document,
+                attachment_value->location(),
+                keyframe_path + ".attachment",
+                "attachment must be a string or null");
+        }
+        if (has_previous_time && keyframe.time <= previous_time) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".time",
+                "slot attachment timeline edit keyframe times must be strictly increasing");
+        }
+        previous_time = keyframe.time;
+        has_previous_time = true;
+        keyframes.push_back(std::move(keyframe));
+    }
+
+    *keyframes_out = std::move(keyframes);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_slot_timeline_edits(
+    const Document& document,
+    const Value& root,
+    std::vector<SlotColorTimelineEdit>* color_edits_out,
+    std::vector<SlotAttachmentTimelineEdit>* attachment_edits_out) {
+    color_edits_out->clear();
+    attachment_edits_out->clear();
+
+    const Value* timeline_edits = find_optional_member(root, "timeline_edits");
+    if (timeline_edits == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *timeline_edits, Value::Type::Object, "$.timeline_edits")) {
+        return error;
+    }
+    const Value* animations = find_optional_member(*timeline_edits, "animations");
+    if (animations == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *animations, Value::Type::Object, "$.timeline_edits.animations")) {
+        return error;
+    }
+
+    for (const auto& [animation_name, animation_value] : animations->as_object()) {
+        const std::string animation_path =
+            "$.timeline_edits.animations." + animation_name;
+        if (const auto error = marrow::runtime::json::require_type(
+                document, animation_value, Value::Type::Object, animation_path)) {
+            return error;
+        }
+        const Value* slots = find_optional_member(animation_value, "slots");
+        if (slots == nullptr) {
+            continue;
+        }
+        if (const auto error = marrow::runtime::json::require_type(
+                document, *slots, Value::Type::Object, animation_path + ".slots")) {
+            return error;
+        }
+        for (const auto& [slot_name, slot_value] : slots->as_object()) {
+            const std::string slot_path = animation_path + ".slots." + slot_name;
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, slot_value, Value::Type::Object, slot_path)) {
+                return error;
+            }
+            if (const Value* color = find_optional_member(slot_value, "color")) {
+                SlotColorTimelineEdit edit;
+                edit.animation_name = animation_name;
+                edit.slot_name = slot_name;
+                if (const auto error = parse_slot_color_keyframes(
+                        document, *color, slot_path + ".color", &edit.keyframes)) {
+                    return error;
+                }
+                color_edits_out->push_back(std::move(edit));
+            }
+            if (const Value* attachment = find_optional_member(slot_value, "attachment")) {
+                SlotAttachmentTimelineEdit edit;
+                edit.animation_name = animation_name;
+                edit.slot_name = slot_name;
+                if (const auto error = parse_slot_attachment_keyframes(
+                        document, *attachment, slot_path + ".attachment", &edit.keyframes)) {
+                    return error;
+                }
+                attachment_edits_out->push_back(std::move(edit));
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
 std::optional<LoadError> parse_ik_constraint_edits(
     const Document& document,
     const Value& root,
@@ -2788,6 +3014,56 @@ Value build_event_keyframes_value(const EventTimelineEdit& edit) {
     return make_array_value(std::move(keyframes));
 }
 
+Value build_slot_color_keyframes_value(const SlotColorTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const SlotColorKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        Value::Object color_object;
+        color_object.emplace("r", make_number_value(keyframe.color.r));
+        color_object.emplace("g", make_number_value(keyframe.color.g));
+        color_object.emplace("b", make_number_value(keyframe.color.b));
+        color_object.emplace("a", make_number_value(keyframe.color.a));
+        keyframe_object.emplace("color", make_object_value(std::move(color_object)));
+        keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
+Value build_runtime_slot_color_keyframes_value(const SlotColorTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const SlotColorKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        keyframe_object.emplace("r", make_number_value(keyframe.color.r));
+        keyframe_object.emplace("g", make_number_value(keyframe.color.g));
+        keyframe_object.emplace("b", make_number_value(keyframe.color.b));
+        keyframe_object.emplace("a", make_number_value(keyframe.color.a));
+        keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
+Value build_slot_attachment_keyframes_value(const SlotAttachmentTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const SlotAttachmentKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        if (keyframe.attachment_name.has_value()) {
+            keyframe_object.emplace("attachment", make_string_value(*keyframe.attachment_name));
+        } else {
+            keyframe_object.emplace("attachment", make_null_value());
+        }
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
 Value build_ik_constraint_edits_value(const std::vector<IkConstraintEdit>& edits) {
     Value::Array constraints;
     constraints.reserve(edits.size());
@@ -2912,7 +3188,9 @@ Value build_timeline_edits_value(
     const std::vector<TransformTimelineEdit>& transform_edits,
     const std::vector<MeshDeformTimelineEdit>& mesh_deform_edits,
     const std::vector<DrawOrderTimelineEdit>& draw_order_edits,
-    const std::vector<EventTimelineEdit>& event_edits) {
+    const std::vector<EventTimelineEdit>& event_edits,
+    const std::vector<SlotColorTimelineEdit>& slot_color_edits,
+    const std::vector<SlotAttachmentTimelineEdit>& slot_attachment_edits) {
     Value::Object animations_object;
     for (const TransformTimelineEdit& edit : transform_edits) {
         auto& animation_value = animations_object[edit.animation_name];
@@ -2958,6 +3236,31 @@ Value build_timeline_edits_value(
         }
 
         animation_value.as_object()["events"] = build_event_keyframes_value(edit);
+    }
+
+    for (const SlotColorTimelineEdit& edit : slot_color_edits) {
+        auto& animation_value = animations_object[edit.animation_name];
+        if (!animation_value.is_object()) {
+            animation_value = make_object_value();
+        }
+        Value* slots_value = ensure_object_member(&animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["color"] = build_slot_color_keyframes_value(edit);
+        }
+    }
+
+    for (const SlotAttachmentTimelineEdit& edit : slot_attachment_edits) {
+        auto& animation_value = animations_object[edit.animation_name];
+        if (!animation_value.is_object()) {
+            animation_value = make_object_value();
+        }
+        Value* slots_value = ensure_object_member(&animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["attachment"] =
+                build_slot_attachment_keyframes_value(edit);
+        }
     }
 
     Value::Object timeline_edits;
@@ -3134,14 +3437,18 @@ Value build_project_value(const ProjectData& project) {
     if (!project.transform_timeline_edits.empty() ||
         !project.mesh_deform_timeline_edits.empty() ||
         !project.draw_order_timeline_edits.empty() ||
-        !project.event_timeline_edits.empty()) {
+        !project.event_timeline_edits.empty() ||
+        !project.slot_color_timeline_edits.empty() ||
+        !project.slot_attachment_timeline_edits.empty()) {
         root.emplace(
             "timeline_edits",
             build_timeline_edits_value(
                 project.transform_timeline_edits,
                 project.mesh_deform_timeline_edits,
                 project.draw_order_timeline_edits,
-                project.event_timeline_edits));
+                project.event_timeline_edits,
+                project.slot_color_timeline_edits,
+                project.slot_attachment_timeline_edits));
     }
     if (!project.mesh_weight_attachment_edits.empty()) {
         root.emplace(
@@ -3346,6 +3653,25 @@ Document build_runtime_document(
         Value* animation_value = ensure_object_member(animations, edit.animation_name);
         if (animation_value != nullptr) {
             animation_value->as_object()["events"] = build_event_keyframes_value(edit);
+        }
+    }
+
+    for (const SlotColorTimelineEdit& edit : project.slot_color_timeline_edits) {
+        Value* animation_value = ensure_object_member(animations, edit.animation_name);
+        Value* slots_value = ensure_object_member(animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["color"] = build_runtime_slot_color_keyframes_value(edit);
+        }
+    }
+
+    for (const SlotAttachmentTimelineEdit& edit : project.slot_attachment_timeline_edits) {
+        Value* animation_value = ensure_object_member(animations, edit.animation_name);
+        Value* slots_value = ensure_object_member(animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["attachment"] =
+                build_slot_attachment_keyframes_value(edit);
         }
     }
 
@@ -4334,6 +4660,58 @@ EventTimelineEdit* ProjectData::find_event_timeline_edit(
     return iterator == event_timeline_edits.end() ? nullptr : &(*iterator);
 }
 
+const SlotColorTimelineEdit* ProjectData::find_slot_color_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) const {
+    const auto iterator = std::find_if(
+        slot_color_timeline_edits.begin(),
+        slot_color_timeline_edits.end(),
+        [&](const SlotColorTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_color_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+SlotColorTimelineEdit* ProjectData::find_slot_color_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) {
+    const auto iterator = std::find_if(
+        slot_color_timeline_edits.begin(),
+        slot_color_timeline_edits.end(),
+        [&](const SlotColorTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_color_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+const SlotAttachmentTimelineEdit* ProjectData::find_slot_attachment_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) const {
+    const auto iterator = std::find_if(
+        slot_attachment_timeline_edits.begin(),
+        slot_attachment_timeline_edits.end(),
+        [&](const SlotAttachmentTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_attachment_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+SlotAttachmentTimelineEdit* ProjectData::find_slot_attachment_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) {
+    const auto iterator = std::find_if(
+        slot_attachment_timeline_edits.begin(),
+        slot_attachment_timeline_edits.end(),
+        [&](const SlotAttachmentTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_attachment_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
 const IkConstraintEdit* ProjectData::find_ik_constraint_edit(std::string_view name) const {
     const auto iterator = std::find_if(
         ik_constraint_edits.begin(),
@@ -4539,6 +4917,14 @@ ProjectLoadResult load_project(const Document& document) {
     }
     if (const auto error = parse_event_timeline_edits(
             document, document.root, &project.event_timeline_edits)) {
+        result.error = error;
+        return result;
+    }
+    if (const auto error = parse_slot_timeline_edits(
+            document,
+            document.root,
+            &project.slot_color_timeline_edits,
+            &project.slot_attachment_timeline_edits)) {
         result.error = error;
         return result;
     }

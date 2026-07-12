@@ -2,7 +2,7 @@
 
 ## Project State
 
-- This workspace is currently planning-first. The main source of truth is `docs/discription.md`.
+- This workspace is currently planning-first. The main source of truth is `docs/root1/discription.md`.
 - The folder is now a git repository. Ralph is configured to commit one completed story per iteration.
 - Ralph state is written to `.ralph/` and should be treated as generated runtime state.
 
@@ -14,20 +14,20 @@
 
 ## Working Rules
 
-- Read `docs/discription.md` before changing runtime or file-format decisions.
+- Read `docs/root1/discription.md` before changing runtime or file-format decisions.
 - Keep new stories small and vertical. One story should be finishable in one Ralph iteration.
 - Preserve the runtime-first plan unless the active story explicitly updates it.
 - If a build or test workflow is introduced, document the exact commands here.
-- The checked-in PRD already expands the renderer, runtime, and editor roadmap from `docs/discription.md`. Prefer updating that PRD rather than inventing parallel plans.
+- The checked-in PRD already expands the renderer, runtime, and editor roadmap from `docs/root1/discription.md`. Prefer updating that PRD rather than inventing parallel plans.
 
 ## Documentation Entry Points
 
-- Architecture source of truth: `docs/discription.md`
-- Runtime integration walkthrough: `docs/quick-start.md`
-- Runtime ownership and playback model: `docs/concepts.md`
-- File format reference: `docs/format-spec.md`
-- Fixture mapping and sample asset intent: `docs/fixtures.md`
-- Ralph loop/operator notes: `docs/ralph-loop.md`
+- Architecture source of truth: `docs/root1/discription.md`
+- Runtime integration walkthrough: `docs/root1/quick-start.md`
+- Runtime ownership and playback model: `docs/root1/concepts.md`
+- File format reference: `docs/root1/format-spec.md`
+- Fixture mapping and sample asset intent: `docs/root1/fixtures.md`
+- Ralph loop/operator notes: `docs/root1/ralph-loop.md`
 
 ## Current Validation
 
@@ -86,7 +86,11 @@
 - Runtime binary inspection CLI: `./build/marrow_inspect assets/fixtures/player_idle.mbin`
 - Imported Spine runtime inspection CLI: `./build/marrow_inspect assets/fixtures/spine_import_sample.mskl`
 - Spine JSON import CLI: `./build/spine_to_marrow assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl`
+- Spine JSON import report CLI: `./build/spine_to_marrow --report /tmp/spine_import_report.json assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl && python3 -m json.tool /tmp/spine_import_report.json > /dev/null`
 - Spine atlas import CLI: `./build/spine_to_marrow assets/fixtures/spine_import_sample.atlas /tmp/spine_import_sample.matl`
+- Skeleton validator CI report: `./build/marrow_validator --skip-render --report /tmp/player_idle_validator.json assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl && python3 -m json.tool /tmp/player_idle_validator.json > /dev/null`
+- Skeleton validator selected animation/skin sample: `./build/marrow_validator --skip-render --animation idle --skin default --time 0.2 --report /tmp/player_idle_idle_validator.json assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl && python3 -m json.tool /tmp/player_idle_idle_validator.json > /dev/null`
+- Spine import-report validator integration: `./build/spine_to_marrow --report /tmp/spine_import_report.json assets/fixtures/spine_import_sample.json /tmp/spine_import_sample.mskl && ./build/spine_to_marrow assets/fixtures/spine_import_sample.atlas /tmp/spine_import_sample.matl && ./build/marrow_validator --skip-render --import-report /tmp/spine_import_report.json --report /tmp/spine_import_validator.json /tmp/spine_import_sample.mskl /tmp/spine_import_sample_hero_page.matl && python3 -m json.tool /tmp/spine_import_validator.json > /dev/null`
 - Spine JSON + atlas importer smoke test (includes curve, weighted-mesh pruning, owl zero-weight weighted-mesh, and tank weighted-clipping regressions): `./build/marrow_spine_import_smoke assets/fixtures/spine_import_sample.json assets/fixtures/spine_import_sample.atlas`
 - Official Spine 4.2 example JSON import batch (owl, goblins, spineboy, tank, raptor): `mkdir -p /tmp/marrow-mar113-batch && for asset in owl goblins spineboy tank raptor; do ./build/spine_to_marrow assets/spine-examples/$asset/$asset-pro.json /tmp/marrow-mar113-batch/$asset.mskl || exit 1; done`
 - Official Spine 4.2 example atlas import batch: `for asset in owl goblins spineboy tank raptor; do ./build/spine_to_marrow assets/spine-examples/$asset/$asset.atlas /tmp/marrow-mar113-batch/$asset.matl || exit 1; done`

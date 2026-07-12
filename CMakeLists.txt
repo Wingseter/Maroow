@@ -333,6 +333,15 @@ target_link_libraries(marrow_renderer_sample
         marrow_renderer
 )
 
+add_executable(marrow_validator
+    src/samples/marrow_validator.cpp
+)
+
+target_link_libraries(marrow_validator
+    PRIVATE
+        marrow_renderer
+)
+
 add_executable(marrow_fixture_smoke
     src/samples/runtime_fixture_smoke.cpp
 )

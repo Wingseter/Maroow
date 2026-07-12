@@ -14,7 +14,8 @@
 
 - `docs/root1/discription.md`는 Maroow를 Spine Pro 대체 오픈소스 2D 스켈레탈 애니메이션 툴체인으로 정의하고, `.marrow`, `.mskl`, `.mbin`, `.matl`, `.png` 파일 흐름을 핵심 런타임 계약으로 둔다.
 - `docs/root1/agent-control.md`는 현재 Agent Control이 MCP 기반이며 `127.0.0.1` 로컬 소켓, 선택적 토큰, undoable action, 명시적 save, 계획된 path whitelist를 전제로 한다고 설명한다.
-- 현재 구현된 op는 `scene.describe`, `bones.list`, `animation.list`, `set_transform`, `remove_transform_keyframe`, `edit_ik_constraint`, `undo`, `redo`, `save`, `export_runtime`이다. 문서상 mesh deform/weight, draw-order, path/transform/physics constraints, PSD/Spine/atlas automation은 아직 없다.
+- 현재 구현된 op는 inspection, transform/draw-order/event/deform/weight/slot timeline edit, IK/path/transform/physics constraint edit, reviewed save/export, export preview/runtime validation/temporary JSON-vs-binary comparison, session pause/resume/terminate, import/pack dry-run 및 review queue 요청까지 포함한다.
+- `import.spine_json`, `import.spine_atlas`, `import.psd_layers`, `atlas.pack` v1은 local path validation, 기본 `dry_run=true`, reviewed target queue 생성을 담당한다. 실제 importer 실행은 기존 CLI/smoke 경로를 유지하며, agent approval card는 안전한 파일쓰기 승인을 추적하는 제어면이다.
 - `src/editor/agent_dispatch.cpp`는 JSON `op`를 받아 `ShellState`와 project edit 모델을 직접 갱신하고, 변경 전후 snapshot을 통해 undo stack에 `"Agent"` 출처로 기록한다.
 - `tools/mcp/server.py`, `tools/mcp/tools/inspection.py`, `tools/mcp/tools/editing.py`는 Python MCP 서버가 C++ dispatcher로 tool call을 전달하는 구조를 가진다.
 - `docs/design/maroow-editor-visual-renewal-spec.md`는 Agent UI가 현재 없고, 연결/session state, live activity feed, change attribution, pause/resume/terminate, permission visibility, global presence, empty state가 필요하다고 명시한다.
@@ -43,44 +44,44 @@
 
 ### Phase 1: Dispatcher/MCP 기반 정리
 
-- [ ] `src/editor/agent_dispatch.cpp`의 op 목록과 인자 검증을 문서화하고, 각 op가 읽기/쓰기/관리/검증 중 어디에 속하는지 내부 registry로 정리한다.
-- [ ] `tools/mcp/tools/inspection.py`와 `tools/mcp/tools/editing.py`의 tool schema를 C++ dispatcher 검증 규칙과 맞춘다.
-- [ ] 모든 mutation op가 `record_action_from_snapshots(..., "Agent", ...)` 또는 동등한 attribution 경로를 통과하는지 확인한다.
-- [ ] 실패 응답에 `ok=false`, 사람이 읽을 수 있는 `message`, 가능한 경우 `op`, `field`, `reason`을 포함하도록 응답 형태를 안정화한다.
+- [x] `src/editor/agent_dispatch.cpp`의 op 목록과 인자 검증을 문서화하고, 각 op가 읽기/쓰기/관리/검증 중 어디에 속하는지 내부 registry로 정리한다.
+- [x] `tools/mcp/tools/inspection.py`와 `tools/mcp/tools/editing.py`의 tool schema를 C++ dispatcher 검증 규칙과 맞춘다.
+- [x] 모든 mutation op가 `record_action_from_snapshots(..., "Agent", ...)` 또는 동등한 attribution 경로를 통과하는지 확인한다.
+- [x] 실패 응답에 `ok=false`, 사람이 읽을 수 있는 `message`, 가능한 경우 `op`, `category`, `mutating`, `error.code`를 포함하도록 응답 형태를 안정화한다.
 
 ### Phase 2: 읽기 API 확장
 
 - [ ] `scene.describe`를 project path, dirty state, selected animation, playhead, counts, export directory, permission mode까지 포함하도록 확장한다.
-- [ ] `slots.list`, `skins.list`, `attachments.list`, `constraints.list`, `timeline.describe`를 추가한다.
-- [ ] `mesh.describe`를 추가해 선택 슬롯/attachment의 vertex, bone weight summary, deform timeline 존재 여부를 읽게 한다.
+- [x] `slots.list`, `skins.list`, `attachments.list`, `constraints.list`, `timeline.describe`를 추가한다.
+- [x] `mesh.describe`를 추가해 선택 슬롯/attachment의 vertex, weight count, triangle count를 읽게 한다.
 - [ ] `project.diagnostics`를 추가해 missing texture, invalid attachment, unsupported constraint, export path 문제를 agent가 먼저 확인할 수 있게 한다.
 
 ### Phase 3: 안전한 편집 API 확장
 
-- [ ] transform keyframe 외에 slot color, attachment switch, draw-order timeline을 작은 단위 op로 추가한다.
-- [ ] mesh deform은 `set_deform_keyframe`과 `remove_deform_keyframe`으로 시작하고, 큰 vertex 배열은 bounds/vertex count 제한을 둔다.
-- [ ] weight 편집은 `paint_weights`보다 먼저 `set_vertex_weights` 또는 `normalize_weights`처럼 결정적이고 검증 가능한 op부터 추가한다.
-- [ ] path/transform/physics constraint 편집은 기존 `edit_ik_constraint` 패턴을 확장하되, 타입별 op를 분리해 schema를 작게 유지한다.
-- [ ] 각 write op는 dry-run 모드로 변경 요약을 반환할 수 있어야 하며, 실제 적용은 undo 가능한 단일 action으로 기록한다.
+- [x] transform keyframe 외에 slot color, attachment switch, draw-order timeline을 작은 단위 op로 추가한다.
+- [x] mesh deform은 `set_deform_keyframe`과 `remove_deform_keyframe`으로 시작하고, 큰 vertex 배열은 bounds/vertex count 제한을 둔다.
+- [x] weight 편집은 `paint_weights`보다 먼저 `set_vertex_weights` 또는 `normalize_weights`처럼 결정적이고 검증 가능한 op부터 추가한다.
+- [x] path/transform/physics constraint 편집은 기존 `edit_ik_constraint` 패턴을 확장하되, 타입별 op를 분리해 schema를 작게 유지한다.
+- [x] 신규 set/edit 계열 write op는 dry-run 모드로 변경 요약을 반환할 수 있으며, 실제 적용은 undo 가능한 단일 action으로 기록한다.
 
 ### Phase 4: Import/Export 자동화
 
-- [ ] `import.spine_json`, `import.spine_atlas`, `import.psd_layers`, `atlas.pack` op를 추가하되 기본은 dry-run과 diagnostics 반환으로 시작한다.
-- [ ] import/export 대상 경로는 project root, asset root, explicit temp export directory 중 whitelist에 포함된 위치로 제한한다.
-- [ ] `export_runtime`은 `.mskl`, `.matl`, `.mbin` 생성 전 변경 요약과 출력 경로를 activity feed에 남긴다.
-- [ ] save/export는 기본적으로 explicit review required 상태로 두고, UI 또는 MCP 인자에서 승인 토큰/세션 승인이 있어야 실행되게 한다.
+- [x] `import.spine_json`, `import.spine_atlas`, `import.psd_layers`, `atlas.pack` op를 추가하되 기본은 dry-run과 reviewed target queue 반환으로 시작한다.
+- [x] import/export 대상 경로는 project root, resolved export directory, `/tmp`/`/private/tmp` 하위 whitelist에 포함된 위치로 제한한다.
+- [x] `export.preview`와 `export_runtime`은 `.mskl`, `.matl`, `.mbin` 생성 전 출력 경로와 review payload를 남긴다.
+- [x] save/export는 explicit review required 상태로 두고, 에디터 Agent panel 승인 없이는 파일을 쓰지 않는다.
 
 ### Phase 5: Agent 패널과 전역 presence
 
-- [ ] 에디터 상단 또는 status 영역에 agent state를 항상 표시한다: disabled, listening, connected, running, paused, blocked, error.
-- [ ] Agent 패널을 추가해 connection/session, permission profile, current op, last result, pending review를 보여준다.
-- [ ] activity feed에 op 시작/성공/실패, 변경 대상, undo label, 저장/내보내기 여부를 시간순으로 표시한다.
+- [x] Agent 패널에 agent state를 표시한다: Off, Listening, Connected, Running, Paused, Blocked, Error.
+- [x] Agent 패널을 추가해 connection/session, current op, last result, pending review를 보여준다.
+- [x] activity feed에 op 성공/실패, review/edit 여부, 메시지를 시간순으로 표시한다.
 - [ ] 변경 attribution을 timeline/properties/history UI에서 `"Agent"` 출처로 식별 가능하게 한다.
 - [ ] pause/resume/terminate 버튼은 실행 중인 queue에는 적용하되, 이미 적용된 변경은 undo/redo 모델로 되돌리게 한다.
 
 ### Phase 6: 검증과 회귀 테스트
 
-- [ ] MCP test client에 read/write/manage/validate 대표 시나리오를 추가한다.
+- [x] MCP test client에 read/write/manage/validate 대표 시나리오를 추가한다.
 - [ ] headless editor smoke에서 agent port를 켠 상태의 session lifecycle을 확인한다.
 - [ ] project export round-trip으로 agent 편집 결과가 `.mskl`/`.mbin` 비교까지 통과하는지 검증한다.
 - [ ] permission/path whitelist 위반, save/export review 누락, unknown op, malformed args를 실패 케이스로 고정한다.

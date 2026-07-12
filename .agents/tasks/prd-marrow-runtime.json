@@ -1,9 +1,9 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, and documentation.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, documentation, and Maroow-native parameter modeling.",
   "qualityGates": [
-    "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
+    "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
     "When a story changes file formats, update checked-in sample assets and any matching operational docs in the same iteration.",
     "Every completed story must leave the repository in a clean git state with build, test, or inspection commands recorded in AGENTS.md and the Ralph progress log.",
@@ -46,11 +46,11 @@
     {
       "id": "MAR-003",
       "title": "Check in canonical .mskl and .matl fixtures",
-      "description": "Convert the format examples in docs/discription.md into checked-in fixture assets that cover skeleton metadata, bones, slots, animations, and atlas metadata for repeatable tests.",
+      "description": "Convert the format examples in docs/root1/discription.md into checked-in fixture assets that cover skeleton metadata, bones, slots, animations, and atlas metadata for repeatable tests.",
       "acceptanceCriteria": [
         "A sample .mskl file exists under an examples or assets directory.",
         "A sample .matl file exists and references plausible atlas regions used by the sample skeleton.",
-        "The repository documents how the fixtures map back to docs/discription.md."
+        "The repository documents how the fixtures map back to docs/root1/discription.md."
       ],
       "dependsOn": [
         "MAR-001"
@@ -1514,11 +1514,11 @@
       "title": "Write Quick Start guide and API concepts documentation",
       "description": "Create the most important documentation pages: a Quick Start (load → animate → render in one page) and a Concepts page explaining SkeletonData/Skeleton/AnimationState architecture. Add Doxygen comments to all public API headers.",
       "acceptanceCriteria": [
-        "docs/quick-start.md shows a complete working example from zero to rendered animation.",
-        "docs/concepts.md explains the SkeletonData→Skeleton→AnimationState→Renderer data flow.",
+        "docs/root1/quick-start.md shows a complete working example from zero to rendered animation.",
+        "docs/root1/concepts.md explains the SkeletonData→Skeleton→AnimationState→Renderer data flow.",
         "All public functions in include/marrow/ have @brief and @param Doxygen comments.",
         "Doxygen builds with zero warnings.",
-        "docs/format-spec.md documents .mskl, .matl, .mbin, and .marrow file formats.",
+        "docs/root1/format-spec.md documents .mskl, .matl, .mbin, and .marrow file formats.",
         "AGENTS.md links to all documentation entry points."
       ],
       "dependsOn": [],
@@ -2138,6 +2138,175 @@
       ],
       "status": "done",
       "completedAt": "2026-04-11T07:02:36.092832+00:00"
+    },
+    {
+      "id": "MAR-120",
+      "title": "Fix parameter/deformer format boundary and roadmap slices",
+      "description": "Turn docs/enhancement/02-live2d-parameter-deformer-system.md into executable roadmap boundaries: define the .marrow authoring section, optional .mskl/.mbin runtime sections, evaluation order, fixture names, and non-compatibility language before runtime implementation begins.",
+      "acceptanceCriteria": [
+        "docs/root1/format-spec.md documents .marrow.parameter_model with parameters, groups, deformers, blend_shapes, art_paths, expressions, and lip_sync fields.",
+        "docs/root1/format-spec.md documents optional .mskl root sections parameters, parameterGroups, parameterShapes, parameterDeformers, artPaths, expressions, and lipSync with empty-section semantics while keeping version 1.",
+        "docs/root1/concepts.md documents the runtime ownership model and fixed evaluation order: setup -> skin/linked mesh -> animation FFD -> parameter shapes/deformers -> prepared render geometry.",
+        "docs/root1/fixtures.md reserves parameter_face_basic, parameter_deformer_grid, parameter_expression_lipsync, and art_path_stroke fixture names without changing existing player_idle fixtures.",
+        "AGENTS.md and PRD references use docs/root1/discription.md and docs/root1 documentation entry points.",
+        "The PRD contains MAR-120 through MAR-128 as small vertical stories for the parameter/deformer track.",
+        "Docs and PRD state that this is Maroow-native parameter modeling, not Live2D Cubism Core, SDK ABI, proprietary file, or importer compatibility."
+      ],
+      "dependsOn": [
+        "MAR-119"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-121",
+      "title": "Add parameter definitions and per-instance runtime values",
+      "description": "Implement the first runtime slice for Maroow-native parameters: parse .mskl parameters and parameterGroups, store immutable definitions on SkeletonData, expose per-Skeleton parameter values, and keep existing assets empty by default.",
+      "acceptanceCriteria": [
+        "include/marrow/runtime/skeleton.hpp defines ParameterDefinition, ParameterGroupDefinition, and per-instance parameter storage APIs on Skeleton.",
+        "SkeletonData exposes parameters(), parameter_groups(), and find_parameter_index(id).",
+        "Skeleton exposes parameter_values(), set_parameter_value(id/index, value), reset_parameters(), and parameter_revision().",
+        "set_parameter_value applies default clamp behavior from each parameter definition and reports missing ids without mutating unrelated values.",
+        "src/runtime/skeleton_parse.cpp treats absent parameters and parameterGroups as empty arrays for every existing .mskl fixture.",
+        "marrow_inspect prints parameter and parameter group counts plus parameter default/range data when present.",
+        "./build/marrow_unit_tests covers clamp, default, missing id, index setter, reset, and revision behavior.",
+        "./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl still passes."
+      ],
+      "dependsOn": [
+        "MAR-120"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-122",
+      "title": "Export parameter authoring data from .marrow projects",
+      "description": "Add the editor-project authoring model for parameters and groups, then export it into .mskl/.mbin runtime documents through the existing project export path.",
+      "acceptanceCriteria": [
+        "ProjectData contains a ParameterModel with parameters, groups, deformers, blend_shapes, art_paths, expressions, and lip_sync fields defaulting to empty.",
+        "load_project() and save_project() parse and serialize .marrow.parameter_model without altering projects that omit it.",
+        "build_runtime_document() exports .marrow.parameter_model.parameters to .mskl parameters and groups to parameterGroups.",
+        "assets/fixtures/parameter_face_basic.marrow exists and validates with python3 -m json.tool.",
+        "marrow_project_smoke exports assets/fixtures/parameter_face_basic.marrow to /tmp/parameter_face_basic_export.mskl and optional /tmp/parameter_face_basic_export.mbin.",
+        "marrow_inspect --compare confirms exported .mbin and .mskl logical parameter payloads are equivalent.",
+        "Existing player_idle.marrow project smoke validation still passes without adding a parameter_model section."
+      ],
+      "dependsOn": [
+        "MAR-121"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-123",
+      "title": "Evaluate 1D parameter mesh shapes after animation FFD",
+      "description": "Implement parameterShapes for mesh vertex deltas driven by one parameter, preserving animation FFD as a separate observable layer and adding a final combined mesh offset path for renderer preparation.",
+      "acceptanceCriteria": [
+        "Runtime parses .mskl parameterShapes with target_slot, target_attachment, parameter, blend_mode, and keyed vertices payloads.",
+        "Supported blend modes are additive_clamped and normalized_override; unsupported modes fail with a clear loader error.",
+        "Skeleton::current_mesh_vertex_offsets() remains animation-FFD-only.",
+        "A new final/combined mesh offset accessor is used by mesh evaluation and renderer preparation.",
+        "Evaluation applies setup -> skin/linked mesh -> animation FFD -> parameterShapes in deterministic order.",
+        "assets/fixtures/parameter_face_basic.mskl and .matl cover a 1D mouth-open shape.",
+        "marrow_fixture_smoke validates setup pose, animation FFD, and parameter shape composition on the fixture.",
+        "marrow_renderer_sample --skip-render assets/fixtures/parameter_face_basic.mskl assets/fixtures/parameter_face_basic.matl validates deformed mesh bounds."
+      ],
+      "dependsOn": [
+        "MAR-122"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-124",
+      "title": "Add warp and rotation parameter deformers",
+      "description": "Add parameterDeformers for 2D bilinear warp grids and pivot/influence rotation deformers, including loader validation, one-level nesting, dirty parameter tracking, and benchmark reporting.",
+      "acceptanceCriteria": [
+        "Runtime parses parameterDeformers with kind warp and rotation.",
+        "Warp deformers support grid_cols, grid_rows, control_points, target_slots, parameter_bindings, and 2D bilinear keyforms.",
+        "Rotation deformers support pivot, influence, target_slots, parameter_bindings, and keyed angle output.",
+        "Loader rejects deformer cycles and nesting deeper than one parent-child level with actionable errors.",
+        "Parameter dirty bitsets avoid reevaluating unaffected shapes/deformers when parameter values do not change.",
+        "assets/fixtures/parameter_deformer_grid.mskl validates 2D face-angle warp interpolation.",
+        "marrow_fixture_smoke covers warp interpolation, rotation pivot influence, nesting, and cycle rejection regressions.",
+        "marrow_benchmark reports parameter_us and deformer_us for --parameter-deformers runs."
+      ],
+      "dependsOn": [
+        "MAR-123"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-125",
+      "title": "Prepare renderable ArtPath stroke objects",
+      "description": "Implement artPaths as renderable stroke objects distinct from existing path constraints, with atlas-free renderer preparation through the solid-white texture path.",
+      "acceptanceCriteria": [
+        "Runtime parses .mskl artPaths with id, name, parent_deformer, points, width, color, cap, join, and parameter_keyforms.",
+        "ArtPath data is not stored as or confused with path constraint attachments.",
+        "PreparedScene includes stroke primitives or equivalent prepared stroke draw data.",
+        "RenderCommandList can submit atlas-free strokes through the existing solid-white texture path.",
+        "Parameter keyforms can deform stroke points before renderer preparation.",
+        "assets/fixtures/art_path_stroke.mskl validates a stroke-only runtime document without atlas-backed region attachments.",
+        "marrow_renderer_sample --skip-render assets/fixtures/art_path_stroke.mskl validates stroke preparation and bounds.",
+        "Existing path constraint fixtures continue to validate unchanged."
+      ],
+      "dependsOn": [
+        "MAR-124"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-126",
+      "title": "Compose expressions and lip-sync into parameter state",
+      "description": "Add ParameterState for active expressions and lip-sync inputs while Skeleton owns final parameter values, then define deterministic priority, smoothing, and clamp behavior.",
+      "acceptanceCriteria": [
+        "Runtime defines ParameterState to own active expression stack, lip-sync input state, and deterministic smoothing state.",
+        "Skeleton remains the owner of final parameter values exposed through parameter_values().",
+        "Parameter composition order is direct parameter values first, lip-sync next, expressions by priority last, then clamp.",
+        "expressions parse id, name, targets, duration, blend, priority, and reset_policy.",
+        "lipSync parses source, parameter, scale, bias, smoothing, attack, release, and phoneme_map mappings.",
+        "Runtime tests cover expression priority, blend duration, reset policy, amplitude-to-mouth.open, phoneme-to-mouth.form, attack, release, and smoothing.",
+        "assets/fixtures/parameter_expression_lipsync.mskl validates expression and lip-sync payload loading.",
+        "marrow_fixture_smoke exercises deterministic expression/lip-sync parameter results."
+      ],
+      "dependsOn": [
+        "MAR-125"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-127",
+      "title": "Add parameter modeling authoring tools to the editor",
+      "description": "Build the editor-facing Parameter Modeling mode for group sliders, deformer editing, keyform capture, expression presets, and lip-sync mapping, with all mutations flowing through snapshots and runtime preview rebuilds.",
+      "acceptanceCriteria": [
+        "Editor shell exposes a Parameter Modeling mode separate from the existing animation and constraint authoring surfaces.",
+        "Parameter groups render sliders, numeric values, and default reset controls from .marrow.parameter_model.",
+        "Warp deformer grid editing and rotation deformer pivot editing update project state and viewport preview.",
+        "Keyform capture stores mesh/deformer state at the current parameter coordinate.",
+        "Expression and lip-sync panels create and edit expression presets and mouth input mappings.",
+        "Every parameter_model mutation uses project snapshots, marks dirty state, supports undo/redo, and calls rebuild_project_runtime().",
+        "marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 5 validates parameter mode smoke coverage.",
+        "marrow_project_smoke confirms editor-authored parameter changes export to runtime .mskl/.mbin payloads."
+      ],
+      "dependsOn": [
+        "MAR-126"
+      ],
+      "status": "todo"
+    },
+    {
+      "id": "MAR-128",
+      "title": "Expose parameter/deformer authoring through agent commands",
+      "description": "Add the MCP/agent command surface for inspecting and mutating parameter models with dry-run support, Agent attribution, affected-target summaries, undo grouping, and smoke coverage.",
+      "acceptanceCriteria": [
+        "Agent dispatch supports parameters.list for read-only inspection.",
+        "Agent dispatch supports dry-run and mutating parameter.set with validation and affected parameter summaries.",
+        "Agent dispatch supports deformer.create, keyform.capture, expression.create, and lip_sync.map in small vertical slices.",
+        "Mutating commands use Agent attribution in project history and group each operation into one undo step.",
+        "Responses include affected parameter, deformer, slot, keyform, expression, or lip-sync target counts as appropriate.",
+        "Destructive or bulk keyform changes report summaries before mutation when dry_run is true.",
+        "marrow_agent_dispatch_smoke covers inspection, dry-run, mutation, undo grouping, and export-preview rebuild paths.",
+        "tools/mcp/test_client.py covers the new MCP tool wrappers against the editor agent port."
+      ],
+      "dependsOn": [
+        "MAR-127"
+      ],
+      "status": "todo"
     }
   ]
 }
