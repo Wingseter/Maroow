@@ -51,6 +51,75 @@ def _influence_schema() -> dict:
     }
 
 
+def _timeline_retime_key_schema() -> dict:
+    common = {
+        "animation": {"type": "string", "minLength": 1},
+        "time": {"type": "number", "minimum": 0},
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "deform"},
+                    "slot": {"type": "string", "minLength": 1},
+                    "attachment": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "attachment", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "draw_order"},
+                },
+                "required": ["kind", "animation", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "event"},
+                    "ordinal": {"type": "integer", "minimum": 0},
+                },
+                "required": ["kind", "animation", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_attachment"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "time"],
+            },
+        ]
+    }
+
+
 def get_tools() -> list[types.Tool]:
     return [
         types.Tool(
@@ -62,6 +131,79 @@ def get_tools() -> list[types.Tool]:
             name="redo",
             description="Redo the last undone action in Marrow editor",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="animation.create",
+            description="Create an empty animation in the project animation edit log.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        ),
+        types.Tool(
+            name="animation.duplicate",
+            description="Deep-copy an effective animation under a new name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "minLength": 1},
+                    "name": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["source", "name"],
+            },
+        ),
+        types.Tool(
+            name="animation.rename",
+            description="Rename an animation and cascade project references.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "minLength": 1},
+                    "to": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["from", "to"],
+            },
+        ),
+        types.Tool(
+            name="animation.delete",
+            description="Delete an animation unless it is the last remaining animation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        ),
+        types.Tool(
+            name="timeline.retime_keyframes",
+            description=(
+                "Atomically shift typed timeline keys by one delta, with optional "
+                "frame snapping and collision clamping."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "delta": {"type": "number"},
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_retime_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "snap": {"type": "boolean"},
+                    "frames_per_second": {"type": "number", "exclusiveMinimum": 0},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["delta", "keys"],
+            },
         ),
         types.Tool(
             name="save",
@@ -91,7 +233,10 @@ def get_tools() -> list[types.Tool]:
                     "bone": {"type": "string"},
                     "channel": {"type": "string", "enum": ["rotate", "translate", "scale", "shear"]},
                     "time": {"type": "number"},
-                    "angle": {"type": "number"},
+                    "angle": {
+                        "type": "number",
+                        "description": "Absolute local rotation in degrees; storage is converted to setup-relative form."
+                    },
                     "x": {"type": "number"},
                     "y": {"type": "number"},
                     "merge": {"type": "boolean"},

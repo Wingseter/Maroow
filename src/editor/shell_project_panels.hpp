@@ -10,8 +10,20 @@ enum class ShellMode {
     WeightPaint = 2,
 };
 
+enum class AnimationCatalogAction {
+    Create,
+    Duplicate,
+    Rename,
+    Delete,
+};
+
 ShellMode current_shell_mode(const ShellState* state);
 void apply_shell_mode(ShellState* state, ShellMode mode);
+bool apply_animation_catalog_action(
+    ShellState* state,
+    AnimationCatalogAction action,
+    std::string_view source_animation,
+    std::string_view destination_animation = {});
 void draw_shell_toolbar(bool* reload_requested, ShellState* state);
 void draw_menu_bar(
     GLFWwindow* window,

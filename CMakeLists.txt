@@ -287,6 +287,7 @@ add_library(marrow_editor STATIC
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/authoring.cpp
     src/editor/session.cpp
     src/editor/agent_dispatch.cpp
     src/editor/agent_handlers_inspection.cpp

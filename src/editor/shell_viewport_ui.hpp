@@ -73,8 +73,11 @@ bool apply_debug_overlay_edit(
 }
 
 
-float clamp_zoom(float zoom);
 void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size);
+std::optional<marrow::runtime::AttachmentVertex> bone_local_position_from_world(
+    const marrow::runtime::Skeleton& skeleton,
+    std::size_t bone_index,
+    const ViewportWorldPoint& target);
 const char* onion_skin_mode_name(marrow::editor::OnionSkinMode mode);
 void draw_viewport_fallback_scene(
     const ShellState& state,
@@ -91,5 +94,19 @@ void draw_viewport_annotations(
     ImDrawList* draw_list);
 void draw_viewport_window(ShellState* state);
 void draw_viewport_settings(ShellState* state);
+void finalize_orphaned_viewport_translate_gesture(ShellState* state);
+
+// UI-free smoke hooks for exercising the same gesture transaction used by the
+// ImGui viewport without synthesizing platform mouse events.
+bool begin_viewport_translate_gesture_for_smoke(
+    ShellState* state,
+    const ViewportLayout& layout,
+    ViewportTranslateAxis axis,
+    const ImVec2& pointer);
+bool update_viewport_translate_gesture_for_smoke(
+    ShellState* state,
+    const ViewportLayout& layout,
+    const ImVec2& pointer);
+void finish_viewport_translate_gesture_for_smoke(ShellState* state, bool commit);
 
 } // namespace marrow::editor::shell

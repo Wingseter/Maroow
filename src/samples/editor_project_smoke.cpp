@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/session.hpp"
 #include "marrow/runtime/animation_compare.hpp"
 
@@ -905,6 +906,26 @@ bool validate_undo_redo_cycle(const marrow::editor::ProjectLoadResult& project_r
         std::cerr << "EditorSession reload did not retain playback state.\n";
         return false;
     }
+    const auto setup_probe_index = session.runtime_data()->find_bone_index("arm_l");
+    if (!setup_probe_index.has_value() || !session.select_setup_pose() ||
+        !session.preview_state().animation_name.empty() ||
+        session.preview_state().playing ||
+        session.preview_skeleton()->data().get() != session.runtime_data()) {
+        std::cerr << "EditorSession could not select the setup-pose preview.\n";
+        return false;
+    }
+    const auto& setup_probe =
+        session.runtime_data()->bones()[*setup_probe_index].setup_pose;
+    const auto& setup_preview =
+        session.preview_skeleton()->bone_poses()[*setup_probe_index].local_pose;
+    if (std::abs(setup_preview.x - setup_probe.x) > 1e-6 ||
+        std::abs(setup_preview.y - setup_probe.y) > 1e-6 ||
+        std::abs(setup_preview.rotation - setup_probe.rotation) > 1e-6 ||
+        !session.select_animation("idle") || !session.seek(0.2)) {
+        std::cerr << "EditorSession setup-pose preview was not immutable setup data.\n";
+        return false;
+    }
+    session.set_playing(true);
     const std::uint64_t runtime_before_advance = session.runtime_revision();
     const std::uint64_t preview_before_advance = session.preview_revision();
     if (!session.advance(1.0 / 60.0) ||
@@ -926,6 +947,107 @@ bool validate_undo_redo_cycle(const marrow::editor::ProjectLoadResult& project_r
         return false;
     }
     session.set_playing(false);
+
+    const std::string live_edit_baseline =
+        marrow::editor::serialize_project(*session.project());
+    const auto live_edit_runtime = session.preview_skeleton()->data();
+    const auto live_edit_pose =
+        session.preview_skeleton()->bone_poses()[*setup_probe_index].local_pose;
+    const double live_edit_time = session.preview_state().time_seconds;
+    const auto live_edit_motion = session.preview_root_motion_total();
+
+    {
+        auto live_cancel = session.begin_edit({
+            marrow::editor::EditKind::AddKeyframe,
+            "Live transform cancel smoke",
+            {},
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        marrow::editor::upsert_transform_keyframe(
+            *live_cancel.project(),
+            *session.runtime_data(),
+            "idle",
+            "arm_l",
+            marrow::editor::TransformTimelineChannel::Rotate,
+            live_edit_time,
+            marrow::editor::TransformKeyframePatch{
+                static_cast<double>(live_edit_pose.rotation) + 7.0,
+                std::nullopt,
+                std::nullopt});
+        const std::uint64_t runtime_before_refresh = session.runtime_revision();
+        const std::uint64_t preview_before_refresh = session.preview_revision();
+        const auto refreshed = live_cancel.refresh_runtime();
+        if (!refreshed || !refreshed.changed || !session.transaction_active() ||
+            session.runtime_revision() <= runtime_before_refresh ||
+            session.preview_revision() <= preview_before_refresh ||
+            session.preview_skeleton()->data().get() != session.runtime_data() ||
+            session.preview_skeleton()->data().get() == live_edit_runtime.get() ||
+            !session.dirty()) {
+            std::cerr << "EditorSession live edit did not refresh runtime preview data.\n";
+            return false;
+        }
+        live_cancel.cancel();
+    }
+    if (session.transaction_active() || session.can_undo() || session.dirty() ||
+        session.preview_skeleton()->data().get() != live_edit_runtime.get() ||
+        marrow::editor::serialize_project(*session.project()) != live_edit_baseline ||
+        std::abs(
+            session.preview_skeleton()
+                    ->bone_poses()[*setup_probe_index]
+                    .local_pose.rotation -
+                live_edit_pose.rotation) > 1e-6 ||
+        std::abs(session.preview_root_motion_total().x - live_edit_motion.x) > 1e-9 ||
+        std::abs(session.preview_root_motion_total().y - live_edit_motion.y) > 1e-9) {
+        std::cerr << "EditorSession live edit cancel did not restore its full snapshot.\n";
+        return false;
+    }
+
+    const std::uint64_t project_before_live_commit = session.project_revision();
+    {
+        auto live_commit = session.begin_edit({
+            marrow::editor::EditKind::AddKeyframe,
+            "Live transform commit smoke",
+            {},
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        marrow::editor::upsert_transform_keyframe(
+            *live_commit.project(),
+            *session.runtime_data(),
+            "idle",
+            "arm_l",
+            marrow::editor::TransformTimelineChannel::Rotate,
+            live_edit_time,
+            marrow::editor::TransformKeyframePatch{
+                static_cast<double>(live_edit_pose.rotation) + 9.0,
+                std::nullopt,
+                std::nullopt});
+        if (!live_commit.refresh_runtime()) {
+            std::cerr << "EditorSession could not refresh a committable live edit.\n";
+            return false;
+        }
+        const std::uint64_t runtime_after_refresh = session.runtime_revision();
+        const auto committed_live_edit = live_commit.commit();
+        if (!committed_live_edit || !committed_live_edit.changed ||
+            session.runtime_revision() != runtime_after_refresh ||
+            session.project_revision() <= project_before_live_commit ||
+            session.undo_count() != 1U) {
+            std::cerr << "EditorSession live gesture did not commit as one history entry.\n";
+            return false;
+        }
+    }
+    if (!session.undo() || session.dirty() || session.can_undo() ||
+        !session.can_redo() ||
+        marrow::editor::serialize_project(*session.project()) != live_edit_baseline ||
+        std::abs(session.preview_root_motion_total().x - live_edit_motion.x) > 1e-9 ||
+        std::abs(session.preview_root_motion_total().y - live_edit_motion.y) > 1e-9) {
+        std::cerr << "EditorSession could not undo a committed live gesture.\n";
+        return false;
+    }
+    session.clear_history();
 
     const std::string baseline_snapshot =
         marrow::editor::serialize_project(*session.project());
@@ -1219,6 +1341,105 @@ bool validate_undo_redo_cycle(const marrow::editor::ProjectLoadResult& project_r
         return false;
     }
 
+    session.clear_history();
+    constexpr std::string_view selected_rename_source = "aim";
+    constexpr std::string_view selected_rename_target = "session_aim_renamed";
+    constexpr double selected_rename_time = 0.2;
+    if (!session.select_animation(selected_rename_source, true) ||
+        !session.seek(selected_rename_time)) {
+        std::cerr << "EditorSession could not prepare selected-animation rename.\n";
+        return false;
+    }
+    session.set_playing(true);
+    const auto rename_selected = session.edit_animation_catalog(
+        {marrow::editor::AnimationCatalogEditKind::Rename,
+         std::string(selected_rename_source),
+         std::string(selected_rename_target)},
+        {marrow::editor::EditKind::EditProperty,
+         "Rename selected animation",
+         "session-animation-catalog",
+         false});
+    const auto selected_rename_matches = [&](std::string_view name) {
+        return session.preview_state().animation_name == name &&
+            std::abs(session.preview_state().time_seconds - selected_rename_time) <= 1e-9 &&
+            session.preview_state().playing;
+    };
+    if (!rename_selected || !rename_selected.changed ||
+        !selected_rename_matches(selected_rename_target) ||
+        session.runtime_data()->find_animation(selected_rename_source) != nullptr) {
+        std::cerr << "Selected animation rename reset compatible playback state.\n";
+        return false;
+    }
+    if (!session.undo() || !selected_rename_matches(selected_rename_source) ||
+        !session.redo() || !selected_rename_matches(selected_rename_target) ||
+        !session.undo() || !selected_rename_matches(selected_rename_source)) {
+        std::cerr << "Selected animation rename history lost playback state.\n";
+        return false;
+    }
+    session.clear_history();
+
+    constexpr std::string_view renamed_queue_animation =
+        "session_attack_queue_renamed";
+    if (!session.select_animation("idle", true) ||
+        !session.set_queue("attack", 0.15, 0.05)) {
+        std::cerr << "EditorSession could not prepare an animation-catalog preview queue.\n";
+        return false;
+    }
+    const auto rename_catalog = session.edit_animation_catalog(
+        {marrow::editor::AnimationCatalogEditKind::Rename,
+         "attack",
+         std::string(renamed_queue_animation)},
+        {marrow::editor::EditKind::EditProperty,
+         "Rename queued animation",
+         "session-animation-catalog",
+         false});
+    if (!rename_catalog || !rename_catalog.changed ||
+        session.preview_state().animation_name != "idle" ||
+        !session.preview_state().queue_enabled ||
+        session.preview_state().queued_animation_name != renamed_queue_animation ||
+        session.runtime_data()->find_animation("attack") != nullptr ||
+        session.runtime_data()->find_animation(renamed_queue_animation) == nullptr) {
+        std::cerr << "EditorSession did not atomically rename a queued animation.\n";
+        return false;
+    }
+    if (!session.undo() ||
+        session.preview_state().animation_name != "idle" ||
+        !session.preview_state().queue_enabled ||
+        session.preview_state().queued_animation_name != "attack" ||
+        session.runtime_data()->find_animation("attack") == nullptr ||
+        !session.redo() ||
+        session.preview_state().queued_animation_name != renamed_queue_animation) {
+        std::cerr << "EditorSession did not restore renamed queue references through history.\n";
+        return false;
+    }
+
+    const auto delete_catalog = session.edit_animation_catalog(
+        {marrow::editor::AnimationCatalogEditKind::Delete,
+         std::string(renamed_queue_animation),
+         {}},
+        {marrow::editor::EditKind::EditProperty,
+         "Delete queued animation",
+         "session-animation-catalog",
+         false});
+    if (!delete_catalog || !delete_catalog.changed ||
+        session.preview_state().animation_name != "idle" ||
+        session.preview_state().queue_enabled ||
+        session.runtime_data()->find_animation(renamed_queue_animation) != nullptr) {
+        std::cerr << "EditorSession did not atomically remove a deleted preview queue.\n";
+        return false;
+    }
+    if (!session.undo() ||
+        session.preview_state().animation_name != "idle" ||
+        !session.preview_state().queue_enabled ||
+        session.preview_state().queued_animation_name != renamed_queue_animation ||
+        session.runtime_data()->find_animation(renamed_queue_animation) == nullptr ||
+        !session.redo() ||
+        session.preview_state().queue_enabled ||
+        session.runtime_data()->find_animation(renamed_queue_animation) != nullptr) {
+        std::cerr << "EditorSession did not restore deleted queue references through history.\n";
+        return false;
+    }
+
     std::cout << "EditorSession transaction, rollback, preview, merge, and history validated.\n";
     return true;
 }
@@ -1349,6 +1570,372 @@ bool validate_binary_export(
     return true;
 }
 
+bool validate_animation_catalog_edits(const marrow::editor::ProjectLoadResult& project_result) {
+    marrow::editor::ProjectData project = *project_result.project;
+    const auto create_result = marrow::editor::create_animation(
+        &project, *project_result.base_skeleton_document, "catalog_empty");
+    const auto duplicate_result = marrow::editor::duplicate_animation(
+        &project, *project_result.base_skeleton_document, "idle", "idle_copy");
+    const auto rename_result = marrow::editor::rename_animation(
+        &project, *project_result.base_skeleton_document, "aim", "focus");
+    const auto delete_result = marrow::editor::delete_animation(
+        &project, *project_result.base_skeleton_document, "attack");
+    if (!create_result || !duplicate_result || !rename_result || !delete_result) {
+        std::cerr << "Animation catalog authoring failed: "
+                  << create_result.error << duplicate_result.error
+                  << rename_result.error << delete_result.error << '\n';
+        return false;
+    }
+
+    const auto runtime_result = marrow::editor::build_project_runtime(
+        project, *project_result.base_skeleton_document);
+    if (!runtime_result) {
+        std::cerr << runtime_result.error->format();
+        return false;
+    }
+    if (runtime_result.skeleton_data->find_animation("catalog_empty") == nullptr ||
+        runtime_result.skeleton_data->find_animation("idle_copy") == nullptr ||
+        runtime_result.skeleton_data->find_animation("focus") == nullptr ||
+        runtime_result.skeleton_data->find_animation("aim") != nullptr ||
+        runtime_result.skeleton_data->find_animation("attack") != nullptr) {
+        std::cerr << "Animation catalog edits did not produce the expected runtime catalog.\n";
+        return false;
+    }
+    const auto* source_idle = runtime_result.skeleton_data->find_animation("idle");
+    const auto* copied_idle = runtime_result.skeleton_data->find_animation("idle_copy");
+    if (source_idle == nullptr || copied_idle == nullptr ||
+        !require_near(copied_idle->duration(), source_idle->duration(), "duplicated clip duration")) {
+        return false;
+    }
+
+    const std::string serialized = marrow::editor::serialize_project(project);
+    const auto parsed = marrow::runtime::json::parse_document(
+        serialized, project_result.project->source_path);
+    if (!parsed) {
+        std::cerr << parsed.error->format();
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(*parsed.document);
+    if (!reloaded || reloaded.project->animation_edits.size() != 4U ||
+        reloaded.skeleton_data->find_animation("focus") == nullptr ||
+        reloaded.skeleton_data->find_animation("attack") != nullptr) {
+        std::cerr << "Animation catalog edits did not survive project serialization.\n";
+        return false;
+    }
+
+    marrow::editor::ProjectData invalid_project = *project_result.project;
+    marrow::editor::AnimationEdit invalid_rename;
+    invalid_rename.kind = marrow::editor::AnimationEditKind::Rename;
+    invalid_rename.name = "missing_source";
+    invalid_rename.new_name = "invalid_target";
+    invalid_project.animation_edits.push_back(std::move(invalid_rename));
+    if (marrow::editor::build_project_runtime(
+            invalid_project, *project_result.base_skeleton_document)) {
+        std::cerr << "Animation catalog accepted a missing rename source.\n";
+        return false;
+    }
+
+    marrow::runtime::json::Document future_base = *project_result.base_skeleton_document;
+    auto* future_animations = marrow::runtime::json::find_member(
+        future_base.root, "animations");
+    auto* future_idle = future_animations != nullptr
+        ? marrow::runtime::json::find_member(*future_animations, "idle")
+        : nullptr;
+    if (future_idle == nullptr || !future_idle->is_object()) {
+        std::cerr << "Animation catalog could not prepare unknown-field coverage.\n";
+        return false;
+    }
+    future_idle->as_object().emplace(
+        "futureTimelineFamily",
+        marrow::runtime::json::Value(
+            marrow::runtime::json::Value::Object{
+                {"sentinel", marrow::runtime::json::Value(7.0, {})}},
+            {}));
+    marrow::editor::ProjectData future_project = *project_result.project;
+    const auto future_duplicate = marrow::editor::duplicate_animation(
+        &future_project, future_base, "idle", "future_copy");
+    const auto future_document = marrow::editor::build_project_runtime_document(
+        future_project, future_base);
+    const auto* future_output_animations = marrow::runtime::json::find_member(
+        future_document.root, "animations");
+    const auto* future_copy = future_output_animations != nullptr
+        ? marrow::runtime::json::find_member(*future_output_animations, "future_copy")
+        : nullptr;
+    if (!future_duplicate || future_copy == nullptr || !future_copy->is_object() ||
+        marrow::runtime::json::find_member(*future_copy, "futureTimelineFamily") == nullptr) {
+        std::cerr << "Animation duplicate did not preserve an unknown timeline family.\n";
+        return false;
+    }
+
+    marrow::editor::ProjectData single_animation = project;
+    for (const auto& animation : runtime_result.skeleton_data->animations()) {
+        if (animation.name == "idle") {
+            continue;
+        }
+        const auto removed = marrow::editor::delete_animation(
+            &single_animation,
+            *project_result.base_skeleton_document,
+            animation.name);
+        if (!removed) {
+            std::cerr << removed.error << '\n';
+            return false;
+        }
+    }
+    const auto rejected = marrow::editor::delete_animation(
+        &single_animation, *project_result.base_skeleton_document, "idle");
+    if (rejected || rejected.error != "The last animation cannot be deleted.") {
+        std::cerr << "Animation catalog allowed deleting the last clip.\n";
+        return false;
+    }
+
+    std::cout << "Animation catalog create/duplicate/rename/delete validated.\n";
+    return true;
+}
+
+bool validate_editing_p0_end_to_end(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    const std::filesystem::path project_path =
+        "/tmp/marrow_editing_p0_e2e.marrow";
+    const std::filesystem::path json_path =
+        "/tmp/marrow_editing_p0_e2e.mskl";
+    const std::filesystem::path binary_path =
+        "/tmp/marrow_editing_p0_e2e.mbin";
+
+    marrow::editor::ProjectData project = *project_result.project;
+    project.runtime_assets.skeleton_path =
+        std::filesystem::absolute(project.resolved_skeleton_path());
+    project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+    for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+        atlas_path = std::filesystem::absolute(atlas_path);
+    }
+    project.source_path = project_path;
+
+    if (project.find_transform_timeline_edit(
+            "idle",
+            "spine",
+            marrow::editor::TransformTimelineChannel::Translate) != nullptr) {
+        std::cerr << "P0 E2E requires a base-only spine translate timeline.\n";
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        project,
+        *project_result.skeleton_data,
+        "idle",
+        "spine",
+        marrow::editor::TransformTimelineChannel::Translate,
+        0.25,
+        marrow::editor::TransformKeyframePatch{
+            std::nullopt,
+            3.0,
+            55.0});
+    const auto* translate_edit = project.find_transform_timeline_edit(
+        "idle",
+        "spine",
+        marrow::editor::TransformTimelineChannel::Translate);
+    if (translate_edit == nullptr || translate_edit->keyframes.size() != 4U) {
+        std::cerr << "First auto-key discarded imported transform keys.\n";
+        return false;
+    }
+
+    const auto setup_rotation_index =
+        project_result.skeleton_data->find_bone_index("transform_source");
+    if (!setup_rotation_index.has_value() ||
+        std::abs(
+            project_result.skeleton_data->bones()[*setup_rotation_index]
+                    .setup_pose.rotation -
+                30.0f) > 1e-6f) {
+        std::cerr << "P0 rotation regression requires a non-zero setup rotation.\n";
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        project,
+        *project_result.skeleton_data,
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate,
+        0.25,
+        marrow::editor::TransformKeyframePatch{47.0, std::nullopt, std::nullopt});
+    // Both sides of the documented epsilon must replace the same key.
+    marrow::editor::upsert_transform_keyframe(
+        project,
+        *project_result.skeleton_data,
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate,
+        0.2500005,
+        marrow::editor::TransformKeyframePatch{48.0, std::nullopt, std::nullopt});
+    marrow::editor::upsert_transform_keyframe(
+        project,
+        *project_result.skeleton_data,
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate,
+        0.2499995,
+        marrow::editor::TransformKeyframePatch{49.0, std::nullopt, std::nullopt});
+    const auto* setup_rotation_edit = project.find_transform_timeline_edit(
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate);
+    if (setup_rotation_edit == nullptr || setup_rotation_edit->keyframes.size() != 1U ||
+        std::abs(setup_rotation_edit->keyframes.front().angle - 19.0) > 1e-9) {
+        std::cerr << "Absolute rotation upsert did not store one setup-relative key.\n";
+        return false;
+    }
+    const auto rotation_runtime = marrow::editor::build_project_runtime(
+        project, *project_result.base_skeleton_document);
+    const auto* rotation_animation = rotation_runtime
+        ? rotation_runtime.skeleton_data->find_animation("idle")
+        : nullptr;
+    const auto sampled_rotation = rotation_animation != nullptr
+        ? rotation_animation->sample_bone_rotation(*setup_rotation_index, 0.25)
+        : std::nullopt;
+    if (!sampled_rotation.has_value() ||
+        std::abs(*sampled_rotation - 49.0) > 1e-5) {
+        std::cerr << "Non-zero setup rotation was applied twice after auto-key.\n";
+        return false;
+    }
+
+    auto* slot_color = marrow::editor::ensure_slot_color_timeline_edit(
+        project, *project_result.skeleton_data, "idle", "body");
+    if (slot_color == nullptr || slot_color->keyframes.size() != 3U) {
+        std::cerr << "Slot-color materialization discarded imported keys.\n";
+        return false;
+    }
+    const auto duplicate = marrow::editor::duplicate_animation(
+        &project,
+        *project_result.base_skeleton_document,
+        "idle",
+        "editing_p0_copy");
+    if (!duplicate) {
+        std::cerr << duplicate.error << '\n';
+        return false;
+    }
+
+    std::vector<marrow::editor::TimelineKeySelector> selectors;
+    marrow::editor::TimelineKeySelector transform_selector;
+    transform_selector.kind = marrow::editor::TimelineKeyKind::Transform;
+    transform_selector.animation_name = "idle";
+    transform_selector.bone_name = "spine";
+    transform_selector.transform_channel =
+        marrow::editor::TransformTimelineChannel::Translate;
+    transform_selector.time = 0.25;
+    selectors.push_back(transform_selector);
+    marrow::editor::TimelineKeySelector color_selector;
+    color_selector.kind = marrow::editor::TimelineKeyKind::SlotColor;
+    color_selector.animation_name = "idle";
+    color_selector.slot_name = "body";
+    color_selector.time = 0.5;
+    selectors.push_back(color_selector);
+    const auto retimed = marrow::editor::retime_keyframes(
+        &project, selectors, 0.05, false, 60.0);
+    if (!retimed || !retimed.changed || retimed.key_count != 2U ||
+        std::abs(retimed.applied_delta - 0.05) > 1e-12) {
+        std::cerr << "P0 E2E could not retime transform and slot keys atomically.\n";
+        return false;
+    }
+
+    const std::string before_failed_retime =
+        marrow::editor::serialize_project(project);
+    auto invalid_selector = transform_selector;
+    invalid_selector.time = 99.0;
+    const auto rejected = marrow::editor::retime_keyframes(
+        &project,
+        {transform_selector, invalid_selector},
+        0.1,
+        false,
+        60.0);
+    if (rejected || marrow::editor::serialize_project(project) != before_failed_retime) {
+        std::cerr << "Failed multi-key retime was not atomic.\n";
+        return false;
+    }
+
+    const auto saved = marrow::editor::save_project(project, project_path);
+    if (!saved) {
+        std::cerr << saved.error->format() << '\n';
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(project_path);
+    if (!reloaded) {
+        std::cerr << reloaded.error->format();
+        return false;
+    }
+    const auto spine_index = reloaded.skeleton_data->find_bone_index("spine");
+    const auto* idle = reloaded.skeleton_data->find_animation("idle");
+    const auto* translated =
+        spine_index.has_value() && idle != nullptr
+        ? idle->find_translate_timeline(*spine_index)
+        : nullptr;
+    if (translated == nullptr || translated->keyframes.size() != 4U ||
+        reloaded.skeleton_data->find_animation("editing_p0_copy") == nullptr ||
+        std::none_of(
+            translated->keyframes.begin(),
+            translated->keyframes.end(),
+            [](const auto& key) { return std::abs(key.time - 0.3f) <= 1e-5f; })) {
+        std::cerr << "P0 authored edits did not survive save/reload.\n";
+        return false;
+    }
+
+    marrow::editor::EditorSession session;
+    if (!session.open(project_path) || !session.select_animation("idle")) {
+        std::cerr << "P0 E2E session could not reopen the authored project.\n";
+        return false;
+    }
+    const std::string undo_baseline =
+        marrow::editor::serialize_project(*session.project());
+    auto transaction = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "P0 E2E retime",
+        "timeline:retime",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    transform_selector.time = 0.3;
+    color_selector.time = 0.55;
+    const auto session_retime = marrow::editor::retime_keyframes(
+        transaction.project(),
+        {transform_selector, color_selector},
+        0.05,
+        false,
+        60.0);
+    const auto committed = session_retime ? transaction.commit()
+                                          : marrow::editor::SessionResult{};
+    if (!session_retime || !committed || !committed.changed || !session.can_undo()) {
+        std::cerr << "P0 E2E retime did not commit as one history item.\n";
+        return false;
+    }
+    const std::string redo_snapshot =
+        marrow::editor::serialize_project(*session.project());
+    if (!session.undo() ||
+        marrow::editor::serialize_project(*session.project()) != undo_baseline ||
+        !session.redo() ||
+        marrow::editor::serialize_project(*session.project()) != redo_snapshot) {
+        std::cerr << "P0 E2E retime undo/redo did not restore exact snapshots.\n";
+        return false;
+    }
+    const auto resaved = session.save(project_path);
+    if (!resaved) {
+        std::cerr << resaved.error->format() << '\n';
+        return false;
+    }
+
+    marrow::editor::ProjectExportOptions export_options;
+    export_options.skeleton_output_path = json_path;
+    export_options.binary_output_path = binary_path;
+    const auto exported = marrow::editor::export_runtime_assets(
+        *session.project(), *session.base_skeleton_document(), export_options);
+    if (!exported) {
+        std::cerr << exported.error->format() << '\n';
+        return false;
+    }
+    if (!validate_binary_export(json_path, binary_path)) {
+        return false;
+    }
+
+    std::cout << "Editing P0 auto-key/retime/save/reload/export E2E validated.\n";
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1375,6 +1962,12 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!validate_undo_redo_cycle(result)) {
+        return 1;
+    }
+    if (!validate_animation_catalog_edits(result)) {
+        return 1;
+    }
+    if (!validate_editing_p0_end_to_end(result)) {
         return 1;
     }
     if (parse_result.options.export_runtime_path.has_value() ||

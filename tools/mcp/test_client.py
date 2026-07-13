@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from server import MarrowClient
+from tools import editing
 
 
 def require_ok(label, result):
@@ -26,6 +27,16 @@ async def test():
     operations_json = json.dumps(operations)
     assert "set_slot_color_keyframe" in operations_json
     assert "dry_run_supported" in operations_json
+    new_edit_operations = {
+        "animation.create",
+        "animation.duplicate",
+        "animation.rename",
+        "animation.delete",
+        "timeline.retime_keyframes",
+    }
+    assert all(name in operations_json for name in new_edit_operations)
+    mcp_edit_tools = {tool.name for tool in editing.get_tools()}
+    assert new_edit_operations <= mcp_edit_tools
 
     scene = require_ok("scene.describe", await client.send_command("scene.describe"))
     assert scene["scene_delta"]["slot_count"] > 0
@@ -55,6 +66,61 @@ async def test():
         )
     )
     require_ok("project.diagnostics", await client.send_command("project.diagnostics"))
+
+    require_ok(
+        "animation.create dry-run",
+        await client.send_command(
+            "animation.create",
+            {"name": "mcp_empty", "dry_run": True},
+        ),
+    )
+    require_ok(
+        "animation.duplicate dry-run",
+        await client.send_command(
+            "animation.duplicate",
+            {"source": "idle", "name": "mcp_idle_copy", "dry_run": True},
+        ),
+    )
+    require_ok(
+        "animation.rename dry-run",
+        await client.send_command(
+            "animation.rename",
+            {"from": "attack", "to": "mcp_attack", "dry_run": True},
+        ),
+    )
+    require_ok(
+        "animation.delete dry-run",
+        await client.send_command(
+            "animation.delete",
+            {"name": "attack", "dry_run": True},
+        ),
+    )
+    require_ok(
+        "timeline.retime_keyframes dry-run",
+        await client.send_command(
+            "timeline.retime_keyframes",
+            {
+                "delta": 0.05,
+                "snap": False,
+                "keys": [
+                    {
+                        "kind": "transform",
+                        "animation": "idle",
+                        "bone": "spine",
+                        "channel": "translate",
+                        "time": 0.5,
+                    },
+                    {
+                        "kind": "slot_color",
+                        "animation": "idle",
+                        "slot": "body",
+                        "time": 0.5,
+                    },
+                ],
+                "dry_run": True,
+            },
+        ),
+    )
 
     require_ok(
         "set_transform dry-run",

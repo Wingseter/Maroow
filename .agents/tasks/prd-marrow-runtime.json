@@ -1,14 +1,15 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness, including the Maroow-native parameter runtime slices in MAR-120–126. Before parameter authoring begins in MAR-127, MAR-129–140 form an editor architecture gate: establish CTest and behavior baselines, introduce a UI-free EditorSession with unified transactions and preview ownership, migrate the C ABI and agent dispatcher without external changes, then extract feature-owned shell modules. This roadmap preserves C ABI v1, the agent JSON protocol, file formats, serialized output, fixtures, playback, undo grouping, and visible editor workflows; Maroow-native parameter modeling is not Live2D Cubism Core, SDK ABI, proprietary file, or importer compatibility.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The runtime and editor architecture baseline through MAR-140 is complete. MAR-141–153 now close the editor P0 trust gap first: honest setup/animate semantics, transactional auto-key, stable viewport interaction, editable slot lanes, dopesheet manipulation, and animation catalog CRUD. MAR-121–128 then deliver the existing Maroow-native parameter runtime/editor track. MAR-154–172 retain the ordered P1 productivity backlog. Imported rigs remain the short-term source; native rig/topology authoring requires a later versioned canonical .marrow architecture decision.",
   "qualityGates": [
     "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
     "When a story changes file formats, update checked-in sample assets and any matching operational docs in the same iteration.",
     "Every completed story must leave the repository in a clean git state with build, test, or inspection commands recorded in AGENTS.md and the Ralph progress log.",
     "Prefer runtime-verifiable slices over placeholder scaffolding; if a feature cannot be fully validated yet, add the smallest executable test harness that proves the implemented slice.",
-    "Bug-fix stories must include a regression test that would have caught the original defect, added to marrow_fixture_smoke or a dedicated test target."
+    "Bug-fix stories must include a regression test that would have caught the original defect, added to marrow_fixture_smoke or a dedicated test target.",
+    "New GUI and agent capabilities must share UI-free authoring operations and preserve the existing C ABI and agent request/response contracts."
   ],
   "stories": [
     {
@@ -2059,8 +2060,8 @@
       ],
       "status": "done",
       "startedAt": "2026-04-04T02:58:44.317890+00:00",
-      "completedAt": null,
-      "updatedAt": "2026-04-04T02:58:44.317897+00:00"
+      "completedAt": "2026-04-11T08:03:16+00:00",
+      "updatedAt": "2026-04-11T08:03:16+00:00"
     },
     {
       "id": "MAR-116",
@@ -2159,6 +2160,228 @@
       "completedAt": "2026-07-12"
     },
     {
+      "id": "MAR-141",
+      "title": "Make setup and preview-only editor controls honest",
+      "description": "Remove misleading unsaved pose/color writes and expose the imported setup contract.",
+      "acceptanceCriteria": [
+        "Setup-mode bone transforms and slot colors are read-only and labelled as imported setup data.",
+        "Animation-mode authoring remains unavailable until a persistent key path is active.",
+        "Global Add/Remove Key controls are disabled instead of reporting placeholder actions.",
+        "Shell smoke proves these controls do not change dirty state or history."
+      ],
+      "dependsOn": [
+        "MAR-140"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-142",
+      "title": "Add transactional animation auto-key authoring",
+      "description": "Add live EditorSession gesture refresh and persist inspector transform edits as playhead keys.",
+      "acceptanceCriteria": [
+        "EditTransaction supports repeated runtime preview refresh, one final history entry, and exact cancel rollback.",
+        "Animation-mode inspector translate/rotate/scale/shear always upserts absolute local keys at the playhead.",
+        "Setup mode remains read-only and playback pauses when authoring begins.",
+        "GUI and set_transform share the same project-domain key upsert operation.",
+        "Session and shell smokes cover live preview, Escape, undo, redo, and save/reload."
+      ],
+      "dependsOn": [
+        "MAR-141"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-143",
+      "title": "Stabilize viewport camera and add inverse mapping",
+      "description": "Decouple camera framing from animated pose bounds and add exact bidirectional coordinate conversion.",
+      "acceptanceCriteria": [
+        "world_from_screen is the inverse of screen_from_world across pan and zoom.",
+        "Pose changes never recenter or rescale the camera.",
+        "Wheel zoom preserves the world point under the cursor and Fit is the only reframing command.",
+        "Viewport smoke covers load initialization, roundtrip, zoom anchoring, pose stability, and Fit."
+      ],
+      "dependsOn": [
+        "MAR-140"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-144",
+      "title": "Move bones and IK targets in the viewport",
+      "description": "Add free/X/Y translate gizmo dragging that auto-keys the selected animation.",
+      "acceptanceCriteria": [
+        "Selected bones and IK target bones expose free, X, and Y move handles in Animation mode.",
+        "World targets convert through root scale or the parent 2x2 inverse, including rotation, shear, and non-uniform scale.",
+        "Singular parents cancel without mutation; Escape restores project/runtime/preview.",
+        "One drag produces one undo entry and pauses playback/hot reload/mutating agent work.",
+        "Smoke covers root, transformed parent, singular parent, IK target, undo, and redo."
+      ],
+      "dependsOn": [
+        "MAR-142",
+        "MAR-143"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-145",
+      "title": "Edit slot color and attachment timelines in the GUI",
+      "description": "Turn the existing slot light-color and attachment runtime/agent paths into full timeline editors.",
+      "acceptanceCriteria": [
+        "Light RGBA keys support add, edit, remove, interpolation, preview, undo, and export.",
+        "Attachment keys support named attachments and none with stepped interpolation.",
+        "Inspector setup dark tint stays read-only and preview attachment composition stays transient.",
+        "GUI and existing agent handlers share project-domain mutations.",
+        "Project and shell smokes cover roundtrip and rollback."
+      ],
+      "dependsOn": [
+        "MAR-142"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-146",
+      "title": "Add timeline ruler, frame display, zoom, and pan",
+      "description": "Replace duration-fixed lanes with a stable time viewport and 60 FPS ruler.",
+      "acceptanceCriteria": [
+        "Timeline view owns visible start and pixels-per-second independently from clip duration.",
+        "A seconds/frame ruler, playhead, cursor-centered zoom, and horizontal pan are rendered.",
+        "Project editor metadata defaults display FPS to 60 without changing runtime seconds.",
+        "Moving the last key does not rescale the visible timeline."
+      ],
+      "dependsOn": [
+        "MAR-140"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-147",
+      "title": "Select timeline keys and box ranges",
+      "description": "Introduce timeline-local key identities and multi-selection without changing global entity selection.",
+      "acceptanceCriteria": [
+        "Click selects a key, Cmd/Ctrl toggles it, and empty-lane drag box-selects keys.",
+        "TimelineKeyRef distinguishes track and key identity, including same-time events.",
+        "Selection follows rebuilds and synchronizes the playhead, track, hierarchy, and inspector.",
+        "Selection-only actions do not dirty the project."
+      ],
+      "dependsOn": [
+        "MAR-146"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-148",
+      "title": "Wire global Add and Remove Key actions",
+      "description": "Make the timeline toolbar operate on the selected editable lane and key selection.",
+      "acceptanceCriteria": [
+        "Add samples the effective value at the playhead for every editable lane.",
+        "Remove deletes selected/exact-playhead project keys and reports imported-track limitations honestly.",
+        "Inherit remains visibly read-only rather than accepting a placeholder action.",
+        "Each action is atomic, undoable, and covered by shell smoke."
+      ],
+      "dependsOn": [
+        "MAR-145",
+        "MAR-147"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-149",
+      "title": "Retime multiple timeline keys by dragging",
+      "description": "Move selected keys by one shared delta with frame snapping and collision protection.",
+      "acceptanceCriteria": [
+        "All selected keys receive one delta and one transaction/history entry.",
+        "Default 60 FPS snapping is bypassed with Alt.",
+        "The global delta clamps at zero and unselected neighbors; event ties preserve stable order.",
+        "Invalid rebuilds and Escape restore all tracks atomically.",
+        "Agent registry exposes an atomic timeline.retime_keyframes operation."
+      ],
+      "dependsOn": [
+        "MAR-142",
+        "MAR-147"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-150",
+      "title": "Copy, cut, and paste timeline keys",
+      "description": "Add a typed editor clipboard for active-animation key workflows.",
+      "acceptanceCriteria": [
+        "Cmd/Ctrl+C/X/V copies complete typed payloads and preserves multi-track relative timing.",
+        "Paste aligns the earliest copied key to the playhead and replaces same-track/time collisions.",
+        "A single compatible track may remap to the selected destination; multi-track paste preserves targets.",
+        "Cut/paste is atomic and cannot silently delete an imported source track.",
+        "Tests cover transform, deform, slot, draw-order, event, collision, and rollback cases."
+      ],
+      "dependsOn": [
+        "MAR-149"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-151",
+      "title": "Persist animation catalog edits and expose agent CRUD",
+      "description": "Add ordered editor-only create/rename/delete operations and shared animation authoring services.",
+      "acceptanceCriteria": [
+        ".marrow animation_edits replay before typed timelines without changing runtime format versions.",
+        "Duplicate deep-copies the effective JSON animation and preserves unknown timeline families.",
+        "Rename/delete update timeline, mixing, active animation, queue, and preview references atomically.",
+        "Missing sources, duplicate destinations, and deleting the last clip are rejected.",
+        "animation.create/duplicate/rename/delete support dry-run, undo, and registry coverage."
+      ],
+      "dependsOn": [
+        "MAR-142"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-152",
+      "title": "Add animation catalog management UI",
+      "description": "Expose create, duplicate, rename, and confirmed delete for the selected clip.",
+      "acceptanceCriteria": [
+        "The animation panel validates unique non-empty names and selects the resulting clip.",
+        "Delete requires confirmation and is disabled for the final clip.",
+        "Selection, queue, playback, and active-animation metadata remain valid after every operation.",
+        "Each catalog mutation is one EditorSession transaction and one undo item.",
+        "No explicit clip-duration control is introduced in this story."
+      ],
+      "dependsOn": [
+        "MAR-151"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-153",
+      "title": "Validate editing P0 end to end",
+      "description": "Prove viewport manipulation, auto-key, dopesheet editing, slot lanes, and catalog CRUD survive the full project/export workflow.",
+      "acceptanceCriteria": [
+        "Viewport drag creates a key, updates preview, saves/reloads, and exports to JSON and binary.",
+        "Dopesheet selection, retime, clipboard, slot color, and attachment edits roundtrip with undo/redo.",
+        "Animation create/duplicate/rename/delete preserves unknown data and rejects final deletion.",
+        "All focused CTest labels and documented direct project/agent/editor/renderer smokes pass.",
+        "AGENTS.md records any newly introduced commands and validated results."
+      ],
+      "dependsOn": [
+        "MAR-144",
+        "MAR-148",
+        "MAR-150",
+        "MAR-152"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
       "id": "MAR-121",
       "title": "Add parameter definitions and per-instance runtime values",
       "description": "Implement the first runtime slice for Maroow-native parameters: parse .mskl parameters and parameterGroups, store immutable definitions on SkeletonData, expose per-Skeleton parameter values, and keep existing assets empty by default.",
@@ -2175,7 +2398,7 @@
       "dependsOn": [
         "MAR-120"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-122",
@@ -2193,7 +2416,7 @@
       "dependsOn": [
         "MAR-121"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-123",
@@ -2212,7 +2435,7 @@
       "dependsOn": [
         "MAR-122"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-124",
@@ -2231,7 +2454,7 @@
       "dependsOn": [
         "MAR-123"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-125",
@@ -2250,7 +2473,7 @@
       "dependsOn": [
         "MAR-124"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-126",
@@ -2269,7 +2492,7 @@
       "dependsOn": [
         "MAR-125"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-129",
@@ -2285,9 +2508,12 @@
         "AGENTS.md lists the exact 24 named cases currently emitted by marrow_unit_tests and retains the interactive Metal host validation notes."
       ],
       "dependsOn": [
-        "MAR-126"
+        "MAR-120"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-130",
@@ -2306,7 +2532,10 @@
       "dependsOn": [
         "MAR-129"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-131",
@@ -2326,7 +2555,10 @@
       "dependsOn": [
         "MAR-130"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-132",
@@ -2344,7 +2576,10 @@
       "dependsOn": [
         "MAR-131"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-133",
@@ -2363,7 +2598,10 @@
       "dependsOn": [
         "MAR-132"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-134",
@@ -2381,7 +2619,10 @@
       "dependsOn": [
         "MAR-133"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-135",
@@ -2399,7 +2640,10 @@
       "dependsOn": [
         "MAR-134"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-136",
@@ -2416,7 +2660,10 @@
       "dependsOn": [
         "MAR-135"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-137",
@@ -2428,12 +2675,15 @@
         "All constraint mutations use EditorSession transactions and preserve validation, dirty state, preview rebuild, undo grouping, and redo behavior.",
         "Constraint selection stays synchronized with hierarchy, timeline, inspector, and viewport overlays.",
         "Constraint preview, debug overlay toggles, and runtime export remain externally unchanged.",
-        "Editor and project smokes cover create/edit/remove, invalid rollback, immediate preview, undo/redo, and export after extraction."
+        "Editor and project smokes cover the existing create/edit behavior, invalid rollback, immediate preview, undo/redo, and export after extraction."
       ],
       "dependsOn": [
         "MAR-136"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-138",
@@ -2450,7 +2700,10 @@
       "dependsOn": [
         "MAR-137"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-139",
@@ -2467,7 +2720,10 @@
       "dependsOn": [
         "MAR-138"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-140",
@@ -2487,26 +2743,31 @@
       "dependsOn": [
         "MAR-139"
       ],
-      "status": "todo"
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
     },
     {
       "id": "MAR-127",
       "title": "Add parameter modeling authoring tools to the editor",
-      "description": "Build the editor-facing Parameter Modeling mode for group sliders, deformer editing, keyform capture, expression presets, and lip-sync mapping, with all mutations flowing through snapshots and runtime preview rebuilds.",
+      "description": "Build Parameter Modeling mode after the parameter runtime, editor architecture, and editing-P0 interaction gates are complete. All mutations use EditorSession transactions and the stable viewport interaction foundation.",
       "acceptanceCriteria": [
         "Editor shell exposes a Parameter Modeling mode separate from the existing animation and constraint authoring surfaces.",
         "Parameter groups render sliders, numeric values, and default reset controls from .marrow.parameter_model.",
         "Warp deformer grid editing and rotation deformer pivot editing update project state and viewport preview.",
         "Keyform capture stores mesh/deformer state at the current parameter coordinate.",
         "Expression and lip-sync panels create and edit expression presets and mouth input mappings.",
-        "Every parameter_model mutation uses project snapshots, marks dirty state, supports undo/redo, and calls rebuild_project_runtime().",
+        "Every parameter_model mutation uses EditorSession transactions with Project/Runtime/Preview impact, marks dirty state, supports undo/redo, and refreshes runtime preview atomically.",
         "marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 5 validates parameter mode smoke coverage.",
         "marrow_project_smoke confirms editor-authored parameter changes export to runtime .mskl/.mbin payloads."
       ],
       "dependsOn": [
-        "MAR-140"
+        "MAR-126",
+        "MAR-140",
+        "MAR-153"
       ],
-      "status": "todo"
+      "status": "open"
     },
     {
       "id": "MAR-128",
@@ -2525,7 +2786,281 @@
       "dependsOn": [
         "MAR-127"
       ],
-      "status": "todo"
+      "status": "open"
+    },
+    {
+      "id": "MAR-154",
+      "title": "Add explicit animation clip duration",
+      "description": "Add an optional runtime duration after P0 catalog CRUD.",
+      "acceptanceCriteria": [
+        "Animation objects accept an optional non-negative duration in JSON/binary.",
+        "Explicit duration cannot be shorter than the last authored key.",
+        "AnimationState loop/queue/complete behavior uses the effective duration.",
+        "Old assets still derive duration from their last key.",
+        "Editor duration changes roundtrip with validation and undo."
+      ],
+      "dependsOn": [
+        "MAR-153"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-155",
+      "title": "Add viewport rotation gizmo",
+      "description": "Rotate selected bones directly with auto-key and one gesture transaction.",
+      "acceptanceCriteria": [
+        "A rotation ring works with transformed parents.",
+        "Angle display and modifier behavior are deterministic.",
+        "Cancel, undo, preview, and export are covered."
+      ],
+      "dependsOn": [
+        "MAR-144"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-156",
+      "title": "Add viewport scale gizmo",
+      "description": "Scale selected bones on uniform or independent axes.",
+      "acceptanceCriteria": [
+        "Uniform and X/Y scale handles auto-key absolute local values.",
+        "Negative/near-zero policy is explicit and singular results are safe.",
+        "Cancel, undo, preview, and export are covered."
+      ],
+      "dependsOn": [
+        "MAR-155"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-157",
+      "title": "Add grid, angle, and vertex snapping",
+      "description": "Provide shared configurable snapping for viewport authoring.",
+      "acceptanceCriteria": [
+        "Translate, rotate, scale, and mesh tools use one snap-settings model.",
+        "Modifiers temporarily bypass or invert snapping.",
+        "Snapping never changes values outside an active gesture."
+      ],
+      "dependsOn": [
+        "MAR-143",
+        "MAR-156",
+        "MAR-158"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-158",
+      "title": "Edit FFD vertices directly in the viewport",
+      "description": "Move existing mesh deform vertices at the playhead.",
+      "acceptanceCriteria": [
+        "Mesh vertices can be selected and dragged in Animation mode.",
+        "Edits create/update FFD keys without changing base topology.",
+        "Multi-vertex gestures preview live and undo atomically."
+      ],
+      "dependsOn": [
+        "MAR-144",
+        "MAR-150"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-159",
+      "title": "Add graph editor view",
+      "description": "Plot selected numeric timelines with synchronized axes and selection.",
+      "acceptanceCriteria": [
+        "Graph and dopesheet share key selection and playhead.",
+        "Pan/zoom remain independent from clip duration.",
+        "Linear, stepped, and Bezier segments are visually distinct."
+      ],
+      "dependsOn": [
+        "MAR-147"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-160",
+      "title": "Edit Bezier handles graphically",
+      "description": "Drag curve handles while keeping numeric interpolation fields synchronized.",
+      "acceptanceCriteria": [
+        "Both cubic handles are draggable with stable time/value mapping.",
+        "Handle edits preview live and create one undo item.",
+        "Stepped/linear conversion and invalid-handle rollback are covered."
+      ],
+      "dependsOn": [
+        "MAR-159"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-161",
+      "title": "Add graph presets and automatic handles",
+      "description": "Add reusable curve presets, remembered defaults, and loop-boundary synchronization.",
+      "acceptanceCriteria": [
+        "Preset application is deterministic and undoable.",
+        "Automatic handles remain continuous unless explicitly broken.",
+        "Optional loop first/last synchronization is tested."
+      ],
+      "dependsOn": [
+        "MAR-160"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-162",
+      "title": "Complete manual weight authoring controls",
+      "description": "Add Replace, numeric influence editing, explicit bind, and Normalize.",
+      "acceptanceCriteria": [
+        "Replace/Paint/Erase/Smooth share top-four normalization rules.",
+        "Influence tables validate bones, weights, and totals.",
+        "Normalize and bind are explicit undoable operations."
+      ],
+      "dependsOn": [
+        "MAR-153"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-163",
+      "title": "Add deterministic automatic weights",
+      "description": "Compute repeatable top-four bone weights for existing mesh geometry.",
+      "acceptanceCriteria": [
+        "The solver is deterministic for identical mesh/bone input.",
+        "All outputs are positive, normalized, and limited to four influences.",
+        "Fixture tests cover joints, isolated vertices, and undo."
+      ],
+      "dependsOn": [
+        "MAR-162"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-164",
+      "title": "Introduce global typed multi-selection",
+      "description": "Replace single optional entity selection with SelectionSet plus active item.",
+      "acceptanceCriteria": [
+        "Bone, slot, attachment, and constraint sets retain one active item.",
+        "Compatibility accessors preserve single-selection workflows.",
+        "Selection changes do not affect dirty/history state."
+      ],
+      "dependsOn": [
+        "MAR-153"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-165",
+      "title": "Add hierarchy and viewport multi-select gestures",
+      "description": "Expose Ctrl/Shift and box selection over the global selection model.",
+      "acceptanceCriteria": [
+        "Hierarchy and viewport selections remain synchronized.",
+        "Active-item inspector behavior is deterministic.",
+        "Selection precedence does not break gizmos or weight paint."
+      ],
+      "dependsOn": [
+        "MAR-143",
+        "MAR-164"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-166",
+      "title": "Rename and delete constraints",
+      "description": "Complete lifecycle operations for all four constraint families.",
+      "acceptanceCriteria": [
+        "IK, path, transform, and physics constraints can be renamed and deleted.",
+        "Timeline, selection, skin, and export references update atomically.",
+        "GUI and agent operations support dry-run, rollback, undo, and redo."
+      ],
+      "dependsOn": [
+        "MAR-153"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-167",
+      "title": "Expose all constraint parameters",
+      "description": "Add the currently missing IK and physics widgets.",
+      "acceptanceCriteria": [
+        "IK softness/compress/stretch roundtrip through project/runtime.",
+        "Physics step/x/y/rotate/scaleX/shearX/limit/massInverse roundtrip.",
+        "Validation ranges match runtime rules and preview updates immediately."
+      ],
+      "dependsOn": [
+        "MAR-166"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-168",
+      "title": "Add New, Open, Save As, and dirty prompts",
+      "description": "Complete core File workflows for imported-rig projects.",
+      "acceptanceCriteria": [
+        "New requires a skeleton and atlas instead of creating an empty native rig.",
+        "Open and Save As use explicit paths and preserve project-relative references.",
+        "Reload, close, and quit prompt for dirty changes.",
+        "Failure leaves the current session untouched."
+      ],
+      "dependsOn": [
+        "MAR-153"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-169",
+      "title": "Add recent project management",
+      "description": "Persist and expose the ten most recent valid project paths.",
+      "acceptanceCriteria": [
+        "Successful open/save updates de-duplicated recents.",
+        "Missing entries report clearly and can be removed.",
+        "Recent state is user-local and never dirties a project."
+      ],
+      "dependsOn": [
+        "MAR-168"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-170",
+      "title": "Edit bone inherit timelines",
+      "description": "Add the missing project overlay, GUI editor, and agent path for inherit keys.",
+      "acceptanceCriteria": [
+        "All supported inherit modes can be keyed with stepped evaluation.",
+        "Load/save/export/preview and undo roundtrip.",
+        "The former read-only lane becomes editable without changing existing assets."
+      ],
+      "dependsOn": [
+        "MAR-145"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-171",
+      "title": "Add a Problems view",
+      "description": "Render project diagnostics as navigable editor issues.",
+      "acceptanceCriteria": [
+        "Diagnostics are grouped by severity and update after revisions.",
+        "Clicking an issue selects/focuses its target when possible.",
+        "The view offers only validated safe fixes and does not mutate on inspection."
+      ],
+      "dependsOn": [
+        "MAR-153"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-172",
+      "title": "Expose PSD re-import in the GUI",
+      "description": "Wire the already-validated PSD re-import backend into File/Assets UI.",
+      "acceptanceCriteria": [
+        "Users can re-import the source PSD into an existing imported rig.",
+        "Authored animations survive layer updates as in marrow_psd_import_smoke.",
+        "A preview/confirmation lists added, updated, and missing layers.",
+        "Failures leave project and runtime assets unchanged."
+      ],
+      "dependsOn": [
+        "MAR-168"
+      ],
+      "status": "open"
     }
   ]
 }

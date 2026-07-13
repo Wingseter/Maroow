@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 44> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 49> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -57,6 +57,11 @@ constexpr std::array<OperationExpectation, 44> kExpectedOperations{{
     {"agent.terminate", "management", false, false, false},
     {"undo", "edit", true, false, false},
     {"redo", "edit", true, false, false},
+    {"animation.create", "edit", true, false, true},
+    {"animation.duplicate", "edit", true, false, true},
+    {"animation.rename", "edit", true, false, true},
+    {"animation.delete", "edit", true, false, true},
+    {"timeline.retime_keyframes", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
     {"set_event_keyframe", "edit", true, false, true},
@@ -273,7 +278,7 @@ public:
         expect(
             invoked_operations_ == expected,
             "operation coverage",
-            "not every one of the 44 registered operations was invoked");
+            "not every registered operation was invoked");
     }
 
     bool passed() const {
@@ -299,7 +304,7 @@ void expect_registry_contract(Harness& harness, const DispatchObservation& respo
     harness.expect(
         operations->as_array().size() == kExpectedOperations.size(),
         "operations.list registry",
-        "registry must expose exactly 44 operations");
+        "registry operation count changed");
 
     std::set<std::string> unique_names;
     const std::size_t count = std::min(
@@ -543,7 +548,7 @@ int main(int argc, char** argv) {
     harness.expect(
         marrow::editor::agent_operation_descriptor_count() == kExpectedOperations.size(),
         "operation registry integrity",
-        "descriptor count must match the 44-operation protocol contract");
+        "descriptor count must match the operation protocol contract");
     const marrow::editor::AgentOperationDescriptor* registered_descriptors =
         marrow::editor::agent_operation_descriptors();
     for (std::size_t index = 0;
@@ -668,6 +673,30 @@ int main(int argc, char** argv) {
     // timeline are compared byte-for-byte to prove no authoring mutation.
     const std::string timeline_before_dry_runs = compact_scene_delta(initial_timeline);
     const std::string diagnostics_before_dry_runs = compact_scene_delta(initial_diagnostics);
+    harness.invoke(
+        "animation.create dry-run",
+        "{\"op\":\"animation.create\",\"args\":{\"name\":\"agent_empty\","
+        "\"dry_run\":true}}");
+    harness.invoke(
+        "animation.duplicate dry-run",
+        "{\"op\":\"animation.duplicate\",\"args\":{\"source\":\"idle\","
+        "\"name\":\"agent_idle_copy\",\"dry_run\":true}}");
+    harness.invoke(
+        "animation.rename dry-run",
+        "{\"op\":\"animation.rename\",\"args\":{\"from\":\"attack\","
+        "\"to\":\"agent_attack\",\"dry_run\":true}}");
+    harness.invoke(
+        "animation.delete dry-run",
+        "{\"op\":\"animation.delete\",\"args\":{\"name\":\"attack\","
+        "\"dry_run\":true}}");
+    harness.invoke(
+        "timeline.retime_keyframes dry-run",
+        "{\"op\":\"timeline.retime_keyframes\",\"args\":{\"delta\":0.05,"
+        "\"snap\":false,\"keys\":[{\"kind\":\"transform\","
+        "\"animation\":\"idle\",\"bone\":\"spine\","
+        "\"channel\":\"translate\",\"time\":0.5},{\"kind\":\"slot_color\","
+        "\"animation\":\"idle\",\"slot\":\"body\",\"time\":0.5}],"
+        "\"dry_run\":true}}");
     harness.invoke(
         "set_transform dry-run",
         "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
@@ -805,6 +834,21 @@ int main(int argc, char** argv) {
         "agent.resume",
         "resume must clear paused and terminated");
 
+    const DispatchObservation retimed = harness.invoke(
+        "timeline.retime_keyframes",
+        "{\"op\":\"timeline.retime_keyframes\",\"args\":{\"delta\":0.05,"
+        "\"snap\":false,\"keys\":[{\"kind\":\"transform\","
+        "\"animation\":\"idle\",\"bone\":\"spine\","
+        "\"channel\":\"translate\",\"time\":0.5},{\"kind\":\"slot_color\","
+        "\"animation\":\"idle\",\"slot\":\"body\",\"time\":0.5}]}}");
+    harness.expect(
+        number_member(retimed.scene_delta(), "key_count") == std::optional<double>(2.0) &&
+            number_member(retimed.scene_delta(), "applied_delta") ==
+                std::optional<double>(0.05),
+        "timeline.retime_keyframes",
+        "atomic retime metadata changed");
+    harness.invoke("undo timeline retime", "{\"op\":\"undo\"}");
+
     // Two merge-enabled transform edits must form one undo group. Temporary
     // JSON/binary comparison gives an implementation-independent key count.
     harness.invoke(
@@ -941,6 +985,45 @@ int main(int argc, char** argv) {
         "remove_draw_order_keyframe",
         "{\"op\":\"remove_draw_order_keyframe\",\"args\":{\"animation\":\"idle\","
         "\"time\":0.75}}");
+
+    const DispatchObservation created_animation = harness.invoke(
+        "animation.create",
+        "{\"op\":\"animation.create\",\"args\":{\"name\":\"agent_empty\"}}");
+    harness.expect(
+        string_member(created_animation.scene_delta(), "selected_animation") ==
+            std::optional<std::string_view>("agent_empty"),
+        "animation.create",
+        "created animation was not selected inside its transaction");
+    const DispatchObservation duplicated_animation = harness.invoke(
+        "animation.duplicate",
+        "{\"op\":\"animation.duplicate\",\"args\":{\"source\":\"idle\","
+        "\"name\":\"agent_idle_copy\"}}");
+    harness.expect(
+        string_member(duplicated_animation.scene_delta(), "selected_animation") ==
+            std::optional<std::string_view>("agent_idle_copy"),
+        "animation.duplicate",
+        "duplicated animation was not selected inside its transaction");
+    const DispatchObservation renamed_animation = harness.invoke(
+        "animation.rename",
+        "{\"op\":\"animation.rename\",\"args\":{\"from\":\"agent_empty\","
+        "\"to\":\"agent_empty_renamed\"}}");
+    harness.expect(
+        string_member(renamed_animation.scene_delta(), "selected_animation") ==
+            std::optional<std::string_view>("agent_idle_copy"),
+        "animation.rename",
+        "renaming an unselected animation changed the current preview");
+    const DispatchObservation deleted_animation = harness.invoke(
+        "animation.delete",
+        "{\"op\":\"animation.delete\",\"args\":{\"name\":\"agent_idle_copy\"}}");
+    const auto selected_after_delete =
+        string_member(deleted_animation.scene_delta(), "selected_animation");
+    harness.expect(
+        selected_after_delete.has_value() && !selected_after_delete->empty() &&
+            *selected_after_delete != "agent_idle_copy" &&
+            bool_member(deleted_animation.scene_delta(), "queue_enabled") ==
+                std::optional<bool>(false),
+        "animation.delete",
+        "deleting the selected animation did not atomically remap its preview");
 
     // Review-only commands must enqueue deterministic, whitelisted targets,
     // allocate monotonic IDs, and never touch files before user approval.

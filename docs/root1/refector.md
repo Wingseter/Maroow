@@ -1,23 +1,23 @@
 # Editor Architecture Refactor Roadmap
 
-This document describes the editor architecture gate between the runtime-first parameter stories MAR-120–126 and parameter authoring story MAR-127. The architecture and file-format source of truth remains [`discription.md`](discription.md); this document owns the refactor sequence and compatibility boundaries.
+This document records the completed editor architecture gate that follows MAR-120 and precedes new editor feature work. The architecture and file-format source of truth remains [`discription.md`](discription.md); this document owns the refactor boundaries and completion record.
 
 ## Why this refactor exists
 
 At the start of the 2026-07-12 refactor, `src/editor/shell_main.cpp` was 10,310 lines and `ShellState` owned project data, compiled runtime state, playback, history, agent state, UI resources, selection, and editor gestures. Project history was also exposed through `ProjectCommandStack`, agent dispatch accepted `ShellState`, and operation metadata was maintained separately from string-branched handlers. The `marrow_editor` target compiled shell/UI code, including an `icon_registry.cpp` source that was also compiled into `marrow_editor_shell`.
 
-The refactor replaces those overlapping ownership paths before new parameter-modeling UI is added. It is a behavior-preserving change: it does not add parameter/deformer features or change runtime/file-format decisions.
+The refactor replaced those overlapping ownership paths before new editing and parameter-modeling UI is added. It is a behavior-preserving change: it did not add parameter/deformer features or change runtime/file-format decisions.
 
 ### Current implementation checkpoint
 
-The refactor is implemented in the current working tree while the new PRD entries remain `todo` for Ralph's one-story-per-iteration execution record:
+The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04512` at `2026-07-12T13:34:04+09:00`. MAR-129–140 are therefore recorded as completed PRD stories rather than being replayed by Ralph:
 
-- `shell_main.cpp` is 748 lines and is limited to CLI/platform startup, theme and docking setup, frame composition, and shutdown; `shell_state.hpp` is 606 lines and is the UI-only state entry point.
+- The refactor checkpoint reduced `shell_main.cpp` to 748 lines and `shell_state.hpp` to 606 lines. The current P0 tree is 750/718 lines respectively; the added state is limited to P0 camera, inspector/viewport gestures, timeline selection/clipboard, and animation-management presentation.
 - The legacy `shell_types.hpp` and private shell undo stack are gone.
 - Preview/playback, asset watching, timeline, constraints, selection, inspector, weight-paint, viewport UI, project/runtime panels, and agent panels have feature-owned source/header pairs.
 - `marrow_editor` contains UI-free project/session/agent authoring code and links only `marrow_runtime` and Zlib; icon/UI/OpenGL code is compiled only into `marrow_editor_shell`.
 - The C API and socket dispatcher use `EditorSession` plus `AgentControlState`, and C ABI version 1 is unchanged.
-- CTest discovers seven source-root compatibility tests, and the agent smoke exercises all 44 registered operations.
+- CTest discovers seven source-root compatibility tests. The refactor baseline characterized 44 operations; editing P0 adds animation CRUD and atomic timeline retime, so the current agent smoke exercises all 49 registered operations.
 
 ## Target ownership
 
@@ -42,7 +42,7 @@ All project and transient preview edits use one non-nestable session transaction
 
 Commit validates the candidate project and performs any required runtime rebuild atomically. Validation or rebuild failure, and explicit cancellation, restore the prior project and preview state and create no history entry. No-change transactions likewise create no history entry.
 
-History remains capped at 100 entries and keeps current merge/grouping behavior. Preview skin and attachment composition remains transient and does not mark the project dirty, but it remains undoable and redoable. `ProjectCommand`, `ProjectCommandStack`, and `make_project_command` are removed after production call sites and their smoke coverage move to `EditorSession`.
+History remains capped at 100 entries and keeps current merge/grouping behavior. Preview skin and attachment composition remains transient and does not mark the project dirty, but it remains undoable and redoable. `ProjectCommand`, `ProjectCommandStack`, and `make_project_command` were removed after production call sites and smoke coverage moved to `EditorSession`.
 
 ## Agent and C API boundary
 
@@ -79,30 +79,32 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | Story | Purpose | Depends on | Status |
 | --- | --- | --- | --- |
 | MAR-120 | Fix parameter/deformer format boundary and roadmap slices | MAR-119 | Done (validated 2026-07-12) |
-| MAR-121–126 | Runtime-first parameter definitions, export, shapes, deformers, ArtPath, expressions/lip-sync | Sequential from MAR-120 | Todo |
-| MAR-129 | Focused CTest guardrail | MAR-126 | Todo |
-| MAR-130 | Characterize external behavior and all 44 agent operations | MAR-129 | Todo |
-| MAR-131 | Unified session transactions and history | MAR-130 | Todo |
-| MAR-132 | Preview controller | MAR-131 | Todo |
-| MAR-133 | EditorSession lifecycle and ownership | MAR-132 | Todo |
-| MAR-134 | C API and agent-context migration | MAR-133 | Todo |
-| MAR-135 | Registry-driven dispatcher and handler modules | MAR-134 | Todo |
-| MAR-136 | Timeline module | MAR-135 | Todo |
-| MAR-137 | Constraint module | MAR-136 | Todo |
-| MAR-138 | Selection and inspector modules | MAR-137 | Todo |
-| MAR-139 | Weight-paint and viewport modules | MAR-138 | Todo |
-| MAR-140 | Composition and build-target cleanup | MAR-139 | Todo |
-| MAR-127 | Parameter-modeling editor tools | MAR-140 | Todo |
-| MAR-128 | Parameter/deformer agent commands | MAR-127 | Todo |
+| MAR-129 | Focused CTest guardrail | MAR-120 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-130 | Characterize external behavior and the baseline 44 agent operations | MAR-129 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00; current registry 49) |
+| MAR-131 | Unified session transactions and history | MAR-130 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-132 | Preview controller | MAR-131 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-133 | EditorSession lifecycle and ownership | MAR-132 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-134 | C API and agent-context migration | MAR-133 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-135 | Registry-driven dispatcher and handler modules | MAR-134 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-136 | Timeline module | MAR-135 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-137 | Constraint module extraction (no new rename/delete behavior) | MAR-136 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-138 | Selection and inspector modules | MAR-137 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-139 | Weight-paint and viewport modules | MAR-138 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-140 | Composition and build-target cleanup | MAR-139 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
+| MAR-141–153 | Editing P0: trustworthy authoring, direct manipulation, dopesheet, slot timelines, animation CRUD, E2E guardrail | MAR-140, then story DAG | Done (current worktree, 2026-07-12) |
+| MAR-121–126 | Runtime-first parameter definitions, export, shapes, deformers, ArtPath, expressions/lip-sync | Sequential from MAR-120 | Open |
+| MAR-127 | Parameter-modeling editor tools | MAR-126, MAR-140, MAR-153 | Open |
+| MAR-128 | Parameter/deformer agent commands | MAR-127 | Open |
+| MAR-154–172 | Editing P1 backlog | MAR-128 and prior P1 slice | Open backlog |
 
-Numeric IDs are intentionally not execution order: MAR-129–140 are inserted before MAR-127 without renumbering existing stories.
+Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before MAR-121; that checkpoint is now implemented. The next active sequence is MAR-121–128, followed by the ordered MAR-154–172 P1 backlog. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-166 rather than being credited to the refactor-only MAR-137.
 
 ## Compatibility boundary
 
 The refactor must preserve:
 
 - C ABI version 1, all C functions, status codes, and ownership rules;
-- all 44 existing agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs;
+- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus the five additive P0 operations for animation CRUD and atomic timeline retime (49 current operations);
 - `.marrow`, `.mskl`, `.mbin`, and `.matl` schemas and versions;
 - byte-identical unchanged `.marrow` serialization and equivalent `.mskl`/`.mbin` exports;
 - checked-in fixtures, playback behavior, transient preview composition, dirty semantics, and history grouping;

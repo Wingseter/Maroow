@@ -364,6 +364,25 @@ ImVec2 screen_from_world(
         static_cast<double>(world_y));
 }
 
+ViewportWorldPoint world_from_screen(
+    const ViewportLayout& layout,
+    const ImVec2& screen_position) {
+    const double pixels_per_unit = static_cast<double>(layout.pixels_per_unit);
+    if (pixels_per_unit <= 0.0) {
+        return ViewportWorldPoint{layout.world_center_x, layout.world_center_y};
+    }
+
+    return ViewportWorldPoint{
+        layout.world_center_x +
+            (static_cast<double>(screen_position.x) -
+             static_cast<double>(layout.screen_center.x)) /
+                pixels_per_unit,
+        layout.world_center_y -
+            (static_cast<double>(screen_position.y) -
+             static_cast<double>(layout.screen_center.y)) /
+                pixels_per_unit};
+}
+
 std::array<float, 16> viewport_projection_matrix(const ViewportLayout& layout) {
     const double pixels_per_unit =
         std::max(static_cast<double>(layout.pixels_per_unit), 0.0001);
@@ -452,17 +471,12 @@ float first_grid_line(float anchor, float minimum, float spacing) {
     return minimum + (offset < 0.0f ? offset + spacing : offset);
 }
 
-std::optional<ViewportLayout> build_viewport_layout(
-    const ShellState& state,
-    const ImVec2& canvas_origin,
-    const ImVec2& canvas_size) {
-    if (!state.load_result || !state.preview_skeleton) {
-        return std::nullopt;
-    }
+namespace {
 
-    const auto& skeleton = *state.load_result.skeleton_data;
-    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
-    if (world_transforms.size() != skeleton.bones().size() || world_transforms.empty()) {
+std::optional<ViewportCamera> camera_for_pose(
+    const marrow::runtime::Skeleton& skeleton) {
+    const auto& world_transforms = skeleton.bone_world_transforms();
+    if (world_transforms.empty()) {
         return std::nullopt;
     }
 
@@ -473,7 +487,7 @@ std::optional<ViewportLayout> build_viewport_layout(
     bool has_active_bone = false;
 
     for (std::size_t bone_index = 0; bone_index < world_transforms.size(); ++bone_index) {
-        if (!state.preview_skeleton->is_bone_active(bone_index)) {
+        if (!skeleton.is_bone_active(bone_index)) {
             continue;
         }
 
@@ -493,8 +507,63 @@ std::optional<ViewportLayout> build_viewport_layout(
         }
     }
 
-    const double extent_x = std::max(max_x - min_x, 80.0);
-    const double extent_y = std::max(max_y - min_y, 80.0);
+    return ViewportCamera{
+        true,
+        (min_x + max_x) * 0.5,
+        (min_y + max_y) * 0.5,
+        std::max(max_x - min_x, 80.0),
+        std::max(max_y - min_y, 80.0)};
+}
+
+} // namespace
+
+bool initialize_viewport_camera_from_preview_pose(ShellState* state) {
+    if (state == nullptr || state->preview_skeleton == nullptr) {
+        return false;
+    }
+
+    const std::optional<ViewportCamera> camera = camera_for_pose(*state->preview_skeleton);
+    if (!camera.has_value()) {
+        state->viewport_camera = {};
+        return false;
+    }
+
+    state->viewport_camera = *camera;
+    return true;
+}
+
+bool frame_viewport_camera_to_preview_pose(ShellState* state) {
+    if (state == nullptr || state->preview_skeleton == nullptr) {
+        return false;
+    }
+
+    const std::optional<ViewportCamera> camera = camera_for_pose(*state->preview_skeleton);
+    if (!camera.has_value()) {
+        return false;
+    }
+
+    state->viewport_camera = *camera;
+    state->viewport.pan_x = 0.0;
+    state->viewport.pan_y = 0.0;
+    state->viewport.zoom = 1.0;
+    return true;
+}
+
+std::optional<ViewportLayout> build_viewport_layout(
+    const ShellState& state,
+    const ImVec2& canvas_origin,
+    const ImVec2& canvas_size) {
+    if (!state.load_result || !state.preview_skeleton ||
+        !state.viewport_camera.initialized) {
+        return std::nullopt;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
+    if (world_transforms.size() != skeleton.bones().size() || world_transforms.empty()) {
+        return std::nullopt;
+    }
+
     const float fit_width = std::max(32.0f, canvas_size.x - 96.0f);
     const float fit_height = std::max(32.0f, canvas_size.y - 96.0f);
 
@@ -505,13 +574,13 @@ std::optional<ViewportLayout> build_viewport_layout(
     layout.screen_center = ImVec2(
         canvas_origin.x + (canvas_size.x * 0.5f) + static_cast<float>(state.viewport.pan_x),
         canvas_origin.y + (canvas_size.y * 0.5f) + static_cast<float>(state.viewport.pan_y));
-    layout.world_center_x = (min_x + max_x) * 0.5;
-    layout.world_center_y = (min_y + max_y) * 0.5;
+    layout.world_center_x = state.viewport_camera.world_center_x;
+    layout.world_center_y = state.viewport_camera.world_center_y;
     layout.pixels_per_unit = std::max(
         0.25f,
         std::min(
-            fit_width / static_cast<float>(extent_x),
-            fit_height / static_cast<float>(extent_y))) *
+            fit_width / static_cast<float>(state.viewport_camera.fit_extent_x),
+            fit_height / static_cast<float>(state.viewport_camera.fit_extent_y))) *
         static_cast<float>(state.viewport.zoom);
     layout.render_joint_radius =
         std::clamp(4.0f + (layout.pixels_per_unit * 0.05f), 4.0f, 10.0f);
@@ -530,6 +599,46 @@ std::optional<ViewportLayout> build_viewport_layout(
     }
 
     return layout;
+}
+
+bool zoom_viewport_at_screen_position(
+    ShellState* state,
+    const ImVec2& canvas_origin,
+    const ImVec2& canvas_size,
+    const ImVec2& screen_position,
+    double zoom_factor) {
+    if (state == nullptr || !std::isfinite(zoom_factor) || zoom_factor <= 0.0) {
+        return false;
+    }
+
+    const std::optional<ViewportLayout> before =
+        build_viewport_layout(*state, canvas_origin, canvas_size);
+    if (!before.has_value()) {
+        return false;
+    }
+
+    const ViewportWorldPoint anchor_world = world_from_screen(*before, screen_position);
+    const double zoom_before = state->viewport.zoom;
+    const double zoom_after = std::clamp(zoom_before * zoom_factor, 0.2, 6.0);
+    if (zoom_after == zoom_before) {
+        return false;
+    }
+
+    state->viewport.zoom = zoom_after;
+    const std::optional<ViewportLayout> after =
+        build_viewport_layout(*state, canvas_origin, canvas_size);
+    if (!after.has_value()) {
+        state->viewport.zoom = zoom_before;
+        return false;
+    }
+
+    const ImVec2 remapped_anchor =
+        screen_from_world(*after, anchor_world.x, anchor_world.y);
+    state->viewport.pan_x +=
+        static_cast<double>(screen_position.x - remapped_anchor.x);
+    state->viewport.pan_y +=
+        static_cast<double>(screen_position.y - remapped_anchor.y);
+    return true;
 }
 
 double onion_skin_sample_time_for_preview(

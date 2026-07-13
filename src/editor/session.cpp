@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "marrow/allocator.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor {
 namespace {
@@ -52,6 +53,18 @@ bool preview_states_equal(const PreviewState& left, const PreviewState& right) {
         left.reverse == right.reverse &&
         left.skin_names == right.skin_names &&
         attachment_overrides_equal(left.slot_overrides, right.slot_overrides);
+}
+
+bool preview_playback_equal(const PreviewState& left, const PreviewState& right) {
+    return left.animation_name == right.animation_name &&
+        left.time_seconds == right.time_seconds &&
+        left.loop == right.loop &&
+        left.playing == right.playing &&
+        left.queue_enabled == right.queue_enabled &&
+        left.queued_animation_name == right.queued_animation_name &&
+        left.queue_delay == right.queue_delay &&
+        left.mix_duration == right.mix_duration &&
+        left.reverse == right.reverse;
 }
 
 std::optional<std::size_t> root_bone_index(const runtime::SkeletonData& data) {
@@ -241,6 +254,29 @@ public:
             state_.time_seconds = 0.0;
         }
         normalize_state(*data_, &state_);
+        if (!refresh_pose(true, error_out)) {
+            state_ = previous;
+            refresh_pose(false, nullptr);
+            return false;
+        }
+        return true;
+    }
+
+    bool select_setup_pose(std::string* error_out) {
+        if (data_ == nullptr) {
+            if (error_out != nullptr) {
+                *error_out = "Preview runtime data is not available.";
+            }
+            return false;
+        }
+        const PreviewState previous = state_;
+        state_.animation_name.clear();
+        state_.time_seconds = 0.0;
+        state_.playing = false;
+        state_.queue_enabled = false;
+        state_.queued_animation_name.clear();
+        state_.queue_delay = 0.0;
+        state_.mix_duration.reset();
         if (!refresh_pose(true, error_out)) {
             state_ = previous;
             refresh_pose(false, nullptr);
@@ -452,7 +488,8 @@ private:
         }
         state->skin_names = std::move(valid_skins);
 
-        if (data.find_animation(state->animation_name) == nullptr) {
+        if (!state->animation_name.empty() &&
+            data.find_animation(state->animation_name) == nullptr) {
             state->animation_name =
                 data.animations().empty() ? std::string{} : data.animations().front().name;
         }
@@ -725,8 +762,7 @@ struct EditorSession::Impl {
     struct HistorySnapshot {
         ProjectData project;
         std::string serialized_project;
-        std::vector<std::string> skin_names;
-        std::vector<std::optional<PreviewAttachmentOverride>> slot_overrides;
+        PreviewState preview_state;
     };
 
     struct HistoryEntry {
@@ -740,7 +776,11 @@ struct EditorSession::Impl {
         EditDescriptor descriptor;
         HistorySnapshot before_history;
         PreviewController::Snapshot before_preview;
+        std::shared_ptr<const runtime::SkeletonData> before_runtime;
+        runtime::AnimationStateSnapshot before_playback;
+        std::optional<PreviewState> pending_preview_state;
         bool runtime_is_current{false};
+        bool live_refresh_applied{false};
     };
 
     ProjectLoadResult load;
@@ -766,16 +806,14 @@ struct EditorSession::Impl {
             snapshot.project = *load.project;
             snapshot.serialized_project = serialize_project(*load.project);
         }
-        snapshot.skin_names = preview.state().skin_names;
-        snapshot.slot_overrides = preview.state().slot_overrides;
+        snapshot.preview_state = preview.state();
         return snapshot;
     }
 
     static bool histories_equal(const HistorySnapshot& left, const HistorySnapshot& right) {
         return left.serialized_project == right.serialized_project &&
             left.project.source_path == right.project.source_path &&
-            left.skin_names == right.skin_names &&
-            attachment_overrides_equal(left.slot_overrides, right.slot_overrides);
+            preview_states_equal(left.preview_state, right.preview_state);
     }
 
     void update_dirty() {
@@ -836,10 +874,88 @@ struct EditorSession::Impl {
             active_transaction.reset();
             return;
         }
-        *load.project = active_transaction->before_history.project;
-        preview.restore(active_transaction->before_preview, nullptr);
+        ActiveTransaction transaction = std::move(*active_transaction);
+        *load.project = transaction.before_history.project;
+        if (transaction.live_refresh_applied && transaction.before_runtime != nullptr) {
+            PreviewController restored_preview;
+            std::string ignored_error;
+            if (restored_preview.bind(
+                    transaction.before_runtime,
+                    transaction.before_preview.state,
+                    false,
+                    &ignored_error) &&
+                restored_preview.restore_playback(
+                    transaction.before_playback,
+                    &ignored_error)) {
+                restored_preview.restore_transient_state(transaction.before_preview);
+                load.skeleton_data = std::move(transaction.before_runtime);
+                preview = std::move(restored_preview);
+                ++runtime_revision;
+                ++preview_revision;
+            }
+        } else {
+            preview.restore(transaction.before_preview, nullptr);
+        }
         active_transaction.reset();
         update_dirty();
+    }
+
+    SessionResult refresh_runtime(std::uint64_t transaction_id) {
+        if (!active_transaction.has_value() ||
+            active_transaction->id != transaction_id) {
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    "The edit transaction is no longer active.")};
+        }
+
+        const ProjectRuntimeResult runtime_result = build_project_runtime(
+            *load.project,
+            *load.base_skeleton_document);
+        if (!runtime_result) {
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::RuntimeBuildFailed,
+                    "The live edit did not produce valid runtime data.",
+                    runtime_result.error)};
+        }
+
+        const PreviewController::Snapshot current_preview = preview.capture();
+        const PreviewState desired_preview =
+            active_transaction->pending_preview_state.value_or(current_preview.state);
+        const bool playback_changed =
+            !preview_playback_equal(current_preview.state, desired_preview);
+        const runtime::AnimationStateSnapshot playback_snapshot =
+            preview.animation_state()->capture_state();
+        PreviewController next_preview;
+        std::string preview_error;
+        if (!next_preview.bind(
+                runtime_result.skeleton_data,
+                desired_preview,
+                !playback_changed,
+                &preview_error) ||
+            (!playback_changed &&
+             !next_preview.restore_playback(playback_snapshot, &preview_error))) {
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::PreviewUpdateFailed,
+                    std::move(preview_error))};
+        }
+        if (!playback_changed) {
+            next_preview.restore_transient_state(current_preview);
+        }
+
+        load.skeleton_data = runtime_result.skeleton_data;
+        preview = std::move(next_preview);
+        active_transaction->runtime_is_current = true;
+        active_transaction->live_refresh_applied = true;
+        update_dirty();
+        ++runtime_revision;
+        ++preview_revision;
+        return SessionResult{true, std::nullopt};
     }
 
     void push_history(HistoryEntry entry) {
@@ -876,20 +992,21 @@ struct EditorSession::Impl {
         }
 
         ActiveTransaction transaction = *active_transaction;
-        const HistorySnapshot after = capture_history();
-        if (histories_equal(transaction.before_history, after)) {
+        HistorySnapshot requested_after = capture_history();
+        if (transaction.pending_preview_state.has_value()) {
+            requested_after.preview_state = *transaction.pending_preview_state;
+        }
+        if (histories_equal(transaction.before_history, requested_after)) {
             active_transaction.reset();
             return {};
         }
 
         const bool project_changed =
-            transaction.before_history.serialized_project != after.serialized_project ||
-            transaction.before_history.project.source_path != after.project.source_path;
-        const bool composition_changed =
-            transaction.before_history.skin_names != after.skin_names ||
-            !attachment_overrides_equal(
-                transaction.before_history.slot_overrides,
-                after.slot_overrides);
+            transaction.before_history.serialized_project != requested_after.serialized_project ||
+            transaction.before_history.project.source_path != requested_after.project.source_path;
+        const bool preview_changed = !preview_states_equal(
+            transaction.before_history.preview_state,
+            requested_after.preview_state);
 
         std::shared_ptr<const runtime::SkeletonData> next_runtime = load.skeleton_data;
         if (project_changed && !transaction.runtime_is_current) {
@@ -916,12 +1033,19 @@ struct EditorSession::Impl {
             !transaction.runtime_is_current) {
             std::string preview_error;
             const PreviewController::Snapshot preserved_preview = preview.capture();
-            PreviewState preserved_state = preserved_preview.state;
+            const bool playback_changed = !preview_playback_equal(
+                preserved_preview.state,
+                requested_after.preview_state);
             const runtime::AnimationStateSnapshot playback_snapshot =
                 preview.animation_state()->capture_state();
             PreviewController next_preview;
-            if (!next_preview.bind(next_runtime, std::move(preserved_state), true, &preview_error) ||
-                !next_preview.restore_playback(playback_snapshot, &preview_error)) {
+            if (!next_preview.bind(
+                    next_runtime,
+                    requested_after.preview_state,
+                    !playback_changed,
+                    &preview_error) ||
+                (!playback_changed &&
+                 !next_preview.restore_playback(playback_snapshot, &preview_error))) {
                 *load.project = transaction.before_history.project;
                 preview.restore(transaction.before_preview, nullptr);
                 active_transaction.reset();
@@ -932,18 +1056,51 @@ struct EditorSession::Impl {
                         SessionErrorCode::PreviewUpdateFailed,
                         std::move(preview_error))};
             }
-            next_preview.restore_transient_state(preserved_preview);
+            if (!playback_changed) {
+                next_preview.restore_transient_state(preserved_preview);
+            }
             preview = std::move(next_preview);
             load.skeleton_data = std::move(next_runtime);
             ++runtime_revision;
             ++preview_revision;
-        } else if (composition_changed) {
+        } else if (preview_changed) {
+            if (transaction.pending_preview_state.has_value()) {
+                const PreviewController::Snapshot current_preview = preview.capture();
+                const bool playback_changed = !preview_playback_equal(
+                    current_preview.state,
+                    requested_after.preview_state);
+                std::string preview_error;
+                if (!preview.restore(
+                        PreviewController::Snapshot{
+                            requested_after.preview_state,
+                            playback_changed
+                                ? runtime::RootMotionDelta{}
+                                : current_preview.root_motion_delta,
+                            playback_changed
+                                ? runtime::RootMotionDelta{}
+                                : current_preview.root_motion_total,
+                            playback_changed
+                                ? std::vector<runtime::AnimationEvent>{}
+                                : current_preview.events},
+                        &preview_error)) {
+                    *load.project = transaction.before_history.project;
+                    preview.restore(transaction.before_preview, nullptr);
+                    active_transaction.reset();
+                    update_dirty();
+                    return SessionResult{
+                        false,
+                        make_error(
+                            SessionErrorCode::PreviewUpdateFailed,
+                            std::move(preview_error))};
+                }
+            }
             ++preview_revision;
         }
 
         if (project_changed) {
             ++project_revision;
         }
+        const HistorySnapshot after = capture_history();
         push_history(HistoryEntry{transaction.descriptor, transaction.before_history, after});
         active_transaction.reset();
         update_dirty();
@@ -966,8 +1123,8 @@ struct EditorSession::Impl {
         const bool project_changed =
             current.serialized_project != target.serialized_project ||
             current.project.source_path != target.project.source_path;
-        const bool composition_changed = current.skin_names != target.skin_names ||
-            !attachment_overrides_equal(current.slot_overrides, target.slot_overrides);
+        const bool preview_changed =
+            !preview_states_equal(current.preview_state, target.preview_state);
         *load.project = target.project;
 
         std::shared_ptr<const runtime::SkeletonData> next_runtime = load.skeleton_data;
@@ -987,16 +1144,21 @@ struct EditorSession::Impl {
             next_runtime = runtime_result.skeleton_data;
         }
 
-        PreviewState desired_preview = preview.state();
-        desired_preview.skin_names = target.skin_names;
-        desired_preview.slot_overrides = target.slot_overrides;
         if (project_changed && has_edit_impact(entry.descriptor.impacts, EditImpact::Runtime)) {
+            const bool playback_changed = !preview_playback_equal(
+                current_preview.state,
+                target.preview_state);
             const runtime::AnimationStateSnapshot playback_snapshot =
                 preview.animation_state()->capture_state();
             PreviewController next_preview;
             std::string preview_error;
-            if (!next_preview.bind(next_runtime, std::move(desired_preview), true, &preview_error) ||
-                !next_preview.restore_playback(playback_snapshot, &preview_error)) {
+            if (!next_preview.bind(
+                    next_runtime,
+                    target.preview_state,
+                    !playback_changed,
+                    &preview_error) ||
+                (!playback_changed &&
+                 !next_preview.restore_playback(playback_snapshot, &preview_error))) {
                 *load.project = current.project;
                 preview.restore(current_preview, nullptr);
                 return SessionResult{
@@ -1005,19 +1167,30 @@ struct EditorSession::Impl {
                         SessionErrorCode::PreviewUpdateFailed,
                         std::move(preview_error))};
             }
-            next_preview.restore_transient_state(current_preview);
+            if (!playback_changed) {
+                next_preview.restore_transient_state(current_preview);
+            }
             preview = std::move(next_preview);
             load.skeleton_data = std::move(next_runtime);
             ++runtime_revision;
             ++preview_revision;
-        } else if (composition_changed) {
+        } else if (preview_changed) {
+            const bool playback_changed = !preview_playback_equal(
+                current_preview.state,
+                target.preview_state);
             std::string preview_error;
             if (!preview.restore(
                     PreviewController::Snapshot{
-                        std::move(desired_preview),
-                        current_preview.root_motion_delta,
-                        current_preview.root_motion_total,
-                        current_preview.events},
+                        target.preview_state,
+                        playback_changed
+                            ? runtime::RootMotionDelta{}
+                            : current_preview.root_motion_delta,
+                        playback_changed
+                            ? runtime::RootMotionDelta{}
+                            : current_preview.root_motion_total,
+                        playback_changed
+                            ? std::vector<runtime::AnimationEvent>{}
+                            : current_preview.events},
                     &preview_error)) {
                 *load.project = current.project;
                 preview.restore(current_preview, nullptr);
@@ -1114,7 +1287,8 @@ ProjectLoadResult EditorSession::reload() {
     PreviewState reloaded_state = impl_->preview.state();
     reloaded_state.skin_names = attempted.project->editor_metadata.preview_skins;
     reloaded_state.slot_overrides.assign(attempted.skeleton_data->slots().size(), std::nullopt);
-    if (attempted.skeleton_data->find_animation(reloaded_state.animation_name) == nullptr) {
+    if (!reloaded_state.animation_name.empty() &&
+        attempted.skeleton_data->find_animation(reloaded_state.animation_name) == nullptr) {
         reloaded_state.animation_name = attempted.project->editor_metadata.active_animation;
     }
     PreviewController next_preview;
@@ -1242,6 +1416,18 @@ bool EditorSession::select_animation(std::string_view animation_name, bool reset
     }
     std::string error;
     if (!impl_->preview.select_animation(animation_name, reset_time, &error)) {
+        return false;
+    }
+    ++impl_->preview_revision;
+    return true;
+}
+
+bool EditorSession::select_setup_pose() {
+    if (!impl_->loaded() || impl_->active_transaction.has_value()) {
+        return false;
+    }
+    std::string error;
+    if (!impl_->preview.select_setup_pose(&error)) {
         return false;
     }
     ++impl_->preview_revision;
@@ -1397,6 +1583,125 @@ SessionResult EditorSession::reset_preview_attachment(
     return transaction.commit();
 }
 
+SessionResult EditorSession::edit_animation_catalog(
+    AnimationCatalogEdit edit,
+    EditDescriptor descriptor) {
+    if (!impl_->loaded()) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::NoProject,
+                "No editor project is open.")};
+    }
+
+    EditTransaction transaction = begin_edit(std::move(descriptor));
+    if (!transaction) {
+        return SessionResult{false, transaction.error()};
+    }
+
+    AuthoringResult authoring_result;
+    switch (edit.kind) {
+    case AnimationCatalogEditKind::Create:
+        authoring_result = create_animation(
+            transaction.project(),
+            *impl_->load.base_skeleton_document,
+            edit.destination_animation);
+        break;
+    case AnimationCatalogEditKind::Duplicate:
+        authoring_result = duplicate_animation(
+            transaction.project(),
+            *impl_->load.base_skeleton_document,
+            edit.source_animation,
+            edit.destination_animation);
+        break;
+    case AnimationCatalogEditKind::Rename:
+        authoring_result = rename_animation(
+            transaction.project(),
+            *impl_->load.base_skeleton_document,
+            edit.source_animation,
+            edit.destination_animation);
+        break;
+    case AnimationCatalogEditKind::Delete:
+        authoring_result = delete_animation(
+            transaction.project(),
+            *impl_->load.base_skeleton_document,
+            edit.source_animation);
+        break;
+    }
+
+    if (!authoring_result) {
+        const std::string message = authoring_result.error;
+        transaction.cancel();
+        return SessionResult{
+            false,
+            Impl::make_error(SessionErrorCode::InvalidTransaction, message)};
+    }
+    if (!authoring_result.changed) {
+        transaction.cancel();
+        return {};
+    }
+
+    PreviewState desired_preview = impl_->preview.state();
+    const auto select_animation = [&](std::string animation_name) {
+        if (desired_preview.animation_name == animation_name) {
+            return;
+        }
+        desired_preview.animation_name = std::move(animation_name);
+        desired_preview.time_seconds = 0.0;
+        desired_preview.playing = false;
+    };
+    const auto remove_queue = [&]() {
+        desired_preview.queue_enabled = false;
+        desired_preview.queued_animation_name.clear();
+    };
+
+    switch (edit.kind) {
+    case AnimationCatalogEditKind::Create:
+    case AnimationCatalogEditKind::Duplicate:
+        select_animation(edit.destination_animation);
+        break;
+    case AnimationCatalogEditKind::Rename:
+        if (desired_preview.animation_name == edit.source_animation) {
+            // Rename is identity-preserving: keep playback time and running
+            // state while remapping the catalog reference.
+            desired_preview.animation_name = edit.destination_animation;
+        }
+        if (desired_preview.queued_animation_name == edit.source_animation) {
+            desired_preview.queued_animation_name = edit.destination_animation;
+        }
+        if (desired_preview.queue_enabled &&
+            desired_preview.queued_animation_name == desired_preview.animation_name) {
+            remove_queue();
+        }
+        break;
+    case AnimationCatalogEditKind::Delete:
+        if (desired_preview.animation_name == edit.source_animation) {
+            std::string replacement = transaction.project()->editor_metadata.active_animation;
+            if (replacement.empty() || replacement == edit.source_animation) {
+                const auto replacement_it = std::find_if(
+                    impl_->load.skeleton_data->animations().begin(),
+                    impl_->load.skeleton_data->animations().end(),
+                    [&](const runtime::AnimationData& animation) {
+                        return animation.name != edit.source_animation;
+                    });
+                replacement = replacement_it != impl_->load.skeleton_data->animations().end()
+                    ? replacement_it->name
+                    : std::string{};
+            }
+            select_animation(std::move(replacement));
+        }
+        if (desired_preview.queued_animation_name == edit.source_animation ||
+            (desired_preview.queue_enabled &&
+             desired_preview.queued_animation_name == desired_preview.animation_name)) {
+            remove_queue();
+        }
+        break;
+    }
+
+    impl_->active_transaction->pending_preview_state = std::move(desired_preview);
+    return transaction.commit();
+}
+
 EditorSession::EditTransaction EditorSession::begin_edit(EditDescriptor descriptor) {
     if (!impl_->loaded()) {
         return EditTransaction(
@@ -1421,6 +1726,10 @@ EditorSession::EditTransaction EditorSession::begin_edit(EditDescriptor descript
         std::move(descriptor),
         impl_->capture_history(),
         impl_->preview.capture(),
+        impl_->load.skeleton_data,
+        impl_->preview.animation_state()->capture_state(),
+        std::nullopt,
+        false,
         false};
     return EditTransaction(impl_.get(), id);
 }
@@ -1565,8 +1874,7 @@ SessionResult EditorSession::commit_external_edit(
     Impl::HistorySnapshot before_history;
     before_history.project = before_project;
     before_history.serialized_project = serialize_project(before_project);
-    before_history.skin_names = before_preview.skin_names;
-    before_history.slot_overrides = before_preview.slot_overrides;
+    before_history.preview_state = before_preview;
     const PreviewController::Snapshot current_preview = impl_->preview.capture();
     const std::uint64_t id = impl_->next_transaction_id++;
     impl_->active_transaction = Impl::ActiveTransaction{
@@ -1578,7 +1886,11 @@ SessionResult EditorSession::commit_external_edit(
             current_preview.root_motion_delta,
             current_preview.root_motion_total,
             current_preview.events},
-        runtime_is_current};
+        impl_->load.skeleton_data,
+        impl_->preview.animation_state()->capture_state(),
+        std::nullopt,
+        runtime_is_current,
+        false};
     return impl_->commit(id);
 }
 
@@ -1723,6 +2035,23 @@ bool EditorSession::EditTransaction::reset_preview_attachment(std::size_t slot_i
         return false;
     }
     return true;
+}
+
+SessionResult EditorSession::EditTransaction::refresh_runtime() {
+    if (!*this) {
+        return SessionResult{
+            false,
+            error_.has_value()
+                ? error_
+                : std::optional<SessionError>(Impl::make_error(
+                      SessionErrorCode::InvalidTransaction,
+                      "The edit transaction is not active."))};
+    }
+    SessionResult result = impl_->refresh_runtime(transaction_id_);
+    if (!result) {
+        error_ = result.error;
+    }
+    return result;
 }
 
 SessionResult EditorSession::EditTransaction::commit() {

@@ -133,6 +133,8 @@
   1. Start Maroow with agent port: `./build/marrow_editor_shell --agent-port 9876`
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
+- MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py`
+- Editing P0 agent registry validation (49 operations, including animation CRUD and atomic retime): `./build/marrow_agent_dispatch_smoke`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
 - Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, draw-order, event, state-preview, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
@@ -157,6 +159,30 @@
 - Fixture editor project inspection: `python3 -m json.tool assets/fixtures/player_idle.marrow > /dev/null`
 - Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation, clipping-mask propagation, sequence frame selection, GPU-skinned weighted-mesh draw preparation, animated slot presentation, slot blend modes, straight-alpha/PMA two-color tint propagation, and the single-color shader fast path from the checked-in fixtures
 - To run the full autonomous loop with Codex against the expanded plan: `ralph build 100`
+
+## MAR-141–153 Editing P0 Validation Results
+
+Validated 2026-07-12. The imported-rig authoring P0 is complete; MAR-121 is the next open product story.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Honest setup + auto-key | Setup transforms/colors are read-only; inspector R/T/S/shear materializes the effective base track, converts non-zero setup rotation correctly, previews live, and rolls back exactly | PASS |
+| Stable viewport + move gizmo | Camera inverse/cursor zoom/Fit plus root, transformed child, IK target, singular-parent cancel, one-drag undo/redo | PASS |
+| Slot lanes + dopesheet | Color/attachment add/edit/remove, stable same-time identities, exact-playhead remove, box/toggle selection, multi-key retime, typed clipboard and compatible-lane paste | PASS |
+| Animation catalog | Ordered `.marrow.animation_edits`, create/duplicate/rename/delete UI and agent operations, unknown-family preservation, atomic queue/preview cascade | PASS |
+| Agent/MCP parity | C++ registry and Python MCP facade expose the same 49 operations; all registry operations and five additive P0 operations are covered | PASS |
+| End to end | Base-only auto-key → retime → undo/redo → save/reload → JSON/quantized binary export and comparison | PASS |
+
+Validated commands and outputs:
+
+- `cmake --build build -j4` → all targets built
+- `ctest --test-dir build --output-on-failure` → 7/7 passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` → P0 E2E passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`
+- `./build/marrow_agent_dispatch_smoke` → all 49 operations passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` + `tools/mcp/venv/bin/python tools/mcp/test_client.py` → MCP/socket E2E passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5` → 5 frames rendered with viewport/timeline/catalog P0 smokes
+- `./build/marrow_renderer_sample --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl` → renderer preparation guardrail passed
+- `git diff --check` → passed
 
 ## Runtime and Renderer Unit Cases
 

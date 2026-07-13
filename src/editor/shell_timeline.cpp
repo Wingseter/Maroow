@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,8 @@
 #include "shell_state.hpp"
 #include "shell_widgets.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/authoring.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor::shell {
 
@@ -307,6 +310,76 @@ std::vector<TimelineTrackRow> build_timeline_tracks(
     return tracks;
 }
 
+namespace {
+
+std::int64_t timeline_time_identity(double time_seconds) {
+    return static_cast<std::int64_t>(std::llround(time_seconds * 1'000'000.0));
+}
+
+} // namespace
+
+TimelineKeyRef timeline_key_ref(
+    const TimelineTrackRow& track,
+    std::size_t key_index) {
+    TimelineKeyRef result;
+    result.track_id = track.id;
+    if (key_index >= track.key_times.size()) return result;
+
+    result.time_microseconds = timeline_time_identity(track.key_times[key_index]);
+    result.same_time_count = 0U;
+    for (std::size_t index = 0U; index < track.key_times.size(); ++index) {
+        if (timeline_time_identity(track.key_times[index]) != result.time_microseconds) continue;
+        if (index < key_index) ++result.same_time_ordinal;
+        ++result.same_time_count;
+    }
+    return result;
+}
+
+std::optional<std::size_t> timeline_key_index(
+    const TimelineTrackRow& track,
+    const TimelineKeyRef& key) {
+    if (key.track_id != track.id || key.same_time_count == 0U) return std::nullopt;
+
+    std::size_t same_time_count = 0U;
+    std::optional<std::size_t> resolved;
+    for (std::size_t index = 0U; index < track.key_times.size(); ++index) {
+        if (timeline_time_identity(track.key_times[index]) != key.time_microseconds) continue;
+        if (same_time_count == key.same_time_ordinal) resolved = index;
+        ++same_time_count;
+    }
+    // If an insertion/removal changed a same-time event group, retaining the
+    // old ordinal could silently select a different event. Drop it instead.
+    if (same_time_count != key.same_time_count) return std::nullopt;
+    return resolved;
+}
+
+void reconcile_timeline_key_selection(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr) return;
+    auto& selection = state->timeline_editor.selected_keys;
+    selection.erase(
+        std::remove_if(
+            selection.begin(),
+            selection.end(),
+            [&](const TimelineKeyRef& key) {
+                const auto track = std::find_if(
+                    tracks.begin(), tracks.end(), [&](const TimelineTrackRow& candidate) {
+                        return candidate.id == key.track_id;
+                    });
+                return track == tracks.end() || !timeline_key_index(*track, key).has_value();
+            }),
+        selection.end());
+    std::vector<TimelineKeyRef> unique;
+    unique.reserve(selection.size());
+    for (const TimelineKeyRef& key : selection) {
+        if (std::find(unique.begin(), unique.end(), key) == unique.end()) {
+            unique.push_back(key);
+        }
+    }
+    selection = std::move(unique);
+}
+
 const TimelineTrackRow* selected_timeline_track(
     const ShellState& state,
     const std::vector<TimelineTrackRow>& tracks) {
@@ -557,28 +630,16 @@ std::optional<std::size_t> ensure_transform_timeline_edit_index(
 
     const std::string& bone_name =
         state->load_result.skeleton_data->bones()[*track.bone_index].name;
-    const auto existing = std::find_if(
-        state->load_result.project->transform_timeline_edits.begin(),
-        state->load_result.project->transform_timeline_edits.end(),
-        [&](const marrow::editor::TransformTimelineEdit& edit) {
-            return edit.animation_name == track.animation_name &&
-                edit.bone_name == bone_name &&
-                edit.channel == *track.transform_channel;
-        });
-    if (existing != state->load_result.project->transform_timeline_edits.end()) {
-        return static_cast<std::size_t>(
-            std::distance(
-                state->load_result.project->transform_timeline_edits.begin(),
-                existing));
-    }
-
-    const auto edit = make_transform_timeline_edit(*state, track);
-    if (!edit.has_value()) {
-        return std::nullopt;
-    }
-
-    state->load_result.project->transform_timeline_edits.push_back(*edit);
-    return state->load_result.project->transform_timeline_edits.size() - 1U;
+    auto* edit = marrow::editor::ensure_transform_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name,
+        bone_name,
+        *track.transform_channel);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->transform_timeline_edits.data()));
 }
 
 std::optional<std::size_t> ensure_mesh_deform_timeline_edit_index(
@@ -590,30 +651,18 @@ std::optional<std::size_t> ensure_mesh_deform_timeline_edit_index(
         return std::nullopt;
     }
 
-    const std::string& slot_name =
+    const std::string slot_name =
         state->load_result.skeleton_data->slots()[*track.slot_index].name;
-    const auto existing = std::find_if(
-        state->load_result.project->mesh_deform_timeline_edits.begin(),
-        state->load_result.project->mesh_deform_timeline_edits.end(),
-        [&](const marrow::editor::MeshDeformTimelineEdit& edit) {
-            return edit.animation_name == track.animation_name &&
-                edit.slot_name == slot_name &&
-                edit.attachment_name == *track.deform_attachment_name;
-        });
-    if (existing != state->load_result.project->mesh_deform_timeline_edits.end()) {
-        return static_cast<std::size_t>(
-            std::distance(
-                state->load_result.project->mesh_deform_timeline_edits.begin(),
-                existing));
-    }
-
-    const auto edit = make_mesh_deform_timeline_edit(*state, track);
-    if (!edit.has_value()) {
-        return std::nullopt;
-    }
-
-    state->load_result.project->mesh_deform_timeline_edits.push_back(*edit);
-    return state->load_result.project->mesh_deform_timeline_edits.size() - 1U;
+    auto* edit = marrow::editor::ensure_mesh_deform_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name,
+        slot_name,
+        *track.deform_attachment_name);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->mesh_deform_timeline_edits.data()));
 }
 
 std::vector<std::string> slot_names_from_indices(
@@ -671,26 +720,14 @@ std::optional<std::size_t> ensure_draw_order_timeline_edit_index(
         return std::nullopt;
     }
 
-    const auto existing = std::find_if(
-        state->load_result.project->draw_order_timeline_edits.begin(),
-        state->load_result.project->draw_order_timeline_edits.end(),
-        [&](const marrow::editor::DrawOrderTimelineEdit& edit) {
-            return edit.animation_name == track.animation_name;
-        });
-    if (existing != state->load_result.project->draw_order_timeline_edits.end()) {
-        return static_cast<std::size_t>(
-            std::distance(
-                state->load_result.project->draw_order_timeline_edits.begin(),
-                existing));
-    }
-
-    const auto edit = make_draw_order_timeline_edit(*state, track);
-    if (!edit.has_value()) {
-        return std::nullopt;
-    }
-
-    state->load_result.project->draw_order_timeline_edits.push_back(*edit);
-    return state->load_result.project->draw_order_timeline_edits.size() - 1U;
+    auto* edit = marrow::editor::ensure_draw_order_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->draw_order_timeline_edits.data()));
 }
 
 std::optional<marrow::editor::EventTimelineEdit> make_event_timeline_edit(
@@ -739,26 +776,111 @@ std::optional<std::size_t> ensure_event_timeline_edit_index(
         return std::nullopt;
     }
 
-    const auto existing = std::find_if(
-        state->load_result.project->event_timeline_edits.begin(),
-        state->load_result.project->event_timeline_edits.end(),
-        [&](const marrow::editor::EventTimelineEdit& edit) {
-            return edit.animation_name == track.animation_name;
-        });
-    if (existing != state->load_result.project->event_timeline_edits.end()) {
-        return static_cast<std::size_t>(
-            std::distance(
-                state->load_result.project->event_timeline_edits.begin(),
-                existing));
-    }
+    auto* edit = marrow::editor::ensure_event_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->event_timeline_edits.data()));
+}
 
-    const auto edit = make_event_timeline_edit(*state, track);
-    if (!edit.has_value()) {
+std::optional<marrow::editor::SlotColorTimelineEdit> make_slot_color_timeline_edit(
+    const ShellState& state,
+    const TimelineTrackRow& track) {
+    if (!state.load_result || !track.slot_index.has_value() ||
+        *track.slot_index >= state.load_result.skeleton_data->slots().size()) {
+        return std::nullopt;
+    }
+    const auto* animation =
+        state.load_result.skeleton_data->find_animation(track.animation_name);
+    const auto* timeline =
+        animation != nullptr ? animation->find_color_timeline(*track.slot_index) : nullptr;
+    if (timeline == nullptr) {
         return std::nullopt;
     }
 
-    state->load_result.project->event_timeline_edits.push_back(*edit);
-    return state->load_result.project->event_timeline_edits.size() - 1U;
+    marrow::editor::SlotColorTimelineEdit edit;
+    edit.animation_name = track.animation_name;
+    edit.slot_name = state.load_result.skeleton_data->slots()[*track.slot_index].name;
+    edit.keyframes.reserve(timeline->keyframes.size());
+    for (const auto& keyframe : timeline->keyframes) {
+        marrow::editor::SlotColorKeyframeEdit copied;
+        copied.time = static_cast<double>(keyframe.time);
+        copied.color = keyframe.color;
+        copied.interpolation = keyframe.interpolation;
+        edit.keyframes.push_back(std::move(copied));
+    }
+    return edit;
+}
+
+std::optional<marrow::editor::SlotAttachmentTimelineEdit>
+make_slot_attachment_timeline_edit(
+    const ShellState& state,
+    const TimelineTrackRow& track) {
+    if (!state.load_result || !track.slot_index.has_value() ||
+        *track.slot_index >= state.load_result.skeleton_data->slots().size()) {
+        return std::nullopt;
+    }
+    const auto* animation =
+        state.load_result.skeleton_data->find_animation(track.animation_name);
+    const auto* timeline =
+        animation != nullptr ? animation->find_attachment_timeline(*track.slot_index) : nullptr;
+    if (timeline == nullptr) {
+        return std::nullopt;
+    }
+
+    marrow::editor::SlotAttachmentTimelineEdit edit;
+    edit.animation_name = track.animation_name;
+    edit.slot_name = state.load_result.skeleton_data->slots()[*track.slot_index].name;
+    edit.keyframes.reserve(timeline->keyframes.size());
+    for (const auto& keyframe : timeline->keyframes) {
+        edit.keyframes.push_back(marrow::editor::SlotAttachmentKeyframeEdit{
+            static_cast<double>(keyframe.time),
+            keyframe.attachment_name});
+    }
+    return edit;
+}
+
+std::optional<std::size_t> ensure_slot_color_timeline_edit_index(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (state == nullptr || !state->load_result || !track.slot_index.has_value() ||
+        *track.slot_index >= state->load_result.skeleton_data->slots().size()) {
+        return std::nullopt;
+    }
+    const std::string slot_name =
+        state->load_result.skeleton_data->slots()[*track.slot_index].name;
+    auto* edit = marrow::editor::ensure_slot_color_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name,
+        slot_name);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->slot_color_timeline_edits.data()));
+}
+
+std::optional<std::size_t> ensure_slot_attachment_timeline_edit_index(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (state == nullptr || !state->load_result || !track.slot_index.has_value() ||
+        *track.slot_index >= state->load_result.skeleton_data->slots().size()) {
+        return std::nullopt;
+    }
+    const std::string& slot_name =
+        state->load_result.skeleton_data->slots()[*track.slot_index].name;
+    auto* edit = marrow::editor::ensure_slot_attachment_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name,
+        slot_name);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->slot_attachment_timeline_edits.data()));
 }
 
 marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
@@ -906,6 +1028,10 @@ bool set_selected_animation(
         return false;
     }
 
+    if (state->selected_animation_name != animation->name) {
+        state->timeline_editor.selected_keys.clear();
+        state->timeline_editor.box_selection.reset();
+    }
     state->selected_animation_name = animation->name;
     state->selected_timeline_track_id.reset();
     normalize_state_preview_settings(state);
@@ -1053,6 +1179,795 @@ bool focus_timeline_track(
     return true;
 }
 
+const TimelineTrackRow* find_timeline_track(
+    const std::vector<TimelineTrackRow>& tracks,
+    std::string_view track_id) {
+    const auto iterator = std::find_if(
+        tracks.begin(),
+        tracks.end(),
+        [&](const TimelineTrackRow& track) { return track.id == track_id; });
+    return iterator == tracks.end() ? nullptr : &(*iterator);
+}
+
+bool timeline_track_is_editable(const TimelineTrackRow& track) {
+    return track.transform_channel.has_value() ||
+        track.deform_attachment_name.has_value() ||
+        (track.slot_index.has_value() &&
+         (track.id.find(":Color") != std::string::npos ||
+          track.id.find(":Attachment") != std::string::npos)) ||
+        track.id == "global:draw-order" ||
+        track.id == "global:events";
+}
+
+bool timeline_key_selected(const ShellState& state, const TimelineKeyRef& key) {
+    return std::find(
+               state.timeline_editor.selected_keys.begin(),
+               state.timeline_editor.selected_keys.end(),
+               key) != state.timeline_editor.selected_keys.end();
+}
+
+std::optional<marrow::editor::TimelineKeySelector> timeline_key_selector(
+    const ShellState& state,
+    const TimelineTrackRow& track,
+    std::size_t key_index) {
+    if (!state.load_result || key_index >= track.key_times.size()) {
+        return std::nullopt;
+    }
+    const auto& skeleton = *state.session.runtime_data();
+    marrow::editor::TimelineKeySelector selector;
+    selector.animation_name = track.animation_name;
+    selector.time = track.key_times[key_index];
+    if (track.transform_channel.has_value() && track.bone_index.has_value() &&
+        *track.bone_index < skeleton.bones().size()) {
+        selector.kind = marrow::editor::TimelineKeyKind::Transform;
+        selector.bone_name = skeleton.bones()[*track.bone_index].name;
+        selector.transform_channel = *track.transform_channel;
+        return selector;
+    }
+    if (track.deform_attachment_name.has_value() && track.slot_index.has_value() &&
+        *track.slot_index < skeleton.slots().size()) {
+        selector.kind = marrow::editor::TimelineKeyKind::Deform;
+        selector.slot_name = skeleton.slots()[*track.slot_index].name;
+        selector.attachment_name = *track.deform_attachment_name;
+        return selector;
+    }
+    if (track.id == "global:draw-order") {
+        selector.kind = marrow::editor::TimelineKeyKind::DrawOrder;
+        return selector;
+    }
+    if (track.id == "global:events") {
+        selector.kind = marrow::editor::TimelineKeyKind::Event;
+        for (std::size_t index = 0U; index < key_index; ++index) {
+            if (std::abs(track.key_times[index] - selector.time) <= 1e-6) {
+                ++selector.same_time_ordinal;
+            }
+        }
+        return selector;
+    }
+    if (track.slot_index.has_value() && *track.slot_index < skeleton.slots().size()) {
+        selector.slot_name = skeleton.slots()[*track.slot_index].name;
+        if (track.id.find(":Color") != std::string::npos) {
+            selector.kind = marrow::editor::TimelineKeyKind::SlotColor;
+            return selector;
+        }
+        if (track.id.find(":Attachment") != std::string::npos) {
+            selector.kind = marrow::editor::TimelineKeyKind::SlotAttachment;
+            return selector;
+        }
+    }
+    return std::nullopt;
+}
+
+template <typename Fn>
+bool visit_editable_timeline_keys(
+    ShellState* state,
+    const TimelineTrackRow& track,
+    Fn&& visitor) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.project == nullptr || !timeline_track_is_editable(track)) {
+        return false;
+    }
+    if (track.transform_channel.has_value()) {
+        const auto index = ensure_transform_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->transform_timeline_edits[*index].keyframes);
+        return true;
+    }
+    if (track.deform_attachment_name.has_value()) {
+        const auto index = ensure_mesh_deform_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->mesh_deform_timeline_edits[*index].keyframes);
+        return true;
+    }
+    if (track.id == "global:draw-order") {
+        const auto index = ensure_draw_order_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->draw_order_timeline_edits[*index].keyframes);
+        return true;
+    }
+    if (track.id == "global:events") {
+        const auto index = ensure_event_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->event_timeline_edits[*index].keyframes);
+        return true;
+    }
+    if (track.id.find(":Color") != std::string::npos) {
+        const auto index = ensure_slot_color_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->slot_color_timeline_edits[*index].keyframes);
+        return true;
+    }
+    if (track.id.find(":Attachment") != std::string::npos) {
+        const auto index = ensure_slot_attachment_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->slot_attachment_timeline_edits[*index].keyframes);
+        return true;
+    }
+    return false;
+}
+
+template <typename Fn>
+bool visit_existing_project_timeline_keys(
+    ShellState* state,
+    const TimelineTrackRow& track,
+    Fn&& visitor) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.project == nullptr || !timeline_track_is_editable(track)) {
+        return false;
+    }
+    auto& project = *state->load_result.project;
+    if (track.transform_channel.has_value() && track.bone_index.has_value() &&
+        *track.bone_index < state->load_result.skeleton_data->bones().size()) {
+        const std::string& bone_name =
+            state->load_result.skeleton_data->bones()[*track.bone_index].name;
+        auto* edit = project.find_transform_timeline_edit(
+            track.animation_name, bone_name, *track.transform_channel);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    if (track.deform_attachment_name.has_value() && track.slot_index.has_value() &&
+        *track.slot_index < state->load_result.skeleton_data->slots().size()) {
+        const std::string& slot_name =
+            state->load_result.skeleton_data->slots()[*track.slot_index].name;
+        auto* edit = project.find_mesh_deform_timeline_edit(
+            track.animation_name, slot_name, *track.deform_attachment_name);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    if (track.id == "global:draw-order") {
+        auto* edit = project.find_draw_order_timeline_edit(track.animation_name);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    if (track.id == "global:events") {
+        auto* edit = project.find_event_timeline_edit(track.animation_name);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    if (track.id.find(":Color") != std::string::npos && track.slot_index.has_value() &&
+        *track.slot_index < state->load_result.skeleton_data->slots().size()) {
+        const std::string& slot_name =
+            state->load_result.skeleton_data->slots()[*track.slot_index].name;
+        auto* edit = project.find_slot_color_timeline_edit(track.animation_name, slot_name);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    if (track.id.find(":Attachment") != std::string::npos && track.slot_index.has_value() &&
+        *track.slot_index < state->load_result.skeleton_data->slots().size()) {
+        const std::string& slot_name =
+            state->load_result.skeleton_data->slots()[*track.slot_index].name;
+        auto* edit = project.find_slot_attachment_timeline_edit(
+            track.animation_name, slot_name);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    return false;
+}
+
+bool finish_timeline_transaction(
+    ShellState* state,
+    marrow::editor::EditorSession::EditTransaction transaction,
+    std::string_view success_status,
+    bool changed) {
+    if (!changed) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        return false;
+    }
+    const marrow::editor::SessionResult result = transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Timeline edit failed";
+        return false;
+    }
+    state->status_message = std::string(success_status);
+    return result.changed;
+}
+
+bool add_timeline_key_at_playhead(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (state == nullptr || !timeline_track_is_editable(track) ||
+        authoring_gesture_active(*state)) {
+        return false;
+    }
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::AddKeyframe,
+        "Add timeline key",
+        "timeline:" + track.id,
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    std::optional<std::size_t> inserted_index;
+    const bool resolved = visit_editable_timeline_keys(
+        state,
+        track,
+        [&](auto& keys) {
+            using Key = typename std::decay_t<decltype(keys)>::value_type;
+            Key new_key{};
+            new_key.time = state->timeline_time_seconds;
+            if constexpr (std::is_same_v<Key, marrow::editor::TransformKeyframeEdit>) {
+                new_key = sample_transform_keyframe(*state, track);
+                if (track.transform_channel ==
+                        std::optional<marrow::editor::TransformTimelineChannel>(
+                            marrow::editor::TransformTimelineChannel::Rotate) &&
+                    track.bone_index.has_value() &&
+                    *track.bone_index < state->session.runtime_data()->bones().size()) {
+                    new_key.angle = marrow::editor::setup_relative_rotation_key(
+                        *state->session.runtime_data(),
+                        state->session.runtime_data()
+                            ->bones()[*track.bone_index]
+                            .name,
+                        new_key.angle);
+                }
+            } else if constexpr (std::is_same_v<Key, marrow::editor::DeformKeyframeEdit>) {
+                new_key = sample_deform_keyframe(*state, track);
+            } else if constexpr (std::is_same_v<Key, marrow::editor::DrawOrderKeyframeEdit>) {
+                new_key = sample_draw_order_keyframe(*state);
+            } else if constexpr (std::is_same_v<Key, marrow::editor::EventKeyframeEdit>) {
+                new_key = sample_event_keyframe(*state);
+            } else if constexpr (std::is_same_v<Key, marrow::editor::SlotColorKeyframeEdit>) {
+                new_key.interpolation = marrow::runtime::Interpolation::linear();
+                if (track.slot_index.has_value() && state->preview_skeleton &&
+                    *track.slot_index < state->preview_skeleton->slot_states().size()) {
+                    new_key.color =
+                        state->preview_skeleton->slot_states()[*track.slot_index].color;
+                }
+            } else if constexpr (
+                std::is_same_v<Key, marrow::editor::SlotAttachmentKeyframeEdit>) {
+                if (track.slot_index.has_value() && state->preview_skeleton &&
+                    *track.slot_index < state->preview_skeleton->slot_states().size()) {
+                    const std::string& attachment =
+                        state->preview_skeleton->slot_states()[*track.slot_index].attachment_name;
+                    if (!attachment.empty()) new_key.attachment_name = attachment;
+                }
+            }
+            new_key.time = state->timeline_time_seconds;
+            auto insertion = std::lower_bound(
+                keys.begin(),
+                keys.end(),
+                new_key.time,
+                [](const Key& key, double time) { return key.time < time; });
+            auto iterator = insertion;
+            if constexpr (std::is_same_v<Key, marrow::editor::EventKeyframeEdit>) {
+                iterator = std::upper_bound(
+                    keys.begin(),
+                    keys.end(),
+                    new_key.time,
+                    [](double time, const Key& key) { return time < key.time; });
+                iterator = keys.insert(iterator, std::move(new_key));
+            } else {
+                iterator = marrow::editor::find_keyframe_near_time(
+                    keys, new_key.time);
+                if (iterator != keys.end()) {
+                    *iterator = std::move(new_key);
+                } else {
+                    iterator = keys.insert(insertion, std::move(new_key));
+                }
+            }
+            inserted_index = static_cast<std::size_t>(std::distance(keys.begin(), iterator));
+        });
+    if (!resolved || !inserted_index.has_value()) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->status_message = "The selected timeline is read-only";
+        return false;
+    }
+    const bool committed = finish_timeline_transaction(
+        state, std::move(transaction), "Added key at playhead", true);
+    if (committed) {
+        state->selected_timeline_track_id = track.id;
+        const auto* animation = selected_animation(*state);
+        const std::vector<TimelineTrackRow> rebuilt_tracks =
+            animation != nullptr
+            ? build_timeline_tracks(*state->load_result.skeleton_data, *animation)
+            : std::vector<TimelineTrackRow>{};
+        const TimelineTrackRow* rebuilt_track = find_timeline_track(rebuilt_tracks, track.id);
+        if (rebuilt_track != nullptr && *inserted_index < rebuilt_track->key_times.size()) {
+            state->timeline_editor.selected_keys = {
+                timeline_key_ref(*rebuilt_track, *inserted_index)};
+        } else {
+            state->timeline_editor.selected_keys.clear();
+        }
+    }
+    return committed;
+}
+
+std::vector<std::size_t> selected_indices_for_track(
+    const ShellState& state,
+    const TimelineTrackRow& track) {
+    std::vector<std::size_t> indices;
+    for (const TimelineKeyRef& key : state.timeline_editor.selected_keys) {
+        if (key.track_id == track.id) {
+            if (const auto index = timeline_key_index(track, key)) indices.push_back(*index);
+        }
+    }
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    return indices;
+}
+
+bool remove_selected_timeline_keys(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || authoring_gesture_active(*state)) return false;
+    std::vector<TimelineKeyRef> removals = state->timeline_editor.selected_keys;
+    if (removals.empty()) {
+        const TimelineTrackRow* track = selected_timeline_track(*state, tracks);
+        if (track == nullptr) {
+            state->status_message = "Select an editable timeline track or key";
+            return false;
+        }
+        if (!timeline_track_is_editable(*track)) {
+            state->status_message = "The selected timeline is read-only";
+            return false;
+        }
+        std::vector<std::size_t> exact_project_indices;
+        const bool has_authored_timeline = visit_existing_project_timeline_keys(
+            state, *track, [&](auto& keys) {
+                for (std::size_t index = 0U; index < keys.size(); ++index) {
+                    if (std::abs(keys[index].time - state->timeline_time_seconds) <= 1e-6) {
+                        exact_project_indices.push_back(index);
+                    }
+                }
+            });
+        if (!has_authored_timeline || exact_project_indices.empty()) {
+            const bool imported_key_at_playhead = std::any_of(
+                track->key_times.begin(), track->key_times.end(), [&](double time) {
+                    return std::abs(time - state->timeline_time_seconds) <= 1e-6;
+                });
+            state->status_message = imported_key_at_playhead
+                ? "Select the imported key before removing it"
+                : "No authored key exists at the playhead";
+            return false;
+        }
+        if (exact_project_indices.size() != 1U) {
+            state->status_message =
+                "Multiple authored keys are at the playhead; select the key to remove";
+            return false;
+        }
+        const std::size_t index = exact_project_indices.front();
+        if (index >= track->key_times.size() ||
+            std::abs(track->key_times[index] - state->timeline_time_seconds) > 1e-6) {
+            state->status_message = "Could not resolve the authored key at the playhead";
+            return false;
+        }
+        removals.push_back(timeline_key_ref(*track, index));
+    }
+    if (removals.empty()) return false;
+
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::RemoveKeyframe,
+        removals.size() == 1U ? "Remove timeline key" : "Remove timeline keys",
+        "timeline:remove-keys",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    std::size_t removed_count = 0U;
+    for (const TimelineTrackRow& track : tracks) {
+        std::vector<std::size_t> indices;
+        for (const TimelineKeyRef& removal : removals) {
+            if (removal.track_id == track.id) {
+                if (const auto index = timeline_key_index(track, removal)) {
+                    indices.push_back(*index);
+                }
+            }
+        }
+        std::sort(indices.begin(), indices.end(), std::greater<std::size_t>());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        if (indices.empty()) continue;
+        visit_editable_timeline_keys(state, track, [&](auto& keys) {
+            // A timeline must retain one key so the runtime override remains valid.
+            for (const std::size_t index : indices) {
+                if (keys.size() <= 1U) break;
+                if (index < keys.size()) {
+                    keys.erase(keys.begin() + static_cast<std::ptrdiff_t>(index));
+                    ++removed_count;
+                }
+            }
+        });
+    }
+    const bool committed = finish_timeline_transaction(
+        state,
+        std::move(transaction),
+        removed_count == 1U ? "Removed timeline key" : "Removed timeline keys",
+        removed_count > 0U);
+    if (committed) state->timeline_editor.selected_keys.clear();
+    return committed;
+}
+
+template <typename Timeline>
+void append_selected_timeline_fragment(
+    const Timeline& source,
+    const std::vector<std::size_t>& indices,
+    std::vector<Timeline>* destination) {
+    Timeline copied = source;
+    copied.keyframes.clear();
+    for (const std::size_t index : indices) {
+        if (index < source.keyframes.size()) copied.keyframes.push_back(source.keyframes[index]);
+    }
+    if (!copied.keyframes.empty()) destination->push_back(std::move(copied));
+}
+
+bool copy_selected_timeline_keys(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || !state->load_result ||
+        state->timeline_editor.selected_keys.empty()) {
+        return false;
+    }
+    TimelineClipboard clipboard;
+    clipboard.animation_name = state->selected_animation_name;
+    clipboard.earliest_time = std::numeric_limits<double>::infinity();
+    for (const TimelineTrackRow& track : tracks) {
+        const std::vector<std::size_t> indices = selected_indices_for_track(*state, track);
+        if (indices.empty() || !timeline_track_is_editable(track)) continue;
+        for (const std::size_t index : indices) {
+            clipboard.earliest_time = std::min(clipboard.earliest_time, track.key_times[index]);
+        }
+        if (track.transform_channel.has_value() && track.bone_index.has_value()) {
+            const std::string& bone_name =
+                state->load_result.skeleton_data->bones()[*track.bone_index].name;
+            const auto* existing = state->load_result.project->find_transform_timeline_edit(
+                track.animation_name, bone_name, *track.transform_channel);
+            const auto runtime = make_transform_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing, indices, &clipboard.project_fragment.transform_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime, indices, &clipboard.project_fragment.transform_timeline_edits);
+            }
+        } else if (track.deform_attachment_name.has_value()) {
+            const std::string& slot_name =
+                state->load_result.skeleton_data->slots()[*track.slot_index].name;
+            const auto* existing = state->load_result.project->find_mesh_deform_timeline_edit(
+                track.animation_name, slot_name, *track.deform_attachment_name);
+            const auto runtime = make_mesh_deform_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing, indices, &clipboard.project_fragment.mesh_deform_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime, indices, &clipboard.project_fragment.mesh_deform_timeline_edits);
+            }
+        } else if (track.id == "global:draw-order") {
+            const auto* existing =
+                state->load_result.project->find_draw_order_timeline_edit(track.animation_name);
+            const auto runtime = make_draw_order_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing, indices, &clipboard.project_fragment.draw_order_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime, indices, &clipboard.project_fragment.draw_order_timeline_edits);
+            }
+        } else if (track.id == "global:events") {
+            const auto* existing =
+                state->load_result.project->find_event_timeline_edit(track.animation_name);
+            const auto runtime = make_event_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing, indices, &clipboard.project_fragment.event_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime, indices, &clipboard.project_fragment.event_timeline_edits);
+            }
+        } else if (track.id.find(":Color") != std::string::npos) {
+            const std::string& slot_name =
+                state->load_result.skeleton_data->slots()[*track.slot_index].name;
+            const auto* existing = state->load_result.project->find_slot_color_timeline_edit(
+                track.animation_name, slot_name);
+            const auto runtime = make_slot_color_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing, indices, &clipboard.project_fragment.slot_color_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime, indices, &clipboard.project_fragment.slot_color_timeline_edits);
+            }
+        } else if (track.id.find(":Attachment") != std::string::npos) {
+            const std::string& slot_name =
+                state->load_result.skeleton_data->slots()[*track.slot_index].name;
+            const auto* existing =
+                state->load_result.project->find_slot_attachment_timeline_edit(
+                    track.animation_name, slot_name);
+            const auto runtime = make_slot_attachment_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing,
+                    indices,
+                    &clipboard.project_fragment.slot_attachment_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime,
+                    indices,
+                    &clipboard.project_fragment.slot_attachment_timeline_edits);
+            }
+        }
+    }
+    clipboard.has_data = std::isfinite(clipboard.earliest_time);
+    if (!clipboard.has_data) return false;
+    state->timeline_editor.clipboard = std::move(clipboard);
+    state->status_message = state->timeline_editor.selected_keys.size() == 1U
+        ? "Copied timeline key"
+        : "Copied timeline keys";
+    return true;
+}
+
+template <typename Key>
+void paste_keys_replace_collisions(
+    std::vector<Key>* destination,
+    const std::vector<Key>& source,
+    double time_shift,
+    bool retain_same_time_source_order) {
+    if (destination == nullptr || source.empty()) return;
+    std::vector<double> target_times;
+    for (const Key& key : source) {
+        const double target_time = std::max(0.0, key.time + time_shift);
+        if (std::find_if(
+                target_times.begin(),
+                target_times.end(),
+                [&](double time) { return std::abs(time - target_time) <= 1e-6; }) ==
+            target_times.end()) {
+            target_times.push_back(target_time);
+        }
+    }
+    destination->erase(
+        std::remove_if(
+            destination->begin(),
+            destination->end(),
+            [&](const Key& key) {
+                return std::any_of(
+                    target_times.begin(),
+                    target_times.end(),
+                    [&](double time) { return std::abs(key.time - time) <= 1e-6; });
+            }),
+        destination->end());
+    for (Key key : source) {
+        key.time = std::max(0.0, key.time + time_shift);
+        destination->push_back(std::move(key));
+    }
+    if (retain_same_time_source_order) {
+        std::stable_sort(
+            destination->begin(), destination->end(), [](const Key& left, const Key& right) {
+                return left.time < right.time;
+            });
+    } else {
+        std::sort(destination->begin(), destination->end(), [](const Key& left, const Key& right) {
+            return left.time < right.time;
+        });
+    }
+}
+
+bool paste_timeline_clipboard(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || !state->load_result || authoring_gesture_active(*state) ||
+        !state->timeline_editor.clipboard.has_data ||
+        state->timeline_editor.clipboard.animation_name != state->selected_animation_name) {
+        return false;
+    }
+    const TimelineClipboard& clipboard = state->timeline_editor.clipboard;
+    const double shift = state->timeline_time_seconds - clipboard.earliest_time;
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::AddKeyframe,
+        "Paste timeline keys",
+        "timeline:paste",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    std::size_t pasted_count = 0U;
+    std::optional<std::string> first_track_id;
+    const std::size_t clipboard_track_count =
+        clipboard.project_fragment.transform_timeline_edits.size() +
+        clipboard.project_fragment.mesh_deform_timeline_edits.size() +
+        clipboard.project_fragment.draw_order_timeline_edits.size() +
+        clipboard.project_fragment.event_timeline_edits.size() +
+        clipboard.project_fragment.slot_color_timeline_edits.size() +
+        clipboard.project_fragment.slot_attachment_timeline_edits.size();
+    const TimelineTrackRow* selected_remap_track = clipboard_track_count == 1U
+        ? selected_timeline_track(*state, tracks)
+        : nullptr;
+    if (selected_remap_track != nullptr &&
+        !timeline_track_is_editable(*selected_remap_track)) {
+        selected_remap_track = nullptr;
+    }
+    const auto find_transform_track = [&](const marrow::editor::TransformTimelineEdit& edit) {
+        const auto bone_index = state->load_result.skeleton_data->find_bone_index(edit.bone_name);
+        if (!bone_index.has_value()) return static_cast<const TimelineTrackRow*>(nullptr);
+        const auto iterator = std::find_if(
+            tracks.begin(), tracks.end(), [&](const TimelineTrackRow& track) {
+                return track.animation_name == state->selected_animation_name &&
+                    track.bone_index == bone_index && track.transform_channel == edit.channel;
+            });
+        return iterator == tracks.end() ? nullptr : &(*iterator);
+    };
+    const auto find_slot_track = [&](std::string_view slot_name, std::string_view suffix) {
+        const auto slot_index = state->load_result.skeleton_data->find_slot_index(slot_name);
+        if (!slot_index.has_value()) return static_cast<const TimelineTrackRow*>(nullptr);
+        const auto iterator = std::find_if(
+            tracks.begin(), tracks.end(), [&](const TimelineTrackRow& track) {
+                return track.animation_name == state->selected_animation_name &&
+                    track.slot_index == slot_index &&
+                    track.id.find(suffix) != std::string::npos;
+            });
+        return iterator == tracks.end() ? nullptr : &(*iterator);
+    };
+    const auto remember_track = [&](const TimelineTrackRow& track, std::size_t count) {
+        if (!first_track_id.has_value()) first_track_id = track.id;
+        pasted_count += count;
+    };
+
+    for (const auto& source : clipboard.project_fragment.transform_timeline_edits) {
+        const bool remap_is_compatible = selected_remap_track != nullptr &&
+            selected_remap_track->bone_index.has_value() &&
+            selected_remap_track->transform_channel ==
+                std::optional<marrow::editor::TransformTimelineChannel>(source.channel);
+        const TimelineTrackRow* track = remap_is_compatible
+            ? selected_remap_track
+            : find_transform_track(source);
+        if (track == nullptr) continue;
+        if (const auto index = ensure_transform_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->transform_timeline_edits[*index].keyframes,
+                source.keyframes,
+                shift,
+                false);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+    for (const auto& source : clipboard.project_fragment.mesh_deform_timeline_edits) {
+        const auto slot_index = state->load_result.skeleton_data->find_slot_index(source.slot_name);
+        const auto source_iterator = std::find_if(
+            tracks.begin(), tracks.end(), [&](const TimelineTrackRow& track) {
+                return track.slot_index == slot_index &&
+                    track.deform_attachment_name ==
+                        std::optional<std::string>(source.attachment_name);
+            });
+        const TimelineTrackRow* track = selected_remap_track != nullptr &&
+                selected_remap_track->deform_attachment_name.has_value()
+            ? selected_remap_track
+            : (source_iterator != tracks.end() ? &(*source_iterator) : nullptr);
+        if (track == nullptr) continue;
+        if (const auto index = ensure_mesh_deform_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->mesh_deform_timeline_edits[*index].keyframes,
+                source.keyframes,
+                shift,
+                false);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+    for (const auto& source : clipboard.project_fragment.draw_order_timeline_edits) {
+        const TimelineTrackRow* track = selected_remap_track != nullptr &&
+                selected_remap_track->id == "global:draw-order"
+            ? selected_remap_track
+            : find_timeline_track(tracks, "global:draw-order");
+        if (track == nullptr) continue;
+        if (const auto index = ensure_draw_order_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->draw_order_timeline_edits[*index].keyframes,
+                source.keyframes,
+                shift,
+                false);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+    for (const auto& source : clipboard.project_fragment.event_timeline_edits) {
+        const TimelineTrackRow* track = selected_remap_track != nullptr &&
+                selected_remap_track->id == "global:events"
+            ? selected_remap_track
+            : find_timeline_track(tracks, "global:events");
+        if (track == nullptr) continue;
+        if (const auto index = ensure_event_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->event_timeline_edits[*index].keyframes,
+                source.keyframes,
+                shift,
+                true);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+    for (const auto& source : clipboard.project_fragment.slot_color_timeline_edits) {
+        const TimelineTrackRow* track = selected_remap_track != nullptr &&
+                selected_remap_track->slot_index.has_value() &&
+                selected_remap_track->id.find(":Color") != std::string::npos
+            ? selected_remap_track
+            : find_slot_track(source.slot_name, ":Color");
+        if (track == nullptr) continue;
+        if (const auto index = ensure_slot_color_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->slot_color_timeline_edits[*index].keyframes,
+                source.keyframes,
+                shift,
+                false);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+    for (const auto& source : clipboard.project_fragment.slot_attachment_timeline_edits) {
+        const TimelineTrackRow* track = selected_remap_track != nullptr &&
+                selected_remap_track->slot_index.has_value() &&
+                selected_remap_track->id.find(":Attachment") != std::string::npos
+            ? selected_remap_track
+            : find_slot_track(source.slot_name, ":Attachment");
+        if (track == nullptr) continue;
+        if (const auto index = ensure_slot_attachment_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->slot_attachment_timeline_edits[*index].keyframes,
+                source.keyframes,
+                shift,
+                false);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+
+    const bool committed = finish_timeline_transaction(
+        state,
+        std::move(transaction),
+        pasted_count == 1U ? "Pasted timeline key" : "Pasted timeline keys",
+        pasted_count > 0U);
+    if (committed) {
+        state->timeline_editor.selected_keys.clear();
+        if (first_track_id.has_value()) state->selected_timeline_track_id = *first_track_id;
+    }
+    return committed;
+}
+
+bool cut_selected_timeline_keys(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (!copy_selected_timeline_keys(state, tracks)) return false;
+    const bool removed = remove_selected_timeline_keys(state, tracks);
+    if (removed) state->status_message = "Cut timeline keys";
+    return removed;
+}
+
 
 
 marrow::editor::Icon track_property_icon(const std::string& track_id) {
@@ -1085,10 +2000,314 @@ ImU32 track_group_accent(const std::string& track_id) {
     return IM_COL32(0xbe, 0xc7, 0xdc, 0x4D);      // secondary @ 30%
 }
 
+double timeline_major_tick_interval(double pixels_per_second) {
+    constexpr std::array<double, 12> kIntervals{
+        1.0 / 60.0, 1.0 / 30.0, 0.05, 0.1, 0.25, 0.5,
+        1.0, 2.0, 5.0, 10.0, 30.0, 60.0};
+    for (const double interval : kIntervals) {
+        if (interval * pixels_per_second >= 72.0) return interval;
+    }
+    return kIntervals.back();
+}
+
+double timeline_time_from_x(
+    const ShellState& state,
+    float screen_x,
+    float lane_min_x) {
+    return state.timeline_editor.view_start_seconds +
+        static_cast<double>(screen_x - lane_min_x) /
+            state.timeline_editor.pixels_per_second;
+}
+
+float timeline_x_from_time(
+    const ShellState& state,
+    double time_seconds,
+    float lane_min_x) {
+    return lane_min_x + static_cast<float>(
+        (time_seconds - state.timeline_editor.view_start_seconds) *
+        state.timeline_editor.pixels_per_second);
+}
+
+bool begin_timeline_retime_gesture(
+    ShellState* state,
+    ImGuiID item_id,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || authoring_gesture_active(*state) ||
+        state->timeline_editor.selected_keys.empty()) {
+        return false;
+    }
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        state->timeline_editor.selected_keys.size() == 1U
+            ? "Retime timeline key"
+            : "Retime timeline keys",
+        "timeline:retime",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+    TimelineRetimeGesture gesture;
+    gesture.item_id = item_id;
+    gesture.start_mouse_x = ImGui::GetIO().MousePos.x;
+    gesture.keys = state->timeline_editor.selected_keys;
+    gesture.transaction = std::move(transaction);
+    for (const TimelineKeyRef& key : gesture.keys) {
+        const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+        const auto key_index =
+            track != nullptr ? timeline_key_index(*track, key) : std::nullopt;
+        if (track == nullptr || !key_index.has_value() || !timeline_track_is_editable(*track)) {
+            gesture.transaction.cancel();
+            return false;
+        }
+        gesture.original_times.push_back(track->key_times[*key_index]);
+    }
+    state->timeline_editor.retime_gesture.emplace(std::move(gesture));
+    return true;
+}
+
+void finish_timeline_retime_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->timeline_editor.retime_gesture.has_value()) return;
+    TimelineRetimeGesture gesture =
+        std::move(*state->timeline_editor.retime_gesture);
+    state->timeline_editor.retime_gesture.reset();
+    if (!commit || !gesture.changed) {
+        gesture.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        if (!commit) state->status_message = "Cancelled timeline retime";
+        return;
+    }
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Timeline retime failed";
+    } else {
+        state->status_message = gesture.keys.size() == 1U
+            ? "Retimed timeline key"
+            : "Retimed timeline keys";
+    }
+}
+
+bool begin_timeline_retime_gesture_for_smoke(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    return begin_timeline_retime_gesture(state, 0U, tracks);
+}
+
+bool apply_timeline_retime_delta(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double requested_delta,
+    bool snap_to_frames) {
+    if (state == nullptr || !state->timeline_editor.retime_gesture.has_value()) {
+        return false;
+    }
+    TimelineRetimeGesture& gesture = *state->timeline_editor.retime_gesture;
+    if (std::abs(requested_delta - gesture.applied_delta) <= 1e-9) return true;
+
+    if (!gesture.materialized) {
+        for (const TimelineKeyRef& key : gesture.keys) {
+            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+            if (track == nullptr ||
+                !visit_editable_timeline_keys(state, *track, [](auto&) {})) {
+                finish_timeline_retime_gesture(state, false);
+                state->status_message = "Could not materialize the selected timeline keys";
+                return false;
+            }
+        }
+        gesture.materialized = true;
+    }
+    std::vector<std::size_t> resolved_indices;
+    resolved_indices.reserve(gesture.keys.size());
+    for (const TimelineKeyRef& key : gesture.keys) {
+        const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+        const auto index = track != nullptr ? timeline_key_index(*track, key) : std::nullopt;
+        if (!index.has_value()) {
+            finish_timeline_retime_gesture(state, false);
+            state->status_message = "The selected timeline keys changed during retime";
+            return false;
+        }
+        resolved_indices.push_back(*index);
+    }
+    std::vector<marrow::editor::TimelineKeySelector> selectors;
+    selectors.reserve(gesture.keys.size());
+    for (std::size_t selection_index = 0U;
+         selection_index < gesture.keys.size();
+         ++selection_index) {
+        const TimelineTrackRow* track =
+            find_timeline_track(tracks, gesture.keys[selection_index].track_id);
+        const auto selector = track != nullptr
+            ? timeline_key_selector(*state, *track, resolved_indices[selection_index])
+            : std::nullopt;
+        if (!selector.has_value()) {
+            finish_timeline_retime_gesture(state, false);
+            state->status_message = "Could not resolve the selected timeline keys";
+            return false;
+        }
+        selectors.push_back(*selector);
+    }
+    const marrow::editor::TimelineRetimeResult retime =
+        marrow::editor::retime_keyframes(
+            gesture.transaction.project(),
+            selectors,
+            requested_delta - gesture.applied_delta,
+            snap_to_frames,
+            state->timeline_editor.frames_per_second);
+    if (!retime) {
+        const std::string error = retime.error;
+        finish_timeline_retime_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Timeline retime failed";
+        return false;
+    }
+    if (!retime.changed) return true;
+
+    const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
+    if (!refresh) {
+        const std::string error = refresh.error->format();
+        finish_timeline_retime_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Timeline retime preview failed";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    const auto* rebuilt_animation =
+        state->session.runtime_data()->find_animation(state->selected_animation_name);
+    const std::vector<TimelineTrackRow> rebuilt_tracks =
+        rebuilt_animation != nullptr
+        ? build_timeline_tracks(*state->session.runtime_data(), *rebuilt_animation)
+        : std::vector<TimelineTrackRow>{};
+    std::vector<TimelineKeyRef> rebuilt_selection;
+    rebuilt_selection.reserve(gesture.keys.size());
+    for (std::size_t selection_index = 0U;
+         selection_index < gesture.keys.size();
+         ++selection_index) {
+        const TimelineTrackRow* rebuilt_track =
+            find_timeline_track(rebuilt_tracks, gesture.keys[selection_index].track_id);
+        if (rebuilt_track == nullptr ||
+            resolved_indices[selection_index] >= rebuilt_track->key_times.size()) {
+            finish_timeline_retime_gesture(state, false);
+            state->status_message = "Could not preserve timeline selection after retime";
+            return false;
+        }
+        rebuilt_selection.push_back(
+            timeline_key_ref(*rebuilt_track, resolved_indices[selection_index]));
+    }
+    gesture.keys = rebuilt_selection;
+    state->timeline_editor.selected_keys = std::move(rebuilt_selection);
+    gesture.applied_delta += retime.applied_delta;
+    gesture.changed = true;
+    return true;
+}
+
+void update_timeline_retime_gesture(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || !state->timeline_editor.retime_gesture.has_value()) return;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        finish_timeline_retime_gesture(state, false);
+        return;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        finish_timeline_retime_gesture(state, true);
+        return;
+    }
+    TimelineRetimeGesture& gesture = *state->timeline_editor.retime_gesture;
+    if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) return;
+    const double requested_delta =
+        static_cast<double>(ImGui::GetIO().MousePos.x - gesture.start_mouse_x) /
+        state->timeline_editor.pixels_per_second;
+    const bool snap_to_frames =
+        state->timeline_editor.snap_to_frames && !ImGui::GetIO().KeyAlt;
+    (void)apply_timeline_retime_delta(
+        state, tracks, requested_delta, snap_to_frames);
+}
+
+void draw_timeline_ruler(ShellState* state, double duration_seconds) {
+    const float width = std::max(96.0f, ImGui::GetContentRegionAvail().x);
+    constexpr float kHeight = 28.0f;
+    ImGui::InvisibleButton(
+        "timeline_ruler",
+        ImVec2(width, kHeight),
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+    const ImVec2 rect_min = ImGui::GetItemRectMin();
+    const ImVec2 rect_max = ImGui::GetItemRectMax();
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(rect_min, rect_max, IM_COL32(0x17, 0x1a, 0x21, 0xff));
+
+    if (ImGui::IsItemHovered() && std::abs(ImGui::GetIO().MouseWheel) > 1e-6f) {
+        const double cursor_time = timeline_time_from_x(
+            *state, ImGui::GetIO().MousePos.x, rect_min.x);
+        const double zoom_factor = std::pow(1.15, ImGui::GetIO().MouseWheel);
+        state->timeline_editor.pixels_per_second = std::clamp(
+            state->timeline_editor.pixels_per_second * zoom_factor, 24.0, 1600.0);
+        state->timeline_editor.view_start_seconds = std::max(
+            0.0,
+            cursor_time -
+                static_cast<double>(ImGui::GetIO().MousePos.x - rect_min.x) /
+                    state->timeline_editor.pixels_per_second);
+    }
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        state->timeline_editor.view_start_seconds = std::max(
+            0.0,
+            state->timeline_editor.view_start_seconds -
+                static_cast<double>(ImGui::GetIO().MouseDelta.x) /
+                    state->timeline_editor.pixels_per_second);
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        state->timeline_playing = false;
+        scrub_timeline_time(
+            state,
+            timeline_time_from_x(*state, ImGui::GetIO().MousePos.x, rect_min.x),
+            "Timeline ruler",
+            true);
+    }
+
+    const double interval = timeline_major_tick_interval(
+        state->timeline_editor.pixels_per_second);
+    const double visible_end = state->timeline_editor.view_start_seconds +
+        static_cast<double>(rect_max.x - rect_min.x) /
+            state->timeline_editor.pixels_per_second;
+    double tick_time = std::floor(state->timeline_editor.view_start_seconds / interval) * interval;
+    for (; tick_time <= visible_end + interval; tick_time += interval) {
+        if (tick_time < 0.0) continue;
+        const float x = timeline_x_from_time(*state, tick_time, rect_min.x);
+        draw_list->AddLine(
+            ImVec2(x, rect_min.y + 10.0f),
+            ImVec2(x, rect_max.y),
+            IM_COL32(0x76, 0x79, 0x86, 0xb0));
+        char label[48]{};
+        std::snprintf(
+            label,
+            sizeof(label),
+            "%.2fs  f%d",
+            tick_time,
+            static_cast<int>(std::llround(tick_time * state->timeline_editor.frames_per_second)));
+        draw_list->AddText(ImVec2(x + 3.0f, rect_min.y + 1.0f), IM_COL32_WHITE, label);
+    }
+    const float playhead_x =
+        timeline_x_from_time(*state, state->timeline_time_seconds, rect_min.x);
+    if (playhead_x >= rect_min.x && playhead_x <= rect_max.x) {
+        draw_list->AddLine(
+            ImVec2(playhead_x, rect_min.y),
+            ImVec2(playhead_x, rect_max.y),
+            IM_COL32(0xff, 0x54, 0x50, 0xff),
+            2.0f);
+    }
+    ImGui::SetItemTooltip(
+        "%.0f FPS | mouse wheel zoom | middle-drag pan | span %.3fs",
+        state->timeline_editor.frames_per_second,
+        duration_seconds);
+}
+
 void draw_timeline_lane(
     ShellState* state,
     const TimelineTrackRow& track,
-    double duration_seconds) {
+    const std::vector<TimelineTrackRow>& tracks) {
     ImGui::PushID(track.id.c_str());
 
     const bool selected = timeline_track_matches_selection(*state, track);
@@ -1124,10 +2343,14 @@ void draw_timeline_lane(
             2.0f);
     }
 
-    // Subtle quarter-ticks (outline_variant @ 30%)
-    for (int tick_index = 1; tick_index < 4; ++tick_index) {
-        const float normalized = static_cast<float>(tick_index) / 4.0f;
-        const float tick_x = rect_min.x + (rect_width * normalized);
+    const double major_interval = timeline_major_tick_interval(
+        state->timeline_editor.pixels_per_second);
+    const double visible_end = state->timeline_editor.view_start_seconds +
+        static_cast<double>(rect_width) / state->timeline_editor.pixels_per_second;
+    double tick_time =
+        std::floor(state->timeline_editor.view_start_seconds / major_interval) * major_interval;
+    for (; tick_time <= visible_end + major_interval; tick_time += major_interval) {
+        const float tick_x = timeline_x_from_time(*state, tick_time, rect_min.x);
         draw_list->AddLine(
             ImVec2(tick_x, rect_min.y + 2.0f),
             ImVec2(tick_x, rect_max.y - 2.0f),
@@ -1136,23 +2359,17 @@ void draw_timeline_lane(
 
     // Horizontal interpolation hint line connecting keyframes
     if (track.key_times.size() >= 2) {
-        const float first_normalized = duration_seconds > 0.0
-            ? static_cast<float>(std::clamp(track.key_times.front() / duration_seconds, 0.0, 1.0))
-            : 0.0f;
-        const float last_normalized = duration_seconds > 0.0
-            ? static_cast<float>(std::clamp(track.key_times.back() / duration_seconds, 0.0, 1.0))
-            : 0.0f;
         const float line_y = (rect_min.y + rect_max.y) * 0.5f;
         draw_list->AddLine(
-            ImVec2(rect_min.x + rect_width * first_normalized, line_y),
-            ImVec2(rect_min.x + rect_width * last_normalized, line_y),
+            ImVec2(timeline_x_from_time(*state, track.key_times.front(), rect_min.x), line_y),
+            ImVec2(timeline_x_from_time(*state, track.key_times.back(), rect_min.x), line_y),
             IM_COL32(0xb3, 0xc5, 0xff, 0x26));  // primary @ ~15%
     }
 
     // Playhead: tertiary-container red (#ff5450)
-    if (duration_seconds > 0.0) {
-        const float playhead_x = rect_min.x +
-            static_cast<float>(state->timeline_time_seconds / duration_seconds) * rect_width;
+    {
+        const float playhead_x =
+            timeline_x_from_time(*state, state->timeline_time_seconds, rect_min.x);
         draw_list->AddLine(
             ImVec2(playhead_x, rect_min.y),
             ImVec2(playhead_x, rect_max.y),
@@ -1163,15 +2380,18 @@ void draw_timeline_lane(
     // Keyframe diamonds: primary normally, tertiary-container at playhead,
     // secondary on unselected rows for hierarchy.
     const float marker_half = 4.0f;
-    for (const double key_time : track.key_times) {
-        const float normalized = duration_seconds > 0.0
-            ? static_cast<float>(std::clamp(key_time / duration_seconds, 0.0, 1.0))
-            : 0.0f;
-        const float marker_x = rect_min.x + (rect_width * normalized);
+    for (std::size_t key_index = 0; key_index < track.key_times.size(); ++key_index) {
+        const double key_time = track.key_times[key_index];
+        const float marker_x = timeline_x_from_time(*state, key_time, rect_min.x);
+        if (marker_x < rect_min.x - marker_half || marker_x > rect_max.x + marker_half) continue;
         const bool near_playhead =
             std::abs(key_time - state->timeline_time_seconds) <= 1e-6;
+        const bool key_selected = timeline_key_selected(
+            *state, timeline_key_ref(track, key_index));
         ImU32 fill_color;
-        if (near_playhead) {
+        if (key_selected) {
+            fill_color = IM_COL32(0xff, 0xc1, 0x5c, 0xff);
+        } else if (near_playhead) {
             fill_color = IM_COL32(0xff, 0x54, 0x50, 0xFF);   // tertiary-container
         } else if (selected) {
             fill_color = IM_COL32(0xb3, 0xc5, 0xff, 0xFF);   // primary
@@ -1196,24 +2416,79 @@ void draw_timeline_lane(
             1.0f);
     }
 
-    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !state->timeline_editor.retime_gesture.has_value()) {
         const float local_x = std::clamp(ImGui::GetIO().MousePos.x - rect_min.x, 0.0f, rect_width);
-        const double clicked_time = duration_seconds > 0.0
-            ? (static_cast<double>(local_x) / static_cast<double>(rect_width)) * duration_seconds
-            : 0.0;
-        const double threshold_time =
-            duration_seconds > 0.0
-                ? (12.0 / static_cast<double>(rect_width)) * duration_seconds
-                : 0.0;
-        const std::optional<double> snapped_time =
-            nearest_key_time(track, clicked_time, threshold_time);
+        const double clicked_time = timeline_time_from_x(
+            *state, rect_min.x + local_x, rect_min.x);
+        const double threshold_time = 9.0 / state->timeline_editor.pixels_per_second;
+        std::optional<std::size_t> hit_key_index;
+        double hit_distance = threshold_time;
+        for (std::size_t index = 0; index < track.key_times.size(); ++index) {
+            const double distance = std::abs(track.key_times[index] - clicked_time);
+            if (distance <= hit_distance) {
+                hit_distance = distance;
+                hit_key_index = index;
+            }
+        }
         state->timeline_playing = false;
         focus_timeline_track(
             state,
             track,
-            snapped_time.value_or(clicked_time),
+            hit_key_index.has_value() ? track.key_times[*hit_key_index] : clicked_time,
             "Timeline",
             true);
+        const bool additive = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
+        if (hit_key_index.has_value()) {
+            const TimelineKeyRef hit = timeline_key_ref(track, *hit_key_index);
+            auto& selection = state->timeline_editor.selected_keys;
+            const auto existing = std::find(selection.begin(), selection.end(), hit);
+            if (additive) {
+                if (existing == selection.end()) selection.push_back(hit);
+                else selection.erase(existing);
+            } else if (existing == selection.end()) {
+                selection = {hit};
+            }
+            if (timeline_key_selected(*state, hit) && timeline_track_is_editable(track)) {
+                begin_timeline_retime_gesture(state, ImGui::GetItemID(), tracks);
+            }
+        } else {
+            if (!additive) state->timeline_editor.selected_keys.clear();
+            state->timeline_editor.box_selection = TimelineBoxSelection{
+                track.id, clicked_time, clicked_time, additive};
+        }
+    }
+
+    if (state->timeline_editor.box_selection.has_value() &&
+        state->timeline_editor.box_selection->track_id == track.id) {
+        auto& box = *state->timeline_editor.box_selection;
+        box.current_time = timeline_time_from_x(
+            *state,
+            std::clamp(ImGui::GetIO().MousePos.x, rect_min.x, rect_max.x),
+            rect_min.x);
+        const float box_start = timeline_x_from_time(*state, box.start_time, rect_min.x);
+        const float box_end = timeline_x_from_time(*state, box.current_time, rect_min.x);
+        draw_list->AddRectFilled(
+            ImVec2(std::min(box_start, box_end), rect_min.y),
+            ImVec2(std::max(box_start, box_end), rect_max.y),
+            IM_COL32(0x60, 0x8b, 0xff, 0x30));
+        draw_list->AddRect(
+            ImVec2(std::min(box_start, box_end), rect_min.y),
+            ImVec2(std::max(box_start, box_end), rect_max.y),
+            IM_COL32(0xb3, 0xc5, 0xff, 0xc0));
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const double minimum_time = std::min(box.start_time, box.current_time);
+            const double maximum_time = std::max(box.start_time, box.current_time);
+            auto& selection = state->timeline_editor.selected_keys;
+            if (!box.additive) selection.clear();
+            for (std::size_t index = 0; index < track.key_times.size(); ++index) {
+                if (track.key_times[index] < minimum_time - 1e-6 ||
+                    track.key_times[index] > maximum_time + 1e-6) continue;
+                const TimelineKeyRef key = timeline_key_ref(track, index);
+                if (!timeline_key_selected(*state, key)) selection.push_back(key);
+            }
+            state->timeline_editor.box_selection.reset();
+        }
     }
 
     if (ImGui::IsItemHovered()) {
@@ -1829,6 +3104,231 @@ void draw_event_timeline_editor(
     ImGui::EndChild();
 }
 
+void draw_slot_color_timeline_editor(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (!state->load_result || !track.slot_index.has_value() ||
+        *track.slot_index >= state->load_result.skeleton_data->slots().size()) {
+        ImGui::TextUnformatted("The selected slot-color track could not be resolved.");
+        return;
+    }
+    const std::string& slot_name =
+        state->load_result.skeleton_data->slots()[*track.slot_index].name;
+    const auto runtime_edit = make_slot_color_timeline_edit(*state, track);
+    if (!runtime_edit.has_value()) {
+        ImGui::TextUnformatted("The selected slot-color track could not be resolved.");
+        return;
+    }
+    const auto* existing = state->load_result.project->find_slot_color_timeline_edit(
+        track.animation_name, slot_name);
+    const marrow::editor::SlotColorTimelineEdit display_edit =
+        existing != nullptr ? *existing : *runtime_edit;
+    const double duration_seconds = selected_animation_duration(*state);
+
+    ImGui::TextUnformatted("Slot Light RGBA Key Editor");
+    ImGui::Text("%s / %s / Light RGBA", track.animation_name.c_str(), slot_name.c_str());
+    ImGui::TextDisabled("Dark tint remains read-only. Light color and alpha export to .mskl.");
+    ImGui::BeginChild("slot_color_key_editor", ImVec2(0.0f, 270.0f), true);
+    for (std::size_t key_index = 0; key_index < display_edit.keyframes.size(); ++key_index) {
+        const auto display_key = display_edit.keyframes[key_index];
+        ImGui::PushID(static_cast<int>(key_index));
+        const std::string header = "Key " + std::to_string(key_index + 1U) +
+            " @ " + format_time_seconds(display_key.time);
+        if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            double edited_time = display_key.time;
+            const bool time_changed = ImGui::DragScalar(
+                "Time", ImGuiDataType_Double, &edited_time, 0.01f, nullptr, nullptr, "%.3f s");
+            apply_timeline_project_drag(
+                state,
+                time_changed,
+                EditActionKind::EditProperty,
+                "Updated slot-color key timing on " + slot_name,
+                "timeline:" + track.id + ":key:" + std::to_string(key_index),
+                false,
+                "Slot-color edit failed",
+                [&]() {
+                    if (const auto edit_index = ensure_slot_color_timeline_edit_index(state, track)) {
+                        auto& keys = state->load_result.project
+                            ->slot_color_timeline_edits[*edit_index].keyframes;
+                        keys[key_index].time = clamp_existing_key_time(
+                            keys, key_index, edited_time, duration_seconds);
+                    }
+                });
+
+            float rgba[4] = {
+                display_key.color.r,
+                display_key.color.g,
+                display_key.color.b,
+                display_key.color.a};
+            const bool color_changed = ImGui::ColorEdit4(
+                "Light RGBA", rgba, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_Float);
+            apply_timeline_project_drag(
+                state,
+                color_changed,
+                EditActionKind::EditProperty,
+                "Updated slot light color on " + slot_name,
+                "timeline:" + track.id + ":key:" + std::to_string(key_index),
+                false,
+                "Slot-color edit failed",
+                [&]() {
+                    if (const auto edit_index = ensure_slot_color_timeline_edit_index(state, track)) {
+                        auto& key = state->load_result.project
+                            ->slot_color_timeline_edits[*edit_index].keyframes[key_index];
+                        key.color = marrow::runtime::SlotColor{
+                            std::clamp(rgba[0], 0.0f, 1.0f),
+                            std::clamp(rgba[1], 0.0f, 1.0f),
+                            std::clamp(rgba[2], 0.0f, 1.0f),
+                            std::clamp(rgba[3], 0.0f, 1.0f)};
+                    }
+                });
+
+            int interpolation_kind = 0;
+            switch (display_key.interpolation.kind()) {
+            case marrow::runtime::InterpolationKind::Linear:
+                interpolation_kind = 0;
+                break;
+            case marrow::runtime::InterpolationKind::Stepped:
+                interpolation_kind = 1;
+                break;
+            case marrow::runtime::InterpolationKind::CubicBezier:
+                interpolation_kind = 2;
+                break;
+            }
+            constexpr const char* kInterpolationLabels[] = {"Linear", "Stepped", "Bezier"};
+            if (ImGui::Combo(
+                    "Interpolation",
+                    &interpolation_kind,
+                    kInterpolationLabels,
+                    IM_ARRAYSIZE(kInterpolationLabels))) {
+                const marrow::editor::ProjectData previous = *state->load_result.project;
+                if (const auto edit_index = ensure_slot_color_timeline_edit_index(state, track)) {
+                    auto& interpolation = state->load_result.project
+                        ->slot_color_timeline_edits[*edit_index].keyframes[key_index].interpolation;
+                    interpolation = interpolation_kind == 0
+                        ? marrow::runtime::Interpolation::linear()
+                        : interpolation_kind == 1
+                            ? marrow::runtime::Interpolation::stepped()
+                            : marrow::runtime::Interpolation::cubic_bezier(0.25, 0.1, 0.75, 0.9);
+                    apply_project_command_change(
+                        state,
+                        previous,
+                        EditActionKind::EditProperty,
+                        "Updated slot-color interpolation on " + slot_name,
+                        "timeline:" + track.id + ":key:" + std::to_string(key_index),
+                        false,
+                        "Slot-color edit failed");
+                }
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
+void draw_slot_attachment_timeline_editor(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (!state->load_result || !track.slot_index.has_value() ||
+        *track.slot_index >= state->load_result.skeleton_data->slots().size()) {
+        ImGui::TextUnformatted("The selected attachment track could not be resolved.");
+        return;
+    }
+    const auto& skeleton = *state->load_result.skeleton_data;
+    const std::string slot_name = skeleton.slots()[*track.slot_index].name;
+    const auto runtime_edit = make_slot_attachment_timeline_edit(*state, track);
+    if (!runtime_edit.has_value()) {
+        ImGui::TextUnformatted("The selected attachment track could not be resolved.");
+        return;
+    }
+    const auto* existing = state->load_result.project->find_slot_attachment_timeline_edit(
+        track.animation_name, slot_name);
+    const marrow::editor::SlotAttachmentTimelineEdit display_edit =
+        existing != nullptr ? *existing : *runtime_edit;
+    const double duration_seconds = selected_animation_duration(*state);
+    std::vector<std::string> attachment_names;
+    for (const SlotAttachmentReference& reference :
+         collect_slot_attachments(skeleton, *track.slot_index)) {
+        if (reference.attachment != nullptr &&
+            std::find(
+                attachment_names.begin(),
+                attachment_names.end(),
+                reference.attachment->name) == attachment_names.end()) {
+            attachment_names.push_back(reference.attachment->name);
+        }
+    }
+    std::sort(attachment_names.begin(), attachment_names.end());
+
+    ImGui::TextUnformatted("Slot Attachment Key Editor");
+    ImGui::Text("%s / %s / Attachment", track.animation_name.c_str(), slot_name.c_str());
+    ImGui::TextDisabled("Attachment keys are stepped; <none> hides the slot.");
+    ImGui::BeginChild("slot_attachment_key_editor", ImVec2(0.0f, 250.0f), true);
+    for (std::size_t key_index = 0; key_index < display_edit.keyframes.size(); ++key_index) {
+        const auto display_key = display_edit.keyframes[key_index];
+        ImGui::PushID(static_cast<int>(key_index));
+        const std::string header = "Key " + std::to_string(key_index + 1U) +
+            " @ " + format_time_seconds(display_key.time);
+        if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            double edited_time = display_key.time;
+            const bool time_changed = ImGui::DragScalar(
+                "Time", ImGuiDataType_Double, &edited_time, 0.01f, nullptr, nullptr, "%.3f s");
+            apply_timeline_project_drag(
+                state,
+                time_changed,
+                EditActionKind::EditProperty,
+                "Updated attachment key timing on " + slot_name,
+                "timeline:" + track.id + ":key:" + std::to_string(key_index),
+                false,
+                "Attachment edit failed",
+                [&]() {
+                    if (const auto edit_index =
+                            ensure_slot_attachment_timeline_edit_index(state, track)) {
+                        auto& keys = state->load_result.project
+                            ->slot_attachment_timeline_edits[*edit_index].keyframes;
+                        keys[key_index].time = clamp_existing_key_time(
+                            keys, key_index, edited_time, duration_seconds);
+                    }
+                });
+
+            const char* selected_name = display_key.attachment_name.has_value()
+                ? display_key.attachment_name->c_str()
+                : "<none>";
+            if (ImGui::BeginCombo("Attachment", selected_name)) {
+                const auto choose_attachment = [&](std::optional<std::string> name) {
+                    const marrow::editor::ProjectData previous = *state->load_result.project;
+                    if (const auto edit_index =
+                            ensure_slot_attachment_timeline_edit_index(state, track)) {
+                        state->load_result.project
+                            ->slot_attachment_timeline_edits[*edit_index]
+                            .keyframes[key_index]
+                            .attachment_name = std::move(name);
+                        apply_project_command_change(
+                            state,
+                            previous,
+                            EditActionKind::EditProperty,
+                            "Updated attachment key on " + slot_name,
+                            "timeline:" + track.id + ":key:" + std::to_string(key_index),
+                            false,
+                            "Attachment edit failed");
+                    }
+                };
+                if (ImGui::Selectable("<none>", !display_key.attachment_name.has_value())) {
+                    choose_attachment(std::nullopt);
+                }
+                for (const std::string& attachment_name : attachment_names) {
+                    const bool selected =
+                        display_key.attachment_name == std::optional<std::string>(attachment_name);
+                    if (ImGui::Selectable(attachment_name.c_str(), selected)) {
+                        choose_attachment(attachment_name);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
 void draw_transform_timeline_editor(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks) {
@@ -1854,6 +3354,14 @@ void draw_transform_timeline_editor(
     }
     if (track->deform_attachment_name.has_value()) {
         draw_mesh_deform_timeline_editor(state, *track);
+        return;
+    }
+    if (track->slot_index.has_value() && track->id.find(":Color") != std::string::npos) {
+        draw_slot_color_timeline_editor(state, *track);
+        return;
+    }
+    if (track->slot_index.has_value() && track->id.find(":Attachment") != std::string::npos) {
+        draw_slot_attachment_timeline_editor(state, *track);
         return;
     }
 
@@ -2010,7 +3518,9 @@ void draw_transform_timeline_editor(
                 });
 
             if (*track->transform_channel == marrow::editor::TransformTimelineChannel::Rotate) {
-                double edited_angle = display_key.angle;
+                const double setup_rotation = static_cast<double>(
+                    skeleton.bones()[*track->bone_index].setup_pose.rotation);
+                double edited_angle = display_key.angle + setup_rotation;
                 const bool angle_changed = ImGui::DragScalar(
                     "Angle",
                     ImGuiDataType_Double,
@@ -2032,7 +3542,10 @@ void draw_transform_timeline_editor(
                         if (edit_index.has_value()) {
                             state->load_result.project->transform_timeline_edits[*edit_index]
                                 .keyframes[key_index]
-                                .angle = edited_angle;
+                                .angle = marrow::editor::setup_relative_rotation_key(
+                                    *state->session.runtime_data(),
+                                    bone_name,
+                                    edited_angle);
                         }
                     });
             } else {
@@ -2709,6 +4222,7 @@ void draw_timeline_window(ShellState* state) {
     const std::vector<TimelineTrackRow> tracks =
         animation != nullptr ? build_timeline_tracks(skeleton, *animation)
                              : std::vector<TimelineTrackRow>{};
+    reconcile_timeline_key_selection(state, tracks);
 
     if (icon_button(
             state->icons,
@@ -2799,31 +4313,70 @@ void draw_timeline_window(ShellState* state) {
     ImGui::TextDisabled("|");
     ImGui::SameLine();
 
-    // Add / Remove keyframe — navigation helpers that jump to the per-track
-    // keyframe editor below. Disabled when no track is selected. Actual
-    // add/remove lives in the track-specific editor since each track type
-    // (transform / deform / draw-order / event) has its own keyframe model.
-    const bool has_selected_track = state->selected_timeline_track_id.has_value();
+    const TimelineTrackRow* toolbar_track = selected_timeline_track(*state, tracks);
+    const bool has_editable_track =
+        toolbar_track != nullptr && timeline_track_is_editable(*toolbar_track);
     if (icon_button(
             state->icons,
             Icon::AddKey,
-            has_selected_track
-                ? "Scroll to track editor to add keyframe at playhead"
-                : "Select a track first to add keyframes",
+            has_editable_track
+                ? "Add or replace a keyframe at the playhead"
+                : "Select an editable track (Inherit remains read-only)",
             false,
-            !has_selected_track)) {
-        state->status_message = "Use the track editor below to add a keyframe at the playhead";
+            !has_editable_track)) {
+        add_timeline_key_at_playhead(state, *toolbar_track);
     }
     ImGui::SameLine();
+    const bool has_selected_editable_key = std::any_of(
+        state->timeline_editor.selected_keys.begin(),
+        state->timeline_editor.selected_keys.end(),
+        [&](const TimelineKeyRef& key) {
+            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+            return track != nullptr && timeline_track_is_editable(*track);
+        });
+    const bool has_remove_target = has_editable_track || has_selected_editable_key;
     if (icon_button(
             state->icons,
             Icon::RemoveKey,
-            has_selected_track
-                ? "Scroll to track editor to remove keyframe at playhead"
-                : "Select a track first to remove keyframes",
+            has_remove_target
+                ? "Remove selected keys, or an authored key exactly at the playhead"
+                : "Select an editable track (Inherit remains read-only)",
             false,
-            !has_selected_track)) {
-        state->status_message = "Use the track editor below to remove the keyframe nearest the playhead";
+            !has_remove_target)) {
+        remove_selected_timeline_keys(state, tracks);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    const bool has_key_selection = has_selected_editable_key;
+    if (!has_key_selection) ImGui::BeginDisabled();
+    if (ImGui::SmallButton("Copy")) copy_selected_timeline_keys(state, tracks);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Cut")) cut_selected_timeline_keys(state, tracks);
+    if (!has_key_selection) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const bool paste_enabled = state->timeline_editor.clipboard.has_data &&
+        state->timeline_editor.clipboard.animation_name == state->selected_animation_name;
+    if (!paste_enabled) ImGui::BeginDisabled();
+    if (ImGui::SmallButton("Paste")) paste_timeline_clipboard(state, tracks);
+    if (!paste_enabled) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::Checkbox("Snap to Frames", &state->timeline_editor.snap_to_frames);
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::GetIO().WantTextInput &&
+        !state->timeline_editor.retime_gesture.has_value()) {
+        const bool command = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
+        if (command && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+            copy_selected_timeline_keys(state, tracks);
+        } else if (command && ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+            cut_selected_timeline_keys(state, tracks);
+        } else if (command && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
+            paste_timeline_clipboard(state, tracks);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
+                   ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
+            remove_selected_timeline_keys(state, tracks);
+        }
     }
 
     double slider_time = state->timeline_time_seconds;
@@ -2853,6 +4406,8 @@ void draw_timeline_window(ShellState* state) {
         tracks.size(),
         state->preview_root_motion_total.x,
         state->preview_root_motion_total.y);
+
+    draw_timeline_ruler(state, duration_seconds);
 
     if (tracks.empty()) {
         ImGui::TextUnformatted("The selected animation does not contain keyed tracks.");
@@ -2898,11 +4453,13 @@ void draw_timeline_window(ShellState* state) {
             ImGui::PopID();
 
             ImGui::TableSetColumnIndex(1);
-            draw_timeline_lane(state, track, duration_seconds);
+            draw_timeline_lane(state, track, tracks);
         }
 
         ImGui::EndTable();
     }
+
+    update_timeline_retime_gesture(state, tracks);
 
     draw_transform_timeline_editor(state, tracks);
 

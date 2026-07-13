@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -18,6 +20,26 @@ enum class TransformTimelineChannel {
     Translate,
     Scale,
     Shear,
+};
+
+enum class AnimationEditKind {
+    Create,
+    Rename,
+    Delete,
+};
+
+/**
+ * @brief One ordered animation-catalog mutation applied to the referenced runtime skeleton.
+ *
+ * Create stores a complete animation JSON object so duplicates preserve timeline
+ * families that the current editor does not understand. Rename moves the
+ * effective animation object, and Delete hides it from the authored runtime.
+ */
+struct AnimationEdit {
+    AnimationEditKind kind{AnimationEditKind::Create};
+    std::string name;
+    std::string new_name;
+    runtime::json::Value animation{runtime::json::Value::Object{}, {}};
 };
 
 enum class OnionSkinMode {
@@ -57,6 +79,49 @@ struct TransformTimelineEdit {
     TransformTimelineChannel channel{TransformTimelineChannel::Rotate};
     std::vector<TransformKeyframeEdit> keyframes;
 };
+
+/**
+ * @brief Partial value update for one transform keyframe.
+ *
+ * Rotate timelines consume `angle`; translate, scale, and shear timelines
+ * consume `x` and `y`. Omitted values preserve an existing key's value and
+ * use the default-initialized value when a key is inserted.
+ */
+struct TransformKeyframePatch {
+    // Absolute local rotation as displayed by the inspector/agent surface.
+    // The project-domain upsert converts it to the runtime format's
+    // setup-relative rotate-key angle.
+    std::optional<double> angle;
+    std::optional<double> x;
+    std::optional<double> y;
+};
+
+/** Finds a sorted key within a symmetric time tolerance. */
+template <typename Keyframe>
+typename std::vector<Keyframe>::iterator find_keyframe_near_time(
+    std::vector<Keyframe>& keyframes,
+    double time,
+    double epsilon = 1e-6) {
+    auto iterator = std::lower_bound(
+        keyframes.begin(),
+        keyframes.end(),
+        time,
+        [](const Keyframe& keyframe, double key_time) {
+            return keyframe.time < key_time;
+        });
+    if (iterator != keyframes.end() &&
+        std::abs(iterator->time - time) <= epsilon) {
+        return iterator;
+    }
+    if (iterator != keyframes.begin()) {
+        auto previous = iterator;
+        --previous;
+        if (std::abs(previous->time - time) <= epsilon) {
+            return previous;
+        }
+    }
+    return keyframes.end();
+}
 
 struct DeformKeyframeEdit {
     double time{0.0};
@@ -225,6 +290,10 @@ struct ViewportState {
     DebugOverlaySettings debug_overlay{};
 };
 
+struct TimelineSettings {
+    double frames_per_second{60.0};
+};
+
 struct ProjectMetadata {
     std::string name;
     std::string active_animation;
@@ -232,12 +301,14 @@ struct ProjectMetadata {
     std::filesystem::path export_directory{"exports"};
     std::string notes;
     ViewportState viewport{};
+    TimelineSettings timeline{};
 };
 
 struct ProjectData {
     std::string marrow_version{"1.0"};
     RuntimeAssetReferences runtime_assets;
     ProjectMetadata editor_metadata;
+    std::vector<AnimationEdit> animation_edits;
     std::vector<TransformTimelineEdit> transform_timeline_edits;
     std::vector<MeshDeformTimelineEdit> mesh_deform_timeline_edits;
     std::vector<MeshWeightAttachmentEdit> mesh_weight_attachment_edits;
@@ -440,6 +511,68 @@ struct ProjectData {
         const std::filesystem::path& atlas_path);
 };
 
+TransformTimelineEdit* ensure_transform_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    TransformTimelineChannel channel);
+
+MeshDeformTimelineEdit* ensure_mesh_deform_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name,
+    std::string_view attachment_name);
+
+DrawOrderTimelineEdit* ensure_draw_order_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name);
+
+EventTimelineEdit* ensure_event_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name);
+
+SlotColorTimelineEdit* ensure_slot_color_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name);
+
+SlotAttachmentTimelineEdit* ensure_slot_attachment_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name);
+
+double setup_relative_rotation_key(
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view bone_name,
+    double absolute_local_rotation);
+
+/**
+ * @brief Inserts or updates one project-owned transform keyframe.
+ *
+ * The timeline and key are created when absent. When the project has not yet
+ * materialized that channel, all effective runtime keys are copied first so a
+ * first edit cannot replace the imported track. Keys remain time-sorted and a
+ * key within 1e-6 seconds of `time` is updated in place. Inputs are absolute
+ * local values; rotate angles are converted to setup-relative runtime keys.
+ * Newly inserted keys use linear interpolation.
+ *
+ * @return The inserted or updated keyframe.
+ */
+TransformKeyframeEdit& upsert_transform_keyframe(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    TransformTimelineChannel channel,
+    double time,
+    const TransformKeyframePatch& patch);
+
 struct ProjectLoadResult {
     std::shared_ptr<ProjectData> project;
     std::shared_ptr<const runtime::json::Document> base_skeleton_document;
@@ -552,6 +685,15 @@ ProjectLoadResult load_project(const std::filesystem::path& path);
  * @return Export-ready runtime skeleton data or an error.
  */
 ProjectRuntimeResult build_project_runtime(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document);
+/**
+ * @brief Builds the effective runtime JSON document before typed runtime parsing.
+ * @param project Project containing editor-side overrides.
+ * @param base_skeleton_document Referenced runtime skeleton document.
+ * @return A deep-copied document with animation, timeline, mesh, and constraint edits applied.
+ */
+runtime::json::Document build_project_runtime_document(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document);
 /**

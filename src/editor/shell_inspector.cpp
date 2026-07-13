@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 
 #include "shell_selection.hpp"
 #include "shell_theme.hpp"
@@ -300,6 +301,163 @@ std::vector<MeshWeightVertexRow> build_mesh_weight_rows(
     return rows;
 }
 
+bool inspector_bone_pose_editable(const ShellState& state) noexcept {
+    return static_cast<bool>(state.load_result) &&
+        !state.selected_animation_name.empty() &&
+        !state.weight_paint.enabled;
+}
+
+namespace {
+
+std::string_view inspector_transform_channel_name(
+    marrow::editor::TransformTimelineChannel channel) {
+    switch (channel) {
+    case marrow::editor::TransformTimelineChannel::Rotate:
+        return "rotation";
+    case marrow::editor::TransformTimelineChannel::Translate:
+        return "translation";
+    case marrow::editor::TransformTimelineChannel::Scale:
+        return "scale";
+    case marrow::editor::TransformTimelineChannel::Shear:
+        return "shear";
+    }
+    return "transform";
+}
+
+void finish_inspector_transform_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->inspector_transform_gesture.has_value()) {
+        return;
+    }
+
+    InspectorTransformGesture gesture =
+        std::move(*state->inspector_transform_gesture);
+    state->inspector_transform_gesture.reset();
+    const std::string channel_name(
+        inspector_transform_channel_name(gesture.channel));
+    if (!commit || !gesture.changed) {
+        gesture.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        if (commit) {
+            state->status_message = "No " + channel_name + " key change";
+        }
+        return;
+    }
+
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Bone " + channel_name + " edit failed";
+        return;
+    }
+    state->error_message.clear();
+    state->status_message = "Keyed bone " + channel_name + " at " +
+        format_time_seconds(state->timeline_time_seconds);
+}
+
+bool apply_inspector_transform_drag(
+    ShellState* state,
+    bool value_changed,
+    std::size_t bone_index,
+    marrow::editor::TransformTimelineChannel channel,
+    const marrow::editor::TransformKeyframePatch& patch) {
+    if (state == nullptr || !inspector_bone_pose_editable(*state) ||
+        state->load_result.project == nullptr ||
+        bone_index >= state->load_result.skeleton_data->bones().size()) {
+        return false;
+    }
+
+    const ImGuiID item_id = ImGui::GetItemID();
+    if (ImGui::IsItemActivated()) {
+        if (state->pending_edit_action.has_value() ||
+            state->weight_paint_stroke.active) {
+            state->status_message = "Finish the active edit before editing a bone pose";
+            return false;
+        }
+        state->timeline_playing = false;
+        state->session.set_playing(false);
+        const std::string channel_name(inspector_transform_channel_name(channel));
+        auto transaction = state->session.begin_edit({
+            marrow::editor::EditKind::AddKeyframe,
+            "Key bone " + channel_name,
+            "inspector-transform:" + state->selected_animation_name + ":" +
+                state->load_result.skeleton_data->bones()[bone_index].name + ":" +
+                channel_name,
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) {
+            state->error_message = transaction.error()->format();
+            return false;
+        }
+        InspectorTransformGesture gesture;
+        gesture.item_id = item_id;
+        gesture.channel = channel;
+        gesture.transaction = std::move(transaction);
+        state->inspector_transform_gesture.emplace(std::move(gesture));
+    }
+
+    if (!state->inspector_transform_gesture.has_value() ||
+        state->inspector_transform_gesture->item_id != item_id) {
+        return false;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        finish_inspector_transform_gesture(state, false);
+        state->status_message = "Cancelled bone transform edit";
+        return true;
+    }
+
+    if (value_changed) {
+        auto& gesture = *state->inspector_transform_gesture;
+        marrow::editor::upsert_transform_keyframe(
+            *gesture.transaction.project(),
+            *state->session.runtime_data(),
+            state->selected_animation_name,
+            state->load_result.skeleton_data->bones()[bone_index].name,
+            channel,
+            state->timeline_time_seconds,
+            patch);
+        const marrow::editor::SessionResult refresh =
+            gesture.transaction.refresh_runtime();
+        if (!refresh) {
+            const std::string error = refresh.error->format();
+            finish_inspector_transform_gesture(state, false);
+            state->error_message = error;
+            state->status_message = "Bone transform preview failed";
+            return false;
+        }
+        gesture.changed = true;
+        sync_shell_from_editor_session(state);
+    }
+
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        finish_inspector_transform_gesture(state, true);
+    } else if (ImGui::IsItemDeactivated()) {
+        finish_inspector_transform_gesture(state, false);
+    }
+    return true;
+}
+
+} // namespace
+
+void finalize_orphaned_inspector_transform_gesture(ShellState* state) {
+    if (state == nullptr || !state->inspector_transform_gesture.has_value()) {
+        return;
+    }
+    const ImGuiID item_id = state->inspector_transform_gesture->item_id;
+    const ImGuiContext* context = ImGui::GetCurrentContext();
+    const bool item_is_live = context != nullptr &&
+        ImGui::GetActiveID() == item_id && context->ActiveIdIsAlive == item_id;
+    if (item_is_live) {
+        return;
+    }
+    const bool cancel = context != nullptr &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    finish_inspector_transform_gesture(state, !cancel);
+}
+
 
 void draw_inspector_window(ShellState* state) {
     ImGui::Begin(kPropertiesWindowTitle);
@@ -311,9 +469,12 @@ void draw_inspector_window(ShellState* state) {
         return;
     }
 
-    const auto& skeleton = *state->load_result.skeleton_data;
+    // A live transform edit may replace the session's runtime data while this
+    // window is being drawn. Keep the frame-start data alive until the panel
+    // completes so labels and hierarchy references remain valid.
+    const auto skeleton_data = state->load_result.skeleton_data;
+    const auto& skeleton = *skeleton_data;
     const auto children = build_bone_children(skeleton);
-    const auto& world_transforms = state->preview_skeleton->bone_world_transforms();
 
     // Persistent context strip — what is currently being inspected.
     {
@@ -364,10 +525,10 @@ void draw_inspector_window(ShellState* state) {
 
         if (state->selected_bone_index.has_value() &&
             *state->selected_bone_index < skeleton.bones().size() &&
-            *state->selected_bone_index < world_transforms.size()) {
+            *state->selected_bone_index <
+                state->preview_skeleton->bone_world_transforms().size()) {
             const std::size_t bone_index = *state->selected_bone_index;
             const auto& bone = skeleton.bones()[bone_index];
-            const auto& world = world_transforms[bone_index];
             const auto& setup_pose = bone.setup_pose;
 
             ImGui::Spacing();
@@ -436,11 +597,14 @@ void draw_inspector_window(ShellState* state) {
                 ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_FrameStyle);
             ImGui::TextUnformatted("Local Pose");
             ImGui::SameLine();
-            ImGui::TextDisabled("(editable)");
-            {
-                auto& local_pose =
-                    state->preview_skeleton->bone_poses()[bone_index].local_pose;
-                bool pose_changed = false;
+            const bool pose_editable = inspector_bone_pose_editable(*state);
+            ImGui::TextDisabled(
+                pose_editable
+                    ? "(auto-key at playhead)"
+                    : "(read-only; switch to Animation mode to key)");
+            const marrow::runtime::BoneTransform local_pose =
+                state->preview_skeleton->bone_poses()[bone_index].local_pose;
+            if (pose_editable) {
 
                 // Ghost input: transparent FrameBg + bottom underline that
                 // illuminates to primary-container when focused.
@@ -464,70 +628,120 @@ void draw_inspector_window(ShellState* state) {
                 };
 
                 float translate[2] = {local_pose.x, local_pose.y};
-                if (ImGui::DragFloat2(
+                const bool translate_changed = ImGui::DragFloat2(
                         "Translate##bone_local",
                         translate,
                         1.0f,
                         0.0f,
                         0.0f,
-                        "%.1f")) {
-                    local_pose.x = translate[0];
-                    local_pose.y = translate[1];
-                    pose_changed = true;
-                }
+                        "%.1f");
+                apply_inspector_transform_drag(
+                    state,
+                    translate_changed,
+                    bone_index,
+                    marrow::editor::TransformTimelineChannel::Translate,
+                    marrow::editor::TransformKeyframePatch{
+                        std::nullopt,
+                        static_cast<double>(translate[0]),
+                        static_cast<double>(translate[1])});
                 ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
 
                 float rotation = local_pose.rotation;
-                if (ImGui::DragFloat(
+                const bool rotation_changed = ImGui::DragFloat(
                         "Rotation##bone_local",
                         &rotation,
                         0.5f,
                         -360.0f,
                         360.0f,
-                        "%.1f deg")) {
-                    local_pose.rotation = rotation;
-                    pose_changed = true;
-                }
+                        "%.1f deg");
+                apply_inspector_transform_drag(
+                    state,
+                    rotation_changed,
+                    bone_index,
+                    marrow::editor::TransformTimelineChannel::Rotate,
+                    marrow::editor::TransformKeyframePatch{
+                        static_cast<double>(rotation),
+                        std::nullopt,
+                        std::nullopt});
                 ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
 
                 float scale[2] = {local_pose.scale_x, local_pose.scale_y};
-                if (ImGui::DragFloat2(
+                const bool scale_changed = ImGui::DragFloat2(
                         "Scale##bone_local",
                         scale,
                         0.01f,
                         0.0f,
                         0.0f,
-                        "%.3f")) {
-                    local_pose.scale_x = scale[0];
-                    local_pose.scale_y = scale[1];
-                    pose_changed = true;
-                }
+                        "%.3f");
+                apply_inspector_transform_drag(
+                    state,
+                    scale_changed,
+                    bone_index,
+                    marrow::editor::TransformTimelineChannel::Scale,
+                    marrow::editor::TransformKeyframePatch{
+                        std::nullopt,
+                        static_cast<double>(scale[0]),
+                        static_cast<double>(scale[1])});
                 ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
 
                 float shear[2] = {local_pose.shear_x, local_pose.shear_y};
-                if (ImGui::DragFloat2(
+                const bool shear_changed = ImGui::DragFloat2(
                         "Shear##bone_local",
                         shear,
                         0.5f,
                         0.0f,
                         0.0f,
-                        "%.1f")) {
-                    local_pose.shear_x = shear[0];
-                    local_pose.shear_y = shear[1];
-                    pose_changed = true;
-                }
+                        "%.1f");
+                apply_inspector_transform_drag(
+                    state,
+                    shear_changed,
+                    bone_index,
+                    marrow::editor::TransformTimelineChannel::Shear,
+                    marrow::editor::TransformKeyframePatch{
+                        std::nullopt,
+                        static_cast<double>(shear[0]),
+                        static_cast<double>(shear[1])});
                 ghost_underline(ImGui::IsItemActive() || ImGui::IsItemFocused());
 
                 ImGui::PopStyleColor(3);
-
-                if (pose_changed) {
-                    state->preview_skeleton->update_world_transforms();
-                }
+            } else {
+                char pose_buffer[160];
+                std::snprintf(
+                    pose_buffer,
+                    sizeof(pose_buffer),
+                    "Translate: (%.1f, %.1f)",
+                    static_cast<double>(local_pose.x),
+                    static_cast<double>(local_pose.y));
+                icon_label(state->icons, Icon::PropTranslate, pose_buffer, 0.75f);
+                std::snprintf(
+                    pose_buffer,
+                    sizeof(pose_buffer),
+                    "Rotation: %.1f deg",
+                    static_cast<double>(local_pose.rotation));
+                icon_label(state->icons, Icon::PropRotate, pose_buffer, 0.75f);
+                std::snprintf(
+                    pose_buffer,
+                    sizeof(pose_buffer),
+                    "Scale: (%.3f, %.3f)",
+                    static_cast<double>(local_pose.scale_x),
+                    static_cast<double>(local_pose.scale_y));
+                icon_label(state->icons, Icon::PropScale, pose_buffer, 0.75f);
+                std::snprintf(
+                    pose_buffer,
+                    sizeof(pose_buffer),
+                    "Shear: (%.1f, %.1f)",
+                    static_cast<double>(local_pose.shear_x),
+                    static_cast<double>(local_pose.shear_y));
+                icon_label(state->icons, Icon::PropShear, pose_buffer, 0.75f);
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
             ImGui::Separator();
             ImGui::TextUnformatted("World Pose");
+            const auto& current_world_transforms =
+                state->preview_skeleton->bone_world_transforms();
+            const marrow::runtime::BoneWorldTransform world =
+                current_world_transforms[bone_index];
             ImGui::Text(
                 "World position: (%.1f, %.1f)",
                 static_cast<double>(world.world_x),
@@ -566,7 +780,7 @@ void draw_inspector_window(ShellState* state) {
             *state->selected_slot_index < state->preview_skeleton->slot_states().size()) {
             const std::size_t slot_index = *state->selected_slot_index;
             const auto& slot = skeleton.slots()[slot_index];
-            auto& slot_state = state->preview_skeleton->slot_states()[slot_index];
+            const auto& slot_state = state->preview_skeleton->slot_states()[slot_index];
             const auto* current_attachment = state->preview_skeleton->current_attachment(slot_index);
             const auto current_selection = current_attachment_selection(*state, slot_index);
             const auto skin_preview_attachment = resolve_skin_preview_attachment(
@@ -603,39 +817,18 @@ void draw_inspector_window(ShellState* state) {
                 current_attachment != nullptr ? current_attachment->name.c_str() : "<none>");
             ImGui::Text("Attachment source skin: %s", source_skin.c_str());
             ImGui::Text("Preview override: %s", yes_no(has_preview_override));
-            float light_color[4] = {
-                slot_state.color.r,
-                slot_state.color.g,
-                slot_state.color.b,
-                slot_state.color.a};
-            if (ImGui::ColorEdit4(
-                    "Light color##slot_color",
-                    light_color,
-                    ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) {
-                slot_state.color.r = light_color[0];
-                slot_state.color.g = light_color[1];
-                slot_state.color.b = light_color[2];
-                slot_state.color.a = light_color[3];
-            }
+            ImGui::Text(
+                "Light color: %s",
+                format_slot_color(slot_state.color).c_str());
             if (slot_state.dark_color.has_value()) {
-                float dark[4] = {
-                    slot_state.dark_color->r,
-                    slot_state.dark_color->g,
-                    slot_state.dark_color->b,
-                    slot_state.dark_color->a};
-                if (ImGui::ColorEdit4(
-                        "Dark tint##slot_dark",
-                        dark,
-                        ImGuiColorEditFlags_AlphaBar |
-                            ImGuiColorEditFlags_AlphaPreviewHalf)) {
-                    slot_state.dark_color->r = dark[0];
-                    slot_state.dark_color->g = dark[1];
-                    slot_state.dark_color->b = dark[2];
-                    slot_state.dark_color->a = dark[3];
-                }
+                ImGui::Text(
+                    "Dark tint: %s",
+                    format_slot_color(*slot_state.dark_color).c_str());
             } else {
                 ImGui::Text("Dark tint: <none>");
             }
+            ImGui::TextDisabled(
+                "Slot colors are read-only until keyed color authoring is enabled.");
         } else {
             ImGui::Spacing();
             ImGui::TextUnformatted("Select a slot to inspect presentation state.");

@@ -110,6 +110,25 @@ struct SessionResult {
     explicit operator bool() const noexcept { return !error.has_value(); }
 };
 
+/**
+ * @brief One animation-catalog mutation owned by EditorSession.
+ *
+ * Create uses `destination_animation`, delete uses `source_animation`, and
+ * duplicate/rename use both names.
+ */
+enum class AnimationCatalogEditKind {
+    Create,
+    Duplicate,
+    Rename,
+    Delete,
+};
+
+struct AnimationCatalogEdit {
+    AnimationCatalogEditKind kind{AnimationCatalogEditKind::Create};
+    std::string source_animation;
+    std::string destination_animation;
+};
+
 class EditorSessionShellBinding;
 
 /**
@@ -163,6 +182,8 @@ public:
     runtime::RootMotionDelta preview_root_motion_total() const noexcept;
 
     bool select_animation(std::string_view animation_name, bool reset_time = true);
+    /** @brief Clears animation playback and shows the immutable setup pose. */
+    bool select_setup_pose();
     bool seek(double time_seconds);
     bool advance(double delta_seconds);
     void set_playing(bool playing) noexcept;
@@ -206,6 +227,23 @@ public:
             "preview-attachment",
             true,
             EditImpact::Preview});
+
+    /**
+     * @brief Applies one catalog edit and its preview selection/queue remap atomically.
+     *
+     * Rename remaps matching current and queued animation references. Delete
+     * selects the project's replacement animation when necessary and removes a
+     * queue that references the deleted animation. The preview state is stored
+     * in the same undo/redo snapshot as the project mutation.
+     */
+    SessionResult edit_animation_catalog(
+        AnimationCatalogEdit edit,
+        EditDescriptor descriptor = {
+            EditKind::EditProperty,
+            "Edit animation catalog",
+            "animation-catalog",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
 
     EditTransaction begin_edit(EditDescriptor descriptor);
     bool transaction_active() const noexcept;
@@ -270,6 +308,16 @@ public:
         std::optional<std::size_t> skin_index,
         std::string attachment_name);
     bool reset_preview_attachment(std::size_t slot_index);
+
+    /**
+     * @brief Rebuilds runtime data and refreshes the preview without closing the edit.
+     *
+     * This supports live authoring gestures. Repeated calls replace the
+     * transaction's transient runtime while commit still creates one history
+     * entry. Cancel restores the project, runtime, and preview captured when
+     * the transaction began.
+     */
+    SessionResult refresh_runtime();
 
     SessionResult commit();
     void cancel() noexcept;

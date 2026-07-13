@@ -1,7 +1,15 @@
-# Maroow Editor UI 구현 계획
+# Maroow Editor UI 디자인 참고 계획 (보관)
 
-Stitch 디자인을 기반으로 한 ImGui 구현 계획.
-디자인 100% 재현이 아닌, **기능과 사용자 편의성** 우선.
+> 이 문서는 Stitch 디자인을 해석했던 초기 UI 참고자료이며 더 이상 구현 순서나 소스 구조의 기준이 아니다.
+> 편집 P0(MAR-141~153)는 현재 워킹 트리에 구현됐다. 다음 활성 우선순위는 [`editing-gap-analysis.md`](editing-gap-analysis.md)와 `.agents/tasks/prd-marrow-runtime.json`의 MAR-121~128 파라미터 트랙이며, MAR-154~172는 후속 P1 backlog다.
+
+현재 에디터의 UI-free 저작 경계는 `include/marrow/editor/session.hpp`의 `EditorSession`이고,
+ImGui 구현은 `src/editor/shell_state.hpp`와 `shell_timeline`, `shell_constraints`, `shell_selection`,
+`shell_inspector`, `shell_weight_paint`, `shell_viewport_ui`, project/agent panel 모듈로 분리돼 있다.
+아래 `shell_main.cpp` line number, 단일 파일 수정 지시, 예상 변경량은 모두 당시 설계 기록으로만 읽는다.
+
+Stitch 디자인을 기반으로 한 초기 ImGui 구현 계획이다.
+디자인 100% 재현이 아닌, **기능과 사용자 편의성** 우선이라는 시각 원칙은 유지한다.
 
 ---
 
@@ -10,7 +18,7 @@ Stitch 디자인을 기반으로 한 ImGui 구현 계획.
 1. **기능 우선**: 시각적 장식보다 실사용 개선에 집중
 2. **ImGui 자연스러움**: ImGui에서 어색한 구현(Glassmorphism, Gradient)은 과감히 단순화
 3. **점진적 적용**: 한 Phase가 빌드+테스트 통과해야 다음으로 진행
-4. **기존 테스트 유지**: 27개 유닛테스트 + headless smoke 5프레임 항상 통과
+4. **기존 테스트 유지**: 현재 24개 named unit case + focused CTest 7개 + headless smoke 5프레임 항상 통과
 
 ---
 
@@ -643,7 +651,8 @@ void draw_console_content(ShellState* state) {
 모든 Phase 완료 후:
 ```bash
 cmake --build build
-./build/marrow_unit_tests          # 27개 전부 통과
+ctest --test-dir build --output-on-failure  # focused 7개 전부 통과
+./build/marrow_unit_tests          # 현재 24개 named case 전부 통과
 ./build/marrow_editor_shell --auto-close 5  # headless smoke 통과
 ./build/marrow_renderer_sample --auto-close 2  # renderer 통과
 ```

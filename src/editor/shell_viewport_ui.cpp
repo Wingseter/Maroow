@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
-#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -25,45 +24,261 @@ namespace marrow::editor::shell {
 using marrow::editor::Icon;
 using marrow::editor::IconRegistry;
 
-float clamp_zoom(float zoom) {
-    return std::max(0.2f, std::min(zoom, 6.0f));
+void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
+    (void)canvas_size;
+    if (frame_viewport_camera_to_preview_pose(state)) {
+        state->status_message = "Framed skeleton to viewport";
+    }
 }
 
-void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
-    if (!state->preview_skeleton) {
+namespace {
+
+constexpr float kTranslateGizmoLength = 42.0f;
+constexpr float kTranslateGizmoHitRadius = 7.0f;
+
+std::optional<ViewportTranslateAxis> hit_test_translate_gizmo(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ImVec2& position) {
+    if (state.selected_animation_name.empty() || state.weight_paint.enabled ||
+        !state.selected_bone_index.has_value() ||
+        *state.selected_bone_index >= layout.bones.size()) {
+        return std::nullopt;
+    }
+    const ImVec2 origin = layout.bones[*state.selected_bone_index].screen_position;
+    if (squared_distance(origin, position) <=
+        kTranslateGizmoHitRadius * kTranslateGizmoHitRadius) {
+        return ViewportTranslateAxis::Free;
+    }
+    const ImVec2 x_end(origin.x + kTranslateGizmoLength, origin.y);
+    if (point_segment_distance_squared(position, origin, x_end) <=
+        kTranslateGizmoHitRadius * kTranslateGizmoHitRadius) {
+        return ViewportTranslateAxis::X;
+    }
+    const ImVec2 y_end(origin.x, origin.y - kTranslateGizmoLength);
+    if (point_segment_distance_squared(position, origin, y_end) <=
+        kTranslateGizmoHitRadius * kTranslateGizmoHitRadius) {
+        return ViewportTranslateAxis::Y;
+    }
+    return std::nullopt;
+}
+
+void draw_translate_gizmo(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    ImDrawList* draw_list) {
+    if (draw_list == nullptr || state.selected_animation_name.empty() ||
+        state.weight_paint.enabled || !state.selected_bone_index.has_value() ||
+        *state.selected_bone_index >= layout.bones.size()) {
         return;
     }
-    const auto& transforms = state->preview_skeleton->bone_world_transforms();
-    if (transforms.empty()) {
+    const ImVec2 origin = layout.bones[*state.selected_bone_index].screen_position;
+    const ImVec2 x_end(origin.x + kTranslateGizmoLength, origin.y);
+    const ImVec2 y_end(origin.x, origin.y - kTranslateGizmoLength);
+    draw_list->AddLine(origin, x_end, IM_COL32(239, 91, 91, 255), 3.0f);
+    draw_list->AddTriangleFilled(
+        x_end,
+        ImVec2(x_end.x - 8.0f, x_end.y - 5.0f),
+        ImVec2(x_end.x - 8.0f, x_end.y + 5.0f),
+        IM_COL32(239, 91, 91, 255));
+    draw_list->AddLine(origin, y_end, IM_COL32(102, 204, 124, 255), 3.0f);
+    draw_list->AddTriangleFilled(
+        y_end,
+        ImVec2(y_end.x - 5.0f, y_end.y + 8.0f),
+        ImVec2(y_end.x + 5.0f, y_end.y + 8.0f),
+        IM_COL32(102, 204, 124, 255));
+    draw_list->AddCircleFilled(origin, 6.0f, IM_COL32(244, 198, 88, 255), 16);
+    draw_list->AddCircle(origin, 7.0f, IM_COL32(18, 21, 25, 255), 16, 1.0f);
+}
+
+std::optional<marrow::runtime::AttachmentVertex> local_position_for_world_target_impl(
+    const marrow::runtime::Skeleton& skeleton,
+    std::size_t bone_index,
+    const ViewportWorldPoint& target) {
+    if (bone_index >= skeleton.data()->bones().size() ||
+        bone_index >= skeleton.bone_world_transforms().size()) {
+        return std::nullopt;
+    }
+    const auto& bone = skeleton.data()->bones()[bone_index];
+    if (!bone.parent_index.has_value()) {
+        constexpr double kEpsilon = 1e-8;
+        if (std::abs(skeleton.scale_x()) <= kEpsilon ||
+            std::abs(skeleton.scale_y()) <= kEpsilon) {
+            return std::nullopt;
+        }
+        return marrow::runtime::AttachmentVertex{
+            target.x / skeleton.scale_x(),
+            target.y / skeleton.scale_y()};
+    }
+    const std::size_t parent_index = *bone.parent_index;
+    if (parent_index >= skeleton.bone_world_transforms().size()) {
+        return std::nullopt;
+    }
+    const auto parent = skeleton.bone_world_transforms()[parent_index];
+    const double a = parent.a;
+    const double b = parent.b;
+    const double c = parent.c;
+    const double d = parent.d;
+    const double determinant = (a * d) - (b * c);
+    if (std::abs(determinant) <= 1e-8) {
+        return std::nullopt;
+    }
+    const double dx = target.x - parent.world_x;
+    const double dy = target.y - parent.world_y;
+    return marrow::runtime::AttachmentVertex{
+        ((dx * d) - (dy * b)) / determinant,
+        ((dy * a) - (dx * c)) / determinant};
+}
+
+void finish_viewport_translate_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->viewport_translate_gesture.has_value()) {
         return;
     }
-    float min_x = std::numeric_limits<float>::max();
-    float min_y = std::numeric_limits<float>::max();
-    float max_x = std::numeric_limits<float>::lowest();
-    float max_y = std::numeric_limits<float>::lowest();
-    for (const auto& t : transforms) {
-        min_x = std::min(min_x, t.world_x);
-        max_x = std::max(max_x, t.world_x);
-        min_y = std::min(min_y, t.world_y);
-        max_y = std::max(max_y, t.world_y);
-    }
-    const float margin = 1.2f;
-    const float bounds_w = (max_x - min_x) * margin;
-    const float bounds_h = (max_y - min_y) * margin;
-    const float center_x = (min_x + max_x) * 0.5f;
-    const float center_y = (min_y + max_y) * 0.5f;
-    if (canvas_size.x < 1.0f || canvas_size.y < 1.0f) {
+    ViewportTranslateGesture gesture =
+        std::move(*state->viewport_translate_gesture);
+    state->viewport_translate_gesture.reset();
+    if (!commit || !gesture.changed) {
+        gesture.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        if (!commit) {
+            state->status_message = "Cancelled bone move";
+        }
         return;
     }
-    const float zoom_x = canvas_size.x / std::max(bounds_w, 1.0f);
-    const float zoom_y = canvas_size.y / std::max(bounds_h, 1.0f);
-    state->viewport.zoom = static_cast<double>(
-        clamp_zoom(std::min(zoom_x, zoom_y)));
-    state->viewport.pan_x =
-        static_cast<double>(canvas_size.x * 0.5f - center_x * state->viewport.zoom);
-    state->viewport.pan_y =
-        static_cast<double>(canvas_size.y * 0.5f + center_y * state->viewport.zoom);
-    state->status_message = "Framed skeleton to viewport";
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Bone move failed";
+        return;
+    }
+    state->error_message.clear();
+    state->status_message = "Keyed " + gesture.bone_name + " translation at " +
+        format_time_seconds(state->timeline_time_seconds);
+}
+
+bool begin_viewport_translate_gesture(
+    ShellState* state,
+    const ViewportLayout& layout,
+    ViewportTranslateAxis axis,
+    const ImVec2& pointer) {
+    if (state == nullptr || state->selected_animation_name.empty() ||
+        !state->selected_bone_index.has_value() || state->preview_skeleton == nullptr ||
+        state->load_result.project == nullptr || authoring_gesture_active(*state)) {
+        return false;
+    }
+    const std::size_t bone_index = *state->selected_bone_index;
+    if (bone_index >= state->preview_skeleton->bone_world_transforms().size() ||
+        bone_index >= state->load_result.skeleton_data->bones().size()) {
+        return false;
+    }
+    state->timeline_playing = false;
+    state->session.set_playing(false);
+    const std::string bone_name = state->load_result.skeleton_data->bones()[bone_index].name;
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::MoveBone,
+        "Move bone " + bone_name,
+        "viewport-translate:" + state->selected_animation_name + ":" + bone_name,
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+    const auto world = state->preview_skeleton->bone_world_transforms()[bone_index];
+    ViewportTranslateGesture gesture;
+    gesture.bone_index = bone_index;
+    gesture.bone_name = bone_name;
+    gesture.axis = axis;
+    gesture.pointer_start = world_from_screen(layout, pointer);
+    gesture.bone_world_start = ViewportWorldPoint{world.world_x, world.world_y};
+    gesture.transaction = std::move(transaction);
+    state->viewport_translate_gesture.emplace(std::move(gesture));
+    return true;
+}
+
+bool update_viewport_translate_gesture(
+    ShellState* state,
+    const ViewportLayout& layout,
+    const ImVec2& pointer) {
+    if (state == nullptr || !state->viewport_translate_gesture.has_value() ||
+        state->preview_skeleton == nullptr) {
+        return false;
+    }
+    auto& gesture = *state->viewport_translate_gesture;
+    const ViewportWorldPoint pointer_world = world_from_screen(layout, pointer);
+    const double delta_x = pointer_world.x - gesture.pointer_start.x;
+    const double delta_y = pointer_world.y - gesture.pointer_start.y;
+    if (!gesture.changed && std::abs(delta_x) <= 1e-6 && std::abs(delta_y) <= 1e-6) {
+        return true;
+    }
+    ViewportWorldPoint target = gesture.bone_world_start;
+    if (gesture.axis != ViewportTranslateAxis::Y) {
+        target.x += delta_x;
+    }
+    if (gesture.axis != ViewportTranslateAxis::X) {
+        target.y += delta_y;
+    }
+    const auto local = local_position_for_world_target_impl(
+        *state->preview_skeleton, gesture.bone_index, target);
+    if (!local.has_value()) {
+        const std::string error =
+            "Cannot move a bone through a singular parent transform.";
+        finish_viewport_translate_gesture(state, false);
+        state->error_message = error;
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        *gesture.transaction.project(),
+        *state->session.runtime_data(),
+        state->selected_animation_name,
+        gesture.bone_name,
+        marrow::editor::TransformTimelineChannel::Translate,
+        state->timeline_time_seconds,
+        marrow::editor::TransformKeyframePatch{
+            std::nullopt,
+            local->x,
+            local->y});
+    const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
+    if (!refresh) {
+        const std::string error = refresh.error->format();
+        finish_viewport_translate_gesture(state, false);
+        state->error_message = error;
+        return false;
+    }
+    gesture.changed = true;
+    sync_shell_from_editor_session(state);
+    return true;
+}
+
+} // namespace
+
+bool begin_viewport_translate_gesture_for_smoke(
+    ShellState* state,
+    const ViewportLayout& layout,
+    ViewportTranslateAxis axis,
+    const ImVec2& pointer) {
+    return begin_viewport_translate_gesture(state, layout, axis, pointer);
+}
+
+bool update_viewport_translate_gesture_for_smoke(
+    ShellState* state,
+    const ViewportLayout& layout,
+    const ImVec2& pointer) {
+    return update_viewport_translate_gesture(state, layout, pointer);
+}
+
+void finish_viewport_translate_gesture_for_smoke(ShellState* state, bool commit) {
+    finish_viewport_translate_gesture(state, commit);
+}
+
+std::optional<marrow::runtime::AttachmentVertex> bone_local_position_from_world(
+    const marrow::runtime::Skeleton& skeleton,
+    std::size_t bone_index,
+    const ViewportWorldPoint& target) {
+    return local_position_for_world_target_impl(skeleton, bone_index, target);
 }
 
 
@@ -716,16 +931,22 @@ void draw_viewport_window(ShellState* state) {
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-    if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
+    if (!state->viewport_translate_gesture.has_value() && hovered &&
+        ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
         const ImVec2 mouse_delta = ImGui::GetIO().MouseDelta;
         state->viewport.pan_x += static_cast<double>(mouse_delta.x);
         state->viewport.pan_y += static_cast<double>(mouse_delta.y);
     }
 
-    if (hovered && std::abs(ImGui::GetIO().MouseWheel) > 0.0f) {
+    if (!state->viewport_translate_gesture.has_value() && hovered &&
+        std::abs(ImGui::GetIO().MouseWheel) > 0.0f) {
         const float zoom_factor = ImGui::GetIO().MouseWheel > 0.0f ? 1.1f : 0.9f;
-        state->viewport.zoom = static_cast<double>(
-            clamp_zoom(static_cast<float>(state->viewport.zoom) * zoom_factor));
+        (void)zoom_viewport_at_screen_position(
+            state,
+            canvas_origin,
+            canvas_size,
+            ImGui::GetIO().MousePos,
+            static_cast<double>(zoom_factor));
     }
 
     const auto layout = build_viewport_layout(*state, canvas_origin, canvas_size);
@@ -745,11 +966,30 @@ void draw_viewport_window(ShellState* state) {
     if (hovered && layout.has_value()) {
         hovered_bone = pick_bone_at_position(*layout, ImGui::GetIO().MousePos);
     }
+    const std::optional<ViewportTranslateAxis> hovered_translate_axis =
+        hovered && layout.has_value()
+            ? hit_test_translate_gizmo(*state, *layout, ImGui::GetIO().MousePos)
+            : std::nullopt;
     const std::vector<OnionSkinGhostPose> ghost_poses =
         layout.has_value() ? build_onion_skin_ghost_poses(*state, *layout)
                            : std::vector<OnionSkinGhostPose>{};
     if (state->weight_paint_stroke.active && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         finish_weight_paint_stroke(state);
+    }
+    if (!brush_enabled && hovered && layout.has_value() &&
+        hovered_translate_axis.has_value() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        (void)begin_viewport_translate_gesture(
+            state,
+            *layout,
+            *hovered_translate_axis,
+            ImGui::GetIO().MousePos);
+    }
+    if (state->viewport_translate_gesture.has_value() && layout.has_value() &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        !ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        (void)update_viewport_translate_gesture(
+            state, *layout, ImGui::GetIO().MousePos);
     }
     if (brush_enabled &&
         hovered &&
@@ -776,7 +1016,7 @@ void draw_viewport_window(ShellState* state) {
             }
         }
     }
-    if (!brush_enabled &&
+    if (!brush_enabled && !state->viewport_translate_gesture.has_value() &&
         hovered &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
         hovered_bone.has_value()) {
@@ -832,6 +1072,7 @@ void draw_viewport_window(ShellState* state) {
 
     if (layout.has_value()) {
         draw_viewport_annotations(*state, *layout, hovered_bone, rendered_overlay, draw_list);
+        draw_translate_gizmo(*state, *layout, draw_list);
         if (brush_enabled && hovered) {
             draw_list->AddCircle(
                 ImGui::GetIO().MousePos,
@@ -849,8 +1090,13 @@ void draw_viewport_window(ShellState* state) {
 
     // ── Floating translucent header (top-left, overlaid on the canvas) ──
     {
+        const bool animation_move_ready =
+            !weight_tool_ready && !state->selected_animation_name.empty() &&
+            state->selected_bone_index.has_value();
         std::string hint =
-            std::string(weight_tool_ready ? "LMB brush weights" : "LMB select") +
+            std::string(weight_tool_ready
+                            ? "LMB brush weights"
+                            : animation_move_ready ? "LMB move gizmo / select" : "LMB select") +
             "   ·   RMB pan   ·   Wheel zoom";
         if (!state->selected_animation_name.empty()) {
             hint += "   ·   " +
@@ -895,6 +1141,21 @@ void draw_viewport_window(ShellState* state) {
     }
 
     ImGui::End();
+}
+
+void finalize_orphaned_viewport_translate_gesture(ShellState* state) {
+    if (state == nullptr || !state->viewport_translate_gesture.has_value()) {
+        return;
+    }
+    const bool cancel = ImGui::GetCurrentContext() == nullptr ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (cancel) {
+        finish_viewport_translate_gesture(state, false);
+        return;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        finish_viewport_translate_gesture(state, true);
+    }
 }
 
 void draw_viewport_settings(ShellState* state) {

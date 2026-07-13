@@ -495,6 +495,7 @@ bool reload_project(ShellState* state) {
     state->selected_slot_index.reset();
     state->selected_attachment.reset();
     state->selected_timeline_track_id.reset();
+    state->timeline_editor = TimelineEditorState{};
     state->selected_constraint.reset();
     state->preview_skin_names.clear();
     state->preview_slot_overrides.clear();
@@ -509,6 +510,8 @@ bool reload_project(ShellState* state) {
     state->error_message.clear();
 
     state->viewport = state->load_result.project->editor_metadata.viewport;
+    state->timeline_editor.frames_per_second =
+        state->load_result.project->editor_metadata.timeline.frames_per_second;
     state->saved_project_snapshot =
         marrow::editor::serialize_project(*state->load_result.project);
     state->preview_skeleton =
@@ -545,6 +548,7 @@ bool reload_project(ShellState* state) {
         state->session.seek(state->timeline_time_seconds);
         state->session.set_playing(state->timeline_playing);
     }
+    (void)initialize_viewport_camera_from_preview_pose(state);
     reset_runtime_asset_watch(state);
 
     return true;

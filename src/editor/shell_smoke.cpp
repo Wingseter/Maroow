@@ -324,6 +324,191 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     return true;
 }
 
+bool validate_animation_catalog_smoke(const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state)) {
+        std::cerr << "Animation catalog smoke could not load the project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    const std::size_t initial_animation_count =
+        state.load_result.skeleton_data->animations().size();
+    if (initial_animation_count == 0U) {
+        std::cerr << "Animation catalog smoke requires at least one base animation.\n";
+        return false;
+    }
+
+    const auto unique_name = [&](std::string stem) {
+        while (state.load_result.skeleton_data->find_animation(stem) != nullptr) {
+            stem.push_back('_');
+        }
+        return stem;
+    };
+    const std::string created = unique_name("marrow_catalog_smoke");
+    const std::string duplicated = unique_name(created + "_copy");
+    const std::string renamed = unique_name(duplicated + "_renamed");
+    std::size_t expected_undo_count = state.session.undo_count();
+
+    if (!apply_animation_catalog_action(
+            &state,
+            AnimationCatalogAction::Create,
+            {},
+            created) ||
+        state.load_result.skeleton_data->find_animation(created) == nullptr ||
+        state.selected_animation_name != created ||
+        state.load_result.skeleton_data->animations().size() != initial_animation_count + 1U ||
+        state.session.undo_count() != ++expected_undo_count) {
+        std::cerr << "Animation catalog smoke failed to create and select a clip.\n";
+        return false;
+    }
+
+    if (!apply_animation_catalog_action(
+            &state,
+            AnimationCatalogAction::Duplicate,
+            created,
+            duplicated) ||
+        state.load_result.skeleton_data->find_animation(duplicated) == nullptr ||
+        state.selected_animation_name != duplicated ||
+        state.load_result.skeleton_data->animations().size() != initial_animation_count + 2U ||
+        state.session.undo_count() != ++expected_undo_count) {
+        std::cerr << "Animation catalog smoke failed to duplicate and select a clip.\n";
+        return false;
+    }
+
+    std::string queued_name;
+    for (const auto& animation : state.load_result.skeleton_data->animations()) {
+        if (animation.name != duplicated) {
+            queued_name = animation.name;
+            break;
+        }
+    }
+    if (queued_name.empty() ||
+        !state.session.set_queue(queued_name, 0.125, 0.05)) {
+        std::cerr << "Animation catalog smoke could not stage a queued preview.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+
+    if (!apply_animation_catalog_action(
+            &state,
+            AnimationCatalogAction::Rename,
+            duplicated,
+            renamed) ||
+        state.load_result.skeleton_data->find_animation(duplicated) != nullptr ||
+        state.load_result.skeleton_data->find_animation(renamed) == nullptr ||
+        state.selected_animation_name != renamed ||
+        !state.preview_queue_enabled ||
+        state.preview_queued_animation_name != queued_name ||
+        state.session.undo_count() != ++expected_undo_count) {
+        std::cerr << "Animation catalog smoke failed to rename a clip or preserve its queue.\n";
+        return false;
+    }
+
+    if (!undo_project_change(&state) ||
+        state.load_result.skeleton_data->find_animation(duplicated) == nullptr ||
+        state.load_result.skeleton_data->find_animation(renamed) != nullptr ||
+        state.selected_animation_name != duplicated ||
+        !state.preview_queue_enabled ||
+        state.preview_queued_animation_name != queued_name ||
+        state.session.undo_count() + 1U != expected_undo_count) {
+        std::cerr << "Animation catalog smoke did not atomically undo its renamed preview.\n";
+        return false;
+    }
+    if (!redo_project_change(&state) ||
+        state.load_result.skeleton_data->find_animation(duplicated) != nullptr ||
+        state.load_result.skeleton_data->find_animation(renamed) == nullptr ||
+        state.selected_animation_name != renamed ||
+        !state.preview_queue_enabled ||
+        state.preview_queued_animation_name != queued_name ||
+        state.session.undo_count() != expected_undo_count) {
+        std::cerr << "Animation catalog smoke did not atomically redo its renamed preview.\n";
+        return false;
+    }
+
+    if (!set_selected_animation(
+            &state,
+            queued_name,
+            "Animation catalog smoke",
+            false,
+            true) ||
+        !state.session.set_queue(renamed, 0.125, 0.05)) {
+        std::cerr << "Animation catalog smoke could not queue the clip selected for deletion.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+
+    if (!apply_animation_catalog_action(
+            &state,
+            AnimationCatalogAction::Delete,
+            renamed) ||
+        state.load_result.skeleton_data->find_animation(renamed) != nullptr ||
+        state.selected_animation_name != queued_name ||
+        state.preview_queue_enabled ||
+        state.session.undo_count() != ++expected_undo_count) {
+        std::cerr << "Animation catalog smoke failed to remove a deleted queued clip.\n";
+        return false;
+    }
+
+    if (!undo_project_change(&state) ||
+        state.load_result.skeleton_data->find_animation(renamed) == nullptr ||
+        state.selected_animation_name != queued_name ||
+        !state.preview_queue_enabled ||
+        state.preview_queued_animation_name != renamed ||
+        state.session.undo_count() + 1U != expected_undo_count) {
+        std::cerr << "Animation catalog smoke did not restore a deleted preview queue on undo.\n";
+        return false;
+    }
+    if (!redo_project_change(&state) ||
+        state.load_result.skeleton_data->find_animation(renamed) != nullptr ||
+        state.selected_animation_name != queued_name ||
+        state.preview_queue_enabled ||
+        state.session.undo_count() != expected_undo_count) {
+        std::cerr << "Animation catalog smoke did not remove the preview queue again on redo.\n";
+        return false;
+    }
+
+    while (state.load_result.skeleton_data->animations().size() > 1U) {
+        const std::string animation_name = state.selected_animation_name.empty()
+            ? state.load_result.skeleton_data->animations().front().name
+            : state.selected_animation_name;
+        if (!apply_animation_catalog_action(
+                &state,
+                AnimationCatalogAction::Delete,
+                animation_name)) {
+            std::cerr << "Animation catalog smoke could not delete '" << animation_name
+                      << "' while reducing the catalog: " << state.error_message << '\n';
+            return false;
+        }
+        ++expected_undo_count;
+    }
+
+    const std::string last_animation =
+        state.load_result.skeleton_data->animations().front().name;
+    const std::size_t edits_before_rejection =
+        state.load_result.project->animation_edits.size();
+    if (apply_animation_catalog_action(
+            &state,
+            AnimationCatalogAction::Delete,
+            last_animation) ||
+        state.error_message.find("last animation") == std::string::npos ||
+        state.load_result.skeleton_data->animations().size() != 1U ||
+        state.load_result.project->animation_edits.size() != edits_before_rejection ||
+        state.session.undo_count() != expected_undo_count) {
+        std::cerr << "Animation catalog smoke did not reject deletion of the last clip.\n";
+        return false;
+    }
+
+    if (!undo_project_change(&state) ||
+        state.load_result.skeleton_data->animations().size() != 2U ||
+        state.session.undo_count() + 1U != expected_undo_count) {
+        std::cerr << "Animation catalog smoke did not restore a deletion as one undo item.\n";
+        return false;
+    }
+    return true;
+}
+
 const marrow::renderer::RegionAttachmentDrawCommand* find_region_attachment(
     const marrow::renderer::PreparedScene& scene,
     std::string_view slot_name) {
@@ -518,6 +703,282 @@ std::optional<std::string> initialize_viewport_smoke_context(
     return std::nullopt;
 }
 #endif
+
+bool validate_viewport_camera_smoke(
+    const std::filesystem::path& project_path) {
+    ShellState camera_state;
+    camera_state.project_path = project_path;
+    if (!reload_project(&camera_state)) {
+        std::cerr << camera_state.error_message << '\n';
+        return false;
+    }
+    if (!camera_state.viewport_camera.initialized ||
+        camera_state.preview_skeleton == nullptr ||
+        camera_state.preview_skeleton->bone_poses().empty()) {
+        std::cerr << "Viewport camera smoke did not initialize from the loaded preview pose.\n";
+        return false;
+    }
+    const auto& persisted_viewport =
+        camera_state.load_result.project->editor_metadata.viewport;
+    if (camera_state.viewport.pan_x != persisted_viewport.pan_x ||
+        camera_state.viewport.pan_y != persisted_viewport.pan_y ||
+        camera_state.viewport.zoom != persisted_viewport.zoom) {
+        std::cerr << "Viewport camera initialization did not preserve project pan/zoom metadata.\n";
+        return false;
+    }
+
+    camera_state.viewport.pan_x = 37.25;
+    camera_state.viewport.pan_y = -24.5;
+    camera_state.viewport.zoom = 1.35;
+    const ImVec2 canvas_origin(23.0f, 41.0f);
+    const ImVec2 canvas_size(1000.0f, 700.0f);
+    const auto initial_layout = build_viewport_layout(
+        camera_state,
+        canvas_origin,
+        canvas_size);
+    if (!initial_layout.has_value()) {
+        std::cerr << "Viewport camera smoke could not build its initial layout.\n";
+        return false;
+    }
+
+    const ViewportWorldPoint expected_world{
+        initial_layout->world_center_x + 17.125,
+        initial_layout->world_center_y - 9.75};
+    const ImVec2 expected_screen = screen_from_world(
+        *initial_layout,
+        expected_world.x,
+        expected_world.y);
+    const ViewportWorldPoint round_trip_world =
+        world_from_screen(*initial_layout, expected_screen);
+    if (std::abs(round_trip_world.x - expected_world.x) > 1e-4 ||
+        std::abs(round_trip_world.y - expected_world.y) > 1e-4) {
+        std::cerr << "Viewport world/screen transforms did not round-trip.\n";
+        return false;
+    }
+
+    marrow::runtime::Skeleton drag_skeleton(camera_state.load_result.skeleton_data);
+    const auto arm_index = drag_skeleton.data()->find_bone_index("arm_l");
+    if (!arm_index.has_value()) {
+        std::cerr << "Viewport translate smoke could not find arm_l.\n";
+        return false;
+    }
+    const auto parent_index = drag_skeleton.data()->bones()[*arm_index].parent_index;
+    if (!parent_index.has_value()) {
+        std::cerr << "Viewport translate smoke expected arm_l to have a parent.\n";
+        return false;
+    }
+    auto& parent_pose = drag_skeleton.bone_poses()[*parent_index].local_pose;
+    parent_pose.rotation = 31.0f;
+    parent_pose.scale_x = 1.7f;
+    parent_pose.scale_y = 0.65f;
+    parent_pose.shear_x = 8.0f;
+    drag_skeleton.update_world_transforms();
+    const auto arm_world_before = drag_skeleton.bone_world_transforms()[*arm_index];
+    const ViewportWorldPoint arm_target{
+        static_cast<double>(arm_world_before.world_x) + 19.0,
+        static_cast<double>(arm_world_before.world_y) - 11.0};
+    const auto arm_local = bone_local_position_from_world(
+        drag_skeleton, *arm_index, arm_target);
+    if (!arm_local.has_value()) {
+        std::cerr << "Viewport translate smoke could not invert a non-uniform parent.\n";
+        return false;
+    }
+    drag_skeleton.bone_poses()[*arm_index].local_pose.x =
+        static_cast<float>(arm_local->x);
+    drag_skeleton.bone_poses()[*arm_index].local_pose.y =
+        static_cast<float>(arm_local->y);
+    drag_skeleton.update_world_transforms();
+    const auto arm_world_after = drag_skeleton.bone_world_transforms()[*arm_index];
+    if (std::abs(static_cast<double>(arm_world_after.world_x) - arm_target.x) > 1e-3 ||
+        std::abs(static_cast<double>(arm_world_after.world_y) - arm_target.y) > 1e-3) {
+        std::cerr << "Viewport translate parent inverse did not reach the world target.\n";
+        return false;
+    }
+    parent_pose.scale_x = 0.0f;
+    parent_pose.scale_y = 0.0f;
+    drag_skeleton.update_world_transforms();
+    if (bone_local_position_from_world(drag_skeleton, *arm_index, arm_target).has_value()) {
+        std::cerr << "Viewport translate did not reject a singular parent transform.\n";
+        return false;
+    }
+
+    const auto exercise_translate_gesture = [&camera_state, canvas_origin, canvas_size](
+                                                std::string_view bone_name,
+                                                double time,
+                                                const ImVec2& screen_delta) {
+        const auto bone_index = camera_state.session.runtime_data()->find_bone_index(bone_name);
+        if (!bone_index.has_value() ||
+            !scrub_timeline_time(
+                &camera_state, time, "Viewport gesture smoke", false)) {
+            return false;
+        }
+        camera_state.selected_bone_index = *bone_index;
+        const auto layout = build_viewport_layout(
+            camera_state, canvas_origin, canvas_size);
+        if (!layout.has_value() ||
+            *bone_index >= camera_state.preview_skeleton->bone_world_transforms().size()) {
+            return false;
+        }
+        const auto world =
+            camera_state.preview_skeleton->bone_world_transforms()[*bone_index];
+        const ImVec2 pointer = screen_from_world(
+            *layout, world.world_x, world.world_y);
+        const std::string before =
+            marrow::editor::serialize_project(*camera_state.session.project());
+        if (!begin_viewport_translate_gesture_for_smoke(
+                &camera_state,
+                *layout,
+                ViewportTranslateAxis::Free,
+                pointer) ||
+            !update_viewport_translate_gesture_for_smoke(
+                &camera_state,
+                *layout,
+                ImVec2(pointer.x + screen_delta.x, pointer.y + screen_delta.y))) {
+            return false;
+        }
+        finish_viewport_translate_gesture_for_smoke(&camera_state, true);
+        const auto* edit = camera_state.session.project()->find_transform_timeline_edit(
+            "idle",
+            bone_name,
+            marrow::editor::TransformTimelineChannel::Translate);
+        const bool keyed = edit != nullptr && std::any_of(
+            edit->keyframes.begin(), edit->keyframes.end(), [&](const auto& key) {
+                return std::abs(key.time - time) <= 1e-6;
+            });
+        const std::string after =
+            marrow::editor::serialize_project(*camera_state.session.project());
+        if (!keyed || before == after || camera_state.session.undo_count() != 1U ||
+            camera_state.timeline_playing) {
+            return false;
+        }
+        if (!camera_state.session.undo() ||
+            marrow::editor::serialize_project(*camera_state.session.project()) != before ||
+            !camera_state.session.redo() ||
+            marrow::editor::serialize_project(*camera_state.session.project()) != after ||
+            !camera_state.session.undo()) {
+            return false;
+        }
+        sync_shell_from_editor_session(&camera_state);
+        camera_state.session.clear_history();
+        return marrow::editor::serialize_project(*camera_state.session.project()) == before;
+    };
+    if (!exercise_translate_gesture("root", 0.37, ImVec2(18.0f, -9.0f)) ||
+        !exercise_translate_gesture("arm_l", 0.43, ImVec2(-14.0f, 12.0f)) ||
+        !exercise_translate_gesture("ik_target", 0.47, ImVec2(11.0f, 16.0f))) {
+        std::cerr << "Viewport translate gesture did not auto-key/undo/redo atomically.\n";
+        return false;
+    }
+
+    const std::string singular_before =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    if (!scrub_timeline_time(
+            &camera_state, 0.51, "Viewport singular smoke", false)) {
+        return false;
+    }
+    const auto singular_arm = camera_state.session.runtime_data()->find_bone_index("arm_l");
+    if (!singular_arm.has_value()) return false;
+    const auto singular_parent =
+        camera_state.session.runtime_data()->bones()[*singular_arm].parent_index;
+    if (!singular_parent.has_value()) return false;
+    camera_state.selected_bone_index = *singular_arm;
+    auto& singular_parent_pose =
+        camera_state.preview_skeleton->bone_poses()[*singular_parent].local_pose;
+    singular_parent_pose.scale_x = 0.0f;
+    singular_parent_pose.scale_y = 0.0f;
+    camera_state.preview_skeleton->update_world_transforms();
+    const auto singular_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    if (!singular_layout.has_value()) return false;
+    const auto singular_world =
+        camera_state.preview_skeleton->bone_world_transforms()[*singular_arm];
+    const ImVec2 singular_pointer = screen_from_world(
+        *singular_layout, singular_world.world_x, singular_world.world_y);
+    if (!begin_viewport_translate_gesture_for_smoke(
+            &camera_state,
+            *singular_layout,
+            ViewportTranslateAxis::Free,
+            singular_pointer) ||
+        update_viewport_translate_gesture_for_smoke(
+            &camera_state,
+            *singular_layout,
+            ImVec2(singular_pointer.x + 10.0f, singular_pointer.y + 10.0f)) ||
+        camera_state.viewport_translate_gesture.has_value() ||
+        marrow::editor::serialize_project(*camera_state.session.project()) != singular_before) {
+        std::cerr << "Viewport singular-parent gesture did not cancel without mutation.\n";
+        return false;
+    }
+
+    const ImVec2 zoom_anchor(811.25f, 233.75f);
+    const ViewportWorldPoint anchor_before =
+        world_from_screen(*initial_layout, zoom_anchor);
+    if (!zoom_viewport_at_screen_position(
+            &camera_state,
+            canvas_origin,
+            canvas_size,
+            zoom_anchor,
+            1.1)) {
+        std::cerr << "Viewport camera smoke could not apply cursor-centered zoom.\n";
+        return false;
+    }
+    const auto zoomed_layout = build_viewport_layout(
+        camera_state,
+        canvas_origin,
+        canvas_size);
+    if (!zoomed_layout.has_value()) {
+        std::cerr << "Viewport camera smoke could not build its zoomed layout.\n";
+        return false;
+    }
+    const ViewportWorldPoint anchor_after =
+        world_from_screen(*zoomed_layout, zoom_anchor);
+    if (std::abs(anchor_after.x - anchor_before.x) > 1e-4 ||
+        std::abs(anchor_after.y - anchor_before.y) > 1e-4 ||
+        std::abs(zoomed_layout->pixels_per_unit - initial_layout->pixels_per_unit) < 1e-3f) {
+        std::cerr << "Viewport zoom did not preserve the world point under the cursor.\n";
+        return false;
+    }
+
+    const ViewportCamera stable_camera = camera_state.viewport_camera;
+    const float stable_pixels_per_unit = zoomed_layout->pixels_per_unit;
+    const ImVec2 root_screen_before = zoomed_layout->bones.front().screen_position;
+    camera_state.preview_skeleton->bone_poses().front().local_pose.x += 250.0f;
+    camera_state.preview_skeleton->bone_poses().front().local_pose.y -= 125.0f;
+    camera_state.preview_skeleton->update_world_transforms();
+    const auto moved_pose_layout = build_viewport_layout(
+        camera_state,
+        canvas_origin,
+        canvas_size);
+    if (!moved_pose_layout.has_value() ||
+        camera_state.viewport_camera.world_center_x != stable_camera.world_center_x ||
+        camera_state.viewport_camera.world_center_y != stable_camera.world_center_y ||
+        moved_pose_layout->pixels_per_unit != stable_pixels_per_unit ||
+        squared_distance(root_screen_before, moved_pose_layout->bones.front().screen_position) <
+            100.0f) {
+        std::cerr << "Viewport camera changed its framing when only the preview pose changed.\n";
+        return false;
+    }
+
+    if (!frame_viewport_camera_to_preview_pose(&camera_state)) {
+        std::cerr << "Viewport camera smoke could not explicitly fit the moved pose.\n";
+        return false;
+    }
+    const auto fitted_layout = build_viewport_layout(
+        camera_state,
+        canvas_origin,
+        canvas_size);
+    if (!fitted_layout.has_value() ||
+        camera_state.viewport.pan_x != 0.0 ||
+        camera_state.viewport.pan_y != 0.0 ||
+        camera_state.viewport.zoom != 1.0 ||
+        (std::abs(camera_state.viewport_camera.world_center_x - stable_camera.world_center_x) <
+             25.0 &&
+         std::abs(camera_state.viewport_camera.world_center_y - stable_camera.world_center_y) <
+             25.0)) {
+        std::cerr << "Viewport Fit did not replace the stable frame with the current pose.\n";
+        return false;
+    }
+
+    return true;
+}
 
 bool validate_viewport_prepared_scene_renderer_smoke(
     const std::filesystem::path& project_path) {
@@ -1036,6 +1497,399 @@ bool validate_viewport_prepared_scene_renderer_smoke(
     return true;
 }
 
+bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Timeline P0 smoke", false, true)) {
+        std::cerr << "Timeline P0 smoke could not load the idle animation.\n";
+        return false;
+    }
+    const auto build_tracks = [&]() {
+        const auto* animation = selected_animation(state);
+        return animation != nullptr
+            ? build_timeline_tracks(*state.load_result.skeleton_data, *animation)
+            : std::vector<TimelineTrackRow>{};
+    };
+    std::vector<TimelineTrackRow> tracks = build_tracks();
+    const auto find_track = [&](std::string_view suffix) -> const TimelineTrackRow* {
+        const auto iterator = std::find_if(
+            tracks.begin(), tracks.end(), [&](const TimelineTrackRow& track) {
+                return track.id.find(suffix) != std::string::npos;
+            });
+        return iterator == tracks.end() ? nullptr : &(*iterator);
+    };
+    const TimelineTrackRow* color_track = find_track(":Color");
+    const TimelineTrackRow* attachment_track = find_track(":Attachment");
+    const TimelineTrackRow* event_track = find_track("global:events");
+    if (color_track == nullptr || attachment_track == nullptr || event_track == nullptr ||
+        !color_track->slot_index.has_value()) {
+        std::cerr << "Timeline P0 smoke could not resolve slot and event lanes.\n";
+        return false;
+    }
+    const auto imported_transform = std::find_if(
+        tracks.begin(), tracks.end(), [&](const TimelineTrackRow& track) {
+            if (!track.transform_channel.has_value() || !track.bone_index.has_value() ||
+                track.key_times.empty()) {
+                return false;
+            }
+            const std::string& bone_name =
+                state.load_result.skeleton_data->bones()[*track.bone_index].name;
+            return state.load_result.project->find_transform_timeline_edit(
+                "idle", bone_name, *track.transform_channel) == nullptr;
+        });
+    if (imported_transform == tracks.end()) {
+        std::cerr << "Timeline P0 smoke could not resolve an imported transform lane.\n";
+        return false;
+    }
+    state.selected_timeline_track_id = imported_transform->id;
+    state.timeline_editor.selected_keys.clear();
+    if (!scrub_timeline_time(
+            &state, imported_transform->key_times.front(), "Timeline P0 smoke", false) ||
+        remove_selected_timeline_keys(&state, tracks) ||
+        state.status_message.find("imported") == std::string::npos) {
+        std::cerr << "Timeline P0 toolbar remove did not preserve an unselected imported key.\n";
+        return false;
+    }
+    const std::string slot_name =
+        state.load_result.skeleton_data->slots()[*color_track->slot_index].name;
+    if (!ensure_slot_color_timeline_edit_index(&state, *color_track).has_value() ||
+        !ensure_slot_attachment_timeline_edit_index(&state, *attachment_track).has_value()) {
+        std::cerr << "Timeline P0 smoke could not materialize typed slot edit overlays.\n";
+        return false;
+    }
+    const auto* baseline_color = state.load_result.project->find_slot_color_timeline_edit(
+        "idle", slot_name);
+    const auto* baseline_attachment =
+        state.load_result.project->find_slot_attachment_timeline_edit("idle", slot_name);
+    if (baseline_color == nullptr || baseline_attachment == nullptr) {
+        std::cerr << "Timeline P0 smoke did not load typed slot edit overlays.\n";
+        return false;
+    }
+    const std::size_t baseline_color_count = baseline_color->keyframes.size();
+    const std::size_t baseline_attachment_count = baseline_attachment->keyframes.size();
+
+    const std::string epsilon_add_baseline =
+        marrow::editor::serialize_project(*state.session.project());
+    const double epsilon_add_time = baseline_color->keyframes[1].time + 0.5e-6;
+    state.selected_timeline_track_id = color_track->id;
+    if (!scrub_timeline_time(&state, epsilon_add_time, "Timeline P0 smoke", false) ||
+        !add_timeline_key_at_playhead(&state, *color_track)) {
+        std::cerr << "Timeline P0 epsilon replacement could not run.\n";
+        return false;
+    }
+    const auto* epsilon_color = state.load_result.project->find_slot_color_timeline_edit(
+        "idle", slot_name);
+    if (epsilon_color == nullptr || epsilon_color->keyframes.size() != baseline_color_count ||
+        !state.session.undo()) {
+        std::cerr << "Timeline P0 epsilon replacement inserted a duplicate key.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+    if (marrow::editor::serialize_project(*state.session.project()) !=
+        epsilon_add_baseline) {
+        std::cerr << "Timeline P0 epsilon replacement did not undo exactly.\n";
+        return false;
+    }
+
+    if (!scrub_timeline_time(&state, 0.333, "Timeline P0 smoke", false) ||
+        !add_timeline_key_at_playhead(&state, *color_track)) {
+        std::cerr << "Timeline P0 toolbar add did not create a slot-color key.\n";
+        return false;
+    }
+    const auto* added_color = state.load_result.project->find_slot_color_timeline_edit(
+        "idle", slot_name);
+    if (added_color == nullptr || added_color->keyframes.size() != baseline_color_count + 1U ||
+        state.timeline_editor.selected_keys.size() != 1U) {
+        std::cerr << "Timeline P0 toolbar add did not retain the inserted slot-color selection"
+                  << " (baseline=" << baseline_color_count
+                  << ", current=" << (added_color != nullptr ? added_color->keyframes.size() : 0U)
+                  << ", selected=" << state.timeline_editor.selected_keys.size() << ").\n";
+        return false;
+    }
+    tracks = build_tracks();
+    color_track = find_track(":Color");
+    reconcile_timeline_key_selection(&state, tracks);
+    if (color_track == nullptr || state.timeline_editor.selected_keys.size() != 1U) {
+        std::cerr << "Timeline P0 inserted-key selection did not survive the runtime rebuild.\n";
+        return false;
+    }
+    if (!remove_selected_timeline_keys(&state, tracks)) {
+        std::cerr << "Timeline P0 toolbar remove did not remove the selected slot-color key.\n";
+        return false;
+    }
+    const auto* restored_color = state.load_result.project->find_slot_color_timeline_edit(
+        "idle", slot_name);
+    if (restored_color == nullptr || restored_color->keyframes.size() != baseline_color_count) {
+        std::cerr << "Timeline P0 toolbar remove left the slot-color lane changed.\n";
+        return false;
+    }
+    state.selected_timeline_track_id = color_track->id;
+    state.timeline_editor.selected_keys.clear();
+    if (!scrub_timeline_time(&state, 0.337, "Timeline P0 smoke", false) ||
+        remove_selected_timeline_keys(&state, tracks) ||
+        state.load_result.project->find_slot_color_timeline_edit("idle", slot_name)
+                ->keyframes.size() != baseline_color_count) {
+        std::cerr << "Timeline P0 toolbar remove chose a nearest key away from the playhead.\n";
+        return false;
+    }
+    const double exact_authored_time = restored_color->keyframes.front().time;
+    if (!scrub_timeline_time(&state, exact_authored_time, "Timeline P0 smoke", false) ||
+        !remove_selected_timeline_keys(&state, tracks)) {
+        std::cerr << "Timeline P0 toolbar remove did not remove an exact authored key.\n";
+        return false;
+    }
+    tracks = build_tracks();
+    color_track = find_track(":Color");
+    if (!add_timeline_key_at_playhead(&state, *color_track)) {
+        std::cerr << "Timeline P0 smoke could not restore the exact-key removal fixture.\n";
+        return false;
+    }
+
+    tracks = build_tracks();
+    color_track = find_track(":Color");
+    attachment_track = find_track(":Attachment");
+    event_track = find_track("global:events");
+    state.timeline_editor.selected_keys = {
+        timeline_key_ref(*color_track, 0U),
+        timeline_key_ref(*attachment_track, 0U)};
+    if (!copy_selected_timeline_keys(&state, tracks) ||
+        state.timeline_editor.clipboard.project_fragment.slot_color_timeline_edits.size() != 1U ||
+        state.timeline_editor.clipboard.project_fragment.slot_attachment_timeline_edits.size() != 1U ||
+        !scrub_timeline_time(&state, 0.75, "Timeline P0 smoke", false) ||
+        !paste_timeline_clipboard(&state, tracks)) {
+        std::cerr << "Timeline P0 typed cross-lane copy/paste failed.\n";
+        return false;
+    }
+    const auto* pasted_color = state.load_result.project->find_slot_color_timeline_edit(
+        "idle", slot_name);
+    const auto* pasted_attachment =
+        state.load_result.project->find_slot_attachment_timeline_edit("idle", slot_name);
+    const auto has_key_at = [](const auto* edit, double time) {
+        return edit != nullptr && std::any_of(
+            edit->keyframes.begin(), edit->keyframes.end(), [&](const auto& key) {
+                return std::abs(key.time - time) <= 1e-6;
+            });
+    };
+    if (!has_key_at(pasted_color, 0.75) || !has_key_at(pasted_attachment, 0.75) ||
+        pasted_color->keyframes.size() != baseline_color_count + 1U ||
+        pasted_attachment->keyframes.size() != baseline_attachment_count + 1U) {
+        std::cerr << "Timeline P0 paste did not align the earliest typed keys to the playhead.\n";
+        return false;
+    }
+
+    tracks = build_tracks();
+    event_track = find_track("global:events");
+    if (event_track == nullptr || event_track->key_times.size() < 2U ||
+        std::abs(event_track->key_times[0] - event_track->key_times[1]) > 1e-6) {
+        std::cerr << "Timeline P0 smoke requires the two stable same-time fixture events.\n";
+        return false;
+    }
+    state.timeline_editor.selected_keys = {
+        timeline_key_ref(*event_track, 0U), timeline_key_ref(*event_track, 1U)};
+    if (state.timeline_editor.selected_keys[0] == state.timeline_editor.selected_keys[1] ||
+        timeline_key_index(*event_track, state.timeline_editor.selected_keys[0]) != 0U ||
+        timeline_key_index(*event_track, state.timeline_editor.selected_keys[1]) != 1U) {
+        std::cerr << "Timeline P0 same-time event identities are not distinct.\n";
+        return false;
+    }
+    TimelineTrackRow shifted_event_track = *event_track;
+    shifted_event_track.key_times.insert(
+        shifted_event_track.key_times.begin(), event_track->key_times.front() - 0.1);
+    if (timeline_key_index(shifted_event_track, state.timeline_editor.selected_keys[0]) != 1U ||
+        timeline_key_index(shifted_event_track, state.timeline_editor.selected_keys[1]) != 2U) {
+        std::cerr << "Timeline P0 key identities did not survive an unrelated insertion.\n";
+        return false;
+    }
+    const std::vector<TimelineKeyRef> same_time_event_selection =
+        state.timeline_editor.selected_keys;
+    reconcile_timeline_key_selection(&state, {shifted_event_track});
+    if (state.timeline_editor.selected_keys != same_time_event_selection) {
+        std::cerr << "Timeline P0 selection did not survive a rebuilt shifted lane.\n";
+        return false;
+    }
+    TimelineTrackRow reduced_same_time_track = *event_track;
+    reduced_same_time_track.key_times.erase(reduced_same_time_track.key_times.begin());
+    if (timeline_key_index(
+            reduced_same_time_track, state.timeline_editor.selected_keys[1]).has_value()) {
+        std::cerr << "Timeline P0 key identity silently retargeted after same-time removal.\n";
+        return false;
+    }
+    state.timeline_editor.selected_keys = same_time_event_selection;
+    reconcile_timeline_key_selection(&state, {reduced_same_time_track});
+    if (!state.timeline_editor.selected_keys.empty()) {
+        std::cerr << "Timeline P0 selection retained an ambiguous same-time identity.\n";
+        return false;
+    }
+    state.timeline_editor.selected_keys = same_time_event_selection;
+    if (!copy_selected_timeline_keys(&state, tracks) ||
+        !scrub_timeline_time(&state, 0.8, "Timeline P0 smoke", false) ||
+        !paste_timeline_clipboard(&state, tracks)) {
+        std::cerr << "Timeline P0 same-time event paste failed.\n";
+        return false;
+    }
+    const auto* events = state.load_result.project->find_event_timeline_edit("idle");
+    std::vector<std::string> pasted_event_names;
+    if (events != nullptr) {
+        for (const auto& key : events->keyframes) {
+            if (std::abs(key.time - 0.8) <= 1e-6) pasted_event_names.push_back(key.event_name);
+        }
+    }
+    if (pasted_event_names.size() != 2U ||
+        pasted_event_names[0] != "footstep" || pasted_event_names[1] != "dust_vfx") {
+        std::cerr << "Timeline P0 paste did not preserve stable same-time event ordering.\n";
+        return false;
+    }
+
+    tracks = build_tracks();
+    std::vector<const TimelineTrackRow*> translate_tracks;
+    for (const TimelineTrackRow& track : tracks) {
+        if (track.transform_channel ==
+            std::optional<marrow::editor::TransformTimelineChannel>(
+                marrow::editor::TransformTimelineChannel::Translate)) {
+            translate_tracks.push_back(&track);
+        }
+    }
+    if (translate_tracks.size() < 2U) {
+        std::cerr << "Timeline P0 smoke requires two compatible translate lanes.\n";
+        return false;
+    }
+    const TimelineTrackRow& source_translate = *translate_tracks[0];
+    const TimelineTrackRow& target_translate = *translate_tracks[1];
+    state.timeline_editor.selected_keys = {timeline_key_ref(source_translate, 0U)};
+    if (!copy_selected_timeline_keys(&state, tracks)) {
+        std::cerr << "Timeline P0 compatible-lane copy failed.\n";
+        return false;
+    }
+    state.selected_timeline_track_id = target_translate.id;
+    constexpr double kRemappedPasteTime = 0.913;
+    if (!scrub_timeline_time(&state, kRemappedPasteTime, "Timeline P0 smoke", false) ||
+        !paste_timeline_clipboard(&state, tracks)) {
+        std::cerr << "Timeline P0 compatible single-lane remap paste failed.\n";
+        return false;
+    }
+    const std::string& target_bone_name =
+        state.load_result.skeleton_data->bones()[*target_translate.bone_index].name;
+    const auto* remapped_translate =
+        state.load_result.project->find_transform_timeline_edit(
+            "idle",
+            target_bone_name,
+            marrow::editor::TransformTimelineChannel::Translate);
+    if (!has_key_at(remapped_translate, kRemappedPasteTime) ||
+        state.selected_timeline_track_id != target_translate.id) {
+        std::cerr << "Timeline P0 paste did not remap the single compatible lane.\n";
+        return false;
+    }
+
+    const auto build_runtime_tracks = [&]() {
+        const auto* animation =
+            state.session.runtime_data()->find_animation("idle");
+        return animation != nullptr
+            ? build_timeline_tracks(*state.session.runtime_data(), *animation)
+            : std::vector<TimelineTrackRow>{};
+    };
+    tracks = build_runtime_tracks();
+    color_track = find_track(":Color");
+    attachment_track = find_track(":Attachment");
+    if (color_track == nullptr || attachment_track == nullptr ||
+        color_track->key_times.size() < 2U ||
+        attachment_track->key_times.size() < 2U) {
+        std::cerr << "Timeline P0 retime smoke could not rebuild editable lanes.\n";
+        return false;
+    }
+    state.session.clear_history();
+    const std::string retime_baseline =
+        marrow::editor::serialize_project(*state.session.project());
+
+    state.timeline_editor.selected_keys = {timeline_key_ref(*color_track, 0U)};
+    const double snap_anchor = color_track->key_times[0];
+    const double frame_seconds = 1.0 / state.timeline_editor.frames_per_second;
+    const double expected_snapped =
+        std::round((snap_anchor + 0.021) / frame_seconds) * frame_seconds -
+        snap_anchor;
+    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+        !apply_timeline_retime_delta(&state, tracks, 0.021, true) ||
+        !state.timeline_editor.retime_gesture.has_value() ||
+        std::abs(
+            state.timeline_editor.retime_gesture->applied_delta -
+            expected_snapped) > 1e-6) {
+        std::cerr << "Timeline P0 production retime path did not snap to 60 FPS.\n";
+        return false;
+    }
+    finish_timeline_retime_gesture(&state, false);
+    if (marrow::editor::serialize_project(*state.session.project()) != retime_baseline) {
+        std::cerr << "Timeline P0 snapped retime did not roll back exactly.\n";
+        return false;
+    }
+
+    tracks = build_runtime_tracks();
+    color_track = find_track(":Color");
+    state.timeline_editor.selected_keys = {timeline_key_ref(*color_track, 0U)};
+    const double expected_clamped =
+        color_track->key_times[1] - 0.001 - color_track->key_times[0];
+    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+        !apply_timeline_retime_delta(&state, tracks, 1.0, false) ||
+        !state.timeline_editor.retime_gesture.has_value() ||
+        std::abs(
+            state.timeline_editor.retime_gesture->applied_delta -
+            expected_clamped) > 1e-6) {
+        std::cerr << "Timeline P0 production retime path crossed an unselected neighbor.\n";
+        return false;
+    }
+    finish_timeline_retime_gesture(&state, false);
+    if (marrow::editor::serialize_project(*state.session.project()) != retime_baseline) {
+        std::cerr << "Timeline P0 clamped retime did not roll back exactly.\n";
+        return false;
+    }
+
+    tracks = build_runtime_tracks();
+    color_track = find_track(":Color");
+    attachment_track = find_track(":Attachment");
+    state.timeline_editor.selected_keys = {
+        timeline_key_ref(*color_track, 0U),
+        timeline_key_ref(*attachment_track, 0U)};
+    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+        !apply_timeline_retime_delta(&state, tracks, 0.02, false) ||
+        marrow::editor::serialize_project(*state.session.project()) == retime_baseline) {
+        std::cerr << "Timeline P0 live retime did not update the project preview.\n";
+        return false;
+    }
+    finish_timeline_retime_gesture(&state, false);
+    if (marrow::editor::serialize_project(*state.session.project()) != retime_baseline ||
+        state.session.can_undo()) {
+        std::cerr << "Timeline P0 retime Escape rollback was not exact.\n";
+        return false;
+    }
+
+    tracks = build_runtime_tracks();
+    color_track = find_track(":Color");
+    attachment_track = find_track(":Attachment");
+    state.timeline_editor.selected_keys = {
+        timeline_key_ref(*color_track, 0U),
+        timeline_key_ref(*attachment_track, 0U)};
+    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+        !apply_timeline_retime_delta(&state, tracks, 0.02, false)) {
+        std::cerr << "Timeline P0 committed retime could not start.\n";
+        return false;
+    }
+    finish_timeline_retime_gesture(&state, true);
+    const std::string retime_committed =
+        marrow::editor::serialize_project(*state.session.project());
+    if (retime_committed == retime_baseline || state.session.undo_count() != 1U ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) != retime_baseline ||
+        !state.session.redo() ||
+        marrow::editor::serialize_project(*state.session.project()) != retime_committed ||
+        !state.session.undo()) {
+        std::cerr << "Timeline P0 retime did not commit/undo/redo as one transaction.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+    return true;
+}
+
 int run_headless_smoke(const Options& options) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1058,6 +1912,47 @@ int run_headless_smoke(const Options& options) {
     shell_state.project_path = options.project_path;
     if (!reload_project(&shell_state)) {
         std::cerr << shell_state.error_message;
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_timeline_p0_authoring_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!inspector_bone_pose_editable(shell_state)) {
+        std::cerr << "Animation mode did not enable inspector transform authoring.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    apply_shell_mode(&shell_state, ShellMode::Setup);
+    const auto setup_bone_index =
+        shell_state.load_result.skeleton_data->find_bone_index("arm_l");
+    if (!setup_bone_index.has_value() ||
+        current_shell_mode(&shell_state) != ShellMode::Setup ||
+        !shell_state.selected_animation_name.empty() ||
+        !shell_state.session.preview_state().animation_name.empty() ||
+        inspector_bone_pose_editable(shell_state)) {
+        std::cerr << "Setup mode did not make inspector transforms read-only.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const auto& setup_pose =
+        shell_state.load_result.skeleton_data->bones()[*setup_bone_index].setup_pose;
+    const auto& setup_preview =
+        shell_state.preview_skeleton->bone_poses()[*setup_bone_index].local_pose;
+    if (std::abs(setup_pose.x - setup_preview.x) > 1e-6 ||
+        std::abs(setup_pose.y - setup_preview.y) > 1e-6 ||
+        std::abs(setup_pose.rotation - setup_preview.rotation) > 1e-6) {
+        std::cerr << "Setup mode did not display the runtime setup pose.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    apply_shell_mode(&shell_state, ShellMode::Animation);
+    if (current_shell_mode(&shell_state) != ShellMode::Animation ||
+        !inspector_bone_pose_editable(shell_state) ||
+        shell_state.session.preview_state().animation_name.empty()) {
+        std::cerr << "Animation mode did not restore keyed inspector authoring.\n";
         ImGui::DestroyContext();
         return 1;
     }
@@ -1115,7 +2010,9 @@ int run_headless_smoke(const Options& options) {
     }
     shell_state.session.clear_history();
 
-    if (!validate_viewport_prepared_scene_renderer_smoke(options.project_path)) {
+    if (!validate_animation_catalog_smoke(options.project_path) ||
+        !validate_viewport_camera_smoke(options.project_path) ||
+        !validate_viewport_prepared_scene_renderer_smoke(options.project_path)) {
         ImGui::DestroyContext();
         return 1;
     }

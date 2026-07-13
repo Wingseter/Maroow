@@ -359,6 +359,7 @@ Top-level keys:
 - `marrow`
 - `runtime`
 - `editor`
+- `animation_edits`
 - `timeline_edits`
 - `mesh_edits`
 - `constraint_edits`
@@ -384,6 +385,7 @@ Common fields:
 - `export_directory`
 - `notes`
 - `viewport`
+- `timeline`
 
 `viewport` currently includes:
 
@@ -393,6 +395,29 @@ Common fields:
 - `onion_skin`
 - `debug_overlay`
 
+`timeline` is optional and currently stores `fps`, a finite positive editor
+display/snap rate. It defaults to `60` for existing projects. Timeline zoom and
+pan are presentation state and do not alter animation duration.
+
+### `animation_edits`
+
+Optional ordered animation-catalog operations applied to the referenced base skeleton before
+`timeline_edits` are merged. Projects that omit this array keep the base animation catalog unchanged.
+
+```json
+"animation_edits": [
+  { "op": "create", "name": "idle_copy", "animation": {} },
+  { "op": "rename", "from": "idle", "to": "idle_main" },
+  { "op": "delete", "name": "walk" }
+]
+```
+
+- `create` stores a complete animation JSON object. Duplicate therefore deep-copies timeline families unknown to the current editor and remains independent of later source edits.
+- `rename` atomically remaps the animation catalog, mixing entries, editor timeline overlays, and compatible preview/queue references.
+- `delete` removes the animation plus its mixing entries and editor timeline overlays.
+- Operations are applied in array order. Empty names, missing sources, duplicate destinations, and deleting the last remaining animation are rejected.
+- The exported `.mskl`/`.mbin` contains the resulting animation catalog; `animation_edits` remains editor-only and does not change runtime format versions.
+
 ### `timeline_edits`
 
 Editor-side overrides that have not yet been exported into runtime assets:
@@ -401,6 +426,8 @@ Editor-side overrides that have not yet been exported into runtime assets:
 - mesh deform edits
 - draw-order edits
 - event edits
+- slot light-color edits
+- slot attachment edits
 
 The exported runtime path merges these edits back into the `.mskl` animation layout.
 

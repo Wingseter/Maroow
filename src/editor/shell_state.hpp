@@ -60,6 +60,19 @@ struct BoneCanvasNode {
     bool active{true};
 };
 
+struct ViewportCamera {
+    bool initialized{false};
+    double world_center_x{0.0};
+    double world_center_y{0.0};
+    double fit_extent_x{80.0};
+    double fit_extent_y{80.0};
+};
+
+struct ViewportWorldPoint {
+    double x{0.0};
+    double y{0.0};
+};
+
 struct ViewportLayout {
     ImVec2 canvas_origin{};
     ImVec2 canvas_size{};
@@ -301,6 +314,86 @@ struct PendingEditAction {
     EditorHistorySnapshot before_snapshot;
 };
 
+struct InspectorTransformGesture {
+    ImGuiID item_id{0};
+    marrow::editor::TransformTimelineChannel channel{
+        marrow::editor::TransformTimelineChannel::Rotate};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+enum class ViewportTranslateAxis {
+    Free,
+    X,
+    Y,
+};
+
+struct ViewportTranslateGesture {
+    std::size_t bone_index{0U};
+    std::string bone_name;
+    ViewportTranslateAxis axis{ViewportTranslateAxis::Free};
+    ViewportWorldPoint pointer_start{};
+    ViewportWorldPoint bone_world_start{};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+struct TimelineKeyRef {
+    std::string track_id;
+    // Indices are presentation details and shift whenever a key is inserted or
+    // removed. Keep a quantized time identity instead, plus enough same-time
+    // context to distinguish event keys and invalidate ambiguous identities
+    // when the same-time population changes.
+    std::int64_t time_microseconds{0};
+    std::size_t same_time_ordinal{0U};
+    std::size_t same_time_count{1U};
+
+    friend bool operator==(const TimelineKeyRef& left, const TimelineKeyRef& right) {
+        return left.track_id == right.track_id &&
+            left.time_microseconds == right.time_microseconds &&
+            left.same_time_ordinal == right.same_time_ordinal &&
+            left.same_time_count == right.same_time_count;
+    }
+};
+
+struct TimelineClipboard {
+    bool has_data{false};
+    std::string animation_name;
+    double earliest_time{0.0};
+    // A typed project fragment keeps every supported key payload intact while
+    // remaining independent from the operating-system text clipboard.
+    marrow::editor::ProjectData project_fragment;
+};
+
+struct TimelineBoxSelection {
+    std::string track_id;
+    double start_time{0.0};
+    double current_time{0.0};
+    bool additive{false};
+};
+
+struct TimelineRetimeGesture {
+    ImGuiID item_id{0};
+    float start_mouse_x{0.0f};
+    std::vector<TimelineKeyRef> keys;
+    std::vector<double> original_times;
+    double applied_delta{0.0};
+    bool materialized{false};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+struct TimelineEditorState {
+    double frames_per_second{60.0};
+    bool snap_to_frames{true};
+    double view_start_seconds{0.0};
+    double pixels_per_second{160.0};
+    std::vector<TimelineKeyRef> selected_keys;
+    TimelineClipboard clipboard;
+    std::optional<TimelineBoxSelection> box_selection;
+    std::optional<TimelineRetimeGesture> retime_gesture;
+};
+
 using AgentReviewKind = marrow::editor::AgentReviewKind;
 using AgentReviewRequest = marrow::editor::AgentReviewRequest;
 using AgentActivityEntry = marrow::editor::AgentActivityEntry;
@@ -322,10 +415,14 @@ struct ShellState {
     std::uint64_t observed_preview_revision{0U};
     std::filesystem::path project_path;
     marrow::editor::ViewportState viewport{};
+    ViewportCamera viewport_camera{};
     bool hud_overlay_enabled{false};
     WeightPaintSettings weight_paint{};
     marrow::editor::ProjectLoadResult& load_result;
     std::optional<PendingEditAction> pending_edit_action;
+    std::optional<InspectorTransformGesture> inspector_transform_gesture;
+    std::optional<ViewportTranslateGesture> viewport_translate_gesture;
+    TimelineEditorState timeline_editor{};
     MeshWeightStrokeState weight_paint_stroke{};
     ViewportRenderResources viewport_renderer{};
     DockLayoutState dock_layout{};
@@ -374,7 +471,11 @@ struct ShellState {
 };
 
 inline bool authoring_gesture_active(const ShellState& state) noexcept {
-    return state.pending_edit_action.has_value() || state.weight_paint_stroke.active;
+    return state.pending_edit_action.has_value() ||
+        state.inspector_transform_gesture.has_value() ||
+        state.viewport_translate_gesture.has_value() ||
+        state.timeline_editor.retime_gesture.has_value() ||
+        state.weight_paint_stroke.active;
 }
 
 void sync_shell_from_editor_session(ShellState* state);
@@ -512,6 +613,14 @@ std::optional<ViewportLayout> build_viewport_layout(
     const ShellState& state,
     const ImVec2& canvas_origin,
     const ImVec2& canvas_size);
+bool initialize_viewport_camera_from_preview_pose(ShellState* state);
+bool frame_viewport_camera_to_preview_pose(ShellState* state);
+bool zoom_viewport_at_screen_position(
+    ShellState* state,
+    const ImVec2& canvas_origin,
+    const ImVec2& canvas_size,
+    const ImVec2& screen_position,
+    double zoom_factor);
 std::vector<OnionSkinGhostPose> build_onion_skin_ghost_poses(
     const ShellState& state,
     const ViewportLayout& layout);
@@ -540,6 +649,9 @@ ImVec2 screen_from_world(
     const ViewportLayout& layout,
     float world_x,
     float world_y);
+ViewportWorldPoint world_from_screen(
+    const ViewportLayout& layout,
+    const ImVec2& screen_position);
 ImVec2 local_viewport_position(
     const ViewportLayout& layout,
     const ImVec2& screen_position);

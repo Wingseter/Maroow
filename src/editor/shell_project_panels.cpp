@@ -1,5 +1,7 @@
 #include "shell_project_panels.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -26,6 +28,241 @@ namespace marrow::editor::shell {
 
 using marrow::editor::Icon;
 
+namespace {
+
+constexpr char kAnimationNamePopup[] = "Animation Name##animation_catalog";
+constexpr char kAnimationDeletePopup[] = "Delete Animation##animation_catalog";
+
+struct AnimationCatalogPopupState {
+    AnimationCatalogAction action{AnimationCatalogAction::Create};
+    std::string source_animation;
+    std::string delete_animation;
+    std::array<char, 128> name{};
+};
+
+AnimationCatalogPopupState g_animation_catalog_popup;
+
+const char* animation_catalog_verb(AnimationCatalogAction action) {
+    switch (action) {
+    case AnimationCatalogAction::Create:
+        return "Create";
+    case AnimationCatalogAction::Duplicate:
+        return "Duplicate";
+    case AnimationCatalogAction::Rename:
+        return "Rename";
+    case AnimationCatalogAction::Delete:
+        return "Delete";
+    }
+    return "Edit";
+}
+
+std::string unique_animation_name(
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view stem) {
+    std::string candidate(stem);
+    if (skeleton.find_animation(candidate) == nullptr) {
+        return candidate;
+    }
+    for (std::size_t suffix = 2U;; ++suffix) {
+        candidate = std::string(stem) + "_" + std::to_string(suffix);
+        if (skeleton.find_animation(candidate) == nullptr) {
+            return candidate;
+        }
+    }
+}
+
+void open_animation_name_popup(
+    AnimationCatalogAction action,
+    std::string source_animation,
+    std::string initial_name) {
+    g_animation_catalog_popup.action = action;
+    g_animation_catalog_popup.source_animation = std::move(source_animation);
+    std::snprintf(
+        g_animation_catalog_popup.name.data(),
+        g_animation_catalog_popup.name.size(),
+        "%s",
+        initial_name.c_str());
+    ImGui::OpenPopup(kAnimationNamePopup);
+}
+
+void draw_animation_catalog_popups(ShellState* state) {
+    if (ImGui::BeginPopupModal(
+            kAnimationNamePopup,
+            nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize)) {
+        const char* verb = animation_catalog_verb(g_animation_catalog_popup.action);
+        if (g_animation_catalog_popup.action == AnimationCatalogAction::Create) {
+            ImGui::TextUnformatted("Create a new empty animation clip.");
+        } else {
+            ImGui::Text(
+                "%s '%s'.",
+                verb,
+                g_animation_catalog_popup.source_animation.c_str());
+        }
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        const bool enter_pressed = ImGui::InputText(
+            "Name",
+            g_animation_catalog_popup.name.data(),
+            g_animation_catalog_popup.name.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        const std::string destination(g_animation_catalog_popup.name.data());
+        const bool unchanged_rename =
+            g_animation_catalog_popup.action == AnimationCatalogAction::Rename &&
+            destination == g_animation_catalog_popup.source_animation;
+        const bool can_apply =
+            !destination.empty() && !unchanged_rename &&
+            !authoring_gesture_active(*state) && !state->session.transaction_active();
+
+        if (!state->error_message.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kStateErr);
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::BeginDisabled(!can_apply);
+        const bool apply_pressed = ImGui::Button(verb) || enter_pressed;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        } else if (apply_pressed && can_apply &&
+                   apply_animation_catalog_action(
+                       state,
+                       g_animation_catalog_popup.action,
+                       g_animation_catalog_popup.source_animation,
+                       destination)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal(
+            kAnimationDeletePopup,
+            nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(
+            "Delete '%s' and all of its authored timeline edits?",
+            g_animation_catalog_popup.delete_animation.c_str());
+        ImGui::TextDisabled("This action can be undone.");
+        if (!state->error_message.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kStateErr);
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::Spacing();
+        const bool delete_blocked =
+            authoring_gesture_active(*state) || state->session.transaction_active();
+        ImGui::BeginDisabled(delete_blocked);
+        const bool delete_pressed = ImGui::Button("Delete");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        } else if (delete_pressed && !delete_blocked &&
+                   apply_animation_catalog_action(
+                       state,
+                       AnimationCatalogAction::Delete,
+                       g_animation_catalog_popup.delete_animation)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void draw_animation_catalog(ShellState* state) {
+    const auto& skeleton = *state->load_result.skeleton_data;
+    if (!ImGui::CollapsingHeader(
+            "Animation Management",
+            ImGuiTreeNodeFlags_DefaultOpen)) {
+        draw_animation_catalog_popups(state);
+        return;
+    }
+
+    const float list_height =
+        std::min(5.0f, static_cast<float>(std::max<std::size_t>(1U, skeleton.animations().size()))) *
+            ImGui::GetTextLineHeightWithSpacing() +
+        (ImGui::GetStyle().FramePadding.y * 2.0f);
+    if (ImGui::BeginChild(
+            "##animation_catalog_list",
+            ImVec2(0.0f, list_height),
+            ImGuiChildFlags_Borders)) {
+        for (const auto& animation : skeleton.animations()) {
+            const bool selected = state->selected_animation_name == animation.name;
+            ImGui::PushID(animation.name.c_str());
+            char label[256];
+            std::snprintf(
+                label,
+                sizeof(label),
+                "%s  (%.2fs)",
+                animation.name.c_str(),
+                animation.duration());
+            if (icon_selectable(state->icons, Icon::NodeAnim, label, selected)) {
+                state->timeline_playing = false;
+                (void)set_selected_animation(
+                    state,
+                    animation.name,
+                    "Project",
+                    true,
+                    true);
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+
+    const bool edit_blocked =
+        authoring_gesture_active(*state) || state->session.transaction_active();
+    const bool has_selection = selected_animation(*state) != nullptr;
+    ImGui::BeginDisabled(edit_blocked);
+    if (ImGui::Button("Create...")) {
+        state->error_message.clear();
+        open_animation_name_popup(
+            AnimationCatalogAction::Create,
+            {},
+            unique_animation_name(skeleton, "animation"));
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has_selection);
+    if (ImGui::Button("Duplicate...")) {
+        state->error_message.clear();
+        const std::string stem = state->selected_animation_name + "_copy";
+        open_animation_name_popup(
+            AnimationCatalogAction::Duplicate,
+            state->selected_animation_name,
+            unique_animation_name(skeleton, stem));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Rename...")) {
+        state->error_message.clear();
+        open_animation_name_popup(
+            AnimationCatalogAction::Rename,
+            state->selected_animation_name,
+            state->selected_animation_name);
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(skeleton.animations().size() <= 1U);
+    if (ImGui::Button("Delete...")) {
+        state->error_message.clear();
+        g_animation_catalog_popup.delete_animation = state->selected_animation_name;
+        ImGui::OpenPopup(kAnimationDeletePopup);
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+
+    if (skeleton.animations().size() <= 1U && has_selection) {
+        ImGui::TextDisabled("The last animation cannot be deleted.");
+    }
+    draw_animation_catalog_popups(state);
+}
+
+} // namespace
+
 ShellMode current_shell_mode(const ShellState* state) {
     if (state->weight_paint.enabled) return ShellMode::WeightPaint;
     if (!state->selected_animation_name.empty()) return ShellMode::Animation;
@@ -39,23 +276,121 @@ void apply_shell_mode(ShellState* state, ShellMode mode) {
     switch (mode) {
         case ShellMode::Setup:
             state->weight_paint.enabled = false;
+            state->timeline_playing = false;
             state->selected_animation_name.clear();
+            state->selected_timeline_track_id.reset();
+            state->preview_queue_enabled = false;
+            state->session.set_playing(false);
+            if (!state->session.select_setup_pose()) {
+                state->error_message = "Failed to select the setup-pose preview.";
+            } else {
+                sync_shell_from_editor_session(state);
+                state->error_message.clear();
+                state->status_message = "Setup Pose is read-only";
+            }
             break;
         case ShellMode::Animation:
             state->weight_paint.enabled = false;
             if (state->selected_animation_name.empty() &&
                 state->load_result.skeleton_data != nullptr &&
                 !state->load_result.skeleton_data->animations().empty()) {
-                state->selected_animation_name =
-                    state->load_result.skeleton_data->animations()
-                        .front()
-                        .name;
+                const std::string animation_name =
+                    state->load_result.skeleton_data->animations().front().name;
+                if (!set_selected_animation(
+                        state,
+                        animation_name,
+                        "Mode",
+                        false,
+                        false)) {
+                    state->error_message = "Failed to enter Animation mode.";
+                }
             }
             break;
         case ShellMode::WeightPaint:
             state->weight_paint.enabled = true;
             break;
     }
+}
+
+bool apply_animation_catalog_action(
+    ShellState* state,
+    AnimationCatalogAction action,
+    std::string_view source_animation,
+    std::string_view destination_animation) {
+    if (state == nullptr || !state->session.has_project() ||
+        state->session.base_skeleton_document() == nullptr) {
+        return false;
+    }
+    if (authoring_gesture_active(*state) || state->session.transaction_active()) {
+        state->status_message = "Finish the active edit before editing animations";
+        return false;
+    }
+
+    const std::string source(source_animation);
+    const std::string destination(destination_animation);
+    std::string label;
+    switch (action) {
+    case AnimationCatalogAction::Create:
+        label = "Created animation " + destination;
+        break;
+    case AnimationCatalogAction::Duplicate:
+        label = "Duplicated " + source + " as " + destination;
+        break;
+    case AnimationCatalogAction::Rename:
+        label = "Renamed animation " + source + " to " + destination;
+        break;
+    case AnimationCatalogAction::Delete:
+        label = "Deleted animation " + source;
+        break;
+    }
+
+    marrow::editor::AnimationCatalogEdit edit;
+    edit.source_animation = source;
+    edit.destination_animation = destination;
+    switch (action) {
+    case AnimationCatalogAction::Create:
+        edit.kind = marrow::editor::AnimationCatalogEditKind::Create;
+        break;
+    case AnimationCatalogAction::Duplicate:
+        edit.kind = marrow::editor::AnimationCatalogEditKind::Duplicate;
+        break;
+    case AnimationCatalogAction::Rename:
+        edit.kind = marrow::editor::AnimationCatalogEditKind::Rename;
+        break;
+    case AnimationCatalogAction::Delete:
+        edit.kind = marrow::editor::AnimationCatalogEditKind::Delete;
+        break;
+    }
+
+    const std::string previous_selection = state->selected_animation_name;
+    const marrow::editor::SessionResult commit_result =
+        state->session.edit_animation_catalog(
+            std::move(edit),
+            {marrow::editor::EditKind::EditProperty,
+             label,
+             "animation-catalog",
+             false,
+             marrow::editor::EditImpact::Project |
+                 marrow::editor::EditImpact::Runtime |
+                 marrow::editor::EditImpact::Preview});
+    if (!commit_result || !commit_result.changed) {
+        state->error_message = commit_result.error.has_value()
+            ? commit_result.error->format()
+            : "The animation catalog edit did not change the project.";
+        state->status_message = "Animation edit failed";
+        sync_shell_from_editor_session(state);
+        return false;
+    }
+
+    sync_shell_from_editor_session(state);
+    if (state->selected_animation_name != previous_selection) {
+        state->timeline_editor.selected_keys.clear();
+        state->timeline_editor.box_selection.reset();
+    }
+    state->selected_timeline_track_id.reset();
+    state->error_message.clear();
+    state->status_message = std::move(label);
+    return true;
 }
 
 // Secondary toolbar tier (below the menu bar): global actions on the left,
@@ -414,6 +749,10 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
         return;
     }
 
+    draw_animation_catalog(state);
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
     const auto& project = *state->load_result.project;
     const auto& skeleton = *state->load_result.skeleton_data;
     const std::string active_animation_label =

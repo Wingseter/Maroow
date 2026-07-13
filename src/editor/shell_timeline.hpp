@@ -17,7 +17,9 @@ class Skeleton;
 namespace marrow::editor::shell {
 
 struct ShellState;
+struct TimelineKeyRef;
 struct TimelineTrackRow;
+struct TimelineRetimeGesture;
 
 template <typename Keyframe>
 std::optional<double> insertable_key_time(
@@ -53,12 +55,45 @@ std::vector<double> collect_animation_key_times(
 std::vector<TimelineTrackRow> build_timeline_tracks(
     const marrow::runtime::SkeletonData& skeleton,
     const marrow::runtime::AnimationData& animation);
+TimelineKeyRef timeline_key_ref(
+    const TimelineTrackRow& track,
+    std::size_t key_index);
+std::optional<std::size_t> timeline_key_index(
+    const TimelineTrackRow& track,
+    const TimelineKeyRef& key);
+void reconcile_timeline_key_selection(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
 const TimelineTrackRow* selected_timeline_track(
     const ShellState& state,
     const std::vector<TimelineTrackRow>& tracks);
 bool timeline_track_matches_selection(
     const ShellState& state,
     const TimelineTrackRow& track);
+bool add_timeline_key_at_playhead(
+    ShellState* state,
+    const TimelineTrackRow& track);
+bool remove_selected_timeline_keys(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
+bool copy_selected_timeline_keys(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
+bool cut_selected_timeline_keys(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
+bool paste_timeline_clipboard(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
+bool begin_timeline_retime_gesture_for_smoke(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
+bool apply_timeline_retime_delta(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double requested_delta,
+    bool snap_to_frames);
+void finish_timeline_retime_gesture(ShellState* state, bool commit);
 bool set_selected_animation(
     ShellState* state,
     std::string_view animation_name,
@@ -90,6 +125,12 @@ std::optional<std::size_t> ensure_draw_order_timeline_edit_index(
 std::optional<std::size_t> ensure_event_timeline_edit_index(
     ShellState* state,
     const TimelineTrackRow& track);
+std::optional<std::size_t> ensure_slot_color_timeline_edit_index(
+    ShellState* state,
+    const TimelineTrackRow& track);
+std::optional<std::size_t> ensure_slot_attachment_timeline_edit_index(
+    ShellState* state,
+    const TimelineTrackRow& track);
 marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
     const ShellState& state,
     const TimelineTrackRow& track);
@@ -100,6 +141,12 @@ void draw_event_timeline_editor(
     ShellState* state,
     const TimelineTrackRow& track);
 void draw_mesh_deform_timeline_editor(
+    ShellState* state,
+    const TimelineTrackRow& track);
+void draw_slot_color_timeline_editor(
+    ShellState* state,
+    const TimelineTrackRow& track);
+void draw_slot_attachment_timeline_editor(
     ShellState* state,
     const TimelineTrackRow& track);
 void draw_transform_timeline_editor(

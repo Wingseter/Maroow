@@ -18,12 +18,18 @@ Maroow Agent Control allows AI agents to interact with the Maroow 2D animation e
 
 ## Implemented Scope
 
+The dispatcher and MCP facade currently expose the same 49-operation surface.
+`operations.list` is the protocol source of truth for operation category,
+mutation, review, and dry-run metadata.
+
 The current dispatcher implements inspection ops: `operations.list`,
 `scene.describe`, `bones.list`, `animation.list`, `slots.list`, `skins.list`,
 `attachments.list`, `constraints.list`, `timeline.describe`, `mesh.describe`,
 and `project.diagnostics`.
 
-The current dispatcher implements edit ops: `set_transform`,
+The current dispatcher implements edit ops: `animation.create`,
+`animation.duplicate`, `animation.rename`, `animation.delete`,
+`timeline.retime_keyframes`, `set_transform`,
 `remove_transform_keyframe`, `set_draw_order_keyframe`,
 `remove_draw_order_keyframe`, `set_event_keyframe`,
 `remove_event_keyframe`, `set_deform_keyframe`, `remove_deform_keyframe`,
@@ -67,7 +73,16 @@ There is no separate `move_bone` op - bone motion is expressed as
 - `agent.permissions.describe`: Returns pause/termination/review state.
 
 ### Editing
-- `set_transform`: Creates or updates a keyframe.
+- `animation.create`: Creates an empty animation.
+- `animation.duplicate`: Deep-copies an effective animation under a new name.
+- `animation.rename`: Renames an animation and cascades project references.
+- `animation.delete`: Deletes an animation; deleting the last animation is rejected.
+- `timeline.retime_keyframes`: Atomically retimes up to 4096 typed keys with
+  optional frame snapping. Transform, deform, draw-order, event, slot-color,
+  and slot-attachment keys are supported; same-time events use `ordinal`.
+- `set_transform`: Creates or updates a keyframe. Rotation `angle` is the
+  absolute local value shown in the editor; the project authoring layer converts
+  it to the runtime format's setup-relative rotate key.
 - `remove_transform_keyframe`: Removes a keyframe at a given time.
 - `set_draw_order_keyframe`: Creates or replaces a full-slot-stack draw-order keyframe.
 - `remove_draw_order_keyframe`: Removes a draw-order keyframe at a given time.
@@ -90,6 +105,47 @@ There is no separate `move_bone` op - bone motion is expressed as
 - `import.psd_layers`: Validates or queues reviewed PSD skeleton/atlas targets.
 - `atlas.pack`: Validates or queues a reviewed atlas pack target.
 - `agent.pause` / `agent.resume` / `agent.terminate`: Controls mutating operation intake.
+
+## Protocol Examples
+
+Animation catalog mutations are written to the ordered project animation edit
+log. Every catalog operation supports `dry_run`; a dry run validates against a
+copy and does not modify the project or undo history.
+
+```json
+{"op":"animation.duplicate","args":{"source":"idle","name":"idle_variant","dry_run":true}}
+```
+
+`timeline.retime_keyframes` applies one atomic delta to all selectors. The
+optional `snap` flag defaults to `true`; `frames_per_second` defaults to the
+project timeline FPS. An event selector's zero-based `ordinal` distinguishes
+events that share the same time.
+
+```json
+{
+  "op": "timeline.retime_keyframes",
+  "args": {
+    "delta": 0.05,
+    "snap": false,
+    "keys": [
+      {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "translate",
+        "time": 0.5
+      },
+      {
+        "kind": "event",
+        "animation": "idle",
+        "time": 0.5,
+        "ordinal": 1
+      }
+    ],
+    "dry_run": true
+  }
+}
+```
 
 ## Configuration
 

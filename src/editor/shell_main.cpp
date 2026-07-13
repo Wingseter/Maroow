@@ -586,6 +586,8 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
         draw_agent_window(shell_state);
     }
 
+    finalize_orphaned_inspector_transform_gesture(shell_state);
+    finalize_orphaned_viewport_translate_gesture(shell_state);
     finalize_orphaned_edit_action(shell_state);
 
     if (reload_requested) {
