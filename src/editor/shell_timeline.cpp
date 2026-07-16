@@ -4255,7 +4255,7 @@ void draw_timeline_window(ShellState* state) {
             play_icon,
             state->timeline_playing ? "Pause" : "Play",
             state->timeline_playing,
-            animation == nullptr)) {
+            animation == nullptr || state->shell_mode == ShellMode::Parameter)) {
         if (animation != nullptr) {
             const bool was_playing = state->timeline_playing;
             state->timeline_playing = !state->timeline_playing;

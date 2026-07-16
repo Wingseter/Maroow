@@ -10,7 +10,7 @@ The refactor replaced those overlapping ownership paths before new editing and p
 
 ### Current implementation checkpoint
 
-The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04512` at `2026-07-12T13:34:04+09:00`. MAR-129–140 are therefore recorded as completed PRD stories rather than being replayed by Ralph:
+The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04512` at `2026-07-12T13:34:04+09:00`. MAR-129–140 are therefore recorded as completed PRD stories and are not scheduled again:
 
 - The refactor checkpoint reduced `shell_main.cpp` to 748 lines and `shell_state.hpp` to 606 lines. The current P0 tree is 750/718 lines respectively; the added state is limited to P0 camera, inspector/viewport gestures, timeline selection/clipboard, and animation-management presentation.
 - The legacy `shell_types.hpp` and private shell undo stack are gone.
@@ -92,20 +92,22 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | MAR-139 | Weight-paint and viewport modules | MAR-138 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
 | MAR-140 | Composition and build-target cleanup | MAR-139 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
 | MAR-141–153 | Editing P0: trustworthy authoring, direct manipulation, dopesheet, slot timelines, animation CRUD, E2E guardrail | MAR-140, then story DAG | Done (current worktree, 2026-07-12) |
-| MAR-121–126 | Runtime-first parameter definitions, export, shapes, deformers, ArtPath, expressions/lip-sync | Sequential from MAR-120 | Open |
-| MAR-127 | Parameter-modeling editor tools | MAR-126, MAR-140, MAR-153 | Open |
-| MAR-128 | Parameter/deformer agent commands | MAR-127 | Open |
-| MAR-154–172 | Editing P1 backlog | MAR-128 and prior P1 slice | Open backlog |
+| MAR-121 | Tracking tombstone: runtime foundation integrated into MAR-122 | MAR-120 | Done (integrated 2026-07-16; no separate implementation) |
+| MAR-122–126 | Runtime-first parameter foundation/export, shapes, deformers, ArtPath, expressions/lip-sync | Sequential from MAR-120 beginning at MAR-122 | Done (validated 2026-07-16) |
+| MAR-127 | Parameter-modeling editor tools | MAR-126, MAR-140, MAR-153 | Done (validated 2026-07-16) |
+| MAR-128 | Parameter/deformer agent commands | MAR-127 | Done (validated 2026-07-16) |
+| MAR-154–191 | Editing P1 backlog | MAR-154 depends on MAR-128; MAR-155–191 each depend on the immediately preceding story | Open backlog |
 
-Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before MAR-121; that checkpoint is now implemented. The next active sequence is MAR-121–128, followed by the ordered MAR-154–172 P1 backlog. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-166 rather than being credited to the refactor-only MAR-137.
+Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122. The next dependency sequence is the linear MAR-154–191 P1 backlog after the completed MAR-128 gate. These are functional implementation and validation milestones. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
 
 ## Compatibility boundary
 
 The refactor must preserve:
 
 - C ABI version 1, all C functions, status codes, and ownership rules;
-- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus the five additive P0 operations for animation CRUD and atomic timeline retime (49 current operations);
-- `.marrow`, `.mskl`, `.mbin`, and `.matl` schemas and versions;
+- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations and six MAR-128 parameter operations for an exact current total of 55;
+- existing `.marrow` compatibility, `.mskl` v1, `.mbin` v2, and `.matl` v1; P1 project fields remain optional and additive;
+- optional parameter-model roots default to empty for old assets, unknown additive `.marrow` fields survive load/save, and direct preview parameter input is not serialized;
 - byte-identical unchanged `.marrow` serialization and equivalent `.mskl`/`.mbin` exports;
 - checked-in fixtures, playback behavior, transient preview composition, dirty semantics, and history grouping;
 - visible editor selection, timeline, constraint, paint, onion-skin, hot-reload, agent-panel, save, and export workflows.

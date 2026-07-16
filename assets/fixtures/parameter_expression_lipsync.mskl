@@ -1,0 +1,109 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "parameter_expression_lipsync",
+    "width": 1,
+    "height": 1
+  },
+  "bones": [
+    {
+      "name": "root"
+    }
+  ],
+  "slots": [
+    {
+      "name": "parameter_anchor",
+      "bone": "root",
+      "attachment": ""
+    }
+  ],
+  "skins": {
+    "default": {}
+  },
+  "animations": {
+    "idle": {}
+  },
+  "parameters": [
+    {
+      "id": "mouth.open",
+      "name": "Mouth Open",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "type": "continuous",
+      "clamp": true
+    },
+    {
+      "id": "mouth.form",
+      "name": "Mouth Form",
+      "min": -1,
+      "max": 1,
+      "default": 0,
+      "type": "continuous",
+      "clamp": true
+    },
+    {
+      "id": "eye.open",
+      "name": "Eye Open",
+      "min": 0,
+      "max": 1,
+      "default": 1,
+      "type": "continuous",
+      "clamp": true
+    }
+  ],
+  "expressions": [
+    {
+      "id": "smile",
+      "name": "Smile",
+      "targets": [
+        {"parameter": "mouth.form", "value": 0.8},
+        {"parameter": "eye.open", "value": -0.2}
+      ],
+      "duration": 0.1,
+      "blend": "additive",
+      "priority": 10,
+      "reset_policy": "restore"
+    },
+    {
+      "id": "surprised",
+      "name": "Surprised",
+      "targets": [
+        {"parameter": "mouth.open", "value": 1},
+        {"parameter": "eye.open", "value": 1}
+      ],
+      "duration": 0,
+      "blend": "override",
+      "priority": 20,
+      "reset_policy": "hold"
+    }
+  ],
+  "lipSync": {
+    "mappings": [
+      {
+        "source": "amplitude",
+        "parameter": "mouth.open",
+        "scale": 1.25,
+        "bias": 0,
+        "attack": 0.02,
+        "release": 0.08,
+        "smoothing": 0.04
+      },
+      {
+        "source": "phoneme",
+        "parameter": "mouth.form",
+        "scale": 1,
+        "bias": 0,
+        "attack": 0,
+        "release": 0,
+        "smoothing": 0,
+        "phoneme_map": {
+          "A": 0.2,
+          "E": 0.8,
+          "O": -0.7
+        }
+      }
+    ]
+  }
+}

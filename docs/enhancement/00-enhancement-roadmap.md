@@ -1,6 +1,6 @@
 # Maroow Enhancement Roadmap
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement one linked enhancement plan at a time. Steps in the linked plans use checkbox syntax for tracking.
+> **Current authority:** `docs/root1/discription.md` owns architecture and `.agents/tasks/prd-marrow-runtime.json` owns dependency-ordered milestones. Linked enhancement plans provide scope context; each milestone closes at a focused validation checkpoint.
 
 **Goal:** Spine parity work, Live2D-inspired authoring, AI-agent control, runtime ecosystem, and production workflow polish are separated into independent planning tracks.
 
@@ -22,28 +22,26 @@ This directory is organized by product capability, not by code layer. Each docum
 | `04-runtime-sdk-engine-ecosystem.md` | Runtime SDK packaging, C/C++ ABI, engine bridges, Web/WASM, conformance tests | Maroow assets become easier to ship outside the editor and molga-engine |
 | `05-production-workflow-ui-validation.md` | Editor UX, workflow ergonomics, diagnostics, visual renewal, docs/tutorials | The editor becomes practical for long production sessions and easier to validate |
 
-## Recommended Execution Order
+## Current Milestone Order
 
-1. **P0: AI Agent Control Expansion**
-   - This is Maroow's clearest differentiator against Spine and Live2D.
-   - It also creates automation hooks that can accelerate the other tracks.
+1. **Completed checkpoint: imported-rig editing P0 (MAR-141~153)**
+   - Honest setup/animation semantics, stable viewport interaction, dopesheet/slot authoring, animation catalog CRUD, and the shared agent foundation are validated.
 
-2. **P1: Production Workflow/UI Validation**
-   - The core feature set is already broad, but the editor needs stronger discoverability, diagnostics, and mode clarity before adding more authoring concepts.
+2. **Completed checkpoint: Maroow Parameter Modeling (MAR-122~128)**
+   - MAR-121 is a done tracking tombstone; its runtime foundation is implemented as part of MAR-122 rather than as a separate checkpoint.
+   - Dependency order is runtime definitions/project export, 1D shapes, warp/rotation deformers, ArtPath, expression/lip-sync, editor mode, then agent/MCP parity.
 
-3. **P1: Spine Parity Authoring/Export**
-   - Existing Spine runtime/import coverage is strong; remaining work is mostly production polish, export formats, and compatibility policy.
+3. **Next backlog: imported-rig editing P1 (MAR-154~191)**
+   - The MAR-128 gate passed on 2026-07-16. P1 follows the linear dependency chain recorded in the PRD and `editing-gap-analysis.md`, beginning with MAR-154.
 
-4. **P2: Live2D Parameter/Deformer System**
-   - This is a new authoring model and should not be bolted onto existing FFD casually. Start after the project has better diagnostics and agent-visible editing primitives.
-
-5. **P2: Runtime SDK/Engine Ecosystem**
-   - Begin ABI/package hardening early, but defer broad engine bridges until format changes from the parameter/deformer work are clearer.
+4. **Deferred enhancement tracks**
+   - Broader AI control, production workflow, Spine parity/export, and runtime SDK work remain useful capability plans, but none overrides the active MAR-154 P1 milestone.
+   - Native rig/mesh topology authoring remains blocked on a versioned canonical `.marrow` authoring-graph decision.
 
 ## Cross-Track Rules
 
-- Keep `docs/root1/discription.md` as the architecture source of truth unless a story explicitly updates it.
-- Treat `.ralph/` as generated runtime state.
+- Keep `docs/root1/discription.md` as the architecture source of truth unless an active milestone explicitly updates it.
+- Treat `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` as preserved historical artifacts, not current execution authority.
 - Prefer updating `.agents/tasks/prd-marrow-runtime.json` over creating a competing implementation roadmap.
 - Any file-format change must include fixture updates and validation commands.
 - Any agent-facing edit operation must be undoable and visible in the editor.
@@ -51,7 +49,7 @@ This directory is organized by product capability, not by code layer. Each docum
 
 ## Baseline Validation Commands
 
-Use the smallest relevant subset per story, then run broader checks before closing a track:
+Use the smallest relevant subset per milestone checkpoint, then run broader checks before closing a track:
 
 ```bash
 cmake -S . -B build
@@ -89,5 +87,5 @@ cmake --build build-bench --target marrow_benchmark
 
 - Each enhancement track has its own plan document in this directory.
 - Each plan states current state, scope boundaries, vertical phases, validation commands, risks, and acceptance criteria.
-- Follow-up implementation stories can be copied into the Ralph PRD without inventing another planning structure.
+- Follow-up implementation work is represented in the checked-in PRD as dependency-ordered milestones without inventing another planning structure.
 - No plan requires unrelated rewrites before a first useful slice can ship.

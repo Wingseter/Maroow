@@ -294,6 +294,151 @@ struct TimelineSettings {
     double frames_per_second{60.0};
 };
 
+enum class ParameterAuthoringType {
+    Continuous,
+    Discrete,
+};
+
+/**
+ * @brief Editor-owned parameter definition before runtime index resolution.
+ *
+ * The source document remains ID based. Runtime loaders resolve parameter and
+ * target indices only after project export, so those derived indices never
+ * enter the `.marrow` authoring graph.
+ */
+struct ParameterAuthoringDefinition {
+    std::string id;
+    std::string name;
+    double min_value{0.0};
+    double max_value{1.0};
+    double default_value{0.0};
+    ParameterAuthoringType type{ParameterAuthoringType::Continuous};
+    bool clamp{true};
+    std::optional<double> ui_step;
+    std::optional<std::string> units;
+};
+
+struct ParameterGroupAuthoringDefinition {
+    std::string id;
+    std::string name;
+    std::vector<std::string> parameter_ids;
+    bool collapsed{false};
+    std::optional<std::string> color_tag;
+    std::optional<std::string> exclusive_mode;
+};
+
+/**
+ * @brief Lossless, ID-based project form of one runtime parameter shape.
+ *
+ * Runtime-only resolved indices inherited from the runtime definition remain
+ * unset in project data. `preserved_source` retains additive fields unknown to this
+ * editor version, including unknown fields on nested keyforms.
+ */
+struct ParameterShapeAuthoringDefinition : runtime::ParameterShapeDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one warp or rotation deformer. */
+struct ParameterDeformerAuthoringDefinition : runtime::ParameterDeformerDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one skeleton-local ArtPath. */
+struct ArtPathAuthoringDefinition : runtime::ArtPathDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one expression preset. */
+struct ExpressionAuthoringDefinition : runtime::ExpressionDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one lip-sync target mapping. */
+struct LipSyncMappingAuthoringDefinition : runtime::LipSyncMappingDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Typed `.marrow.parameter_model.lip_sync` section. */
+struct LipSyncAuthoringDefinition {
+    std::vector<LipSyncMappingAuthoringDefinition> mappings;
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+
+    bool empty() const noexcept;
+};
+
+// These conversion helpers are shared by project loading, the UI-free
+// authoring primitives, and the editor shell. Known fields are rebuilt from
+// typed data while unknown additive fields are retained from `preserved_source`.
+bool parse_parameter_shape_authoring_value(
+    const runtime::json::Value& value,
+    ParameterShapeAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_parameter_shape_authoring_value(
+    const ParameterShapeAuthoringDefinition& definition);
+
+bool parse_parameter_deformer_authoring_value(
+    const runtime::json::Value& value,
+    ParameterDeformerAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_parameter_deformer_authoring_value(
+    const ParameterDeformerAuthoringDefinition& definition);
+
+bool parse_art_path_authoring_value(
+    const runtime::json::Value& value,
+    ArtPathAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_art_path_authoring_value(
+    const ArtPathAuthoringDefinition& definition);
+
+bool parse_expression_authoring_value(
+    const runtime::json::Value& value,
+    ExpressionAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_expression_authoring_value(
+    const ExpressionAuthoringDefinition& definition);
+
+bool parse_lip_sync_authoring_value(
+    const runtime::json::Value& value,
+    LipSyncAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_lip_sync_authoring_value(
+    const LipSyncAuthoringDefinition& definition);
+
+/**
+ * @brief Optional `.marrow.parameter_model` authoring source.
+ *
+ * Every milestone-owned family is typed. `source` values preserve unknown
+ * additive fields at section, entry, and nested-entry levels when known fields
+ * are rewritten.
+ */
+struct ParameterModel {
+    std::vector<ParameterAuthoringDefinition> parameters;
+    std::vector<ParameterGroupAuthoringDefinition> groups;
+    std::vector<ParameterDeformerAuthoringDefinition> deformers;
+    std::vector<ParameterShapeAuthoringDefinition> blend_shapes;
+    std::vector<ArtPathAuthoringDefinition> art_paths;
+    std::vector<ExpressionAuthoringDefinition> expressions;
+    LipSyncAuthoringDefinition lip_sync;
+    runtime::json::Value source{runtime::json::Value::Object{}, {}};
+
+    bool empty() const noexcept;
+    const ParameterAuthoringDefinition* find_parameter(std::string_view id) const;
+    ParameterAuthoringDefinition* find_parameter(std::string_view id);
+    const ParameterGroupAuthoringDefinition* find_group(std::string_view id) const;
+    ParameterGroupAuthoringDefinition* find_group(std::string_view id);
+    const ParameterShapeAuthoringDefinition* find_shape(std::string_view id) const;
+    ParameterShapeAuthoringDefinition* find_shape(std::string_view id);
+    const ParameterDeformerAuthoringDefinition* find_deformer(std::string_view id) const;
+    ParameterDeformerAuthoringDefinition* find_deformer(std::string_view id);
+    const ArtPathAuthoringDefinition* find_art_path(std::string_view id) const;
+    ArtPathAuthoringDefinition* find_art_path(std::string_view id);
+    const ExpressionAuthoringDefinition* find_expression(std::string_view id) const;
+    ExpressionAuthoringDefinition* find_expression(std::string_view id);
+    const LipSyncMappingAuthoringDefinition* find_lip_mapping(
+        std::string_view parameter_id) const;
+    LipSyncMappingAuthoringDefinition* find_lip_mapping(std::string_view parameter_id);
+};
+
 struct ProjectMetadata {
     std::string name;
     std::string active_animation;
@@ -320,7 +465,12 @@ struct ProjectData {
     std::vector<PathConstraintEdit> path_constraint_edits;
     std::vector<TransformConstraintEdit> transform_constraint_edits;
     std::vector<PhysicsConstraintEdit> physics_constraint_edits;
+    std::optional<ParameterModel> parameter_model;
     std::vector<AtlasPackDefinition> atlas_pack_definitions;
+    // Unknown top-level additive fields from the loaded `.marrow` document.
+    // Known fields are overlaid during serialization; this value is never
+    // exported into the runtime document.
+    runtime::json::Value preserved_root{runtime::json::Value::Object{}, {}};
     std::filesystem::path source_path;
 
     /**

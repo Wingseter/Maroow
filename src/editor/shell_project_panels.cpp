@@ -264,9 +264,7 @@ void draw_animation_catalog(ShellState* state) {
 } // namespace
 
 ShellMode current_shell_mode(const ShellState* state) {
-    if (state->weight_paint.enabled) return ShellMode::WeightPaint;
-    if (!state->selected_animation_name.empty()) return ShellMode::Animation;
-    return ShellMode::Setup;
+    return state == nullptr ? ShellMode::Setup : state->shell_mode;
 }
 
 void apply_shell_mode(ShellState* state, ShellMode mode) {
@@ -287,6 +285,7 @@ void apply_shell_mode(ShellState* state, ShellMode mode) {
                 sync_shell_from_editor_session(state);
                 state->error_message.clear();
                 state->status_message = "Setup Pose is read-only";
+                state->shell_mode = ShellMode::Setup;
             }
             break;
         case ShellMode::Animation:
@@ -303,11 +302,22 @@ void apply_shell_mode(ShellState* state, ShellMode mode) {
                         false,
                         false)) {
                     state->error_message = "Failed to enter Animation mode.";
+                    return;
                 }
             }
+            state->shell_mode = ShellMode::Animation;
             break;
         case ShellMode::WeightPaint:
             state->weight_paint.enabled = true;
+            state->shell_mode = ShellMode::WeightPaint;
+            break;
+        case ShellMode::Parameter:
+            state->weight_paint.enabled = false;
+            state->timeline_playing = false;
+            state->session.set_playing(false);
+            state->shell_mode = ShellMode::Parameter;
+            state->error_message.clear();
+            state->status_message = "Parameter Modeling preview";
             break;
     }
 }
@@ -447,7 +457,7 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
 
             // ModeStrip — centered segmented control.
             const char* kModes[] = {"SETUP POSE", "ANIMATION",
-                                    "WEIGHT PAINT"};
+                                    "WEIGHT PAINT", "PARAMETERS"};
             int mode_idx = static_cast<int>(current_shell_mode(state));
             float strip_w = 16.0f;
             for (const char* m : kModes) {
@@ -461,7 +471,7 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
                 ImGui::SameLine(0.0f, 24.0f);
             }
             ImGui::BeginDisabled(gesture_active);
-            if (widgets::seg_toggle("##modestrip", kModes, 3, &mode_idx)) {
+            if (widgets::seg_toggle("##modestrip", kModes, 4, &mode_idx)) {
                 apply_shell_mode(state, static_cast<ShellMode>(mode_idx));
             }
             ImGui::EndDisabled();

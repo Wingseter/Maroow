@@ -32,9 +32,11 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 현재 제품 단계는 **임포트한 리그를 기반으로 애니메이션과 후처리를 저작하는 에디터**다.
 
 - 베이스 `.mskl`은 본, 슬롯, 스킨, 어태치먼트와 메시 topology의 소유자다.
-- `.marrow`는 베이스 런타임 자산 참조와 이름 기반 애니메이션·제약·웨이트 편집 오버레이를 저장한다.
+- `.marrow`는 베이스 런타임 자산 참조와 이름 기반 애니메이션·제약·웨이트 편집 overlay, editor-only metadata를 저장한다. 활성 파라미터 마일스톤의 optional `parameter_model`과 P1의 duration operation, viewport snap, curve/loop metadata, constraint lifecycle, inherit overlay, PSD provenance도 모두 additive 필드다. 알 수 없는 additive 필드는 load/save에서 보존한다.
+- Parameter slider와 agent `parameter.set`은 ID 기반 direct preview 입력이며 `.marrow`나 runtime export에 저장하지 않는다. Persistent parameter-model CRUD만 project dirty 상태를 바꾼다.
 - Setup Pose는 현재 읽기 전용이다. Animation 모드의 본 포즈 변경은 현재 playhead의 키프레임으로 저장해야 하며, 저장되지 않는 preview-only 포즈/색상 편집은 허용하지 않는다.
-- 본·슬롯·스킨·어태치먼트 생성/삭제, 재부모화, 메시 topology 편집은 현재 범위 밖이다.
+- 본·슬롯·스킨·어태치먼트 생성/삭제, 재부모화, 메시 topology·경로 제어점 편집, multi-selection group transform, partial/degraded project open은 현재 P1 범위 밖이다.
+- P1은 `.mskl` v1, `.mbin` v2와 C ABI v1을 유지한다. 구 자산 fallback과 기존 C 함수·ownership 규칙을 깨는 version bump는 하지 않는다.
 - 장기 자체 리그 저작 단계에서는 기존 이름 기반 오버레이를 계속 확장하지 않는다. 버전과 stable ID를 가진 canonical `.marrow` authoring graph를 먼저 설계하고, 임포트 자산을 그 graph로 한 번 변환하는 경계를 정의한다.
 
 ---
@@ -55,16 +57,16 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 | 확장자 | 용도 | 형식 |
 |---|---|---|
 | `.marrow` | 에디터 프로젝트 파일 | JSON (초기), 추후 바이너리 컴파일러 추가 |
-| `.mskl` | 본 구조 + 애니메이션 데이터 (runtime import용) | JSON → 추후 바이너리 |
+| `.mskl` | 본 구조 + 애니메이션 데이터 (runtime import용) | JSON interchange/runtime source |
 | `.mbin` | 프로덕션용 런타임 스켈레톤 바이너리 | Compact binary |
 | `.matl` | 텍스처 아틀라스 메타데이터 | JSON |
 | `.png` | 실제 텍스처 아틀라스 | 이미지 |
 
-> 개발 초기에는 JSON으로 시작, 디버깅 안정화 후 바이너리 컴파일러 추가
+> 개발·검사에는 `.mskl` JSON을 사용하고 프로덕션에는 같은 runtime document의 `.mbin` binary export를 사용할 수 있다.
 > `.mskl` / `.matl` 루트에는 정수 `version` 필드가 포함되며, 현재 런타임은 `version: 1`만 로드한다.
 > `.matl.atlas.premultiplied_alpha` 불리언으로 straight alpha와 PMA 텍스처를 구분하며, 렌더러는 이 값을 기준으로 셰이더/블렌드 경로를 전환한다.
 > `.matl.regions[].rotate`는 선택적인 아틀라스 내 회전 각도(도 단위)를 보존하며, Spine `.atlas` 멀티페이지 import는 페이지당 하나의 `.matl` 파일로 변환한다.
-> `.mbin`은 검증된 런타임 문서를 그대로 보존하면서 회전/이동 키프레임에 대해 16-bit 시간/채널 인덱스 + 양자화 payload를 추가 저장해, 내보내기 시 키 감소와 런타임 quantized playback을 지원한다.
+> 현재 `.mbin` wire version은 v2다. 검증된 런타임 문서를 그대로 보존하면서 회전/이동 키프레임에 대해 16-bit 시간/채널 인덱스 + 양자화 payload를 추가 저장해, 내보내기 시 키 감소와 런타임 quantized playback을 지원한다.
 
 ---
 
@@ -166,7 +168,7 @@ void main() {
 - [ ] **Attachment Timeline** - 애니메이션 중 슬롯의 어태치먼트 전환
 - [ ] **Bone Scale/Shear Timeline** - 본 스케일·전단 키프레임
 - [ ] **Linked Mesh** - 다른 메시의 버텍스/가중치를 참조하는 메시 (스킨 간 공유)
-- [ ] **Inherit Timeline** - 애니메이션 중 본의 상속 속성 동적 변경 (회전/스케일/반전 상속 on/off)
+- [x] **Inherit Timeline runtime/read-only** - 5개 inherit mode의 stepped runtime timeline 구현 완료; project overlay와 editor parity는 MAR-184~185
 - [ ] **Shortest Rotation** - 회전 보간 시 최단 경로 선택 (360도 이상 회전 방지)
 
 ### 추가 기능
@@ -182,7 +184,7 @@ void main() {
 - [ ] **Skin Constraints** - 특정 스킨 활성 시에만 적용되는 조건부 Constraint
 - [ ] **SkeletonBounds** - Bounding Box 기반 히트 판정 유틸리티 클래스
 - [ ] **Setup Pose Reset** - 스켈레톤을 초기 설정 포즈로 복원
-- [ ] **Binary Export** - JSON 외 바이너리 포맷 내보내기 (용량↓ 로딩속도↑)
+- [x] **Binary Export** - `.mskl`과 동등한 `.mbin` v2 export·quantized playback 구현 완료
 
 ---
 
@@ -579,20 +581,24 @@ slot: "explosion"
 
 ### Inherit Timeline
 
-애니메이션 중 **본의 상속 속성을 동적으로 변경**한다. Spine 4.2에서 `spInheritTimeline`으로 추가.
+애니메이션 중 **본의 상속 mode를 동적으로 변경**한다. Runtime과 export는 아래 5개 enum 값을 사용하고,
+timeline sampling은 값 사이를 보간하지 않는 stepped-only다.
 
 ```
-프레임 0: arm_bone → inherit rotation = true  (부모 회전 따라감)
-프레임 5: arm_bone → inherit rotation = false (독립 회전)
+프레임 0: arm_bone → inherit = normal
+프레임 5: arm_bone → inherit = noRotationOrReflection
 ```
 
-| 제어 가능한 상속 속성 | 설명 |
+| mode | 설명 |
 |---|---|
-| **rotation** | 부모 본의 회전 상속 여부 |
-| **scale** | 부모 본의 스케일 상속 여부 |
-| **reflectX / reflectY** | 부모 본의 반전 상속 여부 |
+| **normal** | 부모 transform을 정상적으로 상속 |
+| **onlyTranslation** | 부모 translation만 상속 |
+| **noRotationOrReflection** | 부모 rotation/reflection 영향을 제거 |
+| **noScale** | 부모 scale 영향을 제거 |
+| **noScaleOrReflection** | 부모 scale/reflection 영향을 제거 |
 
-> 캐릭터가 방향 전환할 때 특정 본만 반전에서 제외하거나, 무기가 항상 월드 기준 회전을 유지하도록 할 때 사용
+Runtime timeline과 read-only inspector는 이미 이 mode를 사용한다. MAR-184는 optional project overlay와
+materialization/merge/export를 추가하고, MAR-185는 Add/Edit/Remove·selection·retime·scale·clipboard와 agent/MCP parity를 연결한다.
 
 ---
 
@@ -765,13 +771,13 @@ JSON 외에 **바이너리 포맷**으로 내보내기. 프로덕션 배포용.
 ```
 [Marrow Editor]
       ↓ export
-  .mskl / .matl / .png (.mbin 바이너리 추후)
+  .mskl / .matl / .png (.mbin v2 binary 선택)
       ↓ import
 [molga-engine]
   ├── AtlasLoader        → .matl 파싱, 텍스처 로드
   ├── SkeletonLoader     → .mskl 파싱, 본 트리 구성
-  ├── SkeletonData       → 공유 가능한 정적 스켈레톤 데이터 (본/슬롯/스킨/애니메이션)
-  ├── Skeleton           → 인스턴스별 상태 (현재 포즈, 활성 스킨, 드로우 오더)
+  ├── SkeletonData       → 공유 가능한 정적 데이터 (본/슬롯/스킨/애니메이션, immutable parameter 정의)
+  ├── Skeleton           → 인스턴스별 상태 (현재 포즈, 활성 스킨, 드로우 오더, direct/final parameter 값)
   ├── AnimationState     → 트랙 기반 애니메이션 재생, 믹싱, 큐, 콜백
   ├── ConstraintSolver   → IK / Path / Transform / Physics Constraint 해결
   ├── SkinManager        → 스킨 교체, 합성, 조건부 Constraint 관리
@@ -784,14 +790,18 @@ JSON 외에 **바이너리 포맷**으로 내보내기. 프로덕션 배포용.
 
 ## 10. 개발 순서 (권장)
 
-초기 렌더러/런타임 우선 단계, 에디터 아키텍처 리팩터링과 편집 P0는 완료됐다. 현재 실행 순서는 다음과 같다.
+초기 렌더러/런타임 우선 단계, 에디터 아키텍처 리팩터링, 편집 P0와 파라미터 트랙은 완료됐다. 현재 실행 순서는 다음과 같다.
 
 1. **완료: 편집 P0 (MAR-141~153)** - Setup Pose 읽기 전용화, Animation auto-key, 안정적 카메라/이동 기즈모, 도프시트 조작, 슬롯 타임라인, 애니메이션 CRUD와 E2E guardrail
-2. **다음: 파라미터 트랙 (MAR-121~128)** - 런타임 정의·export·shape/deformer·ArtPath·expression/lip-sync 뒤 editor/agent surface
-3. **후속: 편집 P1 (MAR-154~172)** - clip duration, 회전/스케일/FFD 기즈모, graph/weight/multi-select/constraint/file workflow와 PSD 재임포트 GUI
+2. **완료: 파라미터 트랙 (MAR-122~128)** - MAR-121의 런타임 기반을 MAR-122에 통합하고 정의·export·shape/deformer·ArtPath·expression/lip-sync·editor·agent surface를 검증
+3. **다음: 편집 P1 (MAR-154~191)** - duration·preferences·typed selection, 회전/스케일/FFD/snap, graph·retime·preview, weight·constraint lifecycle, atomic file workflow·inherit, structured Problems, staged/atomic PSD 재임포트와 E2E
 4. **보류: 자체 리그 저작 재검토** - canonical `.marrow` authoring graph와 stable ID 전환 설계가 승인된 뒤에만 리그/메시 topology 저작을 시작
 
-> 새 포맷이나 평가 기능은 계속 런타임에서 먼저 검증한다. 편집 P0는 이미 구현된 런타임 위의 데이터 유실·직접 조작·타임라인 UX 갭을 먼저 닫은 예외적인 제품 완성도 단계였다.
+P1 시작 gate인 MAR-128 완료 checkpoint는 2026-07-16에 통과했다. MAR-154는 MAR-128에 의존하고 MAR-155~191은 각각 바로 앞 번호의
+스토리에 의존하는 선형 dependency chain이다. 각 milestone checkpoint는 기능·검증 경계이며 자동 커밋 단위가 아니다. 38개 story의 title과 수직 scope는
+[`editing-gap-analysis.md`](editing-gap-analysis.md)의 P1 표를 따른다.
+
+> 새 포맷이나 평가 기능은 계속 런타임에서 먼저 검증한다. 편집 P0는 이미 구현된 런타임 위의 데이터 유실·직접 조작·타임라인 UX 갭을 먼저 닫은 예외적인 제품 완성도 단계였다. P1도 `.mskl` v1/`.mbin` v2/C ABI v1 compatibility를 유지한다.
 
 ---
 
@@ -799,6 +809,6 @@ JSON 외에 **바이너리 포맷**으로 내보내기. 프로덕션 배포용.
 
 - [x] `.matl` 텍스처 아틀라스 포맷 상세 설계
 - [x] 본 계층 런타임 자료구조 설계
-- [x] 편집 P0/P1 마일스톤과 타임라인 우선순위
+- [x] 편집 P0와 MAR-128 완료 checkpoint 뒤 MAR-154~191 선형 P1 마일스톤·타임라인 우선순위
 - [ ] canonical `.marrow` authoring graph의 version/stable-ID/migration 설계
 - [ ] 자체 리그·메시 topology 저작 재개 조건과 범위

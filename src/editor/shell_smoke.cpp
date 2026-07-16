@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #define GLFW_INCLUDE_NONE
@@ -31,6 +32,7 @@
 #include "shell_agent_panel.hpp"
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
+#include "shell_parameters.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
@@ -40,6 +42,7 @@
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/module.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
@@ -1262,8 +1265,14 @@ bool validate_viewport_prepared_scene_renderer_smoke(
         std::visit(
             [](auto& attachment) {
                 attachment.clip_attachment_name.reset();
-                attachment.masked_vertices.clear();
-                attachment.masked_indices.clear();
+                using Attachment = std::remove_cv_t<
+                    std::remove_reference_t<decltype(attachment)>>;
+                if constexpr (!std::is_same_v<
+                                  Attachment,
+                                  marrow::renderer::PreparedStrokeCommand>) {
+                    attachment.masked_vertices.clear();
+                    attachment.masked_indices.clear();
+                }
             },
             unclipped_scene.draw_commands[draw_index]);
         unclipped_scene.ordered_events.push_back({
@@ -1915,6 +1924,13 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
+    if (shell_state.session.project() != nullptr &&
+        shell_state.session.project()->parameter_model.has_value()) {
+        const bool passed = validate_parameter_mode_shell_smoke(
+            &shell_state, options, io);
+        ImGui::DestroyContext();
+        return passed ? 0 : 1;
+    }
     if (!validate_timeline_p0_authoring_smoke(options.project_path)) {
         ImGui::DestroyContext();
         return 1;
@@ -1956,6 +1972,24 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
+
+    const std::string parameter_mode_animation = shell_state.selected_animation_name;
+    const double parameter_mode_time = shell_state.timeline_time_seconds;
+    const bool parameter_mode_queue = shell_state.preview_queue_enabled;
+    shell_state.timeline_playing = true;
+    shell_state.session.set_playing(true);
+    apply_shell_mode(&shell_state, ShellMode::Parameter);
+    if (current_shell_mode(&shell_state) != ShellMode::Parameter ||
+        shell_state.selected_animation_name != parameter_mode_animation ||
+        shell_state.timeline_time_seconds != parameter_mode_time ||
+        shell_state.preview_queue_enabled != parameter_mode_queue ||
+        shell_state.timeline_playing || shell_state.session.preview_state().playing ||
+        shell_state.weight_paint.enabled || inspector_bone_pose_editable(shell_state)) {
+        std::cerr << "Parameter mode did not preserve the pose while disabling playback and bone tools.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    apply_shell_mode(&shell_state, ShellMode::Animation);
 
     const bool initial_loop = shell_state.timeline_loop;
     const std::uint64_t initial_preview_revision = shell_state.observed_preview_revision;
@@ -4438,6 +4472,7 @@ int run_headless_smoke(const Options& options) {
         }
     }
 
+    apply_shell_mode(&shell_state, ShellMode::Parameter);
     const int frame_count = options.auto_close_frames.value_or(1);
     bool validated_dock_layout = false;
     for (int frame_index = 0; frame_index < frame_count; ++frame_index) {
@@ -4445,6 +4480,8 @@ int run_headless_smoke(const Options& options) {
         ImGui::NewFrame();
         (void)poll_runtime_asset_changes(&shell_state);
         advance_timeline_playback(&shell_state, io.DeltaTime);
+        (void)shell_state.session.advance_parameter_state(io.DeltaTime);
+        sync_shell_from_editor_session_if_revised(&shell_state);
         handle_project_history_shortcuts(&shell_state);
 
         bool reload_requested = false;
@@ -4459,12 +4496,19 @@ int run_headless_smoke(const Options& options) {
         draw_hierarchy_window(&shell_state);
         draw_viewport_window(&shell_state);
         draw_inspector_window(&shell_state);
+        draw_parameter_windows(&shell_state);
 
         if (!validated_dock_layout) {
             const ImGuiWindow* viewport_window = ImGui::FindWindowByName(kViewportWindowTitle);
             const ImGuiWindow* timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
             const ImGuiWindow* hierarchy_window = ImGui::FindWindowByName(kHierarchyWindowTitle);
             const ImGuiWindow* properties_window = ImGui::FindWindowByName(kPropertiesWindowTitle);
+            const ImGuiWindow* parameters_window = ImGui::FindWindowByName(kParametersWindowTitle);
+            const ImGuiWindow* deformers_window =
+                ImGui::FindWindowByName(kParameterDeformersWindowTitle);
+            const ImGuiWindow* expressions_window =
+                ImGui::FindWindowByName(kExpressionsWindowTitle);
+            const ImGuiWindow* lip_sync_window = ImGui::FindWindowByName(kLipSyncWindowTitle);
             const ImGuiDockNode* viewport_node =
                 ImGui::DockBuilderGetNode(shell_state.dock_layout.viewport_node_id);
             const ImGuiDockNode* timeline_node =
@@ -4478,6 +4522,10 @@ int run_headless_smoke(const Options& options) {
                 timeline_window == nullptr ||
                 hierarchy_window == nullptr ||
                 properties_window == nullptr ||
+                parameters_window == nullptr ||
+                deformers_window == nullptr ||
+                expressions_window == nullptr ||
+                lip_sync_window == nullptr ||
                 viewport_node == nullptr ||
                 timeline_node == nullptr ||
                 hierarchy_node == nullptr ||

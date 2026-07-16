@@ -1,6 +1,7 @@
 #include "shell_viewport_ui.hpp"
 
 #include "shell_preview.hpp"
+#include "shell_project_panels.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -40,7 +41,8 @@ std::optional<ViewportTranslateAxis> hit_test_translate_gizmo(
     const ShellState& state,
     const ViewportLayout& layout,
     const ImVec2& position) {
-    if (state.selected_animation_name.empty() || state.weight_paint.enabled ||
+    if (state.shell_mode != ShellMode::Animation ||
+        state.selected_animation_name.empty() || state.weight_paint.enabled ||
         !state.selected_bone_index.has_value() ||
         *state.selected_bone_index >= layout.bones.size()) {
         return std::nullopt;
@@ -67,7 +69,8 @@ void draw_translate_gizmo(
     const ShellState& state,
     const ViewportLayout& layout,
     ImDrawList* draw_list) {
-    if (draw_list == nullptr || state.selected_animation_name.empty() ||
+    if (draw_list == nullptr || state.shell_mode != ShellMode::Animation ||
+        state.selected_animation_name.empty() ||
         state.weight_paint.enabled || !state.selected_bone_index.has_value() ||
         *state.selected_bone_index >= layout.bones.size()) {
         return;
@@ -162,7 +165,8 @@ bool begin_viewport_translate_gesture(
     const ViewportLayout& layout,
     ViewportTranslateAxis axis,
     const ImVec2& pointer) {
-    if (state == nullptr || state->selected_animation_name.empty() ||
+    if (state == nullptr || state->shell_mode != ShellMode::Animation ||
+        state->selected_animation_name.empty() ||
         !state->selected_bone_index.has_value() || state->preview_skeleton == nullptr ||
         state->load_result.project == nullptr || authoring_gesture_active(*state)) {
         return false;
@@ -1320,10 +1324,12 @@ void draw_viewport_settings(ShellState* state) {
     if (ImGui::CollapsingHeader("Weight Paint##settings")) {
         bool tool_enabled = state->weight_paint.enabled;
         if (ImGui::Checkbox("Enable Tool##weight_paint", &tool_enabled)) {
-            state->weight_paint.enabled = tool_enabled;
             if (!tool_enabled) {
                 finish_weight_paint_stroke(state);
             }
+            apply_shell_mode(
+                state,
+                tool_enabled ? ShellMode::WeightPaint : ShellMode::Animation);
         }
 
         // 3-icon toggle group (Paint / Erase / Smooth)

@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 49> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 55> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -45,6 +45,7 @@ constexpr std::array<OperationExpectation, 49> kExpectedOperations{{
     {"skins.list", "inspection", false, false, false},
     {"attachments.list", "inspection", false, false, false},
     {"constraints.list", "inspection", false, false, false},
+    {"parameters.list", "inspection", false, false, false},
     {"timeline.describe", "inspection", false, false, false},
     {"mesh.describe", "inspection", false, false, false},
     {"project.diagnostics", "inspection", false, false, false},
@@ -57,6 +58,11 @@ constexpr std::array<OperationExpectation, 49> kExpectedOperations{{
     {"agent.terminate", "management", false, false, false},
     {"undo", "edit", true, false, false},
     {"redo", "edit", true, false, false},
+    {"parameter.set", "edit", true, false, true},
+    {"deformer.create", "edit", true, false, true},
+    {"keyform.capture", "edit", true, false, true},
+    {"expression.create", "edit", true, false, true},
+    {"lip_sync.map", "edit", true, false, true},
     {"animation.create", "edit", true, false, true},
     {"animation.duplicate", "edit", true, false, true},
     {"animation.rename", "edit", true, false, true},
@@ -141,6 +147,11 @@ class Harness {
 public:
     explicit Harness(MarrowProject* project)
         : project_(project) {}
+
+    void set_project(MarrowProject* project) {
+        project_ = project;
+        last_activity_id_ = 0U;
+    }
 
     void expect(bool condition, std::string_view label, std::string_view detail) {
         if (condition) {
@@ -519,6 +530,372 @@ std::optional<std::uint64_t> expect_export_equivalence(
         : std::nullopt;
 }
 
+void expect_parameter_snapshot_unchanged(
+    Harness& harness,
+    std::string_view label,
+    const DispatchObservation& before,
+    const DispatchObservation& after) {
+    harness.expect(
+        compact_scene_delta(before) == compact_scene_delta(after),
+        label,
+        "dry-run changed parameter values, dirty state, history, or a revision");
+}
+
+void expect_revision_advanced(
+    Harness& harness,
+    std::string_view label,
+    const DispatchObservation& before,
+    const DispatchObservation& after,
+    std::string_view revision_name) {
+    const auto before_revision = number_member(before.scene_delta(), revision_name);
+    const auto after_revision = number_member(after.scene_delta(), revision_name);
+    harness.expect(
+        before_revision.has_value() && after_revision.has_value() &&
+            *after_revision > *before_revision,
+        label,
+        std::string(revision_name) + " did not advance");
+}
+
+bool exercise_parameter_operations(Harness& harness) {
+    constexpr const char* kParameterProjectPath =
+        "assets/fixtures/parameter_face_basic.marrow";
+    MarrowProject* parameter_project = nullptr;
+    const MarrowStatusCode load_status =
+        marrow_editor_project_load(kParameterProjectPath, &parameter_project);
+    if (load_status != MARROW_STATUS_OK || parameter_project == nullptr) {
+        MarrowStringView error{};
+        marrow_get_last_error_message(&error);
+        harness.expect(
+            false,
+            "parameter project load",
+            std::string(error.data ? error.data : "", error.size));
+        return false;
+    }
+
+    harness.set_project(parameter_project);
+    const DispatchObservation initial = harness.invoke(
+        "parameters.list initial",
+        R"json({"op":"parameters.list"})json");
+    harness.expect(
+        number_member(initial.scene_delta(), "count") == std::optional<double>(2.0) &&
+            number_member(initial.scene_delta(), "group_count") ==
+                std::optional<double>(1.0),
+        "parameters.list initial",
+        "fixture definitions or groups were not reported");
+    harness.expect(
+        number_member(member(initial.scene_delta(), "direct_values"), "mouth.open") ==
+                std::optional<double>(0.0) &&
+            number_member(member(initial.scene_delta(), "final_values"), "mouth.open") ==
+                std::optional<double>(0.0),
+        "parameters.list initial",
+        "direct/final fixture defaults were not reported");
+    harness.expect(
+        bool_member(initial.scene_delta(), "project_dirty") ==
+                std::optional<bool>(false) &&
+            number_member(initial.scene_delta(), "undo_count") ==
+                std::optional<double>(0.0),
+        "parameters.list initial",
+        "fresh parameter fixture should be clean with empty history");
+
+    const DispatchObservation parameter_dry_run = harness.invoke(
+        "parameter.set dry-run",
+        R"json({"op":"parameter.set","args":{"id":"mouth.open","value":2,"dry_run":true}})json");
+    harness.expect(
+        number_member(parameter_dry_run.scene_delta(), "requested") ==
+                std::optional<double>(2.0) &&
+            number_member(parameter_dry_run.scene_delta(), "applied") ==
+                std::optional<double>(1.0) &&
+            bool_member(parameter_dry_run.scene_delta(), "clamped") ==
+                std::optional<bool>(true),
+        "parameter.set dry-run",
+        "requested/applied/clamped response changed");
+    const DispatchObservation after_parameter_dry = harness.invoke(
+        "parameters.list after parameter.set dry-run",
+        R"json({"op":"parameters.list"})json");
+    expect_parameter_snapshot_unchanged(
+        harness, "parameter.set dry-run immutability", initial, after_parameter_dry);
+
+    const DispatchObservation before_parameter_live = after_parameter_dry;
+    const DispatchObservation parameter_live = harness.invoke(
+        "parameter.set live",
+        R"json({"op":"parameter.set","args":{"id":"mouth.open","value":0.5}})json");
+    harness.expect(
+        number_member(parameter_live.scene_delta(), "applied") ==
+                std::optional<double>(0.5) &&
+            bool_member(parameter_live.scene_delta(), "clamped") ==
+                std::optional<bool>(false),
+        "parameter.set live",
+        "live preview value response changed");
+    const DispatchObservation after_parameter_live = harness.invoke(
+        "parameters.list after parameter.set",
+        R"json({"op":"parameters.list"})json");
+    harness.expect(
+        number_member(member(after_parameter_live.scene_delta(), "direct_values"), "mouth.open") ==
+                std::optional<double>(0.5) &&
+            bool_member(after_parameter_live.scene_delta(), "project_dirty") ==
+                std::optional<bool>(false),
+        "parameter.set preview impact",
+        "parameter.set did not update only transient direct preview state");
+    harness.expect(
+        number_member(before_parameter_live.scene_delta(), "project_revision") ==
+                number_member(after_parameter_live.scene_delta(), "project_revision") &&
+            number_member(before_parameter_live.scene_delta(), "runtime_revision") ==
+                number_member(after_parameter_live.scene_delta(), "runtime_revision"),
+        "parameter.set preview impact",
+        "parameter.set changed project or runtime revision");
+    expect_revision_advanced(
+        harness,
+        "parameter.set preview impact",
+        before_parameter_live,
+        after_parameter_live,
+        "preview_revision");
+    harness.expect(
+        number_member(after_parameter_live.scene_delta(), "undo_count") ==
+            std::optional<double>(1.0),
+        "parameter.set preview impact",
+        "parameter.set did not create one undo entry");
+
+    const DispatchObservation parameter_undo = harness.invoke(
+        "parameter.set undo",
+        R"json({"op":"undo"})json");
+    harness.expect(
+        string_member(&parameter_undo.root, "message").value_or(std::string_view{}).find(
+            "via Agent") != std::string_view::npos,
+        "parameter.set undo",
+        "Agent history label was not preserved");
+    const DispatchObservation after_parameter_undo = harness.invoke(
+        "parameters.list after parameter undo",
+        R"json({"op":"parameters.list"})json");
+    harness.expect(
+        number_member(member(after_parameter_undo.scene_delta(), "direct_values"), "mouth.open") ==
+            std::optional<double>(0.0),
+        "parameter.set undo",
+        "undo did not restore the direct preview value");
+    harness.invoke("parameter.set redo", R"json({"op":"redo"})json");
+    const DispatchObservation after_parameter_redo = harness.invoke(
+        "parameters.list after parameter redo",
+        R"json({"op":"parameters.list"})json");
+    harness.expect(
+        number_member(member(after_parameter_redo.scene_delta(), "direct_values"), "mouth.open") ==
+            std::optional<double>(0.5),
+        "parameter.set redo",
+        "redo did not restore the direct preview value");
+
+    constexpr std::string_view kDeformerDryRun = R"json(
+        {"op":"deformer.create","args":{"dry_run":true,"deformer":{
+          "id":"agent.face.roll","name":"Agent Face Roll","kind":"rotation",
+          "target_slots":["face"],
+          "parameter_bindings":[{"parameter":"mouth.open","axis":"angle"}],
+          "pivot":[0,0],"influence":0.75,
+          "keyforms":[{"value":0,"angle":0},{"value":1,"angle":20}]
+        }}}
+    )json";
+    constexpr std::string_view kDeformerLive = R"json(
+        {"op":"deformer.create","args":{"deformer":{
+          "id":"agent.face.roll","name":"Agent Face Roll","kind":"rotation",
+          "target_slots":["face"],
+          "parameter_bindings":[{"parameter":"mouth.open","axis":"angle"}],
+          "pivot":[0,0],"influence":0.75,
+          "keyforms":[{"value":0,"angle":0},{"value":1,"angle":20}]
+        }}}
+    )json";
+    const DispatchObservation before_deformer_dry = after_parameter_redo;
+    harness.invoke("deformer.create dry-run", kDeformerDryRun);
+    const DispatchObservation after_deformer_dry = harness.invoke(
+        "parameters.list after deformer.create dry-run",
+        R"json({"op":"parameters.list"})json");
+    expect_parameter_snapshot_unchanged(
+        harness,
+        "deformer.create dry-run immutability",
+        before_deformer_dry,
+        after_deformer_dry);
+    harness.invoke("deformer.create live", kDeformerLive);
+    const DispatchObservation after_deformer_live = harness.invoke(
+        "parameters.list after deformer.create",
+        R"json({"op":"parameters.list"})json");
+    harness.expect(
+        bool_member(after_deformer_live.scene_delta(), "project_dirty") ==
+            std::optional<bool>(true),
+        "deformer.create live",
+        "persistent mutation did not dirty the project");
+    expect_revision_advanced(
+        harness,
+        "deformer.create live",
+        after_deformer_dry,
+        after_deformer_live,
+        "project_revision");
+    expect_revision_advanced(
+        harness,
+        "deformer.create live",
+        after_deformer_dry,
+        after_deformer_live,
+        "runtime_revision");
+    expect_revision_advanced(
+        harness,
+        "deformer.create live",
+        after_deformer_dry,
+        after_deformer_live,
+        "preview_revision");
+    harness.invoke(
+        "runtime.validate after deformer.create",
+        R"json({"op":"runtime.validate"})json");
+
+    const DispatchObservation before_capture_dry = after_deformer_live;
+    harness.invoke(
+        "keyform.capture dry-run",
+        R"json({"op":"keyform.capture","args":{"deformer":"agent.face.roll","dry_run":true}})json");
+    const DispatchObservation after_capture_dry = harness.invoke(
+        "parameters.list after keyform.capture dry-run",
+        R"json({"op":"parameters.list"})json");
+    expect_parameter_snapshot_unchanged(
+        harness,
+        "keyform.capture dry-run immutability",
+        before_capture_dry,
+        after_capture_dry);
+    harness.invoke(
+        "keyform.capture live",
+        R"json({"op":"keyform.capture","args":{"deformer":"agent.face.roll"}})json");
+    const DispatchObservation after_capture_live = harness.invoke(
+        "parameters.list after keyform.capture",
+        R"json({"op":"parameters.list"})json");
+    expect_revision_advanced(
+        harness,
+        "keyform.capture live",
+        after_capture_dry,
+        after_capture_live,
+        "runtime_revision");
+    harness.invoke(
+        "keyform.capture collision rejected",
+        R"json({"op":"keyform.capture","args":{"deformer":"agent.face.roll","dry_run":true}})json",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "keyform.capture replacement dry-run",
+        R"json({"op":"keyform.capture","args":{"deformer":"agent.face.roll","replace":true,"dry_run":true}})json");
+    const DispatchObservation after_capture_collision_checks = harness.invoke(
+        "parameters.list after keyform collision checks",
+        R"json({"op":"parameters.list"})json");
+    expect_parameter_snapshot_unchanged(
+        harness,
+        "keyform.capture collision dry-run immutability",
+        after_capture_live,
+        after_capture_collision_checks);
+    const DispatchObservation capture_undo = harness.invoke(
+        "keyform.capture undo",
+        R"json({"op":"undo"})json");
+    harness.expect(
+        string_member(&capture_undo.root, "message").value_or(std::string_view{}).find(
+            "via Agent") != std::string_view::npos,
+        "keyform.capture undo",
+        "Agent capture history label was not preserved");
+    const DispatchObservation after_capture_undo = harness.invoke(
+        "parameters.list after keyform capture undo",
+        R"json({"op":"parameters.list"})json");
+    expect_revision_advanced(
+        harness,
+        "keyform.capture undo runtime rebuild",
+        after_capture_live,
+        after_capture_undo,
+        "runtime_revision");
+    harness.invoke("keyform.capture redo", R"json({"op":"redo"})json");
+    harness.invoke(
+        "runtime.validate after keyform.capture redo",
+        R"json({"op":"runtime.validate"})json");
+
+    constexpr std::string_view kExpressionDryRun = R"json(
+        {"op":"expression.create","args":{"dry_run":true,"expression":{
+          "id":"agent.smile","name":"Agent Smile",
+          "targets":[{"parameter":"mouth.open","value":0.25}],
+          "duration":0.1,"blend":"additive","priority":5,"reset_policy":"restore"
+        }}}
+    )json";
+    constexpr std::string_view kExpressionLive = R"json(
+        {"op":"expression.create","args":{"expression":{
+          "id":"agent.smile","name":"Agent Smile",
+          "targets":[{"parameter":"mouth.open","value":0.25}],
+          "duration":0.1,"blend":"additive","priority":5,"reset_policy":"restore"
+        }}}
+    )json";
+    const DispatchObservation before_expression_dry = harness.invoke(
+        "parameters.list before expression.create dry-run",
+        R"json({"op":"parameters.list"})json");
+    harness.invoke("expression.create dry-run", kExpressionDryRun);
+    const DispatchObservation after_expression_dry = harness.invoke(
+        "parameters.list after expression.create dry-run",
+        R"json({"op":"parameters.list"})json");
+    expect_parameter_snapshot_unchanged(
+        harness,
+        "expression.create dry-run immutability",
+        before_expression_dry,
+        after_expression_dry);
+    harness.invoke("expression.create live", kExpressionLive);
+    const DispatchObservation after_expression_live = harness.invoke(
+        "parameters.list after expression.create",
+        R"json({"op":"parameters.list"})json");
+    expect_revision_advanced(
+        harness,
+        "expression.create live",
+        after_expression_dry,
+        after_expression_live,
+        "runtime_revision");
+    harness.invoke(
+        "runtime.validate after expression.create",
+        R"json({"op":"runtime.validate"})json");
+
+    constexpr std::string_view kLipDryRun = R"json(
+        {"op":"lip_sync.map","args":{"dry_run":true,"mapping":{
+          "source":"amplitude","parameter":"mouth.open","scale":1,"bias":0,
+          "attack":0.02,"release":0.08,"smoothing":0.04
+        }}}
+    )json";
+    constexpr std::string_view kLipLive = R"json(
+        {"op":"lip_sync.map","args":{"mapping":{
+          "source":"amplitude","parameter":"mouth.open","scale":1,"bias":0,
+          "attack":0.02,"release":0.08,"smoothing":0.04
+        }}}
+    )json";
+    const DispatchObservation before_lip_dry = after_expression_live;
+    harness.invoke("lip_sync.map dry-run", kLipDryRun);
+    const DispatchObservation after_lip_dry = harness.invoke(
+        "parameters.list after lip_sync.map dry-run",
+        R"json({"op":"parameters.list"})json");
+    expect_parameter_snapshot_unchanged(
+        harness,
+        "lip_sync.map dry-run immutability",
+        before_lip_dry,
+        after_lip_dry);
+    harness.invoke("lip_sync.map live", kLipLive);
+    const DispatchObservation after_lip_live = harness.invoke(
+        "parameters.list after lip_sync.map",
+        R"json({"op":"parameters.list"})json");
+    expect_revision_advanced(
+        harness,
+        "lip_sync.map live",
+        after_lip_dry,
+        after_lip_live,
+        "runtime_revision");
+    harness.invoke(
+        "runtime.validate after lip_sync.map",
+        R"json({"op":"runtime.validate"})json");
+    harness.invoke("lip_sync.map undo", R"json({"op":"undo"})json");
+    const DispatchObservation after_lip_undo = harness.invoke(
+        "parameters.list after lip_sync.map undo",
+        R"json({"op":"parameters.list"})json");
+    expect_revision_advanced(
+        harness,
+        "lip_sync.map undo runtime rebuild",
+        after_lip_live,
+        after_lip_undo,
+        "runtime_revision");
+    harness.invoke("lip_sync.map redo", R"json({"op":"redo"})json");
+    harness.invoke(
+        "runtime.validate after lip_sync.map redo",
+        R"json({"op":"runtime.validate"})json");
+
+    marrow_editor_project_destroy(parameter_project);
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -614,6 +991,8 @@ int main(int argc, char** argv) {
         "constraints.list",
         harness.invoke("constraints.list", "{\"op\":\"constraints.list\"}"),
         "editor_arm_reach");
+    (void)exercise_parameter_operations(harness);
+    harness.set_project(project);
     const DispatchObservation initial_timeline = harness.invoke(
         "timeline.describe initial",
         "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");

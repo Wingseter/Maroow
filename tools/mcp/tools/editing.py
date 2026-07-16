@@ -120,6 +120,167 @@ def _timeline_retime_key_schema() -> dict:
     }
 
 
+def _parameter_binding_schema(axis_values: list[str]) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "parameter": {"type": "string", "minLength": 1},
+            "axis": {"type": "string", "enum": axis_values},
+        },
+        "required": ["parameter", "axis"],
+        "additionalProperties": False,
+    }
+
+
+def _deformer_schema() -> dict:
+    common = {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "parent": {"type": "string", "minLength": 1},
+        "target_slots": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": True,
+        },
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "warp"},
+                    "parameter_bindings": {
+                        "type": "array",
+                        "prefixItems": [
+                            _parameter_binding_schema(["x", "y"]),
+                            _parameter_binding_schema(["x", "y"]),
+                        ],
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                    "grid_cols": {"type": "integer", "minimum": 2},
+                    "grid_rows": {"type": "integer", "minimum": 2},
+                    "control_points": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 8,
+                    },
+                    "keyforms": {
+                        "type": "array",
+                        "minItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "control_points": {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 8,
+                                },
+                            },
+                            "required": ["x", "y", "control_points"],
+                        },
+                    },
+                },
+                "required": [
+                    "id", "name", "kind", "target_slots",
+                    "parameter_bindings", "grid_cols", "grid_rows",
+                    "control_points", "keyforms",
+                ],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "rotation"},
+                    "parameter_bindings": {
+                        "type": "array",
+                        "items": _parameter_binding_schema(["angle"]),
+                        "minItems": 1,
+                        "maxItems": 1,
+                    },
+                    "pivot": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                    "influence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "keyforms": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "value": {"type": "number"},
+                                "angle": {"type": "number"},
+                            },
+                            "required": ["value", "angle"],
+                        },
+                    },
+                },
+                "required": [
+                    "id", "name", "kind", "target_slots",
+                    "parameter_bindings", "pivot", "influence", "keyforms",
+                ],
+            },
+        ]
+    }
+
+
+def _expression_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1},
+            "targets": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "parameter": {"type": "string", "minLength": 1},
+                        "value": {"type": "number"},
+                    },
+                    "required": ["parameter", "value"],
+                    "additionalProperties": False,
+                },
+            },
+            "duration": {"type": "number", "minimum": 0},
+            "blend": {"type": "string", "enum": ["additive", "override"]},
+            "priority": {"type": "integer"},
+            "reset_policy": {"type": "string", "enum": ["restore", "hold"]},
+        },
+        "required": [
+            "id", "name", "targets", "duration", "blend", "priority",
+            "reset_policy",
+        ],
+    }
+
+
+def _lip_mapping_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "enum": ["amplitude", "phoneme"]},
+            "parameter": {"type": "string", "minLength": 1},
+            "scale": {"type": "number"},
+            "bias": {"type": "number"},
+            "attack": {"type": "number", "minimum": 0},
+            "release": {"type": "number", "minimum": 0},
+            "smoothing": {"type": "number", "minimum": 0},
+            "phoneme_map": {
+                "type": "object",
+                "additionalProperties": {"type": "number"},
+            },
+        },
+        "required": ["source", "parameter"],
+    }
+
+
 def get_tools() -> list[types.Tool]:
     return [
         types.Tool(
@@ -131,6 +292,79 @@ def get_tools() -> list[types.Tool]:
             name="redo",
             description="Redo the last undone action in Marrow editor",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="parameter.set",
+            description=(
+                "Set one direct parameter preview value without dirtying or "
+                "serializing the project."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "minLength": 1},
+                    "value": {"type": "number"},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["id", "value"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="deformer.create",
+            description="Create and validate one complete warp or rotation deformer.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "deformer": _deformer_schema(),
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["deformer"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="keyform.capture",
+            description=(
+                "Capture one deformer keyform at the current preview parameter "
+                "coordinate."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "deformer": {"type": "string", "minLength": 1},
+                    "replace": {"type": "boolean", "default": False},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["deformer"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="expression.create",
+            description="Create and validate one complete expression definition.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "expression": _expression_schema(),
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["expression"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="lip_sync.map",
+            description="Upsert one lip-sync mapping by target parameter.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mapping": _lip_mapping_schema(),
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["mapping"],
+                "additionalProperties": False,
+            },
         ),
         types.Tool(
             name="animation.create",

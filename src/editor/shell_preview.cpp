@@ -194,7 +194,8 @@ void handle_project_history_shortcuts(ShellState* state) {
     }
 
     if (ImGui::Shortcut(ImGuiKey_Space, ImGuiInputFlags_RouteGlobal)) {
-        if (selected_animation(*state) != nullptr) {
+        if (state->shell_mode != ShellMode::Parameter &&
+            selected_animation(*state) != nullptr) {
             state->timeline_playing = !state->timeline_playing;
             if (state->timeline_playing) {
                 refresh_preview_pose(state);

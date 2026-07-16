@@ -162,6 +162,13 @@ json::LoadResult load_binary_skeleton_document(
     bool apply_animation_optimizations,
     SkeletonBinaryInspection* inspection_out = nullptr);
 
+std::optional<json::LoadError> parse_parameter_model(
+    const json::Document& document,
+    const json::Value& root,
+    const std::vector<SlotData>& slots,
+    const std::vector<SkinData>& skins,
+    ParameterModelDefinitions* model_out);
+
 std::size_t clamp_sequence_frame_index(
     const AttachmentSequenceData& sequence,
     std::size_t frame_index);

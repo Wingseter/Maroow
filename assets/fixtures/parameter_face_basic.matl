@@ -1,0 +1,26 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "atlas": {
+    "name": "parameter_face_basic",
+    "image": "player_fixture.png",
+    "width": 256,
+    "height": 256,
+    "filter_min": "linear",
+    "filter_mag": "linear",
+    "wrap_x": "clamp_to_edge",
+    "wrap_y": "clamp_to_edge",
+    "premultiplied_alpha": false
+  },
+  "regions": [
+    {
+      "name": "face",
+      "x": 0,
+      "y": 0,
+      "width": 96,
+      "height": 96,
+      "origin_x": 48,
+      "origin_y": 48
+    }
+  ]
+}

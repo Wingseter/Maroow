@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "marrow/runtime/animation.hpp"
@@ -17,6 +18,7 @@
 namespace marrow::runtime {
 
 class AnimationState;
+class ParameterState;
 class Skeleton;
 
 struct SkeletonInfo {
@@ -525,6 +527,217 @@ struct AnimationMixDefinition {
     bool from_any{false};
 };
 
+enum class ParameterType {
+    Continuous,
+    Discrete,
+};
+
+struct ParameterDefinition {
+    std::string id;
+    std::string name;
+    double min_value{0.0};
+    double max_value{1.0};
+    double default_value{0.0};
+    ParameterType type{ParameterType::Continuous};
+    bool clamp{true};
+    std::optional<double> ui_step;
+    std::optional<std::string> units;
+};
+
+struct ParameterGroupDefinition {
+    std::string id;
+    std::string name;
+    std::vector<std::string> parameter_ids;
+    bool collapsed{false};
+    std::optional<std::string> color_tag;
+    std::optional<std::string> exclusive_mode;
+};
+
+enum class ParameterShapeBlendMode {
+    AdditiveClamped,
+    NormalizedOverride,
+};
+
+struct ParameterShapeKeyform {
+    double value{0.0};
+    std::vector<double> vertices;
+};
+
+struct ParameterShapeDefinition {
+    std::string id;
+    std::string target_slot;
+    std::size_t target_slot_index{0};
+    std::string target_attachment;
+    std::string parameter;
+    std::optional<std::size_t> parameter_index;
+    ParameterShapeBlendMode blend_mode{ParameterShapeBlendMode::AdditiveClamped};
+    std::vector<ParameterShapeKeyform> keyforms;
+};
+
+enum class ParameterDeformerKind {
+    Warp,
+    Rotation,
+};
+
+enum class ParameterDeformerAxis {
+    X,
+    Y,
+    Angle,
+};
+
+struct ParameterBindingDefinition {
+    std::string parameter;
+    std::optional<std::size_t> parameter_index;
+    ParameterDeformerAxis axis{ParameterDeformerAxis::X};
+};
+
+struct WarpDeformerKeyform {
+    double x{0.0};
+    double y{0.0};
+    std::vector<AttachmentVertex> control_points;
+};
+
+struct RotationDeformerKeyform {
+    double value{0.0};
+    double angle{0.0};
+};
+
+struct ParameterDeformerDefinition {
+    std::string id;
+    std::string name;
+    ParameterDeformerKind kind{ParameterDeformerKind::Warp};
+    std::optional<std::string> parent;
+    std::optional<std::size_t> parent_index;
+    std::vector<std::string> target_slots;
+    std::vector<std::size_t> target_slot_indices;
+    std::vector<ParameterBindingDefinition> parameter_bindings;
+
+    std::size_t grid_cols{0};
+    std::size_t grid_rows{0};
+    std::vector<AttachmentVertex> control_points;
+    std::vector<WarpDeformerKeyform> warp_keyforms;
+
+    AttachmentVertex pivot{};
+    double influence{1.0};
+    std::vector<RotationDeformerKeyform> rotation_keyforms;
+};
+
+enum class ArtPathCap {
+    Butt,
+    Square,
+    Round,
+};
+
+enum class ArtPathJoin {
+    Miter,
+    Bevel,
+    Round,
+};
+
+struct ArtPathKeyform {
+    double value{0.0};
+    std::vector<AttachmentVertex> points;
+    double width{1.0};
+    SlotColor color{};
+};
+
+struct ArtPathParameterKeyforms {
+    std::string parameter;
+    std::optional<std::size_t> parameter_index;
+    std::vector<ArtPathKeyform> keyforms;
+};
+
+struct ArtPathDefinition {
+    std::string id;
+    std::string name;
+    std::optional<std::string> parent_deformer;
+    std::optional<std::size_t> parent_deformer_index;
+    std::vector<AttachmentVertex> points;
+    double width{1.0};
+    SlotColor color{};
+    ArtPathCap cap{ArtPathCap::Butt};
+    ArtPathJoin join{ArtPathJoin::Miter};
+    std::optional<ArtPathParameterKeyforms> parameter_keyforms;
+};
+
+enum class ExpressionBlend {
+    Additive,
+    Override,
+};
+
+enum class ExpressionResetPolicy {
+    Restore,
+    Hold,
+};
+
+struct ExpressionTargetDefinition {
+    std::string parameter;
+    std::optional<std::size_t> parameter_index;
+    double value{0.0};
+};
+
+struct ExpressionDefinition {
+    std::string id;
+    std::string name;
+    std::vector<ExpressionTargetDefinition> targets;
+    double duration{0.0};
+    ExpressionBlend blend{ExpressionBlend::Additive};
+    int priority{0};
+    ExpressionResetPolicy reset_policy{ExpressionResetPolicy::Restore};
+};
+
+enum class LipSyncSource {
+    Amplitude,
+    Phoneme,
+};
+
+struct PhonemeValueDefinition {
+    std::string phoneme;
+    double value{0.0};
+};
+
+struct LipSyncMappingDefinition {
+    LipSyncSource source{LipSyncSource::Amplitude};
+    std::string parameter;
+    std::optional<std::size_t> parameter_index;
+    double scale{1.0};
+    double bias{0.0};
+    double smoothing{0.0};
+    double attack{0.0};
+    double release{0.0};
+    std::vector<PhonemeValueDefinition> phoneme_map;
+};
+
+struct LipSyncDefinition {
+    std::vector<LipSyncMappingDefinition> mappings;
+};
+
+struct ParameterModelDefinitions {
+    std::vector<ParameterDefinition> parameters;
+    std::vector<ParameterGroupDefinition> parameter_groups;
+    std::vector<ParameterShapeDefinition> parameter_shapes;
+    std::vector<ParameterDeformerDefinition> parameter_deformers;
+    std::vector<ArtPathDefinition> art_paths;
+    std::vector<ExpressionDefinition> expressions;
+    LipSyncDefinition lip_sync;
+
+    bool empty() const {
+        return parameters.empty() && parameter_groups.empty() && parameter_shapes.empty() &&
+            parameter_deformers.empty() && art_paths.empty() && expressions.empty() &&
+            lip_sync.mappings.empty();
+    }
+};
+
+struct EvaluatedArtPath {
+    std::string id;
+    std::string name;
+    std::vector<AttachmentVertex> points;
+    double width{1.0};
+    SlotColor color{};
+    ArtPathCap cap{ArtPathCap::Butt};
+    ArtPathJoin join{ArtPathJoin::Miter};
+};
+
 class SkeletonData {
 public:
     // Immutable setup data shared by Skeleton and AnimationState instances.
@@ -557,7 +770,8 @@ public:
         std::vector<AnimationData> animations,
         std::vector<SkinData> skins,
         double default_mix_duration,
-        std::vector<AnimationMixDefinition> mix_definitions);
+        std::vector<AnimationMixDefinition> mix_definitions,
+        ParameterModelDefinitions parameter_model = {});
 
     /// @brief Returns skeleton metadata.
     /// @return Immutable skeleton info.
@@ -592,6 +806,20 @@ public:
     /// @brief Returns per-animation mix overrides.
     /// @return Immutable mix-definition list.
     const std::vector<AnimationMixDefinition>& mix_definitions() const;
+    /// @brief Returns authored parameter definitions.
+    const std::vector<ParameterDefinition>& parameters() const;
+    /// @brief Returns authored parameter groups.
+    const std::vector<ParameterGroupDefinition>& parameter_groups() const;
+    /// @brief Returns authored one-dimensional mesh shapes.
+    const std::vector<ParameterShapeDefinition>& parameter_shapes() const;
+    /// @brief Returns authored warp and rotation deformers.
+    const std::vector<ParameterDeformerDefinition>& parameter_deformers() const;
+    /// @brief Returns authored renderable art paths.
+    const std::vector<ArtPathDefinition>& art_paths() const;
+    /// @brief Returns authored expression presets.
+    const std::vector<ExpressionDefinition>& expressions() const;
+    /// @brief Returns authored lip-sync mappings.
+    const LipSyncDefinition& lip_sync() const;
     /// @brief Returns the cached bone evaluation order for world-transform solving.
     /// @return Bone evaluation order indices.
     const std::vector<std::size_t>& bone_evaluation_order() const;
@@ -626,6 +854,34 @@ public:
      * @return Matching skin index, or `std::nullopt` when none exists.
      */
     std::optional<std::size_t> find_skin_index(std::string_view name) const;
+    /// @brief Finds a parameter definition by stable id.
+    std::optional<std::size_t> find_parameter_index(std::string_view id) const;
+    /// @brief Finds a parameter group by stable id.
+    std::optional<std::size_t> find_parameter_group_index(std::string_view id) const;
+    /// @brief Finds a parameter shape by stable id.
+    std::optional<std::size_t> find_parameter_shape_index(std::string_view id) const;
+    /// @brief Finds a parameter deformer by stable id.
+    std::optional<std::size_t> find_parameter_deformer_index(std::string_view id) const;
+    /// @brief Finds an art path by stable id.
+    std::optional<std::size_t> find_art_path_index(std::string_view id) const;
+    /// @brief Finds an expression by stable id.
+    std::optional<std::size_t> find_expression_index(std::string_view id) const;
+    /**
+     * @brief Returns slots whose final mesh deformation depends on one parameter.
+     * @param parameter_index Parameter definition index.
+     * @return Ordered affected-slot indices, or an empty list when the index is invalid.
+     */
+    const std::vector<std::size_t>& parameter_affected_slots(
+        std::size_t parameter_index) const;
+    /**
+     * @brief Tests the precomputed parameter dependency bitset for one slot.
+     * @param slot_index Slot index to inspect.
+     * @param parameter_index Parameter definition index to inspect.
+     * @return True when a shape or leaf/parent deformer chain creates the dependency.
+     */
+    bool parameter_affects_slot(
+        std::size_t parameter_index,
+        std::size_t slot_index) const;
     /**
      * @brief Finds an animation by name.
      * @param name Animation name to search.
@@ -714,6 +970,22 @@ private:
     std::optional<std::size_t> default_skin_index_;
     double default_mix_duration_{0.0};
     std::vector<AnimationMixDefinition> mix_definitions_;
+    ParameterModelDefinitions parameter_model_;
+    std::unordered_map<std::string, std::size_t> parameter_indices_;
+    std::unordered_map<std::string, std::size_t> parameter_group_indices_;
+    std::unordered_map<std::string, std::size_t> parameter_shape_indices_;
+    std::unordered_map<std::string, std::size_t> parameter_deformer_indices_;
+    std::unordered_map<std::string, std::size_t> art_path_indices_;
+    std::unordered_map<std::string, std::size_t> expression_indices_;
+    std::vector<std::vector<std::size_t>> slot_parameter_shape_indices_;
+    std::vector<std::optional<std::size_t>> slot_parameter_deformer_indices_;
+    std::vector<std::vector<std::size_t>> slot_parameter_dependencies_;
+    std::size_t parameter_dependency_word_count_{0};
+    std::vector<std::uint64_t> slot_parameter_dependency_words_;
+    std::vector<std::vector<std::size_t>> parameter_affected_slots_;
+    std::vector<std::vector<std::size_t>> art_path_parameter_dependencies_;
+
+    void initialize_parameter_model();
 };
 
 struct BonePose {
@@ -1151,6 +1423,18 @@ public:
     /// @brief Returns current mesh deform state for in-place editing.
     /// @return Mutable mesh-deform list.
     std::vector<MeshDeformState>& mesh_deform_states();
+    /// @brief Returns final composed parameter values for this instance.
+    const std::vector<double>& parameter_values() const;
+    /// @brief Returns finite direct preview inputs before expression/lip composition and normalization.
+    const std::vector<double>& direct_parameter_values() const;
+    /// @brief Sets one direct parameter value by stable id.
+    bool set_parameter_value(std::string_view id, double value);
+    /// @brief Sets one direct parameter value by definition index.
+    bool set_parameter_value(std::size_t index, double value);
+    /// @brief Restores direct and final parameter values to authored defaults.
+    void reset_parameters();
+    /// @brief Returns the revision of the final composed parameter buffer.
+    std::uint64_t parameter_revision() const;
     /// @brief Returns current draw order.
     /// @return Immutable draw-order list.
     const std::vector<std::size_t>& draw_order() const;
@@ -1200,6 +1484,18 @@ public:
      */
     const std::vector<double>* current_mesh_vertex_offsets(std::size_t slot_index) const;
     /**
+     * @brief Returns animation FFD combined with parameter shapes and deformers.
+     * @param slot_index Slot index to inspect.
+     * @return Final attachment-local offsets, or `nullptr` when no deformation is active.
+     */
+    const std::vector<double>* current_final_mesh_vertex_offsets(std::size_t slot_index) const;
+    /// @brief Returns evaluated skeleton-local art-path states.
+    const std::vector<EvaluatedArtPath>& current_art_paths() const;
+    /// @brief Alias for current_art_paths().
+    const std::vector<EvaluatedArtPath>& evaluated_art_paths() const {
+        return current_art_paths();
+    }
+    /**
      * @brief Evaluates the current point attachment pose for one slot.
      * @param slot_index Slot index to inspect.
      * @return World-space point attachment pose, or `std::nullopt` when none is active.
@@ -1228,6 +1524,7 @@ public:
 
 private:
     friend class AnimationState;
+    friend class ParameterState;
     friend void update_instance(
         Skeleton& skeleton,
         AnimationState& animation_state,
@@ -1330,6 +1627,21 @@ private:
         bool valid{false};
     };
 
+    struct FinalMeshOffsetCache {
+        const AttachmentData* attachment{nullptr};
+        std::vector<double> animation_offsets;
+        std::vector<std::uint64_t> parameter_revisions;
+        std::vector<double> final_offsets;
+        bool valid{false};
+        bool has_offsets{false};
+    };
+
+    struct ArtPathEvaluationCache {
+        std::vector<std::uint64_t> parameter_revisions;
+        EvaluatedArtPath value;
+        bool valid{false};
+    };
+
     std::shared_ptr<const SkeletonData> data_;
     std::vector<BonePose> bone_poses_;
     std::vector<BonePose> input_pose_cache_;
@@ -1360,6 +1672,13 @@ private:
     std::vector<PathDistanceSample> path_distance_samples_;
     std::vector<SlotState> slot_states_;
     std::vector<MeshDeformState> mesh_deform_states_;
+    std::vector<double> direct_parameter_values_;
+    std::vector<double> parameter_values_;
+    std::vector<std::uint64_t> parameter_value_revisions_;
+    std::uint64_t parameter_revision_{0};
+    mutable std::vector<FinalMeshOffsetCache> final_mesh_offset_caches_;
+    mutable std::vector<ArtPathEvaluationCache> art_path_evaluation_caches_;
+    mutable std::vector<EvaluatedArtPath> evaluated_art_paths_;
     std::vector<std::size_t> draw_order_;
     std::vector<std::size_t> active_skin_indices_;
     std::vector<bool> active_bones_;
@@ -1388,6 +1707,8 @@ private:
     std::size_t constraint_allocation_count_{0};
 
     void reset_to_setup_pose_state(bool reset_slots_and_draw_order);
+    double normalize_parameter_value(std::size_t index, double value) const;
+    bool apply_composed_parameter_values(const std::vector<double>& values);
 };
 
 struct SkeletonDataResult {

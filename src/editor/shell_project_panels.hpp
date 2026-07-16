@@ -4,12 +4,6 @@
 
 namespace marrow::editor::shell {
 
-enum class ShellMode {
-    Setup = 0,
-    Animation = 1,
-    WeightPaint = 2,
-};
-
 enum class AnimationCatalogAction {
     Create,
     Duplicate,

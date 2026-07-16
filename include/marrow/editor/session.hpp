@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -83,6 +84,10 @@ struct PreviewState {
     bool reverse{false};
     std::vector<std::string> skin_names;
     std::vector<std::optional<PreviewAttachmentOverride>> slot_overrides;
+    std::map<std::string, double, std::less<>> direct_parameter_values;
+    std::optional<std::string> active_expression;
+    double synthetic_amplitude{0.0};
+    std::string synthetic_phoneme;
 };
 
 enum class SessionErrorCode {
@@ -186,6 +191,12 @@ public:
     bool select_setup_pose();
     bool seek(double time_seconds);
     bool advance(double delta_seconds);
+    /**
+     * @brief Advances expression fades and lip filters without moving animation time.
+     *
+     * Parameter Modeling mode calls this while playback is paused.
+     */
+    bool advance_parameter_state(double delta_seconds);
     void set_playing(bool playing) noexcept;
     bool set_loop(bool loop);
     bool set_reverse(bool reverse);
@@ -225,6 +236,44 @@ public:
             EditKind::PreviewComposition,
             "Reset preview attachment",
             "preview-attachment",
+            true,
+            EditImpact::Preview});
+
+    /** @brief Records an undoable, non-persistent direct parameter preview edit. */
+    SessionResult set_preview_parameter_value(
+        std::string parameter_id,
+        double value,
+        EditDescriptor descriptor = {
+            EditKind::PreviewComposition,
+            "Change preview parameter",
+            "preview-parameter",
+            true,
+            EditImpact::Preview});
+    /**
+     * @brief Evaluates a direct parameter edit against a copy of the live preview.
+     *
+     * The copied expression stack and lip-filter state are applied without
+     * changing history, dirty state, or any session revision. This is the
+     * validation path used by Agent dry-runs.
+     */
+    std::optional<double> evaluate_preview_parameter_value(
+        std::string_view parameter_id,
+        double value) const;
+    SessionResult set_preview_expression(
+        std::optional<std::string> expression_id,
+        EditDescriptor descriptor = {
+            EditKind::PreviewComposition,
+            "Change preview expression",
+            "preview-expression",
+            false,
+            EditImpact::Preview});
+    SessionResult set_preview_lip_input(
+        double amplitude,
+        std::string phoneme,
+        EditDescriptor descriptor = {
+            EditKind::PreviewComposition,
+            "Change synthetic lip input",
+            "preview-lip-input",
             true,
             EditImpact::Preview});
 
@@ -308,6 +357,9 @@ public:
         std::optional<std::size_t> skin_index,
         std::string attachment_name);
     bool reset_preview_attachment(std::size_t slot_index);
+    bool set_preview_parameter_value(std::string parameter_id, double value);
+    bool set_preview_expression(std::optional<std::string> expression_id);
+    bool set_preview_lip_input(double amplitude, std::string phoneme);
 
     /**
      * @brief Rebuilds runtime data and refreshes the preview without closing the edit.

@@ -7,6 +7,7 @@
 
 #include "marrow/allocator.hpp"
 #include "marrow/editor/authoring.hpp"
+#include "marrow/runtime/parameter_state.hpp"
 
 namespace marrow::editor {
 namespace {
@@ -52,7 +53,11 @@ bool preview_states_equal(const PreviewState& left, const PreviewState& right) {
         left.mix_duration == right.mix_duration &&
         left.reverse == right.reverse &&
         left.skin_names == right.skin_names &&
-        attachment_overrides_equal(left.slot_overrides, right.slot_overrides);
+        attachment_overrides_equal(left.slot_overrides, right.slot_overrides) &&
+        left.direct_parameter_values == right.direct_parameter_values &&
+        left.active_expression == right.active_expression &&
+        left.synthetic_amplitude == right.synthetic_amplitude &&
+        left.synthetic_phoneme == right.synthetic_phoneme;
 }
 
 bool preview_playback_equal(const PreviewState& left, const PreviewState& right) {
@@ -136,20 +141,25 @@ public:
         auto next_skeleton = marrow::allocate_unique<runtime::Skeleton>(data);
         auto next_animation_state =
             marrow::allocate_unique<runtime::AnimationState>(data);
+        auto next_parameter_state =
+            marrow::allocate_unique<runtime::ParameterState>(data);
 
         const runtime::RootMotionDelta previous_total = root_motion_total_;
         data_ = std::move(data);
         state_ = std::move(requested_state);
         skeleton_ = std::move(next_skeleton);
         animation_state_ = std::move(next_animation_state);
+        parameter_state_ = std::move(next_parameter_state);
         root_motion_delta_ = {};
         root_motion_total_ = preserve_root_motion ? previous_total : runtime::RootMotionDelta{};
         events_.clear();
 
-        if (!refresh_pose(false, error_out)) {
+        if (!configure_parameter_composition(error_out) ||
+            !refresh_pose(false, error_out)) {
             data_.reset();
             skeleton_.reset();
             animation_state_.reset();
+            parameter_state_.reset();
             return false;
         }
         return true;
@@ -163,6 +173,27 @@ public:
     }
     runtime::AnimationState* mutable_animation_state() noexcept {
         return animation_state_.get();
+    }
+    std::optional<double> evaluate_parameter_value(
+        std::string_view parameter_id,
+        double value) const {
+        if (data_ == nullptr || skeleton_ == nullptr || parameter_state_ == nullptr ||
+            !std::isfinite(value)) {
+            return std::nullopt;
+        }
+        const std::optional<std::size_t> parameter_index =
+            data_->find_parameter_index(parameter_id);
+        if (!parameter_index.has_value()) {
+            return std::nullopt;
+        }
+
+        runtime::Skeleton candidate_skeleton = *skeleton_;
+        runtime::ParameterState candidate_state = *parameter_state_;
+        if (!candidate_skeleton.set_parameter_value(*parameter_index, value) ||
+            !candidate_state.apply(candidate_skeleton)) {
+            return std::nullopt;
+        }
+        return candidate_skeleton.parameter_values()[*parameter_index];
     }
     bool restore_playback(
         const runtime::AnimationStateSnapshot& snapshot,
@@ -200,6 +231,9 @@ public:
         skeleton_->set_to_setup_pose();
         skeleton_->set_attachment_playback_time(state_.time_seconds);
         animation_state_->apply(*skeleton_);
+        if (!apply_parameter_preview(error_out)) {
+            return false;
+        }
         apply_slot_overrides();
         return true;
     }
@@ -229,7 +263,8 @@ public:
         const std::vector<runtime::AnimationEvent> desired_events = snapshot.events;
         state_ = snapshot.state;
         normalize_state(*data_, &state_);
-        if (!refresh_pose(false, error_out)) {
+        if (!configure_parameter_composition(error_out) ||
+            !refresh_pose(false, error_out)) {
             return false;
         }
         root_motion_delta_ = desired_delta;
@@ -422,6 +457,104 @@ public:
         return refresh_pose(false, error_out);
     }
 
+    bool set_parameter_value(
+        std::string parameter_id,
+        double value,
+        std::string* error_out) {
+        if (data_ == nullptr || skeleton_ == nullptr || !std::isfinite(value)) {
+            if (error_out != nullptr) {
+                *error_out = "Preview parameter values must be finite.";
+            }
+            return false;
+        }
+        const std::optional<std::size_t> parameter_index =
+            data_->find_parameter_index(parameter_id);
+        if (!parameter_index.has_value()) {
+            if (error_out != nullptr) {
+                *error_out = "Unknown preview parameter '" + parameter_id + "'.";
+            }
+            return false;
+        }
+        if (!skeleton_->set_parameter_value(*parameter_index, value)) {
+            if (error_out != nullptr) {
+                *error_out = "Failed to apply preview parameter '" + parameter_id + "'.";
+            }
+            return false;
+        }
+        state_.direct_parameter_values[parameter_id] =
+            skeleton_->direct_parameter_values()[*parameter_index];
+        return parameter_state_ == nullptr || parameter_state_->apply(*skeleton_);
+    }
+
+    bool set_expression(
+        std::optional<std::string> expression_id,
+        std::string* error_out) {
+        if (expression_id.has_value() &&
+            (data_ == nullptr || !data_->find_expression_index(*expression_id).has_value())) {
+            if (error_out != nullptr) {
+                *error_out = "Unknown preview expression '" + *expression_id + "'.";
+            }
+            return false;
+        }
+        const auto previous = state_.active_expression;
+        state_.active_expression = std::move(expression_id);
+        if (!configure_parameter_composition(error_out)) {
+            state_.active_expression = previous;
+            configure_parameter_composition(nullptr);
+            return false;
+        }
+        return true;
+    }
+
+    bool set_lip_input(
+        double amplitude,
+        std::string phoneme,
+        std::string* error_out) {
+        if (!std::isfinite(amplitude)) {
+            if (error_out != nullptr) {
+                *error_out = "Synthetic lip amplitude must be finite.";
+            }
+            return false;
+        }
+        const double previous_amplitude = state_.synthetic_amplitude;
+        std::string previous_phoneme = state_.synthetic_phoneme;
+        state_.synthetic_amplitude = amplitude;
+        state_.synthetic_phoneme = std::move(phoneme);
+        if (!configure_parameter_composition(error_out)) {
+            state_.synthetic_amplitude = previous_amplitude;
+            state_.synthetic_phoneme = std::move(previous_phoneme);
+            configure_parameter_composition(nullptr);
+            return false;
+        }
+        return true;
+    }
+
+    bool advance_parameter_state(
+        double delta_seconds,
+        bool* changed_out,
+        std::string* error_out) {
+        if (changed_out != nullptr) *changed_out = false;
+        if (parameter_state_ == nullptr || skeleton_ == nullptr ||
+            !std::isfinite(delta_seconds) || delta_seconds < 0.0) {
+            if (error_out != nullptr) {
+                *error_out = "Parameter preview time must be finite and non-negative.";
+            }
+            return false;
+        }
+        const std::uint64_t before_revision = skeleton_->parameter_revision();
+        if (!parameter_state_->update(delta_seconds) ||
+            !parameter_state_->apply(*skeleton_)) {
+            if (error_out != nullptr) {
+                *error_out = "Failed to advance preview parameter composition.";
+            }
+            return false;
+        }
+        if (changed_out != nullptr) {
+            *changed_out = skeleton_->parameter_revision() != before_revision;
+        }
+        return true;
+    }
+
     bool advance(double delta_seconds, std::string* error_out) {
         if (!state_.playing || delta_seconds <= 0.0) {
             return false;
@@ -459,6 +592,7 @@ public:
         skeleton_->set_attachment_playback_time(state_.time_seconds);
         animation_state_->apply(*skeleton_);
         animation_state_->set_listener({});
+        (void)advance_parameter_state(delta_seconds, nullptr, nullptr);
         apply_slot_overrides();
         skeleton_->update_physics(delta_seconds);
         return true;
@@ -487,6 +621,25 @@ private:
             }
         }
         state->skin_names = std::move(valid_skins);
+
+        std::map<std::string, double, std::less<>> normalized_parameters;
+        for (const runtime::ParameterDefinition& definition : data.parameters()) {
+            double value = definition.default_value;
+            if (const auto existing = state->direct_parameter_values.find(definition.id);
+                existing != state->direct_parameter_values.end() &&
+                std::isfinite(existing->second)) {
+                value = existing->second;
+            }
+            normalized_parameters.emplace(definition.id, value);
+        }
+        state->direct_parameter_values = std::move(normalized_parameters);
+        if (state->active_expression.has_value() &&
+            !data.find_expression_index(*state->active_expression).has_value()) {
+            state->active_expression.reset();
+        }
+        if (!std::isfinite(state->synthetic_amplitude)) {
+            state->synthetic_amplitude = 0.0;
+        }
 
         if (!state->animation_name.empty() &&
             data.find_animation(state->animation_name) == nullptr) {
@@ -618,6 +771,63 @@ private:
         }
     }
 
+    bool apply_parameter_preview(std::string* error_out) {
+        if (skeleton_ == nullptr || parameter_state_ == nullptr) {
+            if (error_out != nullptr) {
+                *error_out = "Preview parameter state is not available.";
+            }
+            return false;
+        }
+        skeleton_->reset_parameters();
+        for (const auto& [parameter_id, value] : state_.direct_parameter_values) {
+            if (!skeleton_->set_parameter_value(parameter_id, value)) {
+                if (error_out != nullptr) {
+                    *error_out = "Failed to restore preview parameter '" + parameter_id + "'.";
+                }
+                return false;
+            }
+        }
+        if (!parameter_state_->apply(*skeleton_)) {
+            if (error_out != nullptr) {
+                *error_out = "Failed to compose preview parameters.";
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool configure_parameter_composition(std::string* error_out) {
+        if (parameter_state_ == nullptr) {
+            if (error_out != nullptr) {
+                *error_out = "Preview parameter state is not available.";
+            }
+            return false;
+        }
+        parameter_state_->reset();
+        if (!parameter_state_->set_amplitude(state_.synthetic_amplitude)) {
+            if (error_out != nullptr) {
+                *error_out = "Failed to set the synthetic lip amplitude.";
+            }
+            return false;
+        }
+        parameter_state_->set_phoneme(state_.synthetic_phoneme);
+        if (state_.active_expression.has_value() &&
+            !parameter_state_->activate_expression(*state_.active_expression)) {
+            if (error_out != nullptr) {
+                *error_out = "Failed to activate preview expression '" +
+                    *state_.active_expression + "'.";
+            }
+            return false;
+        }
+        if (!parameter_state_->update(0.0)) {
+            if (error_out != nullptr) {
+                *error_out = "Failed to initialize preview parameter filters.";
+            }
+            return false;
+        }
+        return apply_parameter_preview(error_out);
+    }
+
     bool refresh_pose(bool reset_root_motion, std::string* error_out) {
         if (data_ == nullptr || skeleton_ == nullptr || animation_state_ == nullptr) {
             if (error_out != nullptr) {
@@ -653,6 +863,9 @@ private:
             state_.time_seconds = 0.0;
             skeleton_->set_to_setup_pose();
             skeleton_->set_attachment_playback_time(0.0);
+            if (!apply_parameter_preview(error_out)) {
+                return false;
+            }
             apply_slot_overrides();
             if (!reset_root_motion) {
                 events_ = preserved_events;
@@ -705,6 +918,9 @@ private:
         skeleton_->set_attachment_playback_time(state_.time_seconds);
         animation_state_->apply(*skeleton_);
         animation_state_->set_listener({});
+        if (!apply_parameter_preview(error_out)) {
+            return false;
+        }
         apply_slot_overrides();
         if (!reset_root_motion) {
             events_ = preserved_events;
@@ -751,6 +967,7 @@ private:
     PreviewState state_;
     marrow::UniquePtr<runtime::Skeleton> skeleton_;
     marrow::UniquePtr<runtime::AnimationState> animation_state_;
+    marrow::UniquePtr<runtime::ParameterState> parameter_state_;
     std::vector<runtime::AnimationEvent> events_;
     runtime::RootMotionDelta root_motion_delta_{};
     runtime::RootMotionDelta root_motion_total_{};
@@ -861,6 +1078,47 @@ struct EditorSession::Impl {
     bool reset_preview_attachment(std::size_t slot_index, SessionError* error_out) {
         std::string message;
         if (!preview.reset_attachment(slot_index, &message)) {
+            if (error_out != nullptr) {
+                *error_out = make_error(SessionErrorCode::PreviewUpdateFailed, std::move(message));
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool set_preview_parameter_value(
+        std::string parameter_id,
+        double value,
+        SessionError* error_out) {
+        std::string message;
+        if (!preview.set_parameter_value(std::move(parameter_id), value, &message)) {
+            if (error_out != nullptr) {
+                *error_out = make_error(SessionErrorCode::PreviewUpdateFailed, std::move(message));
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool set_preview_expression(
+        std::optional<std::string> expression_id,
+        SessionError* error_out) {
+        std::string message;
+        if (!preview.set_expression(std::move(expression_id), &message)) {
+            if (error_out != nullptr) {
+                *error_out = make_error(SessionErrorCode::PreviewUpdateFailed, std::move(message));
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool set_preview_lip_input(
+        double amplitude,
+        std::string phoneme,
+        SessionError* error_out) {
+        std::string message;
+        if (!preview.set_lip_input(amplitude, std::move(phoneme), &message)) {
             if (error_out != nullptr) {
                 *error_out = make_error(SessionErrorCode::PreviewUpdateFailed, std::move(message));
             }
@@ -1458,6 +1716,21 @@ bool EditorSession::advance(double delta_seconds) {
     return true;
 }
 
+bool EditorSession::advance_parameter_state(double delta_seconds) {
+    if (!impl_->loaded() || impl_->active_transaction.has_value()) {
+        return false;
+    }
+    bool changed = false;
+    std::string error;
+    if (!impl_->preview.advance_parameter_state(delta_seconds, &changed, &error)) {
+        return false;
+    }
+    if (changed) {
+        ++impl_->preview_revision;
+    }
+    return true;
+}
+
 void EditorSession::set_playing(bool playing) noexcept {
     if (!impl_->loaded() || impl_->active_transaction.has_value() ||
         impl_->preview.state().playing == playing) {
@@ -1576,6 +1849,65 @@ SessionResult EditorSession::reset_preview_attachment(
         return SessionResult{false, transaction.error()};
     }
     if (!transaction.reset_preview_attachment(slot_index)) {
+        const std::optional<SessionError> error = transaction.error();
+        transaction.cancel();
+        return SessionResult{false, error};
+    }
+    return transaction.commit();
+}
+
+SessionResult EditorSession::set_preview_parameter_value(
+    std::string parameter_id,
+    double value,
+    EditDescriptor descriptor) {
+    if (descriptor.merge_key == "preview-parameter") {
+        descriptor.merge_key += ":" + parameter_id;
+    }
+    EditTransaction transaction = begin_edit(std::move(descriptor));
+    if (!transaction) {
+        return SessionResult{false, transaction.error()};
+    }
+    if (!transaction.set_preview_parameter_value(std::move(parameter_id), value)) {
+        const std::optional<SessionError> error = transaction.error();
+        transaction.cancel();
+        return SessionResult{false, error};
+    }
+    return transaction.commit();
+}
+
+std::optional<double> EditorSession::evaluate_preview_parameter_value(
+    std::string_view parameter_id,
+    double value) const {
+    if (!impl_->loaded() || impl_->active_transaction.has_value()) {
+        return std::nullopt;
+    }
+    return impl_->preview.evaluate_parameter_value(parameter_id, value);
+}
+
+SessionResult EditorSession::set_preview_expression(
+    std::optional<std::string> expression_id,
+    EditDescriptor descriptor) {
+    EditTransaction transaction = begin_edit(std::move(descriptor));
+    if (!transaction) {
+        return SessionResult{false, transaction.error()};
+    }
+    if (!transaction.set_preview_expression(std::move(expression_id))) {
+        const std::optional<SessionError> error = transaction.error();
+        transaction.cancel();
+        return SessionResult{false, error};
+    }
+    return transaction.commit();
+}
+
+SessionResult EditorSession::set_preview_lip_input(
+    double amplitude,
+    std::string phoneme,
+    EditDescriptor descriptor) {
+    EditTransaction transaction = begin_edit(std::move(descriptor));
+    if (!transaction) {
+        return SessionResult{false, transaction.error()};
+    }
+    if (!transaction.set_preview_lip_input(amplitude, std::move(phoneme))) {
         const std::optional<SessionError> error = transaction.error();
         transaction.cancel();
         return SessionResult{false, error};
@@ -2031,6 +2363,47 @@ bool EditorSession::EditTransaction::reset_preview_attachment(std::size_t slot_i
     }
     SessionError error;
     if (!impl_->reset_preview_attachment(slot_index, &error)) {
+        error_ = std::move(error);
+        return false;
+    }
+    return true;
+}
+
+bool EditorSession::EditTransaction::set_preview_parameter_value(
+    std::string parameter_id,
+    double value) {
+    if (!*this) {
+        return false;
+    }
+    SessionError error;
+    if (!impl_->set_preview_parameter_value(std::move(parameter_id), value, &error)) {
+        error_ = std::move(error);
+        return false;
+    }
+    return true;
+}
+
+bool EditorSession::EditTransaction::set_preview_expression(
+    std::optional<std::string> expression_id) {
+    if (!*this) {
+        return false;
+    }
+    SessionError error;
+    if (!impl_->set_preview_expression(std::move(expression_id), &error)) {
+        error_ = std::move(error);
+        return false;
+    }
+    return true;
+}
+
+bool EditorSession::EditTransaction::set_preview_lip_input(
+    double amplitude,
+    std::string phoneme) {
+    if (!*this) {
+        return false;
+    }
+    SessionError error;
+    if (!impl_->set_preview_lip_input(amplitude, std::move(phoneme), &error)) {
         error_ = std::move(error);
         return false;
     }

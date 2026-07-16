@@ -218,6 +218,10 @@ AgentDispatchResult handle_constraint_operation(
     AgentCommandContext& context,
     const json::Value& cmd,
     const OperationSpec& operation);
+AgentDispatchResult handle_parameter_operation(
+    AgentCommandContext& context,
+    const json::Value& cmd,
+    const OperationSpec& operation);
 AgentDispatchResult handle_management_operation(
     AgentCommandContext& context,
     const json::Value& cmd,

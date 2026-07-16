@@ -145,7 +145,7 @@ struct ViewportRenderResources {
 };
 
 // Bump when the default split changes so a fresh rebuild is forced.
-constexpr int kDockLayoutVersion = 3;
+constexpr int kDockLayoutVersion = 4;
 
 struct DockLayoutState {
     ImGuiID dockspace_id{0};
@@ -187,6 +187,13 @@ enum class WeightPaintMode {
     Paint,
     Erase,
     Smooth,
+};
+
+enum class ShellMode {
+    Setup = 0,
+    Animation = 1,
+    WeightPaint = 2,
+    Parameter = 3,
 };
 
 struct WeightPaintSettings {
@@ -383,6 +390,19 @@ struct TimelineRetimeGesture {
     marrow::editor::EditorSession::EditTransaction transaction;
 };
 
+struct ParameterSliderGesture {
+    std::string parameter_id;
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+struct ParameterGeometryGesture {
+    std::string deformer_id;
+    std::string field;
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
 struct TimelineEditorState {
     double frames_per_second{60.0};
     bool snap_to_frames{true};
@@ -417,11 +437,14 @@ struct ShellState {
     marrow::editor::ViewportState viewport{};
     ViewportCamera viewport_camera{};
     bool hud_overlay_enabled{false};
+    ShellMode shell_mode{ShellMode::Animation};
     WeightPaintSettings weight_paint{};
     marrow::editor::ProjectLoadResult& load_result;
     std::optional<PendingEditAction> pending_edit_action;
     std::optional<InspectorTransformGesture> inspector_transform_gesture;
     std::optional<ViewportTranslateGesture> viewport_translate_gesture;
+    std::optional<ParameterSliderGesture> parameter_slider_gesture;
+    std::optional<ParameterGeometryGesture> parameter_geometry_gesture;
     TimelineEditorState timeline_editor{};
     MeshWeightStrokeState weight_paint_stroke{};
     ViewportRenderResources viewport_renderer{};
@@ -474,6 +497,8 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
     return state.pending_edit_action.has_value() ||
         state.inspector_transform_gesture.has_value() ||
         state.viewport_translate_gesture.has_value() ||
+        state.parameter_slider_gesture.has_value() ||
+        state.parameter_geometry_gesture.has_value() ||
         state.timeline_editor.retime_gesture.has_value() ||
         state.weight_paint_stroke.active;
 }
@@ -514,6 +539,10 @@ constexpr char kTimelineWindowTitle[] = "Timeline";
 constexpr char kViewportWindowTitle[] = "Viewport";
 constexpr char kPropertiesWindowTitle[] = "Properties";
 constexpr char kAgentWindowTitle[] = "Agent";
+constexpr char kParametersWindowTitle[] = "Parameters";
+constexpr char kParameterDeformersWindowTitle[] = "Shapes / Deformers";
+constexpr char kExpressionsWindowTitle[] = "Expressions";
+constexpr char kLipSyncWindowTitle[] = "Lip Sync";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};

@@ -70,6 +70,18 @@ def get_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="parameters.list",
+            description=(
+                "List parameter definitions and groups with direct and final "
+                "preview values."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="timeline.describe",
             description="Describe timeline counts for one animation",
             inputSchema={

@@ -303,6 +303,7 @@ std::vector<MeshWeightVertexRow> build_mesh_weight_rows(
 
 bool inspector_bone_pose_editable(const ShellState& state) noexcept {
     return static_cast<bool>(state.load_result) &&
+        state.shell_mode == ShellMode::Animation &&
         !state.selected_animation_name.empty() &&
         !state.weight_paint.enabled;
 }

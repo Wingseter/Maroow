@@ -2,6 +2,7 @@
 #include "atlas_packer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -298,6 +299,354 @@ std::optional<LoadError> parse_runtime_assets(
     }
 
     *runtime_assets_out = std::move(runtime_assets_value);
+    return std::nullopt;
+}
+
+std::optional<LoadError> read_required_boolean(
+    const Document& document,
+    const Value& object,
+    std::string_view key,
+    std::string_view json_path,
+    bool* value_out) {
+    const Value* member = nullptr;
+    if (const auto error = marrow::runtime::json::require_member(
+            document, object, key, Value::Type::Boolean, json_path, &member)) {
+        return error;
+    }
+    *value_out = member->as_boolean();
+    return std::nullopt;
+}
+
+template <typename Definition, typename Parse>
+std::optional<LoadError> parse_parameter_model_typed_array(
+    const Document& document,
+    const Value& model,
+    std::string_view key,
+    std::vector<Definition>* values_out,
+    Parse&& parse) {
+    const Value* array = find_optional_member(model, key);
+    if (array == nullptr) {
+        values_out->clear();
+        return std::nullopt;
+    }
+    const std::string path = "$.parameter_model." + std::string(key);
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *array, Value::Type::Array, path)) {
+        return error;
+    }
+    std::vector<Definition> values;
+    values.reserve(array->as_array().size());
+    std::vector<std::string> ids;
+    for (std::size_t index = 0U; index < array->as_array().size(); ++index) {
+        const Value& value = array->as_array()[index];
+        const std::string entry_path = path + "[" + std::to_string(index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, value, Value::Type::Object, entry_path)) {
+            return error;
+        }
+        Definition definition;
+        std::string message;
+        if (!parse(value, &definition, &message)) {
+            return validation_error(
+                document,
+                value.location(),
+                entry_path,
+                message.empty() ? "invalid typed parameter-model definition" : message);
+        }
+        if (definition.id.empty()) {
+            return validation_error(
+                document, value.location(), entry_path + ".id", "id must not be empty");
+        }
+        if (std::find(ids.begin(), ids.end(), definition.id) != ids.end()) {
+            return validation_error(
+                document, value.location(), entry_path + ".id", "ids must be unique");
+        }
+        ids.push_back(definition.id);
+        values.push_back(std::move(definition));
+    }
+    *values_out = std::move(values);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_parameter_model(
+    const Document& document,
+    const Value& root,
+    std::optional<ParameterModel>* model_out) {
+    const Value* model_value = find_optional_member(root, "parameter_model");
+    if (model_value == nullptr) {
+        model_out->reset();
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *model_value, Value::Type::Object, "$.parameter_model")) {
+        return error;
+    }
+
+    ParameterModel model;
+    model.source = *model_value;
+
+    if (const Value* parameters = find_optional_member(*model_value, "parameters")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document,
+                *parameters,
+                Value::Type::Array,
+                "$.parameter_model.parameters")) {
+            return error;
+        }
+        std::vector<std::string> ids;
+        model.parameters.reserve(parameters->as_array().size());
+        for (std::size_t index = 0U; index < parameters->as_array().size(); ++index) {
+            const Value& value = parameters->as_array()[index];
+            const std::string path =
+                "$.parameter_model.parameters[" + std::to_string(index) + "]";
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, value, Value::Type::Object, path)) {
+                return error;
+            }
+            ParameterAuthoringDefinition parameter;
+            std::string type;
+            if (const auto error = read_required_string(
+                    document, value, "id", path, &parameter.id)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, value, "name", path, &parameter.name)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, value, "min", path, &parameter.min_value)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, value, "max", path, &parameter.max_value)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, value, "default", path, &parameter.default_value)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, value, "type", path, &type)) {
+                return error;
+            }
+            if (const auto error = read_required_boolean(
+                    document, value, "clamp", path, &parameter.clamp)) {
+                return error;
+            }
+            if (parameter.id.empty() || parameter.name.empty()) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path,
+                    "parameter id and name must not be empty");
+            }
+            if (!std::isfinite(parameter.min_value) ||
+                !std::isfinite(parameter.max_value) ||
+                !std::isfinite(parameter.default_value) ||
+                parameter.min_value > parameter.max_value ||
+                (parameter.clamp &&
+                 (parameter.default_value < parameter.min_value ||
+                  parameter.default_value > parameter.max_value))) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path,
+                    "parameter range and default must be finite and ordered");
+            }
+            if (type == "continuous") {
+                parameter.type = ParameterAuthoringType::Continuous;
+            } else if (type == "discrete") {
+                parameter.type = ParameterAuthoringType::Discrete;
+            } else {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path + ".type",
+                    "type must be continuous or discrete");
+            }
+            double ui_step = 0.0;
+            if (const auto error = read_optional_number(
+                    document, value, "ui_step", path, &ui_step)) {
+                return error;
+            }
+            if (find_optional_member(value, "ui_step") != nullptr) {
+                if (!std::isfinite(ui_step) || ui_step <= 0.0) {
+                    return validation_error(
+                        document,
+                        value.location(),
+                        path + ".ui_step",
+                        "ui_step must be finite and greater than zero");
+                }
+                parameter.ui_step = ui_step;
+            }
+            std::string units;
+            if (const auto error = read_optional_string(
+                    document, value, "units", path, &units)) {
+                return error;
+            }
+            if (find_optional_member(value, "units") != nullptr) {
+                parameter.units = std::move(units);
+            }
+            if (std::find(ids.begin(), ids.end(), parameter.id) != ids.end()) {
+                return validation_error(
+                    document, value.location(), path + ".id", "parameter ids must be unique");
+            }
+            ids.push_back(parameter.id);
+            model.parameters.push_back(std::move(parameter));
+        }
+    }
+
+    if (const Value* groups = find_optional_member(*model_value, "groups")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document,
+                *groups,
+                Value::Type::Array,
+                "$.parameter_model.groups")) {
+            return error;
+        }
+        std::vector<std::string> ids;
+        model.groups.reserve(groups->as_array().size());
+        for (std::size_t index = 0U; index < groups->as_array().size(); ++index) {
+            const Value& value = groups->as_array()[index];
+            const std::string path =
+                "$.parameter_model.groups[" + std::to_string(index) + "]";
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, value, Value::Type::Object, path)) {
+                return error;
+            }
+            ParameterGroupAuthoringDefinition group;
+            if (const auto error = read_required_string(
+                    document, value, "id", path, &group.id)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, value, "name", path, &group.name)) {
+                return error;
+            }
+            const Value* parameter_ids = nullptr;
+            if (const auto error = marrow::runtime::json::require_member(
+                    document,
+                    value,
+                    "parameters",
+                    Value::Type::Array,
+                    path,
+                    &parameter_ids)) {
+                return error;
+            }
+            if (const auto error = parse_string_array(
+                    document,
+                    *parameter_ids,
+                    path + ".parameters",
+                    &group.parameter_ids)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document, value, "collapsed", path, &group.collapsed)) {
+                return error;
+            }
+            std::string color_tag;
+            if (const auto error = read_optional_string(
+                    document, value, "color_tag", path, &color_tag)) {
+                return error;
+            }
+            if (find_optional_member(value, "color_tag") != nullptr) {
+                group.color_tag = std::move(color_tag);
+            }
+            std::string exclusive_mode;
+            if (const auto error = read_optional_string(
+                    document, value, "exclusive_mode", path, &exclusive_mode)) {
+                return error;
+            }
+            if (find_optional_member(value, "exclusive_mode") != nullptr) {
+                group.exclusive_mode = std::move(exclusive_mode);
+            }
+            if (group.id.empty() || group.name.empty()) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path,
+                    "group id and name must not be empty");
+            }
+            if (std::find(ids.begin(), ids.end(), group.id) != ids.end()) {
+                return validation_error(
+                    document, value.location(), path + ".id", "group ids must be unique");
+            }
+            std::vector<std::string> sorted_ids = group.parameter_ids;
+            std::sort(sorted_ids.begin(), sorted_ids.end());
+            if (std::adjacent_find(sorted_ids.begin(), sorted_ids.end()) != sorted_ids.end()) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path + ".parameters",
+                    "group parameter ids must be unique");
+            }
+            for (const std::string& parameter_id : group.parameter_ids) {
+                if (model.find_parameter(parameter_id) == nullptr) {
+                    return validation_error(
+                        document,
+                        value.location(),
+                        path + ".parameters",
+                        "group references an unknown parameter id");
+                }
+            }
+            ids.push_back(group.id);
+            model.groups.push_back(std::move(group));
+        }
+    }
+
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "deformers",
+            &model.deformers,
+            parse_parameter_deformer_authoring_value)) {
+        return error;
+    }
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "blend_shapes",
+            &model.blend_shapes,
+            parse_parameter_shape_authoring_value)) {
+        return error;
+    }
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "art_paths",
+            &model.art_paths,
+            parse_art_path_authoring_value)) {
+        return error;
+    }
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "expressions",
+            &model.expressions,
+            parse_expression_authoring_value)) {
+        return error;
+    }
+    if (const Value* lip_sync = find_optional_member(*model_value, "lip_sync")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document,
+                *lip_sync,
+                Value::Type::Object,
+                "$.parameter_model.lip_sync")) {
+            return error;
+        }
+        std::string message;
+        if (!parse_lip_sync_authoring_value(*lip_sync, &model.lip_sync, &message)) {
+            return validation_error(
+                document,
+                lip_sync->location(),
+                "$.parameter_model.lip_sync",
+                message.empty() ? "invalid typed lip-sync definition" : message);
+        }
+    }
+
+    *model_out = model.empty()
+        ? std::optional<ParameterModel>{}
+        : std::optional<ParameterModel>{std::move(model)};
     return std::nullopt;
 }
 
@@ -3495,93 +3844,218 @@ Value build_animation_edits_value(const std::vector<AnimationEdit>& edits) {
     return make_array_value(std::move(values));
 }
 
-Value build_project_value(const ProjectData& project) {
-    Value::Object root;
-    root.emplace("marrow", make_string_value(project.marrow_version));
+const Value* find_source_entry_by_id(
+    const Value& source,
+    std::string_view collection,
+    std::string_view id) {
+    const Value* values = find_optional_member(source, collection);
+    if (values == nullptr || !values->is_array()) {
+        return nullptr;
+    }
+    for (const Value& value : values->as_array()) {
+        const Value* value_id = find_optional_member(value, "id");
+        if (value_id != nullptr && value_id->is_string() && value_id->as_string() == id) {
+            return &value;
+        }
+    }
+    return nullptr;
+}
 
-    Value::Object runtime_object;
-    runtime_object.emplace(
-        "skeleton",
-        make_string_value(project.runtime_assets.skeleton_path.generic_string()));
+Value build_parameter_definition_value(
+    const ParameterModel& model,
+    const ParameterAuthoringDefinition& parameter) {
+    Value::Object object;
+    if (const Value* source = find_source_entry_by_id(
+            model.source, "parameters", parameter.id);
+        source != nullptr && source->is_object()) {
+        object = source->as_object();
+    }
+    object["id"] = make_string_value(parameter.id);
+    object["name"] = make_string_value(parameter.name);
+    object["min"] = make_number_value(parameter.min_value);
+    object["max"] = make_number_value(parameter.max_value);
+    object["default"] = make_number_value(parameter.default_value);
+    object["type"] = make_string_value(
+        parameter.type == ParameterAuthoringType::Continuous ? "continuous" : "discrete");
+    object["clamp"] = make_boolean_value(parameter.clamp);
+    if (parameter.ui_step.has_value()) {
+        object["ui_step"] = make_number_value(*parameter.ui_step);
+    } else {
+        object.erase("ui_step");
+    }
+    if (parameter.units.has_value()) {
+        object["units"] = make_string_value(*parameter.units);
+    } else {
+        object.erase("units");
+    }
+    return make_object_value(std::move(object));
+}
+
+Value build_parameter_group_value(
+    const ParameterModel& model,
+    const ParameterGroupAuthoringDefinition& group) {
+    Value::Object object;
+    if (const Value* source = find_source_entry_by_id(model.source, "groups", group.id);
+        source != nullptr && source->is_object()) {
+        object = source->as_object();
+    }
+    object["id"] = make_string_value(group.id);
+    object["name"] = make_string_value(group.name);
+    Value::Array parameter_ids;
+    parameter_ids.reserve(group.parameter_ids.size());
+    for (const std::string& parameter_id : group.parameter_ids) {
+        parameter_ids.push_back(make_string_value(parameter_id));
+    }
+    object["parameters"] = make_array_value(std::move(parameter_ids));
+    object["collapsed"] = make_boolean_value(group.collapsed);
+    if (group.color_tag.has_value()) {
+        object["color_tag"] = make_string_value(*group.color_tag);
+    } else {
+        object.erase("color_tag");
+    }
+    if (group.exclusive_mode.has_value()) {
+        object["exclusive_mode"] = make_string_value(*group.exclusive_mode);
+    } else {
+        object.erase("exclusive_mode");
+    }
+    return make_object_value(std::move(object));
+}
+
+Value build_parameter_model_value(const ParameterModel& model) {
+    Value::Object object = model.source.is_object()
+        ? model.source.as_object()
+        : Value::Object{};
+
+    Value::Array parameters;
+    parameters.reserve(model.parameters.size());
+    for (const ParameterAuthoringDefinition& parameter : model.parameters) {
+        parameters.push_back(build_parameter_definition_value(model, parameter));
+    }
+    object["parameters"] = make_array_value(std::move(parameters));
+
+    Value::Array groups;
+    groups.reserve(model.groups.size());
+    for (const ParameterGroupAuthoringDefinition& group : model.groups) {
+        groups.push_back(build_parameter_group_value(model, group));
+    }
+    object["groups"] = make_array_value(std::move(groups));
+
+    const auto typed_array = [](const auto& values, const auto& build) {
+        Value::Array array;
+        array.reserve(values.size());
+        for (const auto& value : values) {
+            array.push_back(build(value));
+        }
+        return make_array_value(std::move(array));
+    };
+    object["deformers"] = typed_array(
+        model.deformers, build_parameter_deformer_authoring_value);
+    object["blend_shapes"] = typed_array(
+        model.blend_shapes, build_parameter_shape_authoring_value);
+    object["art_paths"] = typed_array(
+        model.art_paths, build_art_path_authoring_value);
+    object["expressions"] = typed_array(
+        model.expressions, build_expression_authoring_value);
+    object["lip_sync"] = build_lip_sync_authoring_value(model.lip_sync);
+    return make_object_value(std::move(object));
+}
+
+Value::Object preserved_object_member(const Value& root, std::string_view key) {
+    const Value* member = find_optional_member(root, key);
+    return member != nullptr && member->is_object()
+        ? member->as_object()
+        : Value::Object{};
+}
+
+Value build_project_value(const ProjectData& project) {
+    Value::Object root = project.preserved_root.is_object()
+        ? project.preserved_root.as_object()
+        : Value::Object{};
+    root["marrow"] = make_string_value(project.marrow_version);
+
+    Value::Object runtime_object = preserved_object_member(project.preserved_root, "runtime");
+    runtime_object["skeleton"] =
+        make_string_value(project.runtime_assets.skeleton_path.generic_string());
     Value::Array atlas_paths;
     atlas_paths.reserve(project.runtime_assets.atlas_paths.size());
     for (const auto& atlas_path : project.runtime_assets.atlas_paths) {
         atlas_paths.push_back(make_string_value(atlas_path.generic_string()));
     }
-    runtime_object.emplace("atlases", make_array_value(std::move(atlas_paths)));
-    root.emplace("runtime", make_object_value(std::move(runtime_object)));
+    runtime_object["atlases"] = make_array_value(std::move(atlas_paths));
+    root["runtime"] = make_object_value(std::move(runtime_object));
 
-    Value::Object editor_object;
-    editor_object.emplace("name", make_string_value(project.editor_metadata.name));
-    editor_object.emplace(
-        "active_animation",
-        make_string_value(project.editor_metadata.active_animation));
+    Value::Object editor_object = preserved_object_member(project.preserved_root, "editor");
+    editor_object["name"] = make_string_value(project.editor_metadata.name);
+    editor_object["active_animation"] =
+        make_string_value(project.editor_metadata.active_animation);
     Value::Array preview_skins;
     preview_skins.reserve(project.editor_metadata.preview_skins.size());
     for (const std::string& preview_skin : project.editor_metadata.preview_skins) {
         preview_skins.push_back(make_string_value(preview_skin));
     }
-    editor_object.emplace("preview_skins", make_array_value(std::move(preview_skins)));
-    editor_object.emplace(
-        "export_directory",
-        make_string_value(project.editor_metadata.export_directory.generic_string()));
-    editor_object.emplace("notes", make_string_value(project.editor_metadata.notes));
+    editor_object["preview_skins"] = make_array_value(std::move(preview_skins));
+    editor_object["export_directory"] =
+        make_string_value(project.editor_metadata.export_directory.generic_string());
+    editor_object["notes"] = make_string_value(project.editor_metadata.notes);
     Value::Object timeline_object;
-    timeline_object.emplace(
-        "fps", make_number_value(project.editor_metadata.timeline.frames_per_second));
-    editor_object.emplace("timeline", make_object_value(std::move(timeline_object)));
+    if (const auto timeline = editor_object.find("timeline");
+        timeline != editor_object.end() && timeline->second.is_object()) {
+        timeline_object = timeline->second.as_object();
+    }
+    timeline_object["fps"] =
+        make_number_value(project.editor_metadata.timeline.frames_per_second);
+    editor_object["timeline"] = make_object_value(std::move(timeline_object));
     Value::Object viewport_object;
-    viewport_object.emplace("pan_x", make_number_value(project.editor_metadata.viewport.pan_x));
-    viewport_object.emplace("pan_y", make_number_value(project.editor_metadata.viewport.pan_y));
-    viewport_object.emplace("zoom", make_number_value(project.editor_metadata.viewport.zoom));
+    if (const auto viewport = editor_object.find("viewport");
+        viewport != editor_object.end() && viewport->second.is_object()) {
+        viewport_object = viewport->second.as_object();
+    }
+    viewport_object["pan_x"] = make_number_value(project.editor_metadata.viewport.pan_x);
+    viewport_object["pan_y"] = make_number_value(project.editor_metadata.viewport.pan_y);
+    viewport_object["zoom"] = make_number_value(project.editor_metadata.viewport.zoom);
     Value::Object onion_skin_object;
-    onion_skin_object.emplace(
-        "enabled",
-        make_boolean_value(project.editor_metadata.viewport.onion_skin.enabled));
-    onion_skin_object.emplace(
-        "mode",
-        make_string_value(
-            std::string(onion_skin_mode_json_key(project.editor_metadata.viewport.onion_skin.mode))));
-    onion_skin_object.emplace(
-        "anchor",
-        make_boolean_value(project.editor_metadata.viewport.onion_skin.anchor_to_zero));
-    onion_skin_object.emplace(
-        "before",
-        make_number_value(project.editor_metadata.viewport.onion_skin.before_count));
-    onion_skin_object.emplace(
-        "after",
-        make_number_value(project.editor_metadata.viewport.onion_skin.after_count));
-    onion_skin_object.emplace(
-        "step",
-        make_number_value(project.editor_metadata.viewport.onion_skin.step));
-    viewport_object.emplace("onion_skin", make_object_value(std::move(onion_skin_object)));
+    if (const auto onion_skin = viewport_object.find("onion_skin");
+        onion_skin != viewport_object.end() && onion_skin->second.is_object()) {
+        onion_skin_object = onion_skin->second.as_object();
+    }
+    onion_skin_object["enabled"] =
+        make_boolean_value(project.editor_metadata.viewport.onion_skin.enabled);
+    onion_skin_object["mode"] = make_string_value(
+        std::string(onion_skin_mode_json_key(project.editor_metadata.viewport.onion_skin.mode)));
+    onion_skin_object["anchor"] =
+        make_boolean_value(project.editor_metadata.viewport.onion_skin.anchor_to_zero);
+    onion_skin_object["before"] =
+        make_number_value(project.editor_metadata.viewport.onion_skin.before_count);
+    onion_skin_object["after"] =
+        make_number_value(project.editor_metadata.viewport.onion_skin.after_count);
+    onion_skin_object["step"] =
+        make_number_value(project.editor_metadata.viewport.onion_skin.step);
+    viewport_object["onion_skin"] = make_object_value(std::move(onion_skin_object));
     Value::Object debug_overlay_object;
-    debug_overlay_object.emplace(
-        "bones",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bones));
-    debug_overlay_object.emplace(
-        "ik",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.ik_constraints));
-    debug_overlay_object.emplace(
-        "path",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.path_constraints));
-    debug_overlay_object.emplace(
-        "physics",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.physics_constraints));
-    debug_overlay_object.emplace(
-        "meshes",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.mesh_wireframes));
-    debug_overlay_object.emplace(
-        "bounds",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bounding_boxes));
-    viewport_object.emplace(
-        "debug_overlay",
-        make_object_value(std::move(debug_overlay_object)));
-    editor_object.emplace("viewport", make_object_value(std::move(viewport_object)));
-    root.emplace("editor", make_object_value(std::move(editor_object)));
+    if (const auto debug_overlay = viewport_object.find("debug_overlay");
+        debug_overlay != viewport_object.end() && debug_overlay->second.is_object()) {
+        debug_overlay_object = debug_overlay->second.as_object();
+    }
+    debug_overlay_object["bones"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bones);
+    debug_overlay_object["ik"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.ik_constraints);
+    debug_overlay_object["path"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.path_constraints);
+    debug_overlay_object["physics"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.physics_constraints);
+    debug_overlay_object["meshes"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.mesh_wireframes);
+    debug_overlay_object["bounds"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bounding_boxes);
+    viewport_object["debug_overlay"] = make_object_value(std::move(debug_overlay_object));
+    editor_object["viewport"] = make_object_value(std::move(viewport_object));
+    root["editor"] = make_object_value(std::move(editor_object));
 
     if (!project.animation_edits.empty()) {
-        root.emplace("animation_edits", build_animation_edits_value(project.animation_edits));
+        root["animation_edits"] = build_animation_edits_value(project.animation_edits);
+    } else {
+        root.erase("animation_edits");
     }
 
     if (!project.transform_timeline_edits.empty() ||
@@ -3590,37 +4064,45 @@ Value build_project_value(const ProjectData& project) {
         !project.event_timeline_edits.empty() ||
         !project.slot_color_timeline_edits.empty() ||
         !project.slot_attachment_timeline_edits.empty()) {
-        root.emplace(
-            "timeline_edits",
+        root["timeline_edits"] =
             build_timeline_edits_value(
                 project.transform_timeline_edits,
                 project.mesh_deform_timeline_edits,
                 project.draw_order_timeline_edits,
                 project.event_timeline_edits,
                 project.slot_color_timeline_edits,
-                project.slot_attachment_timeline_edits));
+                project.slot_attachment_timeline_edits);
+    } else {
+        root.erase("timeline_edits");
     }
     if (!project.mesh_weight_attachment_edits.empty()) {
-        root.emplace(
-            "mesh_edits",
-            build_mesh_weight_edits_value(project.mesh_weight_attachment_edits));
+        root["mesh_edits"] =
+            build_mesh_weight_edits_value(project.mesh_weight_attachment_edits);
+    } else {
+        root.erase("mesh_edits");
     }
     if (!project.ik_constraint_edits.empty() ||
         !project.path_constraint_edits.empty() ||
         !project.transform_constraint_edits.empty() ||
         !project.physics_constraint_edits.empty()) {
-        root.emplace(
-            "constraint_edits",
-            build_constraint_edits_value(
+        root["constraint_edits"] = build_constraint_edits_value(
                 project.ik_constraint_edits,
                 project.path_constraint_edits,
                 project.transform_constraint_edits,
-                project.physics_constraint_edits));
+                project.physics_constraint_edits);
+    } else {
+        root.erase("constraint_edits");
+    }
+    if (project.parameter_model.has_value() && !project.parameter_model->empty()) {
+        root["parameter_model"] = build_parameter_model_value(*project.parameter_model);
+    } else {
+        root.erase("parameter_model");
     }
     if (!project.atlas_pack_definitions.empty()) {
-        root.emplace(
-            "atlas_packs",
-            build_atlas_pack_definitions_value(project.atlas_pack_definitions));
+        root["atlas_packs"] =
+            build_atlas_pack_definitions_value(project.atlas_pack_definitions);
+    } else {
+        root.erase("atlas_packs");
     }
 
     return make_object_value(std::move(root));
@@ -3929,6 +4411,55 @@ Document build_runtime_document(
         return document;
     }
 
+    if (project.parameter_model.has_value()) {
+        const ParameterModel& model = *project.parameter_model;
+        const auto replace_array = [&](std::string_view key, const Value::Array& values) {
+            document.root.as_object().erase(std::string(key));
+            if (!values.empty()) {
+                document.root.as_object()[std::string(key)] = make_array_value(values);
+            }
+        };
+
+        Value::Array parameters;
+        parameters.reserve(model.parameters.size());
+        for (const ParameterAuthoringDefinition& parameter : model.parameters) {
+            parameters.push_back(build_parameter_definition_value(model, parameter));
+        }
+        replace_array("parameters", parameters);
+
+        Value::Array groups;
+        groups.reserve(model.groups.size());
+        for (const ParameterGroupAuthoringDefinition& group : model.groups) {
+            groups.push_back(build_parameter_group_value(model, group));
+        }
+        replace_array("parameterGroups", groups);
+
+        const auto build_typed_array = [](const auto& values, const auto& build) {
+            Value::Array array;
+            array.reserve(values.size());
+            for (const auto& value : values) array.push_back(build(value));
+            return array;
+        };
+        replace_array(
+            "parameterShapes",
+            build_typed_array(model.blend_shapes, build_parameter_shape_authoring_value));
+        replace_array(
+            "parameterDeformers",
+            build_typed_array(model.deformers, build_parameter_deformer_authoring_value));
+        replace_array(
+            "artPaths",
+            build_typed_array(model.art_paths, build_art_path_authoring_value));
+        replace_array(
+            "expressions",
+            build_typed_array(model.expressions, build_expression_authoring_value));
+
+        document.root.as_object().erase("lipSync");
+        if (!model.lip_sync.empty()) {
+            document.root.as_object()["lipSync"] =
+                build_lip_sync_authoring_value(model.lip_sync);
+        }
+    }
+
     apply_animation_edits(&document.root, project.animation_edits);
 
     for (const MeshWeightAttachmentEdit& edit : project.mesh_weight_attachment_edits) {
@@ -4083,6 +4614,93 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
     for (const std::string& preview_skin : project.editor_metadata.preview_skins) {
         if (preview_skin.empty()) {
             error_out->message = "preview skin names must not be empty";
+            return false;
+        }
+    }
+
+    if (project.parameter_model.has_value()) {
+        const ParameterModel& model = *project.parameter_model;
+        std::vector<std::string> parameter_ids;
+        parameter_ids.reserve(model.parameters.size());
+        for (const ParameterAuthoringDefinition& parameter : model.parameters) {
+            if (parameter.id.empty() || parameter.name.empty()) {
+                error_out->message = "parameter definitions require non-empty ids and names";
+                return false;
+            }
+            if (!std::isfinite(parameter.min_value) ||
+                !std::isfinite(parameter.max_value) ||
+                !std::isfinite(parameter.default_value) ||
+                parameter.min_value > parameter.max_value ||
+                (parameter.clamp &&
+                 (parameter.default_value < parameter.min_value ||
+                  parameter.default_value > parameter.max_value))) {
+                error_out->message =
+                    "parameter ranges and defaults must be finite and ordered";
+                return false;
+            }
+            if (parameter.ui_step.has_value() &&
+                (!std::isfinite(*parameter.ui_step) || *parameter.ui_step <= 0.0)) {
+                error_out->message = "parameter ui_step must be finite and positive";
+                return false;
+            }
+            if (std::find(parameter_ids.begin(), parameter_ids.end(), parameter.id) !=
+                parameter_ids.end()) {
+                error_out->message = "parameter ids must be unique";
+                return false;
+            }
+            parameter_ids.push_back(parameter.id);
+        }
+
+        std::vector<std::string> group_ids;
+        for (const ParameterGroupAuthoringDefinition& group : model.groups) {
+            if (group.id.empty() || group.name.empty()) {
+                error_out->message = "parameter groups require non-empty ids and names";
+                return false;
+            }
+            if (std::find(group_ids.begin(), group_ids.end(), group.id) != group_ids.end()) {
+                error_out->message = "parameter group ids must be unique";
+                return false;
+            }
+            group_ids.push_back(group.id);
+            std::vector<std::string> group_parameter_ids;
+            for (const std::string& parameter_id : group.parameter_ids) {
+                if (std::find(parameter_ids.begin(), parameter_ids.end(), parameter_id) ==
+                    parameter_ids.end()) {
+                    error_out->message =
+                        "parameter groups may only reference existing parameter ids";
+                    return false;
+                }
+                if (std::find(
+                        group_parameter_ids.begin(),
+                        group_parameter_ids.end(),
+                        parameter_id) != group_parameter_ids.end()) {
+                    error_out->message = "parameter group references must be unique";
+                    return false;
+                }
+                group_parameter_ids.push_back(parameter_id);
+            }
+        }
+
+        const auto validate_typed_ids = [&](const auto& values, std::string_view family) {
+            std::vector<std::string> ids;
+            for (const auto& value : values) {
+                if (value.id.empty()) {
+                    error_out->message = std::string(family) +
+                        " definitions require non-empty string ids";
+                    return false;
+                }
+                if (std::find(ids.begin(), ids.end(), value.id) != ids.end()) {
+                    error_out->message = std::string(family) + " ids must be unique";
+                    return false;
+                }
+                ids.push_back(value.id);
+            }
+            return true;
+        };
+        if (!validate_typed_ids(model.blend_shapes, "blend shape") ||
+            !validate_typed_ids(model.deformers, "deformer") ||
+            !validate_typed_ids(model.art_paths, "art path") ||
+            !validate_typed_ids(model.expressions, "expression")) {
             return false;
         }
     }
@@ -4781,6 +5399,128 @@ runtime::json::Document build_project_runtime_document(
 
 std::string serialize_project(const ProjectData& project) {
     return serialize_project_snapshot(project);
+}
+
+bool ParameterModel::empty() const noexcept {
+    if (!parameters.empty() || !groups.empty() || !deformers.empty() ||
+        !blend_shapes.empty() || !art_paths.empty() || !expressions.empty()) {
+        return false;
+    }
+    if (!lip_sync.empty()) {
+        return false;
+    }
+    if (source.is_object()) {
+        static constexpr std::array<std::string_view, 7U> kKnownKeys{
+            "parameters",
+            "groups",
+            "deformers",
+            "blend_shapes",
+            "art_paths",
+            "expressions",
+            "lip_sync",
+        };
+        for (const auto& [key, unused] : source.as_object()) {
+            (void)unused;
+            if (std::find(kKnownKeys.begin(), kKnownKeys.end(), key) == kKnownKeys.end()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+const ParameterAuthoringDefinition* ParameterModel::find_parameter(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        parameters.begin(), parameters.end(),
+        [&](const ParameterAuthoringDefinition& parameter) { return parameter.id == id; });
+    return found == parameters.end() ? nullptr : &*found;
+}
+
+ParameterAuthoringDefinition* ParameterModel::find_parameter(std::string_view id) {
+    return const_cast<ParameterAuthoringDefinition*>(
+        std::as_const(*this).find_parameter(id));
+}
+
+const ParameterGroupAuthoringDefinition* ParameterModel::find_group(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        groups.begin(), groups.end(),
+        [&](const ParameterGroupAuthoringDefinition& group) { return group.id == id; });
+    return found == groups.end() ? nullptr : &*found;
+}
+
+ParameterGroupAuthoringDefinition* ParameterModel::find_group(std::string_view id) {
+    return const_cast<ParameterGroupAuthoringDefinition*>(std::as_const(*this).find_group(id));
+}
+
+const ParameterShapeAuthoringDefinition* ParameterModel::find_shape(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        blend_shapes.begin(), blend_shapes.end(),
+        [&](const ParameterShapeAuthoringDefinition& shape) { return shape.id == id; });
+    return found == blend_shapes.end() ? nullptr : &*found;
+}
+
+ParameterShapeAuthoringDefinition* ParameterModel::find_shape(std::string_view id) {
+    return const_cast<ParameterShapeAuthoringDefinition*>(std::as_const(*this).find_shape(id));
+}
+
+const ParameterDeformerAuthoringDefinition* ParameterModel::find_deformer(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        deformers.begin(), deformers.end(),
+        [&](const ParameterDeformerAuthoringDefinition& deformer) {
+            return deformer.id == id;
+        });
+    return found == deformers.end() ? nullptr : &*found;
+}
+
+ParameterDeformerAuthoringDefinition* ParameterModel::find_deformer(std::string_view id) {
+    return const_cast<ParameterDeformerAuthoringDefinition*>(
+        std::as_const(*this).find_deformer(id));
+}
+
+const ArtPathAuthoringDefinition* ParameterModel::find_art_path(std::string_view id) const {
+    const auto found = std::find_if(
+        art_paths.begin(), art_paths.end(),
+        [&](const ArtPathAuthoringDefinition& art_path) { return art_path.id == id; });
+    return found == art_paths.end() ? nullptr : &*found;
+}
+
+ArtPathAuthoringDefinition* ParameterModel::find_art_path(std::string_view id) {
+    return const_cast<ArtPathAuthoringDefinition*>(std::as_const(*this).find_art_path(id));
+}
+
+const ExpressionAuthoringDefinition* ParameterModel::find_expression(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        expressions.begin(), expressions.end(),
+        [&](const ExpressionAuthoringDefinition& expression) {
+            return expression.id == id;
+        });
+    return found == expressions.end() ? nullptr : &*found;
+}
+
+ExpressionAuthoringDefinition* ParameterModel::find_expression(std::string_view id) {
+    return const_cast<ExpressionAuthoringDefinition*>(
+        std::as_const(*this).find_expression(id));
+}
+
+const LipSyncMappingAuthoringDefinition* ParameterModel::find_lip_mapping(
+    std::string_view parameter_id) const {
+    const auto found = std::find_if(
+        lip_sync.mappings.begin(), lip_sync.mappings.end(),
+        [&](const LipSyncMappingAuthoringDefinition& mapping) {
+            return mapping.parameter == parameter_id;
+        });
+    return found == lip_sync.mappings.end() ? nullptr : &*found;
+}
+
+LipSyncMappingAuthoringDefinition* ParameterModel::find_lip_mapping(
+    std::string_view parameter_id) {
+    return const_cast<LipSyncMappingAuthoringDefinition*>(
+        std::as_const(*this).find_lip_mapping(parameter_id));
 }
 
 std::filesystem::path ProjectData::resolve_path(const std::filesystem::path& referenced_path) const {
@@ -5534,6 +6274,11 @@ ProjectLoadResult load_project(const Document& document) {
         result.error = error;
         return result;
     }
+    if (const auto error = parse_parameter_model(
+            document, document.root, &project.parameter_model)) {
+        result.error = error;
+        return result;
+    }
     if (const auto error = parse_atlas_pack_definitions(
             document, document.root, &project.atlas_pack_definitions)) {
         result.error = error;
@@ -5561,6 +6306,8 @@ ProjectLoadResult load_project(const Document& document) {
             return result;
         }
     }
+
+    project.preserved_root = document.root;
 
     auto project_ptr = std::make_shared<ProjectData>(std::move(project));
     const auto document_result =

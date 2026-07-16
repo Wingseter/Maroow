@@ -1,6 +1,6 @@
 # Marrow Format Spec
 
-This page documents the currently implemented Marrow asset formats. It is intentionally aligned with the checked-in parsers and fixtures, not just the original design draft.
+This page documents the implemented Marrow asset formats and the validated MAR-122~128 optional parameter-model extension.
 
 ## Shared conventions
 
@@ -8,7 +8,7 @@ This page documents the currently implemented Marrow asset formats. It is intent
 - The current runtime accepts `.mskl` version `1` and `.matl` version `1`.
 - Paths stored inside JSON assets are relative paths unless exported otherwise by the caller.
 - The canonical examples live under `assets/fixtures/` and are cross-referenced in [Fixtures](fixtures.md).
-- Parameter/deformer sections added by future MAR-120+ stories are optional. When absent, loaders must behave as if the section were present but empty.
+- MAR-121 is a done tracking tombstone integrated into MAR-122. Every runtime section added by MAR-122~128 is optional; when absent, loaders behave as if the parameter model were empty.
 
 ## `.mskl`
 
@@ -155,7 +155,7 @@ These arrays mirror the runtime structs in `include/marrow/runtime/skeleton.hpp`
 
 ### Parameter/deformer runtime sections
 
-The MAR-120+ parameter/deformer track extends `.mskl` without changing `version: 1`. Existing fixtures that omit these fields must continue to load as an empty parameter model.
+MAR-122~128 extend `.mskl` without changing `version: 1`. MAR-121 is integrated into MAR-122 rather than implemented separately. Existing assets that omit every field below load with an empty parameter model.
 
 The runtime root sections use these exact names:
 
@@ -167,7 +167,27 @@ The runtime root sections use these exact names:
 - `expressions`: array of named parameter preset definitions.
 - `lipSync`: object containing mouth/input-to-parameter mappings.
 
-`parameters[]` entries use:
+All seven roots are additive and optional. Empty export sections may be omitted. Their logical content is also carried by `.mbin` v2 through the existing generic JSON-like document payload; there is no parameter-specific binary section or version bump.
+
+#### `parameters` and `parameterGroups`
+
+A parameter definition has this wire shape:
+
+```json
+{
+  "id": "mouth.open",
+  "name": "Mouth Open",
+  "min": 0,
+  "max": 1,
+  "default": 0,
+  "type": "continuous",
+  "clamp": true,
+  "ui_step": 0.01,
+  "units": "ratio"
+}
+```
+
+Fields:
 
 - `id`: stable machine identifier, such as `mouth.open`.
 - `name`: display name.
@@ -175,11 +195,35 @@ The runtime root sections use these exact names:
 - `max`: maximum numeric value.
 - `default`: reset value.
 - `type`: `continuous` or `discrete`.
-- `clamp`: boolean; when true, runtime setters clamp to `min`/`max`.
+- `clamp`: boolean; when true, final composed values are clamped to `min`/`max`.
 - `ui_step`: optional editor slider increment.
 - `units`: optional display units.
 
-`parameterGroups[]` entries use:
+Parameter ids are unique and referenced by id from every other section. `min`, `max`, `default`, `ui_step` when present, and runtime setter input must be finite; `min` cannot exceed `max`.
+
+Runtime setter/composition semantics are exact:
+
+1. `set_parameter_value()` accepts only finite values and preserves that exact value in the direct buffer, including fractional discrete values and out-of-range clamped values.
+2. Lip mapping and expression composition operate on those raw direct values.
+3. The final buffer then applies C++ `std::round` to `discrete` parameters (halfway values round away from zero).
+4. Only `clamp: true` limits the rounded/continuous final result to `[min,max]`; `clamp: false` permits final values outside that interval.
+5. A direct-only setter immediately exposes the normalized result in `parameter_values()`; a later `ParameterState::apply()` recomposes from the raw direct buffer.
+6. An unchanged final value is a no-op for `parameter_revision` and parameter/deformer dirty state, even when a different raw direct input normalizes to that same value.
+7. Reset restores the raw authored default and normalizes the final default through the same round/clamp rules. A missing id or invalid index fails without mutating another value.
+
+A group entry uses:
+
+```json
+{
+  "id": "face",
+  "name": "Face",
+  "parameters": ["mouth.open", "mouth.form"],
+  "collapsed": false,
+  "color_tag": "rose"
+}
+```
+
+Fields:
 
 - `id`
 - `name`
@@ -188,70 +232,231 @@ The runtime root sections use these exact names:
 - `color_tag`: optional editor color token.
 - `exclusive_mode`: optional group interaction mode.
 
-`parameterShapes[]` entries use:
+Group ids are unique and every listed parameter must exist. Group order and each group's parameter order are preserved.
+
+#### `parameterShapes`
+
+Each typed 1D shape uses one continuous parameter:
+
+```json
+{
+  "id": "mouth.open.shape",
+  "target_slot": "face",
+  "target_attachment": "face_mesh",
+  "parameter": "mouth.open",
+  "blend_mode": "normalized_override",
+  "keyforms": [
+    { "value": 0, "vertices": [0, 0, 0, 0] },
+    { "value": 1, "vertices": [0, -4, 0, 8] }
+  ]
+}
+```
+
+Fields and validation:
 
 - `id`
 - `target_slot`
 - `target_attachment`
 - `parameter`
 - `blend_mode`: `additive_clamped` or `normalized_override`.
-- `shapes`: array of keyed vertex delta sets. Each shape stores `value` and `vertices`, where `vertices` is the x/y offset array for the target mesh.
+- `keyforms`: strictly increasing `value` records. `vertices` is the flat x/y offset array and must exactly match the resolved target mesh offset count.
 
-`parameterDeformers[]` entries use:
+The parameter is held at the nearest endpoint outside the authored keyform interval and evaluated linearly between adjacent keyforms. Linked meshes use the existing deform-inheritance resolution; incompatible inherited topology fails during loading.
+
+At most one `normalized_override` shape may address a target attachment. It replaces that target's complete animation FFD result. `additive_clamped` evaluates with endpoint hold and adds its result in JSON declaration order. Both outputs are attachment-local.
+
+#### `parameterDeformers`
+
+Common fields are:
 
 - `id`
 - `name`
 - `kind`: `warp` or `rotation`.
-- `parent`: optional parent deformer id. The first implementation only permits one nesting level.
-- `target_slots`: slot ids affected by the deformer.
-- `parameter_bindings`: parameter ids and axes used by keyforms.
-- `keyforms`: sampled deformer states.
+- `parent`: optional parent deformer id.
+- `target_slots`: slot ids affected by the leaf output.
+- `parameter_bindings`: exact `{ "parameter": id, "axis": token }` records.
+- `keyforms`: complete sampled output states.
 
-Warp deformers additionally use:
+A warp record uses:
 
-- `grid_cols`
-- `grid_rows`
-- `control_points`
+```json
+{
+  "id": "face.warp",
+  "name": "Face Warp",
+  "kind": "warp",
+  "target_slots": ["face"],
+  "parameter_bindings": [
+    { "parameter": "face.angle_x", "axis": "x" },
+    { "parameter": "face.angle_y", "axis": "y" }
+  ],
+  "grid_cols": 2,
+  "grid_rows": 2,
+  "control_points": [-48, -48, 48, -48, -48, 48, 48, 48],
+  "keyforms": [
+    { "x": -1, "y": -1, "control_points": [-52, -44, 44, -52, -48, 48, 48, 48] },
+    { "x": 1, "y": -1, "control_points": [-44, -52, 52, -44, -48, 48, 48, 48] },
+    { "x": -1, "y": 1, "control_points": [-48, -48, 48, -48, -52, 44, 44, 52] },
+    { "x": 1, "y": 1, "control_points": [-48, -48, 48, -48, -44, 52, 52, 44] }
+  ]
+}
+```
 
-Rotation deformers additionally use:
+Warp rules:
 
-- `pivot`
-- `influence`
+- `parameter_bindings` contains exactly two continuous bindings: one `axis: "x"` and one `axis: "y"`.
+- `grid_cols` and `grid_rows` are control-point counts and are each at least two.
+- Base `control_points` is a flat row-major x/y array with exactly `grid_cols * grid_rows * 2` numbers. It must form an axis-aligned rectangular lattice: x and y are each strictly monotonic in one consistent direction, and corresponding row/column coordinates agree.
+- Every keyform contains `x`, `y`, and a full control-point array. All Cartesian combinations of the authored x and y coordinates must exist exactly once.
+- Each axis uses endpoint hold outside its range and bilinear interpolation inside it.
+- A target vertex outside the base lattice is unchanged.
 
-`artPaths[]` entries use:
+A rotation record uses:
+
+```json
+{
+  "id": "face.roll",
+  "name": "Face Roll",
+  "kind": "rotation",
+  "target_slots": ["face"],
+  "parameter_bindings": [
+    { "parameter": "face.roll", "axis": "angle" }
+  ],
+  "pivot": [0, 0],
+  "influence": 0.75,
+  "keyforms": [
+    { "value": -30, "angle": -20 },
+    { "value": 0, "angle": 0 },
+    { "value": 30, "angle": 20 }
+  ]
+}
+```
+
+Rotation rules:
+
+- `parameter_bindings` contains exactly one continuous binding with `axis: "angle"`.
+- `pivot` is an attachment-local `[x,y]` pair and `influence` is finite in `[0,1]`.
+- `{value,angle}` keyforms are strictly increasing by `value`, use endpoint hold outside the interval, and linearly interpolate inside it. Rotation output is attachment-local.
+
+Deformer graph rules:
+
+- The leaf/child output is evaluated first, then its optional parent is applied to that output. Each deformer has at most one parent and only one parent-child nesting level is allowed.
+- Missing parents, cycles, and deeper chains fail loading.
+- A slot may be assigned to only one leaf chain. Multiple independent deformers on one slot and ancestor/child double targeting are ambiguous and fail loading.
+- Parameter dependency bitsets, affected-slot lookup, and final-offset caches are derived runtime data, not serialized fields. Only output depending on a parameter whose effective final value changed is reevaluated.
+
+#### `artPaths`
+
+ArtPath is a separate runtime type from constraint path attachments. A record uses skeleton-local point coordinates:
+
+```json
+{
+  "id": "brow.stroke",
+  "name": "Brow Stroke",
+  "parent_deformer": "face.warp",
+  "points": [-40, 8, -20, 18, 0, 20, 20, 18, 40, 8],
+  "width": 8,
+  "color": { "r": 0.16, "g": 0.08, "b": 0.04, "a": 1 },
+  "cap": "round",
+  "join": "round",
+  "parameter_keyforms": {
+    "parameter": "brow.raise",
+    "keyforms": [
+      {
+        "value": 0,
+        "points": [-40, 8, -20, 18, 0, 20, 20, 18, 40, 8],
+        "width": 8,
+        "color": { "r": 0.16, "g": 0.08, "b": 0.04, "a": 1 }
+      }
+    ]
+  }
+}
+```
+
+Fields and rules:
 
 - `id`
 - `name`
-- `parent_deformer`
-- `points`
-- `width`
-- `color`
-- `cap`
-- `join`
-- `parameter_keyforms`
+- `parent_deformer`: optional id applied after keyform interpolation.
+- `points`: flat skeleton-local x/y pairs.
+- `width`: finite positive stroke width.
+- `color`: finite `{r,g,b,a}` components.
+- `cap`: `butt`, `square`, or `round`.
+- `join`: `miter`, `bevel`, or `round`.
+- `parameter_keyforms`: optional object containing exactly one continuous `parameter` and strictly increasing full-state keyforms. Every keyform contains `value`, `points`, `width`, and `color`; evaluation is linear with endpoint hold.
 
-`expressions[]` entries use:
+ArtPaths are root overlays drawn after all slot draw and clipping events, in JSON declaration order. They have no slot binding, draw-order field, or clipping behavior. Their points and stroke geometry are skeleton-local, so the renderer applies the instance's global x/y scale (including mirroring) before computing prepared bounds.
+
+The CPU tessellator uses eight segments per semicircle for round cap/join, a miter limit of four times half-width with bevel fallback, and skips consecutive zero-length segments. Fewer than two remaining valid points is invalid. Bounds include half-width and cap extension.
+
+Prepared stroke data becomes ordinary triangles using `kSolidWhiteTextureHandle`, normal blend, and the single-color shader. `prepare_setup_pose_scene(skeleton)` and its cached overload support stroke-only documents without an atlas; atlas-backed attachments without an atlas produce a clear missing-atlas error. The C render-command ABI remains version 1 and unchanged.
+
+#### `expressions` and `lipSync`
+
+Expression records use:
 
 - `id`
 - `name`
 - `targets`: array of `{ "parameter": "...", "value": number }` records.
-- `duration`
-- `blend`
-- `priority`
-- `reset_policy`
+- `duration`: finite non-negative fade-in and fade-out time.
+- `blend`: `additive` or `override`.
+- `priority`: integer priority.
+- `reset_policy`: `restore` or `hold`.
 
-`lipSync` uses:
+For `additive`, target values are deltas. For `override`, they are absolute targets. Active expressions evaluate from lower priority to higher priority, breaking equal-priority ties by activation order. Deactivation with `restore` fades out over `duration` and removes the contribution; `hold` retains the final contribution until explicit clear/reset.
 
-- `mappings`: array of mapping records.
-- Each mapping record may contain `source`, `parameter`, `scale`, `bias`, `smoothing`, `attack`, `release`, and `phoneme_map`.
+`lipSync` has this shape:
 
-Runtime evaluation order is fixed for this track:
-
-```text
-setup -> skin/linked mesh -> animation FFD -> parameter shapes/deformers -> prepared render geometry
+```json
+{
+  "mappings": [
+    {
+      "source": "amplitude",
+      "parameter": "mouth.open",
+      "scale": 1.25,
+      "bias": 0,
+      "attack": 0.02,
+      "release": 0.08,
+      "smoothing": 0.04
+    },
+    {
+      "source": "phoneme",
+      "parameter": "mouth.form",
+      "scale": 1,
+      "bias": 0,
+      "attack": 0,
+      "release": 0,
+      "smoothing": 0,
+      "phoneme_map": { "A": 0.2, "E": 0.8, "O": -0.7 }
+    }
+  ]
+}
 ```
 
-`Skeleton::current_mesh_vertex_offsets()` remains the animation-FFD-only accessor. Parameter stories should add a separate combined/final offset accessor for mesh evaluation and renderer preparation.
+Mapping rules:
+
+- `source` is exactly `amplitude` or `phoneme`.
+- Each target `parameter` appears in at most one mapping; duplicate targets fail loading.
+- `scale`, `bias`, `smoothing`, `attack`, `release`, and all phoneme values are finite; time constants are non-negative.
+- An unmapped phoneme supplies source value zero.
+- Processing order is scale/bias, attack-or-release envelope, then smoothing. Each filter uses `alpha = 1 - exp(-dt/tau)`; `tau == 0` applies its input immediately.
+
+`ParameterState` owns expression activation order, lip input, and envelope/filter state and exposes `update(dt)` and `apply(Skeleton&)`. Audio analysis is outside this format/runtime scope.
+
+#### Composition and observable values
+
+`Skeleton` owns separate direct and final buffers. `set_parameter_value()` preserves the finite raw direct preview input; `parameter_values()` exposes the rounded/clamped final composed value. The full parameter composition order is:
+
+```text
+direct preview -> lip mapping override -> expressions by priority/activation order -> discrete std::round -> optional clamp
+```
+
+Final local mesh evaluation order is:
+
+```text
+setup/linked-mesh resolution -> animation FFD -> normalized_override -> additive_clamped -> deformer -> GPU skinning
+```
+
+`Skeleton::current_mesh_vertex_offsets(slot)` remains animation-FFD-only. `Skeleton::current_final_mesh_vertex_offsets(slot)` exposes the final attachment-local offset consumed by renderer preparation. Parameter ownership is not added to `AnimationState` or the C ABI.
 
 These sections are Maroow-native. They are inspired by parameter modeling workflows, but they do not provide Live2D Cubism Core compatibility, proprietary file loading, SDK ABI compatibility, Live2D parameter naming compatibility, or Live2D importer compatibility.
 
@@ -452,7 +657,7 @@ The export path translates these sections directly into runtime root-level const
 
 ### `parameter_model`
 
-Optional editor-only authoring source for parameter modeling. The empty default is:
+Optional editor-only authoring source for parameter modeling. Its logical empty value is:
 
 ```json
 {
@@ -466,7 +671,11 @@ Optional editor-only authoring source for parameter modeling. The empty default 
 }
 ```
 
-This section preserves high-level authoring data that may be richer than runtime export data: group UI state, deformer lattice controls, keyform capture metadata, expression panel state, and lip-sync mapping previews.
+When every known family is empty and there are no unknown additive fields, `save_project()` omits `parameter_model` entirely so existing projects do not change serialization. Loading an absent section produces the logical empty value above.
+
+MAR-122 promotes `parameters` and `groups` to typed project data; MAR-123~126 promote `blend_shapes`, `deformers`, `art_paths`, `expressions`, and `lip_sync`. Every known family is therefore typed in `ProjectData`. Each typed record retains its original JSON source so unknown additive fields at the section, entry, and nested-keyform levels survive load/save even when known fields are rewritten.
+
+This section preserves high-level authoring data that may be richer than runtime export data: group UI state, deformer lattice controls, keyform capture metadata, expression panel state, and lip-sync mapping configuration. Stable ids are immutable after creation and all references remain id based.
 
 Export maps this source into runtime root sections as follows:
 
@@ -480,7 +689,11 @@ Export maps this source into runtime root sections as follows:
 | `expressions` | `expressions` |
 | `lip_sync` | `lipSync` |
 
-All editor mutations to `parameter_model` must pass through project snapshots, mark the project dirty, and rebuild exported runtime preview data before reporting success.
+Persistent parameter/group/shape/deformer/expression/lip-sync mutations pass through one `Project|Runtime|Preview` transaction, mark the project dirty, and rebuild exported runtime preview atomically. Dependency-invalid deletes and failed candidate builds roll back all three impacts.
+
+Direct preview values are deliberately not fields of `parameter_model`. Parameter sliders, numeric preview input, and agent `parameter.set` are Preview-only, undoable, mergeable for one continuous drag, and non-dirty; they are never saved to `.marrow` or exported to `.mskl`/`.mbin`.
+
+Keyform capture compares coordinates with `1e-9 * max(1, parameter range)`. A collision is replaced only after explicit GUI confirmation or agent `replace:true`. Blend-shape capture copies animation-FFD-only offsets rather than recursively evaluated parameter output; warp capture copies the current evaluated lattice and rotation capture copies the current angle.
 
 ### `atlas_packs`
 
@@ -516,6 +729,6 @@ Use these checked-in files when updating or validating the formats:
 - `assets/fixtures/player_idle.matl`
 - `assets/fixtures/player_idle.marrow`
 - `assets/fixtures/atlas_pack_smoke/atlas_pack_project.marrow`
-- Future MAR-120+ parameter fixtures: `parameter_face_basic.mskl`, `parameter_face_basic.mbin`, `parameter_face_basic.matl`, `parameter_face_basic.marrow`, `parameter_deformer_grid.mskl`, `parameter_expression_lipsync.mskl`, and `art_path_stroke.mskl`
+- Validated MAR-122~128 fixtures: `parameter_face_basic.mskl`, `parameter_face_basic.matl`, `parameter_face_basic.marrow`, `parameter_deformer_grid.mskl`, `parameter_expression_lipsync.mskl`, and `art_path_stroke.mskl`; the comprehensive binary comparison output is generated as `/tmp/marrow_parameter_face_basic.mbin`
 
 For fixture-to-feature mapping and validation commands, see [Fixtures](fixtures.md).

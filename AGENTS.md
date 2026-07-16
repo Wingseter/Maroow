@@ -2,20 +2,15 @@
 
 ## Project State
 
-- This workspace is currently planning-first. The main source of truth is `docs/root1/discription.md`.
-- The folder is now a git repository. Ralph is configured to commit one completed story per iteration.
-- Ralph state is written to `.ralph/` and should be treated as generated runtime state.
-
-## Ralph Defaults
-
-- Default PRD: `.agents/tasks/prd-marrow-runtime.json`
-- Default agent runner: `codex exec --full-auto -`
-- Default mode: `NO_COMMIT=false`
+- The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 are complete; MAR-154 is the next open product milestone.
+- Work is organized as small functional milestone checkpoints with focused validation.
+- `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
 ## Working Rules
 
 - Read `docs/root1/discription.md` before changing runtime or file-format decisions.
-- Keep new stories small and vertical. One story should be finishable in one Ralph iteration.
+- Keep milestones small, vertical, and independently verifiable at focused checkpoints.
 - Preserve the runtime-first plan unless the active story explicitly updates it.
 - If a build or test workflow is introduced, document the exact commands here.
 - The checked-in PRD already expands the renderer, runtime, and editor roadmap from `docs/root1/discription.md`. Prefer updating that PRD rather than inventing parallel plans.
@@ -27,7 +22,7 @@
 - Runtime ownership and playback model: `docs/root1/concepts.md`
 - File format reference: `docs/root1/format-spec.md`
 - Fixture mapping and sample asset intent: `docs/root1/fixtures.md`
-- Ralph loop/operator notes: `docs/root1/ralph-loop.md`
+- Archived Ralph loop/operator record: `docs/root1/ralph-loop.md`
 
 ## Current Validation
 
@@ -41,6 +36,7 @@
 - Documentation build (requires Doxygen on `PATH`): `cmake --build build --target marrow_docs`
 - Release benchmark configure: `cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release`
 - Release benchmark build: `cmake --build build-bench --target marrow_benchmark`
+- Parameter/deformer benchmark: `./build-bench/marrow_benchmark --parameter-deformers --skeletons 200 --frames 240`
 - Runtime math unit tests: `./build/marrow_unit_tests`
 - Stress harness benchmark (100 synthetic medium skeletons by default): `./build-bench/marrow_benchmark`
 - Constraint performance acceptance benchmark: `./build-bench/marrow_benchmark --frames 240 --samples 5`
@@ -63,17 +59,17 @@
 - Partial constraint dirty-skip benchmark: `./build-bench/marrow_benchmark --skeletons 200 --constraint-drive partial`
 - Release 60fps target validation for 200 medium skeletons: `./build-bench/marrow_benchmark --skeletons 200`
 - Benchmark timing note: run `marrow_benchmark` commands without concurrent build/test workloads; parallel renderer/test activity can perturb the profiler-overhead guard.
-- Current validated 200-skeleton release metrics on this host: `frame_ms=3.99`, `score=100`, `animation_us=1.60`, `transform_us=0.01`, `skinning_us=0.13`, `constraint_us=14.11`, `render_us=0.00`, `max_skeletons_60fps=835.31`
+- Current validated 200-skeleton release metrics on this host: `frame_ms=4.45`, `score=100`, `animation_us=1.98`, `transform_us=0.07`, `skinning_us=1.17`, `constraint_us=15.12`, `render_us=0.00`, `max_skeletons_60fps=749.03`
 - 200-skeleton before/after comparison (original profiling baseline from the MAR-099 story brief vs the current validated release run on this host):
 
 | Metric | Original profiling | Current validated | Target | Status |
 | --- | ---: | ---: | ---: | --- |
-| Animation us/skeleton | 81.00 | 1.54 | <30.00 | PASS |
-| Skinning us/skeleton | 79.00 | 0.05 | <5.00 | PASS |
-| Constraint us/skeleton | 56.00 | 14.05 | <25.00 | PASS |
+| Animation us/skeleton | 81.00 | 1.98 | <30.00 | PASS |
+| Skinning us/skeleton | 79.00 | 1.17 | <5.00 | PASS |
+| Constraint us/skeleton | 56.00 | 15.12 | <25.00 | PASS |
 | Render us/skeleton | 12.00 | 0.00 | <12.00 | PASS |
-| Transform us/skeleton | 4.00 | 0.00 | <4.00 | PASS |
-| Total us/skeleton | ~232.00 | ~15.64 | <76.00 | PASS |
+| Transform us/skeleton | 4.00 | 0.07 | <4.00 | PASS |
+| Total us/skeleton | ~232.00 | ~18.34 | <76.00 | PASS |
 
 - Current validated clip-stack stress metrics on this host: `clips=1`, `break_clip=150.00`, `skinning_us=1.10`, `frame_ms=5.65`, `score=100`
 - SoA/SIMD bone propagation benchmark: `./build-bench/marrow_benchmark --simd-propagation --bones 1024`
@@ -120,6 +116,8 @@
 - Sokol shader regeneration on supported host platforms: `cmake --build build --target marrow_renderer_shaders`
 - Editor project load + undo/redo validation: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Editor project creation validation: `./build/marrow_project_smoke --create /tmp/player_idle.marrow`
+- Parameter project/runtime/preview/export validation: `./build/marrow_parameter_project_smoke assets/fixtures/parameter_face_basic.marrow`
+- Parameter JSON vs binary comparison: `./build/marrow_inspect --compare /tmp/marrow_parameter_face_basic.mbin /tmp/marrow_parameter_face_basic.mskl`
 - Editor runtime export validation for transform, deform, draw-order, event, and constraint edits: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/player_idle_project_export.mskl`
 - Editor runtime asset bundle export validation with optional binary output: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/player_idle_project_export.mskl --export-binary /tmp/player_idle_project_export.mbin`
 - Editor atlas packer validation from 24 individual sprite PNGs through runtime and renderer load: `./build/marrow_atlas_packer_smoke`
@@ -133,11 +131,13 @@
   1. Start Maroow with agent port: `./build/marrow_editor_shell --agent-port 9876`
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
-- MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py`
-- Editing P0 agent registry validation (49 operations, including animation CRUD and atomic retime): `./build/marrow_agent_dispatch_smoke`
+- MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
+- Agent registry validation (55 operations, including parameter authoring): `./build/marrow_agent_dispatch_smoke`
+- Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
 - Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, draw-order, event, state-preview, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed GLFW startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
 - MAR-119 E2E export round-trip: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin`
@@ -157,12 +157,50 @@
 - Imported Spine atlas second-page fixture inspection: `python3 -m json.tool assets/fixtures/spine_import_sample_fx_page.matl > /dev/null`
 - Fixture atlas inspection: `python3 -m json.tool assets/fixtures/player_idle.matl > /dev/null`
 - Fixture editor project inspection: `python3 -m json.tool assets/fixtures/player_idle.marrow > /dev/null`
+- Parameter face fixture inspection: `python3 -m json.tool assets/fixtures/parameter_face_basic.mskl > /dev/null`
+- Parameter project fixture inspection: `python3 -m json.tool assets/fixtures/parameter_face_basic.marrow > /dev/null`
+- Parameter deformer fixture inspection: `python3 -m json.tool assets/fixtures/parameter_deformer_grid.mskl > /dev/null`
+- Parameter expression/lip-sync fixture inspection: `python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/null`
+- ArtPath fixture inspection: `python3 -m json.tool assets/fixtures/art_path_stroke.mskl > /dev/null`
+- Parameter face renderer preparation: `./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_face_basic.mskl assets/fixtures/parameter_face_basic.matl`
+- Parameter deformer renderer preparation: `./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_deformer_grid.mskl assets/fixtures/parameter_face_basic.matl`
+- Atlas-free ArtPath renderer preparation: `./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl`
 - Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation, clipping-mask propagation, sequence frame selection, GPU-skinned weighted-mesh draw preparation, animated slot presentation, slot blend modes, straight-alpha/PMA two-color tint propagation, and the single-color shader fast path from the checked-in fixtures
-- To run the full autonomous loop with Codex against the expanded plan: `ralph build 100`
+
+## MAR-122–128 Parameter Modeling Validation Results
+
+Validated 2026-07-16. MAR-121 remains a tracking tombstone integrated into MAR-122; the complete MAR-122–128 runtime, renderer, project/editor, and Agent/MCP parameter-modeling checkpoint now passes.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Runtime parameters and shapes | Finite/raw-direct/default/discrete/clamp/revision rules, post-composition normalization, 1D endpoint/linear shapes, linked/weighted mesh and animation-FFD separation | PASS |
+| Deformers and caching | Bilinear warp, rotation pivot/influence, one-level chains, cycle/depth/ambiguity rejection, dependency bitsets, affected-slot cache updates | PASS |
+| ArtPath renderer | Deterministic cap/join tessellation and scale-aware bounds, root-overlay ordering, solid-white triangle path, atlas-free preparation and cached missing-atlas guard | PASS |
+| Expression and lip sync | Priority/activation order, additive/override, fade/restore/hold, amplitude/phoneme, attack/release/smoothing | PASS |
+| Project and editor | Lossless optional parameter model, atomic runtime rebuild/rollback, preview preserve/prune/default, Parameter mode, CRUD, capture/replace and lattice/pivot gestures | PASS |
+| Agent/MCP | Exact 55-operation C++/Python parity, dry-run invariants, mutation/undo/rebuild, keyform collision policy and parameter socket E2E | PASS |
+| Compatibility and performance | `.mskl` v1, `.mbin` v2 and C ABI v1 retained; old assets use an empty model; 200-skeleton acceptance and separate parameter/deformer metrics pass | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build` → configured successfully
+- `cmake --build build -j4` → all targets built
+- `ctest --test-dir build --output-on-failure` → 11/11 passed
+- `ctest --test-dir build --output-on-failure -L runtime` → 4/4 passed
+- `ctest --test-dir build --output-on-failure -L editor` → 5/5 passed
+- `./build/marrow_unit_tests` → 29 named cases passed
+- `./build/marrow_parameter_project_smoke` → preview/undo/rollback/save/reload and complete JSON/binary parameter model passed
+- `./build/marrow_inspect --compare /tmp/marrow_parameter_face_basic.mbin /tmp/marrow_parameter_face_basic.mskl` → all seven optional parameter roots match
+- `./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl` → two stroke commands and exact tessellation/bounds guardrails passed
+- `./build/marrow_agent_dispatch_smoke` → all 55 registry operations and parameter dry/live/undo paths passed
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py` and `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only` → both socket E2E paths passed
+- `./build-bench/marrow_benchmark --skeletons 200` → `frame_ms=4.45`, `score=100`, `max_skeletons_60fps=749.03`
+- `./build-bench/marrow_benchmark --parameter-deformers --skeletons 200 --frames 240` → `parameter_us=0.07`, `deformer_us=0.51`
+- `git diff --check` → passed
 
 ## MAR-141–153 Editing P0 Validation Results
 
-Validated 2026-07-12. The imported-rig authoring P0 is complete; MAR-121 is the next open product story.
+Validated 2026-07-12. This table records the earlier imported-rig authoring P0 checkpoint; the later MAR-122–128 parameter-modeling validation is recorded above.
 
 | Slice | Verification | Result |
 | --- | --- | --- |
@@ -170,7 +208,7 @@ Validated 2026-07-12. The imported-rig authoring P0 is complete; MAR-121 is the 
 | Stable viewport + move gizmo | Camera inverse/cursor zoom/Fit plus root, transformed child, IK target, singular-parent cancel, one-drag undo/redo | PASS |
 | Slot lanes + dopesheet | Color/attachment add/edit/remove, stable same-time identities, exact-playhead remove, box/toggle selection, multi-key retime, typed clipboard and compatible-lane paste | PASS |
 | Animation catalog | Ordered `.marrow.animation_edits`, create/duplicate/rename/delete UI and agent operations, unknown-family preservation, atomic queue/preview cascade | PASS |
-| Agent/MCP parity | C++ registry and Python MCP facade expose the same 49 operations; all registry operations and five additive P0 operations are covered | PASS |
+| Agent/MCP parity | At this historical P0 checkpoint, C++ and Python exposed 49 matching operations; MAR-128 later raises the current total to 55 as recorded above | PASS |
 | End to end | Base-only auto-key → retime → undo/redo → save/reload → JSON/quantized binary export and comparison | PASS |
 
 Validated commands and outputs:
@@ -178,7 +216,7 @@ Validated commands and outputs:
 - `cmake --build build -j4` → all targets built
 - `ctest --test-dir build --output-on-failure` → 7/7 passed
 - `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` → P0 E2E passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`
-- `./build/marrow_agent_dispatch_smoke` → all 49 operations passed
+- Historical `./build/marrow_agent_dispatch_smoke` result → 49 operations passed; the current MAR-128 result is 55/55 above
 - `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` + `tools/mcp/venv/bin/python tools/mcp/test_client.py` → MCP/socket E2E passed
 - `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5` → 5 frames rendered with viewport/timeline/catalog P0 smokes
 - `./build/marrow_renderer_sample --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl` → renderer preparation guardrail passed
@@ -186,7 +224,7 @@ Validated commands and outputs:
 
 ## Runtime and Renderer Unit Cases
 
-`./build/marrow_unit_tests` currently reports these 24 named cases (validated 2026-07-12):
+`./build/marrow_unit_tests` currently reports these 29 named cases (validated 2026-07-16):
 
 - `Interpolation Edge Cases`
 - `Constraint Fast Math Approximations`
@@ -210,6 +248,11 @@ Validated commands and outputs:
 - `Dynamic Mesh Cache Static Payload And Deform Updates`
 - `Dynamic Mesh Clipping Uses Stencil Only`
 - `PreparedScene Cache Dirty Updates`
+- `Parameter Definitions And Composition`
+- `Parameter State Transition Semantics`
+- `Parameter Shape Final Offsets`
+- `Parameter Deformer And ArtPath Evaluation`
+- `Parameter Loader Validation`
 - `Binary Key Quantization And Reduction`
 - `Runtime Profiler Frame`
 
@@ -230,7 +273,7 @@ Validated 2026-04-11. All acceptance criteria pass through headless smoke tests 
 | AC9 | Documentation in AGENTS.md | This section | PASS |
 
 Validated test commands and outputs:
-- `./build/marrow_unit_tests` → 24 named cases passed (current executable; revalidated 2026-07-12)
+- `./build/marrow_unit_tests` → 29 named cases passed (current executable; revalidated 2026-07-16)
 - `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5` → 5 frames rendered
 - `./build/marrow_renderer_sample --auto-close 2` → all blend/clip/mesh/batch validations passed
 - `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin` → export + undo/redo validated

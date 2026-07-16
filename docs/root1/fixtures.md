@@ -33,19 +33,39 @@ These fixtures turn the format examples in [docs/root1/discription.md](discripti
 - `assets/fixtures/psd_import_sample.psd`
 - `assets/fixtures/psd_import_sample_reimport.psd`
 
-## Planned parameter/deformer fixtures
+## Validated parameter/deformer fixtures (MAR-122~128)
 
-The MAR-120+ parameter modeling track should add these fixtures without changing `player_idle.*` unless a story explicitly requires it:
+MAR-121 is integrated into MAR-122. The following MAR-122~128 acceptance fixtures were validated on 2026-07-16 without changing `player_idle.*`.
 
-- `assets/fixtures/parameter_face_basic.mskl`: minimal bones/slots plus `parameters`, `parameterGroups`, and a 1D mouth-open `parameterShapes` payload.
-- `assets/fixtures/parameter_face_basic.mbin`: binary round-trip of `parameter_face_basic.mskl`.
-- `assets/fixtures/parameter_face_basic.matl`: minimal atlas metadata for the face/mouth regions.
-- `assets/fixtures/parameter_face_basic.marrow`: `.marrow.parameter_model` authoring source used by project export validation.
-- `assets/fixtures/parameter_deformer_grid.mskl`: 2D face-angle parameter fixture for warp-deformer bilinear keyform evaluation.
-- `assets/fixtures/parameter_expression_lipsync.mskl`: expression stack and lip-sync mapping fixture.
-- `assets/fixtures/art_path_stroke.mskl`: atlas-free renderable stroke fixture.
+- `assets/fixtures/parameter_face_basic.mskl`: minimal bones/slots, continuous/discrete parameter semantics, groups, animation FFD, and 1D mouth-open shape composition.
+- `/tmp/marrow_parameter_face_basic.mbin` (generated): v2 generic-payload round-trip of the exported comprehensive parameter project; no parameter-specific binary section.
+- `assets/fixtures/parameter_face_basic.matl`: minimal atlas metadata for the face/mouth mesh.
+- `assets/fixtures/parameter_face_basic.marrow`: optional/lossless `.marrow.parameter_model` source used by project export and unknown-additive-field validation.
+- `assets/fixtures/parameter_deformer_grid.mskl`: 2D Cartesian warp, rotation pivot/influence, nesting, rejection, and dirty-cache validation.
+- `assets/fixtures/parameter_expression_lipsync.mskl`: direct/final separation, expression priority/fade/reset, amplitude/phoneme mapping, and filter validation.
+- `assets/fixtures/art_path_stroke.mskl`: atlas-free skeleton-local stroke, keyform, cap/join tessellation, and bounds validation.
 
-These fixtures should prove optional-empty compatibility first: existing runtime fixtures omit the new sections and must continue to load as an empty parameter model.
+These fixtures must prove optional-empty compatibility first: existing runtime fixtures omit the new sections and continue to load as an empty parameter model.
+
+### Validated parameter checkpoint commands
+
+These commands are recorded with their 2026-07-16 results in `AGENTS.md`:
+
+```bash
+python3 -m json.tool assets/fixtures/parameter_face_basic.mskl > /dev/null
+python3 -m json.tool assets/fixtures/parameter_face_basic.marrow > /dev/null
+python3 -m json.tool assets/fixtures/parameter_deformer_grid.mskl > /dev/null
+python3 -m json.tool assets/fixtures/art_path_stroke.mskl > /dev/null
+python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/null
+./build/marrow_inspect assets/fixtures/parameter_face_basic.mskl
+./build/marrow_parameter_project_smoke assets/fixtures/parameter_face_basic.marrow
+./build/marrow_inspect --compare /tmp/marrow_parameter_face_basic.mbin /tmp/marrow_parameter_face_basic.mskl
+./build/marrow_fixture_smoke assets/fixtures/parameter_face_basic.mskl assets/fixtures/parameter_face_basic.matl
+./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_face_basic.mskl assets/fixtures/parameter_face_basic.matl
+./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl
+./build-bench/marrow_benchmark --skeletons 200
+./build-bench/marrow_benchmark --parameter-deformers --skeletons 200 --frames 240
+```
 
 ## Mapping to `docs/root1/discription.md`
 
@@ -241,8 +261,8 @@ Why this is the preferred contributor flow:
   - the `gravity` and `wind` vectors stay non-zero so the runtime can preserve and step environmental force metadata alongside the spring parameters during the numeric secondary-motion test.
 - The fixture keeps a single dummy slot and empty animation because the loader still requires `slots` and `animations`, but the validation focus is the parsed physics metadata plus the numeric world-space motion over repeated simulation steps.
 
-## Intent for future stories
+## Intent for later milestones
 
 - Treat these files as the default parser fixtures unless a later story explicitly expands the format.
 - When the `.matl` format is formalized, update this document in the same change so the fixture-to-spec mapping stays explicit.
-- When parameter/deformer stories land, add the matching fixture validation command to AGENTS.md in the same story that introduces the fixture.
+- Keep the MAR-122~128 commands and measured results synchronized with `AGENTS.md` if these fixtures change.

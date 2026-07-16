@@ -87,7 +87,8 @@ SkeletonData::SkeletonData(
     std::vector<AnimationData> animations,
     std::vector<SkinData> skins,
     double default_mix_duration,
-    std::vector<AnimationMixDefinition> mix_definitions)
+    std::vector<AnimationMixDefinition> mix_definitions,
+    ParameterModelDefinitions parameter_model)
     : info_(std::move(info)),
       bones_(std::move(bones)),
       ik_constraints_(std::move(ik_constraints)),
@@ -100,7 +101,8 @@ SkeletonData::SkeletonData(
       skins_(std::move(skins)),
       default_skin_index_(detail::find_skin_index(skins_, "default")),
       default_mix_duration_(default_mix_duration),
-      mix_definitions_(std::move(mix_definitions)) {
+      mix_definitions_(std::move(mix_definitions)),
+      parameter_model_(std::move(parameter_model)) {
     detail::reorder_topologically(
         &bones_,
         &ik_constraints_,
@@ -120,6 +122,7 @@ SkeletonData::SkeletonData(
     bone_subtree_word_masks_ =
         build_bone_subtree_word_masks(children_map_, bone_subtree_word_count_);
     bone_tip_local_vectors_ = build_bone_tip_local_vectors(bones_, children_map_);
+    initialize_parameter_model();
 }
 
 const SkeletonInfo& SkeletonData::info() const {
@@ -305,6 +308,19 @@ Skeleton::Skeleton(std::shared_ptr<const SkeletonData> data)
     bone_poses_.resize(data_->bones().size());
     slot_states_.resize(data_->slots().size());
     mesh_deform_states_.resize(data_->slots().size());
+    direct_parameter_values_.resize(data_->parameters().size());
+    parameter_values_.resize(data_->parameters().size());
+    parameter_value_revisions_.resize(data_->parameters().size(), 0U);
+    for (std::size_t index = 0; index < data_->parameters().size(); ++index) {
+        direct_parameter_values_[index] = data_->parameters()[index].default_value;
+        const double value = normalize_parameter_value(
+            index,
+            data_->parameters()[index].default_value);
+        parameter_values_[index] = value;
+    }
+    final_mesh_offset_caches_.resize(data_->slots().size());
+    art_path_evaluation_caches_.resize(data_->art_paths().size());
+    evaluated_art_paths_.resize(data_->art_paths().size());
     draw_order_.resize(data_->slots().size());
     physics_constraint_states_.resize(data_->physics_constraints().size());
 

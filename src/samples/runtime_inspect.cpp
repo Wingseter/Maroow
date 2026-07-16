@@ -179,7 +179,14 @@ std::string summarize_runtime(
            << " ik=" << skeleton_data.ik_constraints().size()
            << " path=" << skeleton_data.path_constraints().size()
            << " transform=" << skeleton_data.transform_constraints().size()
-           << " physics=" << skeleton_data.physics_constraints().size() << '\n'
+           << " physics=" << skeleton_data.physics_constraints().size()
+           << " parameters=" << skeleton_data.parameters().size()
+           << " parameter_groups=" << skeleton_data.parameter_groups().size()
+           << " parameter_shapes=" << skeleton_data.parameter_shapes().size()
+           << " parameter_deformers=" << skeleton_data.parameter_deformers().size()
+           << " art_paths=" << skeleton_data.art_paths().size()
+           << " expressions=" << skeleton_data.expressions().size()
+           << " lip_mappings=" << skeleton_data.lip_sync().mappings.size() << '\n'
            << "Animations: " << join_or_none(animation_names) << '\n'
            << "Skins: " << join_or_none(skin_names) << '\n'
            << "Active skins: " << join_or_none(active_skin_names);

@@ -1,0 +1,110 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "parameter_deformer_grid",
+    "width": 128,
+    "height": 128
+  },
+  "bones": [
+    {
+      "name": "root"
+    }
+  ],
+  "slots": [
+    {
+      "name": "face",
+      "bone": "root",
+      "attachment": "face_mesh"
+    }
+  ],
+  "skins": {
+    "default": {
+      "face": {
+        "attachment": "face_mesh",
+        "type": "mesh",
+        "region": "face",
+        "vertices": [-48, -48, 48, -48, 48, 48, -48, 48],
+        "triangles": [0, 1, 2, 2, 3, 0],
+        "uvs": [0, 0, 1, 0, 1, 1, 0, 1],
+        "weights": [
+          [{"bone": "root", "x": -48, "y": -48, "weight": 1}],
+          [{"bone": "root", "x": 48, "y": -48, "weight": 1}],
+          [{"bone": "root", "x": 48, "y": 48, "weight": 1}],
+          [{"bone": "root", "x": -48, "y": 48, "weight": 1}]
+        ]
+      }
+    }
+  },
+  "animations": {
+    "idle": {}
+  },
+  "parameters": [
+    {
+      "id": "face.angle_x",
+      "name": "Face Angle X",
+      "min": -1,
+      "max": 1,
+      "default": 0,
+      "type": "continuous",
+      "clamp": true
+    },
+    {
+      "id": "face.angle_y",
+      "name": "Face Angle Y",
+      "min": -1,
+      "max": 1,
+      "default": 0,
+      "type": "continuous",
+      "clamp": true
+    },
+    {
+      "id": "face.roll",
+      "name": "Face Roll",
+      "min": -30,
+      "max": 30,
+      "default": 0,
+      "type": "continuous",
+      "clamp": true,
+      "units": "degrees"
+    }
+  ],
+  "parameterDeformers": [
+    {
+      "id": "face.warp",
+      "name": "Face Warp",
+      "kind": "warp",
+      "target_slots": [],
+      "parameter_bindings": [
+        {"parameter": "face.angle_x", "axis": "x"},
+        {"parameter": "face.angle_y", "axis": "y"}
+      ],
+      "grid_cols": 2,
+      "grid_rows": 2,
+      "control_points": [-48, -48, 48, -48, -48, 48, 48, 48],
+      "keyforms": [
+        {"x": -1, "y": -1, "control_points": [-52, -44, 44, -52, -48, 48, 48, 48]},
+        {"x": 1, "y": -1, "control_points": [-44, -52, 52, -44, -48, 48, 48, 48]},
+        {"x": -1, "y": 1, "control_points": [-48, -48, 48, -48, -52, 44, 44, 52]},
+        {"x": 1, "y": 1, "control_points": [-48, -48, 48, -48, -44, 52, 52, 44]}
+      ]
+    },
+    {
+      "id": "face.roll.deformer",
+      "name": "Face Roll",
+      "kind": "rotation",
+      "parent": "face.warp",
+      "target_slots": ["face"],
+      "parameter_bindings": [
+        {"parameter": "face.roll", "axis": "angle"}
+      ],
+      "pivot": [0, 0],
+      "influence": 0.75,
+      "keyforms": [
+        {"value": -30, "angle": -20},
+        {"value": 0, "angle": 0},
+        {"value": 30, "angle": 20}
+      ]
+    }
+  ]
+}

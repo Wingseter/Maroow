@@ -142,6 +142,9 @@ set(MARROW_RUNTIME_SOURCES
     src/runtime/binary.cpp
     src/runtime/profiler.cpp
     src/runtime/module.cpp
+    src/runtime/parameter_model.cpp
+    src/runtime/parameter_parse.cpp
+    src/runtime/parameter_state.cpp
     src/runtime/atlas.cpp
     src/runtime/json.cpp
     src/runtime/skeleton.cpp
@@ -287,12 +290,14 @@ add_library(marrow_editor STATIC
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
     src/editor/session.cpp
     src/editor/agent_dispatch.cpp
     src/editor/agent_handlers_inspection.cpp
     src/editor/agent_handlers_editing.cpp
     src/editor/agent_handlers_constraints.cpp
+    src/editor/agent_handlers_parameters.cpp
     src/editor/agent_handlers_management.cpp
 )
 
@@ -457,6 +462,15 @@ target_link_libraries(marrow_project_smoke
         marrow_editor
 )
 
+add_executable(marrow_parameter_project_smoke
+    src/samples/parameter_project_smoke.cpp
+)
+
+target_link_libraries(marrow_parameter_project_smoke
+    PRIVATE
+        marrow_editor
+)
+
 add_executable(marrow_atlas_packer_smoke
     src/samples/atlas_packer_smoke.cpp
 )
@@ -503,6 +517,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_weight_paint.cpp
     src/editor/shell_viewport_ui.cpp
     src/editor/shell_project_panels.cpp
+    src/editor/shell_parameters.cpp
     src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
@@ -615,6 +630,52 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.project_smoke PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;project;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.parameter_project_smoke
+        COMMAND marrow_parameter_project_smoke
+            assets/fixtures/parameter_face_basic.marrow
+    )
+    set_tests_properties(marrow.parameter_project_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;editor;parameter;project;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.parameter_editor_shell_smoke
+        COMMAND marrow_editor_shell
+            --project assets/fixtures/parameter_face_basic.marrow
+            --auto-close 2
+    )
+    set_tests_properties(marrow.parameter_editor_shell_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;parameter;shell;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.art_path_renderer_smoke
+        COMMAND marrow_renderer_sample
+            --skip-render
+            --no-atlas
+            assets/fixtures/art_path_stroke.mskl
+    )
+    set_tests_properties(marrow.art_path_renderer_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;renderer;parameter;art-path;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.renderer_missing_atlas_guard
+        COMMAND marrow_renderer_sample
+            --skip-render
+            --no-atlas
+            assets/fixtures/parameter_face_basic.mskl
+    )
+    set_tests_properties(marrow.renderer_missing_atlas_guard PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;parameter;guardrail;noninteractive"
+        WILL_FAIL TRUE
     )
 
     add_test(

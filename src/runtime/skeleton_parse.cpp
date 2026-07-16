@@ -5703,6 +5703,17 @@ SkeletonDataResult load_skeleton_data(const json::Document& document) {
         return result;
     }
 
+    ParameterModelDefinitions parameter_model;
+    if (const auto error = detail::parse_parameter_model(
+            document,
+            root,
+            slots,
+            skins,
+            &parameter_model)) {
+        result.error = *error;
+        return result;
+    }
+
     std::vector<PathConstraintData> path_constraints;
     if (const auto error = detail::parse_path_constraints(
             document,
@@ -5789,7 +5800,8 @@ SkeletonDataResult load_skeleton_data(const json::Document& document) {
             std::move(animations),
             std::move(skins),
             default_mix_duration,
-            std::move(mix_definitions));
+            std::move(mix_definitions),
+            std::move(parameter_model));
     } catch (const std::invalid_argument& error) {
         result.error = detail::validation_error(document, bones_location, "$.bones", error.what());
     }

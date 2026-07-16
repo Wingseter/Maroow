@@ -8,6 +8,7 @@ Marrow splits imported animation content into immutable setup data, mutable inst
 .mskl or .mbin  ->  SkeletonData  ->  Skeleton  ->  PreparedScene / RenderCommandList
                                   \
                                    ->  AnimationState
+                                   ->  ParameterState (MAR-126 implemented)
 
 .matl           ->  AtlasData     -------------------------------------------^
 .marrow         ->  editor-only source that exports .mskl/.mbin + .matl
@@ -23,7 +24,8 @@ It owns:
 - Bone hierarchy and setup-pose transforms.
 - Slots, skins, attachments, constraints, events, and animations.
 - Mix definitions used by `AnimationState`.
-- Optional parameter, parameter group, parameter shape, deformer, art path, expression, and lip-sync definitions once the MAR-120+ parameter track lands.
+- Optional parameter, parameter group, parameter shape, deformer, art path, expression, and lip-sync definitions implemented by MAR-122~128. Absent roots behave as an empty model.
+- Derived parameter id lookup, dependency bitsets, affected-slot lookup, and deformer graph indices; these caches are not serialized.
 
 Why it exists:
 
@@ -48,7 +50,7 @@ It owns:
 - Current mesh deform state.
 - Current draw order.
 - Skin selection, attachment playback time, visibility, and update-throttling state.
-- Per-instance parameter values, parameter revision state, and evaluated parameter/deformer caches once the MAR-120+ parameter track lands.
+- Separate per-instance direct and final parameter buffers, parameter revision/dirty state, and evaluated parameter/deformer final-offset caches implemented by MAR-122~128.
 
 Use a `Skeleton` when you need one character instance in the world. If you spawn ten enemies that all use the same rig, you normally create ten `Skeleton` objects that all point at one shared `SkeletonData`.
 
@@ -71,7 +73,20 @@ It owns:
 
 `AnimationState` does not store bone transforms itself. Instead, it evaluates timelines against `SkeletonData` and applies the results onto a `Skeleton`.
 
-Parameter modeling follows the same ownership rule: `SkeletonData` stores immutable definitions, while `Skeleton` owns the mutable parameter value buffer. Expression and lip-sync state are modeled separately from timeline playback so direct runtime inputs, lip-sync inputs, and expression presets can be composed before final clamping.
+Parameter modeling follows the same ownership rule: `SkeletonData` stores immutable definitions, while `Skeleton` owns mutable direct and final parameter buffers. `set_parameter_value()` preserves finite raw direct preview input, including fractional discrete and out-of-range clamped input; `parameter_values()` exposes the final value after composition, discrete rounding, and optional clamping. `AnimationState` and the C ABI do not own parameter state.
+
+`ParameterState` is separate from timeline playback. It owns expression activation order, amplitude/phoneme input, and attack/release/smoothing filter state. Its active contract is:
+
+```cpp
+parameter_state.update(delta_seconds);
+parameter_state.apply(skeleton);
+```
+
+Composition order is fixed:
+
+```text
+direct preview -> lip mapping override -> expressions by priority/activation order -> discrete round -> optional clamp
+```
 
 Typical per-frame flow:
 
@@ -113,13 +128,15 @@ The renderer layer does not load animation files directly. It consumes the curre
 - Clip attachments and ordered clip/draw events.
 - Bone palette data and atlas presentation metadata.
 
-When parameter/deformer support is enabled, preparation consumes the final combined mesh offsets and prepared stroke geometry. The fixed evaluation order is:
+The implemented parameter contract preserves animation FFD as a separately observable layer and gives renderer preparation a final attachment-local accessor. The fixed mesh order is:
 
 ```text
-setup -> skin/linked mesh -> animation FFD -> parameter shapes/deformers -> prepared render geometry
+setup/linked-mesh resolution -> animation FFD -> normalized_override -> additive_clamped -> deformer -> GPU skinning
 ```
 
-Animation FFD offsets stay observable on their own for existing runtime tests and linked-mesh behavior. Parameter-driven shape/deformer output is a later layer used for final mesh evaluation and renderer preparation.
+`current_mesh_vertex_offsets(slot)` stays animation-FFD-only. `current_final_mesh_vertex_offsets(slot)` supplies the attachment-local result used for mesh preparation and the existing weighted GPU skinning path.
+
+ArtPaths are skeleton-local root overlays, distinct from constraint paths. Preparation applies the instance's global x/y scale (including mirroring), then appends them in JSON declaration order after slot draw and clipping events. Stroke-only skeletons use the atlas-free `prepare_setup_pose_scene(skeleton)` overload; a document with atlas-backed attachments still requires atlas data, including after a cached attachment or skin change.
 
 ### `RenderCommandList`
 
@@ -143,8 +160,11 @@ It keeps:
 - Authoring-only viewport and note state.
 - Unexported timeline, mesh-weight, constraint, and atlas-pack edits.
 - Optional `parameter_model` source data for parameters, groups, blend shapes, deformers, art paths, expressions, and lip-sync mappings.
+- Lossless unknown additive fields inside `parameter_model`; a completely empty model is omitted on save.
 
 The editor export step merges that authoring data into runtime-ready `.mskl` or `.mbin` plus `.matl` outputs.
+
+Direct parameter preview is not authoring source. Slider/numeric preview and agent `parameter.set` are undoable but non-dirty and are never serialized or exported.
 
 ## Rule of thumb
 

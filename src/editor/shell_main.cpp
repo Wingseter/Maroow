@@ -28,6 +28,7 @@
 #include "shell_agent_panel.hpp"
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
+#include "shell_parameters.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
@@ -523,6 +524,10 @@ void ensure_default_dock_layout(
     ImGui::DockBuilderDockWindow(kPropertiesWindowTitle, dock_left_bottom_id);
     ImGui::DockBuilderDockWindow(kRuntimeAssetsWindowTitle, dock_left_bottom_id);
     ImGui::DockBuilderDockWindow(kConstraintsWindowTitle, dock_left_bottom_id);
+    ImGui::DockBuilderDockWindow(kParametersWindowTitle, dock_right_id);
+    ImGui::DockBuilderDockWindow(kParameterDeformersWindowTitle, dock_right_id);
+    ImGui::DockBuilderDockWindow(kExpressionsWindowTitle, dock_right_id);
+    ImGui::DockBuilderDockWindow(kLipSyncWindowTitle, dock_right_id);
     if (state->show_agent_panel) {
         ImGui::DockBuilderDockWindow(kAgentWindowTitle, dock_right_id);
     }
@@ -532,8 +537,6 @@ void ensure_default_dock_layout(
     state->default_dock_layout_initialized = true;
 }
 
-// 0 = setup pose, 1 = animation, 2 = weight paint. Derived from existing
-// state (no new mode field) so the ModeStrip stays a faithful mirror.
 void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     sync_shell_from_editor_session_if_revised(shell_state);
     ImGui_ImplOpenGL3_NewFrame();
@@ -543,6 +546,10 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
         (void)poll_runtime_asset_changes(shell_state);
     }
     advance_timeline_playback(shell_state, ImGui::GetIO().DeltaTime);
+    if (current_shell_mode(shell_state) == ShellMode::Parameter) {
+        (void)shell_state->session.advance_parameter_state(ImGui::GetIO().DeltaTime);
+        sync_shell_from_editor_session_if_revised(shell_state);
+    }
     handle_project_history_shortcuts(shell_state);
 
     bool reload_requested = false;
@@ -559,6 +566,7 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
         switch (current_shell_mode(shell_state)) {
             case ShellMode::Animation:   wash = t::kModeAnimation; break;
             case ShellMode::WeightPaint: wash = t::kModePaint; break;
+            case ShellMode::Parameter:   wash = t::kModeAnimation; break;
             case ShellMode::Setup:       wash = t::kModeSetup; break;
         }
         if (wash.w > 0.0f) {
@@ -576,6 +584,9 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     draw_hierarchy_window(shell_state);
     draw_viewport_window(shell_state);
     draw_inspector_window(shell_state);
+    if (current_shell_mode(shell_state) == ShellMode::Parameter) {
+        draw_parameter_windows(shell_state);
+    }
     // Agent panel is closed by default; toggling rebuilds the dock layout so
     // the column appears/disappears (no permanent empty slot when closed).
     if (shell_state->show_agent_panel != shell_state->agent_panel_was_open) {
