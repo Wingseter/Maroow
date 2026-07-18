@@ -13,16 +13,16 @@ namespace marrow::editor::shell {
 
 // Shell Core Helpers
 std::optional<std::string_view> selected_bone_name(const ShellState& state) {
-    if (!state.load_result || !state.selected_bone_index.has_value()) {
+    if (!state.load_result || !selected_bone_index(state).has_value()) {
         return std::nullopt;
     }
 
     const auto& bones = state.load_result.skeleton_data->bones();
-    if (*state.selected_bone_index >= bones.size()) {
+    if (*selected_bone_index(state) >= bones.size()) {
         return std::nullopt;
     }
 
-    return bones[*state.selected_bone_index].name;
+    return bones[*selected_bone_index(state)].name;
 }
 
 std::vector<std::string> normalize_preview_skin_names(
@@ -116,8 +116,8 @@ double timeline_preview_duration(const ShellState& state) {
 }
 
 static bool attachment_selection_equal(
-    const std::optional<AttachmentSelection>& left,
-    const std::optional<AttachmentSelection>& right) {
+    const std::optional<PreviewAttachmentSelection>& left,
+    const std::optional<PreviewAttachmentSelection>& right) {
     if (left.has_value() != right.has_value()) {
         return false;
     }
@@ -293,7 +293,7 @@ void sync_shell_from_editor_session(ShellState* state) {
     for (std::size_t slot_index = 0; slot_index < preview.slot_overrides.size(); ++slot_index) {
         const auto& override_value = preview.slot_overrides[slot_index];
         if (override_value.has_value()) {
-            state->preview_slot_overrides[slot_index] = AttachmentSelection{
+            state->preview_slot_overrides[slot_index] = PreviewAttachmentSelection{
                 slot_index,
                 override_value->skin_index,
                 override_value->attachment_name};
@@ -457,17 +457,6 @@ bool reload_project(ShellState* state) {
         return false;
     }
 
-    std::optional<std::string> previous_selection_name;
-    if (const auto selection_name = selected_bone_name(*state)) {
-        previous_selection_name = std::string(*selection_name);
-    }
-    
-    std::optional<std::string> previous_slot_name;
-    if (state->load_result && state->selected_slot_index.has_value() &&
-        *state->selected_slot_index < state->load_result.skeleton_data->slots().size()) {
-        previous_slot_name =
-            state->load_result.skeleton_data->slots()[*state->selected_slot_index].name;
-    }
     const std::string previous_animation_name = state->selected_animation_name;
     const double previous_timeline_time = state->timeline_time_seconds;
     const bool previous_timeline_loop = state->timeline_loop;
@@ -491,12 +480,9 @@ bool reload_project(ShellState* state) {
 
     state->preview_skeleton = nullptr;
     state->animation_state = nullptr;
-    state->selected_bone_index.reset();
-    state->selected_slot_index.reset();
-    state->selected_attachment.reset();
+    state->selection.clear();
     state->selected_timeline_track_id.reset();
     state->timeline_editor = TimelineEditorState{};
-    state->selected_constraint.reset();
     state->preview_skin_names.clear();
     state->preview_slot_overrides.clear();
     state->selected_animation_name.clear();

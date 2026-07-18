@@ -7,10 +7,11 @@
 #include <string_view>
 #include <vector>
 
+#include "marrow/editor/selection.hpp"
+
 namespace marrow::editor::shell {
 
 struct ShellState;
-enum class ConstraintEditKind;
 
 template <typename ConstraintType>
 const ConstraintType* find_named_constraint(
@@ -25,17 +26,17 @@ const ConstraintType* find_named_constraint(
     return iterator == constraints.end() ? nullptr : &(*iterator);
 }
 
-const char* constraint_kind_label(ConstraintEditKind kind);
+const char* constraint_kind_label(ConstraintKind kind);
 void validate_selected_constraint(ShellState* state);
 void select_constraint(
     ShellState* state,
-    ConstraintEditKind kind,
+    ConstraintKind kind,
     std::string_view name,
     std::string_view source,
     bool update_status_message);
 std::string unique_constraint_name(
     const ShellState& state,
-    ConstraintEditKind kind,
+    ConstraintKind kind,
     std::string_view prefix);
 std::optional<std::size_t> ensure_ik_constraint_edit_index(
     ShellState* state,

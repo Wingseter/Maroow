@@ -24,6 +24,7 @@ struct GLFWwindow;
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "session_shell_binding.hpp"
 #include "marrow/renderer/module.hpp"
@@ -157,7 +158,7 @@ struct DockLayoutState {
     int layout_version{0};
 };
 
-struct AttachmentSelection {
+struct PreviewAttachmentSelection {
     std::size_t slot_index{0};
     std::optional<std::size_t> skin_index;
     std::string attachment_name;
@@ -270,18 +271,6 @@ struct TimelineTrackRow {
     std::optional<std::string> deform_attachment_name;
 };
 
-enum class ConstraintEditKind {
-    Ik,
-    Path,
-    Transform,
-    Physics,
-};
-
-struct ConstraintSelection {
-    ConstraintEditKind kind{ConstraintEditKind::Ik};
-    std::string name;
-};
-
 struct ShellState;
 
 struct EditorHistorySnapshot {
@@ -289,7 +278,7 @@ struct EditorHistorySnapshot {
     std::string serialized_project;
     marrow::editor::PreviewState preview_state;
     std::vector<std::string> preview_skin_names;
-    std::vector<std::optional<AttachmentSelection>> preview_slot_overrides;
+    std::vector<std::optional<PreviewAttachmentSelection>> preview_slot_overrides;
     std::uint64_t runtime_revision{0U};
 };
 
@@ -458,13 +447,10 @@ struct ShellState {
     DockLayoutState dock_layout{};
     marrow::runtime::Skeleton* preview_skeleton{nullptr};
     marrow::runtime::AnimationState* animation_state{nullptr};
-    std::optional<std::size_t> selected_bone_index;
-    std::optional<std::size_t> selected_slot_index;
-    std::optional<AttachmentSelection> selected_attachment;
+    marrow::editor::SelectionSet selection;
     std::optional<std::string> selected_timeline_track_id;
-    std::optional<ConstraintSelection> selected_constraint;
     std::vector<std::string> preview_skin_names;
-    std::vector<std::optional<AttachmentSelection>> preview_slot_overrides;
+    std::vector<std::optional<PreviewAttachmentSelection>> preview_slot_overrides;
     std::string selected_animation_name;
     double timeline_time_seconds{0.0};
     bool timeline_loop{true};
@@ -586,7 +572,12 @@ void main() {
 )";
 
 // Shared shell/session helpers.
+std::optional<std::size_t> selected_bone_index(const ShellState& state);
 std::optional<std::string_view> selected_bone_name(const ShellState& state);
+std::optional<std::size_t> selected_slot_index(const ShellState& state);
+std::optional<PreviewAttachmentSelection> selected_attachment(const ShellState& state);
+std::optional<marrow::editor::ConstraintSelection> selected_constraint(
+    const ShellState& state);
 const marrow::runtime::AnimationData* selected_animation(const ShellState& state);
 double selected_animation_duration(const ShellState& state);
 const marrow::runtime::AnimationData* queued_preview_animation(const ShellState& state);

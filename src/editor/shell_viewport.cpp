@@ -1288,14 +1288,14 @@ DebugOverlayGeometry build_debug_overlay_geometry(
 
     const auto slot_selected =
         [&](std::size_t slot_index) {
-            return state.selected_slot_index.has_value() &&
-                *state.selected_slot_index == slot_index;
+            return selected_slot_index(state).has_value() &&
+                *selected_slot_index(state) == slot_index;
         };
     const auto constraint_selected =
-        [&](ConstraintEditKind kind, std::string_view name) {
-            return state.selected_constraint.has_value() &&
-                state.selected_constraint->kind == kind &&
-                state.selected_constraint->name == name;
+        [&](ConstraintKind kind, std::string_view name) {
+            return selected_constraint(state).has_value() &&
+                selected_constraint(state)->kind == kind &&
+                selected_constraint(state)->constraint_name == name;
         };
 
     if (state.viewport.debug_overlay.ik_constraints) {
@@ -1306,7 +1306,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
                 continue;
             }
 
-            const bool selected = constraint_selected(ConstraintEditKind::Ik, constraint.name);
+            const bool selected = constraint_selected(ConstraintKind::Ik, constraint.name);
             const ImU32 primary_color = selected
                 ? IM_COL32(178, 255, 186, 245)
                 : IM_COL32(106, 224, 134, 210);
@@ -1447,7 +1447,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
                 screen_points.push_back(screen_from_world(layout, point.x, point.y));
             }
 
-            const bool selected = constraint_selected(ConstraintEditKind::Path, constraint.name);
+            const bool selected = constraint_selected(ConstraintKind::Path, constraint.name);
             add_debug_polyline_segments(
                 &overlay,
                 screen_points,
@@ -1460,7 +1460,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
 
     if (state.viewport.debug_overlay.physics_constraints) {
         for (const auto& constraint : skeleton.physics_constraints()) {
-            const bool selected = constraint_selected(ConstraintEditKind::Physics, constraint.name);
+            const bool selected = constraint_selected(ConstraintKind::Physics, constraint.name);
             const ImU32 spring_color = selected
                 ? IM_COL32(129, 255, 244, 240)
                 : IM_COL32(88, 214, 203, 210);
@@ -1788,7 +1788,7 @@ void build_viewport_overlay_geometry(
             layout,
             layout.bones,
             layout.render_joint_radius,
-            state.selected_bone_index,
+            selected_bone_index(state),
             hovered_bone,
             IM_COL32(214, 163, 76, 220),
             IM_COL32(111, 117, 125, 180),

@@ -131,17 +131,6 @@ bool reload_runtime_source_assets(ShellState* state) {
         return false;
     }
 
-    std::optional<std::string> previous_selection_name;
-    if (const auto selection_name = selected_bone_name(*state)) {
-        previous_selection_name = std::string(*selection_name);
-    }
-    std::optional<std::string> previous_slot_name;
-    if (state->selected_slot_index.has_value() &&
-        *state->selected_slot_index < state->load_result.skeleton_data->slots().size()) {
-        previous_slot_name =
-            state->load_result.skeleton_data->slots()[*state->selected_slot_index].name;
-    }
-
     const auto document_result = marrow::runtime::load_skeleton_document(
         state->load_result.project->resolved_skeleton_path());
     if (!document_result) {
@@ -187,16 +176,8 @@ bool reload_runtime_source_assets(ShellState* state) {
         return false;
     }
 
-    if (previous_selection_name.has_value()) {
-        state->selected_bone_index =
-            state->load_result.skeleton_data->find_bone_index(*previous_selection_name);
-    }
-    if (previous_slot_name.has_value()) {
-        state->selected_slot_index =
-            state->load_result.skeleton_data->find_slot_index(*previous_slot_name);
-    }
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
+    if (selected_slot_index(*state).has_value()) {
+        sync_attachment_selection_for_slot(state, *selected_slot_index(*state));
     }
     validate_selected_constraint(state);
 

@@ -676,8 +676,7 @@ bool validate_animation_duration_shell_smoke(
         std::cerr << "Animation duration smoke could not stage selection invariants.\n";
         return false;
     }
-    state.selected_bone_index = 0U;
-    state.selected_slot_index = 0U;
+    select_slot(&state, 0U, "Smoke", false);
     state.selected_timeline_track_id = duration_tracks.front().id;
     state.timeline_editor.selected_keys = {
         timeline_key_ref(duration_tracks.front(), 0U)};
@@ -686,8 +685,8 @@ bool validate_animation_duration_shell_smoke(
         marrow::editor::serialize_project(*state.session.project());
     const marrow::editor::PreviewState preview_before_rejection =
         state.session.preview_state();
-    const auto selected_bone_before = state.selected_bone_index;
-    const auto selected_slot_before = state.selected_slot_index;
+    const auto selected_bone_before = selected_bone_index(state);
+    const auto selected_slot_before = selected_slot_index(state);
     const auto selected_track_before = state.selected_timeline_track_id;
     const auto selected_keys_before = state.timeline_editor.selected_keys;
     const std::size_t undo_before = state.session.undo_count();
@@ -704,8 +703,8 @@ bool validate_animation_duration_shell_smoke(
         marrow::editor::serialize_project(*state.session.project()) != before_rejection ||
         !preview_states_equal(
             state.session.preview_state(), preview_before_rejection) ||
-        state.selected_bone_index != selected_bone_before ||
-        state.selected_slot_index != selected_slot_before ||
+        selected_bone_index(state) != selected_bone_before ||
+        selected_slot_index(state) != selected_slot_before ||
         state.selected_timeline_track_id != selected_track_before ||
         state.timeline_editor.selected_keys != selected_keys_before ||
         state.session.undo_count() != undo_before ||
@@ -1025,7 +1024,7 @@ bool validate_viewport_camera_smoke(
                 &camera_state, time, "Viewport gesture smoke", false)) {
             return false;
         }
-        camera_state.selected_bone_index = *bone_index;
+        select_bone(&camera_state, *bone_index, "Smoke", false);
         const auto layout = build_viewport_layout(
             camera_state, canvas_origin, canvas_size);
         if (!layout.has_value() ||
@@ -1093,7 +1092,7 @@ bool validate_viewport_camera_smoke(
     const auto singular_parent =
         camera_state.session.runtime_data()->bones()[*singular_arm].parent_index;
     if (!singular_parent.has_value()) return false;
-    camera_state.selected_bone_index = *singular_arm;
+    select_bone(&camera_state, *singular_arm, "Smoke", false);
     auto& singular_parent_pose =
         camera_state.preview_skeleton->bone_poses()[*singular_parent].local_pose;
     singular_parent_pose.scale_x = 0.0f;
@@ -1524,13 +1523,13 @@ bool validate_viewport_prepared_scene_renderer_smoke(
         return false;
     }
 
-    shell_state.selected_bone_index = *spine_index;
+    select_bone(&shell_state, *spine_index, "Smoke", false);
     shell_state.viewport.debug_overlay.bones = true;
     ViewportGeometryPass overlay_geometry;
     build_viewport_overlay_geometry(
         shell_state,
         *setup_layout,
-        shell_state.selected_bone_index,
+        selected_bone_index(shell_state),
         nullptr,
         &overlay_geometry);
     bool overlay_changed = false;
@@ -1568,7 +1567,7 @@ bool validate_viewport_prepared_scene_renderer_smoke(
         cleanup();
         return false;
     }
-    camera_state.selected_bone_index = *spine_index;
+    select_bone(&camera_state, *spine_index, "Smoke", false);
     camera_state.viewport.debug_overlay.bones = true;
     camera_state.viewport.pan_x = 96.0;
     camera_state.viewport.pan_y = -54.0;
@@ -1587,7 +1586,7 @@ bool validate_viewport_prepared_scene_renderer_smoke(
     build_viewport_overlay_geometry(
         camera_state,
         *panned_layout,
-        camera_state.selected_bone_index,
+        selected_bone_index(camera_state),
         nullptr,
         &panned_overlay_geometry);
     const ImVec2 panned_body_center = screen_from_world(
@@ -2109,6 +2108,184 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     return true;
 }
 
+bool validate_selection_set_shell_smoke(ShellState* state) {
+    if (state == nullptr || !state->load_result || state->load_result.project == nullptr ||
+        state->preview_skeleton == nullptr || state->session.runtime_data() == nullptr) {
+        return false;
+    }
+
+    const auto preview_signature = [](const marrow::runtime::Skeleton& skeleton) {
+        std::ostringstream stream;
+        stream << std::setprecision(std::numeric_limits<double>::max_digits10);
+        for (const auto& bone : skeleton.bone_poses()) {
+            stream << bone.local_pose.x << ',' << bone.local_pose.y << ','
+                   << bone.local_pose.rotation << ',' << bone.local_pose.scale_x << ','
+                   << bone.local_pose.scale_y << ',' << bone.local_pose.shear_x << ','
+                   << bone.local_pose.shear_y << ',' << static_cast<int>(bone.inherit) << ';';
+        }
+        for (const auto& world : skeleton.bone_world_transforms()) {
+            stream << world.a << ',' << world.b << ',' << world.c << ',' << world.d << ','
+                   << world.world_x << ',' << world.world_y << ';';
+        }
+        for (const auto& slot_state : skeleton.slot_states()) {
+            stream << slot_state.attachment_name << ':';
+            if (slot_state.attachment_skin_index.has_value()) {
+                stream << *slot_state.attachment_skin_index;
+            }
+            stream << ':' << slot_state.color.r << ',' << slot_state.color.g << ','
+                   << slot_state.color.b << ',' << slot_state.color.a << ';';
+        }
+        for (const auto& deform : skeleton.mesh_deform_states()) {
+            stream << deform.attachment_name << ':';
+            for (const double offset : deform.vertex_offsets) {
+                stream << offset << ',';
+            }
+            stream << ';';
+        }
+        return stream.str();
+    };
+
+    const std::string project_before =
+        marrow::editor::serialize_project(*state->load_result.project);
+    const EditorHistorySnapshot shell_preview_before = capture_history_snapshot(*state);
+    const std::string runtime_preview_before = preview_signature(*state->preview_skeleton);
+    const auto* runtime_data_before = state->session.runtime_data();
+    const auto* preview_skeleton_before = state->preview_skeleton;
+    const auto* animation_state_before = state->animation_state;
+    const bool session_dirty_before = state->session.dirty();
+    const bool shell_dirty_before = state->project_dirty;
+    const std::size_t undo_before = state->session.undo_count();
+    const std::size_t redo_before = state->session.redo_count();
+    const std::uint64_t project_revision_before = state->session.project_revision();
+    const std::uint64_t runtime_revision_before = state->session.runtime_revision();
+    const std::uint64_t preview_revision_before = state->session.preview_revision();
+
+    const auto& skeleton = *state->load_result.skeleton_data;
+    if (skeleton.bones().empty() || skeleton.slots().empty()) {
+        std::cerr << "SelectionSet shell smoke requires at least one bone and slot.\n";
+        return false;
+    }
+    const std::size_t bone_index = 0U;
+    const std::size_t slot_index = 0U;
+    select_bone(state, bone_index, "SelectionSet smoke", false);
+    if (state->selection.items().size() != 1U ||
+        state->selection.active_bone() == nullptr ||
+        state->selection.active_bone()->bone_name != skeleton.bones()[bone_index].name ||
+        selected_bone_index(*state) != bone_index ||
+        selected_slot_index(*state).has_value() || selected_attachment(*state).has_value() ||
+        selected_constraint(*state).has_value()) {
+        std::cerr << "Bone SelectionSet compatibility resolution failed.\n";
+        return false;
+    }
+
+    select_slot(state, slot_index, "SelectionSet smoke", false);
+    const auto slot_attachment = selected_attachment(*state);
+    if (state->selection.items().size() != 1U ||
+        state->selection.active_slot() == nullptr ||
+        state->selection.active_slot()->slot_name != skeleton.slots()[slot_index].name ||
+        selected_slot_index(*state) != slot_index ||
+        selected_bone_index(*state) != skeleton.slots()[slot_index].bone_index ||
+        !slot_attachment.has_value()) {
+        std::cerr << "Slot SelectionSet compatibility resolution failed.\n";
+        return false;
+    }
+
+    select_attachment(state, slot_attachment, "SelectionSet smoke", false);
+    const auto* named_attachment = state->selection.active_attachment();
+    const auto resolved_attachment = selected_attachment(*state);
+    if (named_attachment == nullptr || !slot_attachment->skin_index.has_value() ||
+        *slot_attachment->skin_index >= skeleton.skins().size() ||
+        named_attachment->slot_name != skeleton.slots()[slot_index].name ||
+        named_attachment->skin_name != skeleton.skins()[*slot_attachment->skin_index].name ||
+        named_attachment->attachment_name != slot_attachment->attachment_name ||
+        !resolved_attachment.has_value() ||
+        resolved_attachment->slot_index != slot_attachment->slot_index ||
+        resolved_attachment->skin_index != slot_attachment->skin_index ||
+        resolved_attachment->attachment_name != slot_attachment->attachment_name ||
+        selected_slot_index(*state) != slot_index ||
+        selected_bone_index(*state) != skeleton.slots()[slot_index].bone_index) {
+        std::cerr << "Attachment SelectionSet name identity resolution failed.\n";
+        return false;
+    }
+
+    std::optional<marrow::editor::ConstraintSelection> constraint_identity;
+    if (!skeleton.ik_constraints().empty()) {
+        constraint_identity = marrow::editor::ConstraintSelection{
+            ConstraintKind::Ik,
+            skeleton.ik_constraints().front().name};
+    } else if (!skeleton.path_constraints().empty()) {
+        constraint_identity = marrow::editor::ConstraintSelection{
+            ConstraintKind::Path,
+            skeleton.path_constraints().front().name};
+    } else if (!skeleton.transform_constraints().empty()) {
+        constraint_identity = marrow::editor::ConstraintSelection{
+            ConstraintKind::Transform,
+            skeleton.transform_constraints().front().name};
+    } else if (!skeleton.physics_constraints().empty()) {
+        constraint_identity = marrow::editor::ConstraintSelection{
+            ConstraintKind::Physics,
+            skeleton.physics_constraints().front().name};
+    }
+    if (!constraint_identity.has_value()) {
+        std::cerr << "SelectionSet shell smoke requires a constraint fixture.\n";
+        return false;
+    }
+
+    select_constraint(
+        state,
+        constraint_identity->kind,
+        constraint_identity->constraint_name,
+        "SelectionSet smoke",
+        false);
+    if (state->selection.items().size() != 1U ||
+        state->selection.active_constraint() == nullptr ||
+        selected_constraint(*state) != constraint_identity ||
+        selected_bone_index(*state).has_value() || selected_slot_index(*state).has_value() ||
+        selected_attachment(*state).has_value()) {
+        std::cerr << "Constraint SelectionSet compatibility resolution failed.\n";
+        return false;
+    }
+
+    const marrow::editor::BoneSelection mixed_bone{skeleton.bones()[bone_index].name};
+    const marrow::editor::SlotSelection mixed_slot{skeleton.slots()[slot_index].name};
+    state->selection.clear();
+    if (!state->selection.add_range(
+            {mixed_bone, *constraint_identity, mixed_slot},
+            mixed_slot) ||
+        selected_slot_index(*state) != slot_index ||
+        selected_bone_index(*state) != skeleton.slots()[slot_index].bone_index ||
+        selected_constraint(*state).has_value()) {
+        std::cerr << "Mixed SelectionSet did not expose only its active slot.\n";
+        return false;
+    }
+    if (!state->selection.add_range({*constraint_identity}, *constraint_identity) ||
+        selected_constraint(*state) != constraint_identity ||
+        selected_bone_index(*state).has_value() || selected_slot_index(*state).has_value()) {
+        std::cerr << "Mixed SelectionSet did not expose only its active constraint.\n";
+        return false;
+    }
+    state->selection.clear();
+
+    if (marrow::editor::serialize_project(*state->load_result.project) != project_before ||
+        !history_snapshots_equal(shell_preview_before, capture_history_snapshot(*state)) ||
+        preview_signature(*state->preview_skeleton) != runtime_preview_before ||
+        state->session.runtime_data() != runtime_data_before ||
+        state->preview_skeleton != preview_skeleton_before ||
+        state->animation_state != animation_state_before ||
+        state->session.dirty() != session_dirty_before ||
+        state->project_dirty != shell_dirty_before ||
+        state->session.undo_count() != undo_before ||
+        state->session.redo_count() != redo_before ||
+        state->session.project_revision() != project_revision_before ||
+        state->session.runtime_revision() != runtime_revision_before ||
+        state->session.preview_revision() != preview_revision_before) {
+        std::cerr << "Transient selection changed project, preview, runtime, history, dirty, or revisions.\n";
+        return false;
+    }
+
+    return true;
+}
+
 int run_headless_smoke(const Options& options) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -2140,6 +2317,10 @@ int run_headless_smoke(const Options& options) {
             &shell_state, options, io);
         ImGui::DestroyContext();
         return passed ? 0 : 1;
+    }
+    if (!validate_selection_set_shell_smoke(&shell_state)) {
+        ImGui::DestroyContext();
+        return 1;
     }
     if (!validate_timeline_p0_authoring_smoke(options.project_path)) {
         ImGui::DestroyContext();
@@ -2389,8 +2570,8 @@ int run_headless_smoke(const Options& options) {
         }
 
         select_bone(&shell_state, *picked_bone, "Viewport", false);
-        if (!shell_state.selected_bone_index.has_value() ||
-            *shell_state.selected_bone_index != *arm_index) {
+        if (!selected_bone_index(shell_state).has_value() ||
+            *selected_bone_index(shell_state) != *arm_index) {
             std::cerr << "Viewport selection did not update the inspector selection state.\n";
             ImGui::DestroyContext();
             return 1;
@@ -2398,8 +2579,8 @@ int run_headless_smoke(const Options& options) {
 
         if (const auto spine_index = shell_state.load_result.skeleton_data->find_bone_index("spine")) {
             select_bone(&shell_state, *spine_index, "Hierarchy", false);
-            if (!shell_state.selected_bone_index.has_value() ||
-                *shell_state.selected_bone_index != *spine_index) {
+            if (!selected_bone_index(shell_state).has_value() ||
+                *selected_bone_index(shell_state) != *spine_index) {
                 std::cerr << "Hierarchy selection did not update the inspector selection state.\n";
                 ImGui::DestroyContext();
                 return 1;
@@ -2808,7 +2989,7 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
-    if (shell_state.selected_bone_index != spine_index) {
+    if (selected_bone_index(shell_state) != spine_index) {
         std::cerr << "Timeline track focus did not synchronize bone selection.\n";
         ImGui::DestroyContext();
         return 1;
@@ -3234,7 +3415,7 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
         if (!focus_timeline_track(&shell_state, *deform_track, 0.5, "Smoke", false) ||
-            shell_state.selected_slot_index != body_slot_index) {
+            selected_slot_index(shell_state) != body_slot_index) {
             std::cerr << "Timeline deform track focus did not synchronize slot selection.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3405,14 +3586,14 @@ int run_headless_smoke(const Options& options) {
 
     if (const auto body_slot_index = shell_state.load_result.skeleton_data->find_slot_index("body")) {
         select_slot(&shell_state, *body_slot_index, "Smoke", false);
-        if (!shell_state.selected_slot_index.has_value() ||
-            *shell_state.selected_slot_index != *body_slot_index) {
+        if (!selected_slot_index(shell_state).has_value() ||
+            *selected_slot_index(shell_state) != *body_slot_index) {
             std::cerr << "Slot selection did not update the inspector slot state.\n";
             ImGui::DestroyContext();
             return 1;
         }
-        if (!shell_state.selected_attachment.has_value() ||
-            shell_state.selected_attachment->attachment_name != "warrior_body") {
+        if (!selected_attachment(shell_state).has_value() ||
+            selected_attachment(shell_state)->attachment_name != "warrior_body") {
             std::cerr << "Slot selection did not resolve the animated body attachment at t=0.5.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3420,7 +3601,7 @@ int run_headless_smoke(const Options& options) {
 
         const auto selected_attachment_reference = resolve_attachment_reference(
             *shell_state.load_result.skeleton_data,
-            *shell_state.selected_attachment);
+            *selected_attachment(shell_state));
         if (!selected_attachment_reference.has_value()) {
             std::cerr << "Slot selection did not resolve the selected body attachment reference.\n";
             ImGui::DestroyContext();
@@ -3469,7 +3650,7 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        const AttachmentSelection mage_attachment_selection{
+        const PreviewAttachmentSelection mage_attachment_selection{
             *body_slot_index,
             *mage_skin_index,
             "mage_body"};
@@ -3518,9 +3699,10 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        const auto arm_index = shell_state.load_result.skeleton_data->find_bone_index("arm_l");
-        if (!arm_index.has_value()) {
-            std::cerr << "Weight paint smoke could not resolve arm_l.\n";
+        const auto paint_bone_index =
+            shell_state.load_result.skeleton_data->find_bone_index("spine");
+        if (!paint_bone_index.has_value()) {
+            std::cerr << "Weight paint smoke could not resolve the body slot's owning bone.\n";
             ImGui::DestroyContext();
             return 1;
         }
@@ -3530,7 +3712,12 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        select_bone(&shell_state, *arm_index, "Smoke", false);
+        select_slot(&shell_state, *body_slot_index, "Smoke", false);
+        if (selected_bone_index(shell_state) != paint_bone_index) {
+            std::cerr << "Slot selection did not resolve its owning bone for weight paint.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
         shell_state.weight_paint.enabled = true;
         shell_state.weight_paint.show_heatmap = true;
         shell_state.weight_paint.radius_pixels = 20.0f;
@@ -3561,7 +3748,7 @@ int run_headless_smoke(const Options& options) {
         const auto current_weight_target = [&]() -> std::optional<MeshWeightPaintTarget> {
             return current_mesh_weight_paint_target(shell_state);
         };
-        const auto current_arm_weight = [&](std::size_t vertex_index) -> std::optional<double> {
+        const auto current_paint_weight = [&](std::size_t vertex_index) -> std::optional<double> {
             const std::optional<MeshWeightPaintTarget> target = current_weight_target();
             if (!target.has_value() ||
                 target->source_attachment == nullptr ||
@@ -3572,7 +3759,7 @@ int run_headless_smoke(const Options& options) {
 
             return weight_for_bone(
                 target->source_attachment->mesh_geometry->weights[vertex_index],
-                *arm_index);
+                *paint_bone_index);
         };
         const auto current_vertex_weight_total = [&](std::size_t vertex_index) -> std::optional<double> {
             const std::optional<MeshWeightPaintTarget> target = current_weight_target();
@@ -3609,9 +3796,9 @@ int run_headless_smoke(const Options& options) {
             baseline_overlay->target.source_attachment_name != "body_mesh" ||
             baseline_overlay->target.display_attachment_name != "warrior_body" ||
             baseline_overlay->vertices.size() != 4U ||
-            !require_weight_near(baseline_overlay->vertices[0].weight, 0.0, 1e-6, "baseline vertex0 arm weight") ||
-            !require_weight_near(baseline_overlay->vertices[1].weight, 0.25, 1e-6, "baseline vertex1 arm weight") ||
-            !require_weight_near(baseline_overlay->vertices[2].weight, 0.75, 1e-6, "baseline vertex2 arm weight")) {
+            !require_weight_near(baseline_overlay->vertices[0].weight, 1.0, 1e-6, "baseline vertex0 active-bone weight") ||
+            !require_weight_near(baseline_overlay->vertices[1].weight, 0.75, 1e-6, "baseline vertex1 active-bone weight") ||
+            !require_weight_near(baseline_overlay->vertices[2].weight, 0.25, 1e-6, "baseline vertex2 active-bone weight")) {
             std::cerr << "Weight paint smoke did not resolve the expected linked-mesh paint target.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3644,18 +3831,18 @@ int run_headless_smoke(const Options& options) {
         const std::optional<MeshWeightOverlay> painted_overlay = build_weight_overlay();
         const std::optional<marrow::runtime::MeshAttachmentPose> painted_pose =
             current_body_pose();
-        const std::optional<double> painted_arm_weight = current_arm_weight(1U);
+        const std::optional<double> painted_active_weight = current_paint_weight(1U);
         const std::optional<double> painted_total_weight = current_vertex_weight_total(1U);
         if (shell_state.session.undo_count() != 1U ||
             shell_state.session.redo_count() != 0U ||
             shell_state.load_result.project->mesh_weight_attachment_edits.size() != 1U ||
             !painted_overlay.has_value() ||
             !painted_pose.has_value() ||
-            !painted_arm_weight.has_value() ||
+            !painted_active_weight.has_value() ||
             !painted_total_weight.has_value() ||
-            !require_weight_near(*painted_arm_weight, 0.625, 1e-6, "painted vertex1 arm weight") ||
+            !require_weight_near(*painted_active_weight, 0.875, 1e-6, "painted vertex1 active-bone weight") ||
             !require_weight_near(*painted_total_weight, 1.0, 1e-6, "painted vertex1 total weight") ||
-            !require_weight_near(painted_overlay->vertices[1].weight, 0.625, 1e-6, "painted overlay vertex1 arm weight") ||
+            !require_weight_near(painted_overlay->vertices[1].weight, 0.875, 1e-6, "painted overlay vertex1 active-bone weight") ||
             !(std::abs(painted_pose->vertices[1].x - baseline_pose->vertices[1].x) > 1e-3 ||
               std::abs(painted_pose->vertices[1].y - baseline_pose->vertices[1].y) > 1e-3)) {
             std::cerr << "Weight paint smoke did not apply the painted weight, normalization, or live preview deformation.\n";
@@ -3668,14 +3855,14 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        const std::optional<double> undone_paint_weight = current_arm_weight(1U);
+        const std::optional<double> undone_paint_weight = current_paint_weight(1U);
         const std::optional<marrow::runtime::MeshAttachmentPose> undone_paint_pose =
             current_body_pose();
         if (shell_state.session.undo_count() != 0U ||
             shell_state.session.redo_count() != 1U ||
             !undone_paint_weight.has_value() ||
             !undone_paint_pose.has_value() ||
-            !require_weight_near(*undone_paint_weight, 0.25, 1e-6, "undone painted vertex1 arm weight") ||
+            !require_weight_near(*undone_paint_weight, 0.75, 1e-6, "undone painted vertex1 active-bone weight") ||
             !require_weight_near(undone_paint_pose->vertices[1].x, baseline_pose->vertices[1].x, 1e-6, "undone painted vertex1 x") ||
             !require_weight_near(undone_paint_pose->vertices[1].y, baseline_pose->vertices[1].y, 1e-6, "undone painted vertex1 y")) {
             std::cerr << "Weight paint smoke undo did not restore the baseline mesh state.\n";
@@ -3688,14 +3875,14 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        const std::optional<double> redone_paint_weight = current_arm_weight(1U);
+        const std::optional<double> redone_paint_weight = current_paint_weight(1U);
         const std::optional<marrow::runtime::MeshAttachmentPose> redone_paint_pose =
             current_body_pose();
         if (shell_state.session.undo_count() != 1U ||
             shell_state.session.redo_count() != 0U ||
             !redone_paint_weight.has_value() ||
             !redone_paint_pose.has_value() ||
-            !require_weight_near(*redone_paint_weight, 0.625, 1e-6, "redone painted vertex1 arm weight") ||
+            !require_weight_near(*redone_paint_weight, 0.875, 1e-6, "redone painted vertex1 active-bone weight") ||
             !require_weight_near(redone_paint_pose->vertices[1].x, painted_pose->vertices[1].x, 1e-6, "redone painted vertex1 x") ||
             !require_weight_near(redone_paint_pose->vertices[1].y, painted_pose->vertices[1].y, 1e-6, "redone painted vertex1 y")) {
             std::cerr << "Weight paint smoke redo did not restore the painted mesh state.\n";
@@ -3721,13 +3908,13 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        const std::optional<double> erased_arm_weight = current_arm_weight(1U);
+        const std::optional<double> erased_active_weight = current_paint_weight(1U);
         const std::optional<double> erased_total_weight = current_vertex_weight_total(1U);
         if (shell_state.session.undo_count() != 2U ||
             shell_state.session.redo_count() != 0U ||
-            !erased_arm_weight.has_value() ||
+            !erased_active_weight.has_value() ||
             !erased_total_weight.has_value() ||
-            !require_weight_near(*erased_arm_weight, 0.0, 1e-6, "erased vertex1 arm weight") ||
+            !require_weight_near(*erased_active_weight, 0.0, 1e-6, "erased vertex1 active-bone weight") ||
             !require_weight_near(*erased_total_weight, 1.0, 1e-6, "erased vertex1 total weight")) {
             std::cerr << "Weight paint smoke did not erase the active bone influence.\n";
             ImGui::DestroyContext();
@@ -3739,9 +3926,9 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        const std::optional<double> undone_erase_weight = current_arm_weight(1U);
+        const std::optional<double> undone_erase_weight = current_paint_weight(1U);
         if (!undone_erase_weight.has_value() ||
-            !require_weight_near(*undone_erase_weight, 0.625, 1e-6, "undone erased vertex1 arm weight")) {
+            !require_weight_near(*undone_erase_weight, 0.875, 1e-6, "undone erased vertex1 active-bone weight")) {
             std::cerr << "Weight paint smoke undo did not restore the painted influence.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3752,9 +3939,9 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        const std::optional<double> redone_erase_weight = current_arm_weight(1U);
+        const std::optional<double> redone_erase_weight = current_paint_weight(1U);
         if (!redone_erase_weight.has_value() ||
-            !require_weight_near(*redone_erase_weight, 0.0, 1e-6, "redone erased vertex1 arm weight")) {
+            !require_weight_near(*redone_erase_weight, 0.0, 1e-6, "redone erased vertex1 active-bone weight")) {
             std::cerr << "Weight paint smoke redo did not restore the erased influence.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3788,13 +3975,13 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        const std::optional<double> smoothed_arm_weight = current_arm_weight(0U);
+        const std::optional<double> smoothed_active_weight = current_paint_weight(0U);
         const std::optional<double> smoothed_total_weight = current_vertex_weight_total(0U);
         if (shell_state.session.undo_count() != 1U ||
             shell_state.session.redo_count() != 0U ||
-            !smoothed_arm_weight.has_value() ||
+            !smoothed_active_weight.has_value() ||
             !smoothed_total_weight.has_value() ||
-            !require_weight_near(*smoothed_arm_weight, 0.3125, 1e-6, "smoothed vertex0 arm weight") ||
+            !require_weight_near(*smoothed_active_weight, 0.6875, 1e-6, "smoothed vertex0 active-bone weight") ||
             !require_weight_near(*smoothed_total_weight, 1.0, 1e-6, "smoothed vertex0 total weight")) {
             std::cerr << "Weight paint smoke did not smooth the neighboring influences.\n";
             ImGui::DestroyContext();
@@ -3830,8 +4017,8 @@ int run_headless_smoke(const Options& options) {
         }
         const auto exported_body_slot_index =
             exported_skeleton.skeleton_data->find_slot_index("body");
-        const auto exported_arm_index =
-            exported_skeleton.skeleton_data->find_bone_index("arm_l");
+        const auto exported_paint_bone_index =
+            exported_skeleton.skeleton_data->find_bone_index("spine");
         const auto* exported_attachment =
             exported_body_slot_index.has_value()
                 ? exported_skeleton.skeleton_data->find_attachment(
@@ -3840,17 +4027,17 @@ int run_headless_smoke(const Options& options) {
                       "body_mesh")
                 : nullptr;
         if (!exported_body_slot_index.has_value() ||
-            !exported_arm_index.has_value() ||
+            !exported_paint_bone_index.has_value() ||
             exported_attachment == nullptr ||
             exported_attachment->mesh_geometry == nullptr ||
             exported_attachment->mesh_geometry->weights.size() <= 0U ||
             !require_weight_near(
                 weight_for_bone(
                     exported_attachment->mesh_geometry->weights[0],
-                    *exported_arm_index),
-                0.3125,
+                    *exported_paint_bone_index),
+                0.6875,
                 1e-6,
-                "exported smoothed vertex0 arm weight")) {
+                "exported smoothed vertex0 active-bone weight")) {
             std::cerr << "Weight paint smoke export did not round-trip the authored mesh weights.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3863,9 +4050,9 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        const std::optional<double> undone_smooth_weight = current_arm_weight(0U);
+        const std::optional<double> undone_smooth_weight = current_paint_weight(0U);
         if (!undone_smooth_weight.has_value() ||
-            !require_weight_near(*undone_smooth_weight, 0.0, 1e-6, "undone smoothed vertex0 arm weight")) {
+            !require_weight_near(*undone_smooth_weight, 1.0, 1e-6, "undone smoothed vertex0 active-bone weight")) {
             std::cerr << "Weight paint smoke undo did not restore the unsmoothed mesh weights.\n";
             ImGui::DestroyContext();
             return 1;
@@ -3878,9 +4065,9 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
-        const std::optional<double> redone_smooth_weight = current_arm_weight(0U);
+        const std::optional<double> redone_smooth_weight = current_paint_weight(0U);
         if (!redone_smooth_weight.has_value() ||
-            !require_weight_near(*redone_smooth_weight, 0.3125, 1e-6, "redone smoothed vertex0 arm weight")) {
+            !require_weight_near(*redone_smooth_weight, 0.6875, 1e-6, "redone smoothed vertex0 active-bone weight")) {
             std::cerr << "Weight paint smoke redo did not restore the smoothed mesh weights.\n";
             ImGui::DestroyContext();
             return 1;
@@ -4017,13 +4204,13 @@ int run_headless_smoke(const Options& options) {
 
     select_constraint(
         &shell_state,
-        ConstraintEditKind::Transform,
+        ConstraintKind::Transform,
         "editor_transform_follow",
         "Smoke",
         false);
-    if (!shell_state.selected_constraint.has_value() ||
-        shell_state.selected_constraint->kind != ConstraintEditKind::Transform ||
-        shell_state.selected_constraint->name != "editor_transform_follow") {
+    if (!selected_constraint(shell_state).has_value() ||
+        selected_constraint(shell_state)->kind != ConstraintKind::Transform ||
+        selected_constraint(shell_state)->constraint_name != "editor_transform_follow") {
         std::cerr << "Constraint selection smoke did not preserve the chosen transform constraint.\n";
         ImGui::DestroyContext();
         return 1;
@@ -4179,7 +4366,7 @@ int run_headless_smoke(const Options& options) {
 
         marrow::editor::IkConstraintEdit created_ik;
         created_ik.name =
-            unique_constraint_name(shell_state, ConstraintEditKind::Ik, "editor_created_ik");
+            unique_constraint_name(shell_state, ConstraintKind::Ik, "editor_created_ik");
         created_ik.bone_names = {"transform_target"};
         created_ik.target_bone_name = "transform_source";
         created_ik.mix = 0.0;
@@ -4189,7 +4376,7 @@ int run_headless_smoke(const Options& options) {
 
         select_constraint(
             &shell_state,
-            ConstraintEditKind::Ik,
+            ConstraintKind::Ik,
             created_ik_name,
             "Smoke",
             false);
@@ -4527,7 +4714,7 @@ int run_headless_smoke(const Options& options) {
                     return 1;
                 }
 
-                const AttachmentSelection mage_attachment_selection{
+                const PreviewAttachmentSelection mage_attachment_selection{
                     *body_slot_index,
                     *mage_skin_index,
                     "mage_body"};

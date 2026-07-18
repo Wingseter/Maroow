@@ -2,7 +2,7 @@
 
 최종 갱신: 2026-07-18. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
-Preference Store 완료 checkpoint 및 `.agents/tasks/prd-marrow-runtime.json`.
+Preference Store, MAR-157 Typed SelectionSet 완료 checkpoint 및 `.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
 
 ---
@@ -26,7 +26,8 @@ MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoi
 이후 MAR-154가 runtime의 authored/inferred/effective clip duration 경계를, MAR-155가
 `.marrow` editor authoring·undo·Agent/MCP·key auto-grow를 2026-07-17에 완료했다.
 MAR-156은 project history와 분리된 versioned user preference store를 2026-07-18에 완료했다.
-다음 open milestone은 transient typed selection domain을 도입하는 MAR-157이다.
+MAR-157은 같은 날 transient typed selection domain과 legacy active accessor 경계를 완료했다.
+다음 open milestone은 panel consumer와 runtime-source replacement migration을 담당하는 MAR-158이다.
 
 ---
 
@@ -52,6 +53,7 @@ MAR-156은 project history와 분리된 versioned user preference store를 2026-
 | 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `shell_timeline.cpp` |
 | Clip duration | runtime authored/inferred/effective 경계, ordered `.marrow set_duration`, live UI·undo, key auto-grow, tail/queue/playhead 재구성, JSON↔MBIN 보존 | `authoring.cpp`, `session.cpp`, `shell_project_panels.cpp` |
 | User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, cross-platform/env resolver, unknown-field 보존, same-directory atomic rename, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
+| Entity selection | 이름 기반 typed Bone/Slot/Attachment/Constraint 집합, 단일 active invariant, stable-order replace/toggle/range/prune/remap, active-only legacy shell 해석 | `selection.cpp`, `selection.hpp`, `selection_set_tests.cpp` |
 | 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동 auto-key | `shell_viewport.cpp`, `shell_viewport_ui.cpp` |
 | 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `shell_timeline.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
@@ -71,6 +73,7 @@ MAR-156은 project history와 분리된 versioned user preference store를 2026-
 - **그래프 에디터 없음** — 숫자 Bezier 입력은 가능하지만 graph view/point/handle, preset/auto handle/loop 동기화는 MAR-167~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
 - **제약 파라미터 일부 위젯 없음** — IK softness/compress/stretch, Physics step/x/y/rotate/scaleX/shearX/limit/massInverse (라운드트립은 됨).
 - **제약 삭제/이름변경 불가** — lifecycle schema는 MAR-177, UI·agent surface는 MAR-178, 누락 위젯은 MAR-179 범위다.
+- **SelectionSet은 domain 기반만 완료** — MAR-157은 transient ownership과 active compatibility facade를 제공한다. 패널별 직접 소비, source replacement remap/prune는 MAR-158, hierarchy/viewport gesture는 MAR-159~160이며 group transform은 범위 밖이다.
 
 ---
 
@@ -201,6 +204,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
   authoring·undo·Agent/MCP를 완료했다. 키 생성·오른쪽 이동은 같은 transaction에서 duration을 자동 연장하되
   키 삭제·왼쪽 이동은 자동 축소하지 않으며 마지막 키보다 짧은 수동 축소를 원자적으로 거부한다. Duration이 없는 기존
   프로젝트와 runtime asset은 계속 마지막 키를 경계로 사용한다.
+- MAR-157의 `SelectionSet`은 exact typed name identity, stable insertion order, 단일 active item을 보장한다. 선택은 `ShellState`의 transient 상태이며 project/preview/history/preferences/runtime/C ABI/Agent·MCP에 포함하지 않는다.
 - P1은 기존 imported-rig/name-overlay 구조와 `.mskl` v1, `.mbin` v2, C ABI v1을 유지한다. `.marrow` 변경은 optional additive metadata/operation으로 제한한다.
 - 본·슬롯·스킨·어태치먼트와 메시 topology 저작, 경로 제어점 편집, selection group transform, partial/degraded project open은 P1 범위 밖이다.
 - MAR-129~140 리팩터링은 HEAD `4c93ca1`에서 완료됐다. MAR-137은 constraint 모듈 추출만 완료한 것이며 rename/delete는 MAR-178이다.
@@ -244,7 +248,7 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint는 통과했다. 다음 open milestone은 MAR-157이며, **MAR-157부터 MAR-191까지 각 스토리는 바로 앞 번호의 스토리에 의존**한다. 이 선형 dependency chain도 기능 milestone과 focused validation checkpoint로 관리한다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection checkpoint는 통과했다. 다음 open milestone은 MAR-158이며, **MAR-157부터 MAR-191까지 각 스토리는 바로 앞 번호의 스토리에 의존**한다. 이 선형 dependency chain도 기능 milestone과 focused validation checkpoint로 관리한다.
 
 #### 기반·선택
 
@@ -253,7 +257,7 @@ P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoi
 | MAR-154 | Runtime explicit clip duration (완료, 2026-07-17) | `AnimationData::explicit_duration`, `inferred_duration()`, effective `duration()`을 분리했다. finite/non-negative/last-key 검증, 비제로 identity key boundary, 구 자산 fallback, empty/tail clip, loop·queue·complete·reverse·snapshot, authored presence와 effective-duration AKEY를 JSON↔MBIN fixture로 검증했다. `.mskl` v1, `.mbin` v2, C ABI v1은 유지한다. |
 | MAR-155 | Editor duration authoring (완료, 2026-07-17) | ordered `.marrow.animation_edits set_duration`과 unknown/additive 보존, UI-free mutation, live UI·단일 undo, key auto-grow/no-shrink, 원자적 reject, 56번째 Agent/MCP operation, save/reload·JSON/MBIN export를 project/shell/agent smoke로 검증했다. |
 | MAR-156 | User preference store (완료, 2026-07-18) | versioned user-local JSON, macOS/Linux pure path resolver와 `MARROW_CONFIG_HOME`, six-token curve default, raw Recent Projects 배열, field별 fallback, unknown additive 보존, same-directory temp+atomic rename을 UI-free service와 전용 CTest로 검증했다. Project/session/runtime/C ABI/Agent/MCP와 분리된다. |
-| MAR-157 | Typed SelectionSet | 이름 기반 Bone/Slot/Attachment/Constraint 집합과 단일 active item을 도입하고 기존 단일 선택 accessor를 호환 계층으로 유지한다. |
+| MAR-157 | Typed SelectionSet (완료, 2026-07-18) | exact typed Bone/Slot/Attachment/Constraint identity, 중복 없는 stable insertion order, 단일 active invariant와 replace/toggle/range/clear/prune/remap을 UI-free public model로 구현했다. `ShellState`는 이 set 하나만 소유하고 legacy accessor가 active 이름을 현재 runtime/preview index로 해석한다. 선택은 project/preview/history/revision/Agent·MCP와 분리된다. |
 | MAR-158 | Selection migration | shell 소비자를 `SelectionSet`으로 이전하고 reload remap/prune 및 재사용 가능한 constraint identity remap/prune primitive를 검증한다. 실제 constraint rename/delete transaction 연결은 MAR-178이 담당하며 selection은 project dirty/history에 포함하지 않는다. |
 | MAR-159 | Hierarchy multi-select | plain replace, Cmd/Ctrl toggle, Shift visible-range, Cmd/Ctrl+Shift additive-range gesture를 구현한다. |
 | MAR-160 | Viewport multi-select | hit precedence와 bone-only box select를 추가한다. Inspector/gizmo는 active item만 편집하고 group transform은 하지 않는다. |
@@ -265,6 +269,10 @@ editor-labeled CTest 5/5, Python MCP schema/parity·native socket E2E, JSON/MBIN
 MAR-156 checkpoint는 first-run/roundtrip/optional fallback/version·malformed 진단, macOS/Linux
 경로와 환경 복원, rename failpoint의 기존 bytes·temp cleanup, 열린 `EditorSession`의 serialization,
 dirty, undo/redo와 세 revision 불변을 `marrow_preference_tests`와 editor/full CTest로 검증했다.
+MAR-157 checkpoint는 7개 `SelectionSet` case로 typed scope, stable order, active fallback,
+prune/remap collision, invalid range 원자성을 검증했다. Shell smoke는 Bone/Slot/Attachment/Constraint
+legacy 해석과 mixed active-only 동작, project bytes·preview/runtime data·dirty·undo/redo·세 revision 불변을
+검증했으며 editor CTest 7/7과 전체 CTest 13/13을 통과했다.
 
 #### 뷰포트 직접 조작
 
@@ -333,6 +341,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 
 - **Runtime unit**: explicit/inferred/empty duration, loop·queue·reverse·snapshot, curve flat/overshoot/auto tangent, auto-weight determinism.
 - **Project smoke**: 모든 신규 optional schema의 old-project compatibility, constraint rename/delete cascade, inherit/curve metadata, Save As path rebase, JSON↔MBIN equivalence.
+- **Selection unit/shell smoke**: typed identity scope, stable order와 active fallback, prune/remap collision, invalid-range atomicity, transient project/preview/runtime/history/revision invariants.
 - **Shell smoke**: transformed/reflected/singular gizmo, signed/zero scale, weighted/unweighted/linked FFD, multi-select, snap tie-break, graph point/handle cancel, dirty modal, Problems navigation.
 - **Agent/MCP smoke**: 신규 operation metadata·dry-run·mutation·undo·export preview와 C++/Python registry parity.
 - **PSD smoke**: missing-preserve/delete, animation·overlay 보존, parse/build 및 각 commit failpoint 뒤 대상 bundle의 byte-for-byte rollback.
@@ -345,7 +354,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 
 ### 참고: 에이전트(MCP) 표면과의 비대칭
 
-에이전트 표면은 현재 55 ops다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
+에이전트 표면은 MAR-155 duration operation을 포함해 현재 56 ops다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
 `parameters.list`, `parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`을
 C++ registry와 Python MCP 도구에 함께 노출했다. Transform/slot/parameter authoring은 GUI와 agent가 base materialization
 또는 candidate runtime build를 포함한 UI-free mutation을 공유한다. GUI는 의도적으로 더 넓은 parameter/group/shape lifecycle과

@@ -86,15 +86,15 @@ bool apply_constraint_project_drag(
 
 } // namespace
 
-const char* constraint_kind_label(ConstraintEditKind kind) {
+const char* constraint_kind_label(ConstraintKind kind) {
     switch (kind) {
-    case ConstraintEditKind::Ik:
+    case ConstraintKind::Ik:
         return "IK";
-    case ConstraintEditKind::Path:
+    case ConstraintKind::Path:
         return "Path";
-    case ConstraintEditKind::Transform:
+    case ConstraintKind::Transform:
         return "Transform";
-    case ConstraintEditKind::Physics:
+    case ConstraintKind::Physics:
         return "Physics";
     }
 
@@ -220,16 +220,16 @@ std::optional<std::vector<std::string>> first_direct_chain(
 
 bool constraint_exists(
     const marrow::runtime::SkeletonData& skeleton,
-    ConstraintEditKind kind,
+    ConstraintKind kind,
     std::string_view name) {
     switch (kind) {
-    case ConstraintEditKind::Ik:
+    case ConstraintKind::Ik:
         return find_named_constraint(skeleton.ik_constraints(), name) != nullptr;
-    case ConstraintEditKind::Path:
+    case ConstraintKind::Path:
         return find_named_constraint(skeleton.path_constraints(), name) != nullptr;
-    case ConstraintEditKind::Transform:
+    case ConstraintKind::Transform:
         return find_named_constraint(skeleton.transform_constraints(), name) != nullptr;
-    case ConstraintEditKind::Physics:
+    case ConstraintKind::Physics:
         return find_named_constraint(skeleton.physics_constraints(), name) != nullptr;
     }
 
@@ -237,24 +237,26 @@ bool constraint_exists(
 }
 
 void validate_selected_constraint(ShellState* state) {
-    if (!state->load_result || !state->selected_constraint.has_value()) {
+    const auto selection = selected_constraint(*state);
+    if (!state->load_result || !selection.has_value()) {
         return;
     }
     if (!constraint_exists(
             *state->load_result.skeleton_data,
-            state->selected_constraint->kind,
-            state->selected_constraint->name)) {
-        state->selected_constraint.reset();
+            selection->kind,
+            selection->constraint_name)) {
+        state->selection.remap(*selection, std::nullopt);
     }
 }
 
 void select_constraint(
     ShellState* state,
-    ConstraintEditKind kind,
+    ConstraintKind kind,
     std::string_view name,
     std::string_view source,
     bool update_status_message) {
-    state->selected_constraint = ConstraintSelection{kind, std::string(name)};
+    state->selection.replace(
+        marrow::editor::ConstraintSelection{kind, std::string(name)});
     if (!update_status_message) {
         return;
     }
@@ -269,7 +271,7 @@ void select_constraint(
 
 std::string unique_constraint_name(
     const ShellState& state,
-    ConstraintEditKind kind,
+    ConstraintKind kind,
     std::string_view prefix) {
     if (!state.load_result) {
         return std::string(prefix) + "_1";
@@ -528,7 +530,7 @@ std::optional<marrow::editor::IkConstraintEdit> make_default_ik_constraint_edit(
     const auto& skeleton = *state.load_result.skeleton_data;
 
     marrow::editor::IkConstraintEdit edit;
-    edit.name = unique_constraint_name(state, ConstraintEditKind::Ik, "ik_constraint");
+    edit.name = unique_constraint_name(state, ConstraintKind::Ik, "ik_constraint");
     edit.bone_names = preferred_chain(skeleton, {"ik_upper", "ik_lower"})
         .value_or(first_direct_chain(skeleton, 2).value_or(std::vector<std::string>{}));
     if (edit.bone_names.empty()) {
@@ -554,7 +556,7 @@ std::optional<marrow::editor::PathConstraintEdit> make_default_path_constraint_e
     const auto& skeleton = *state.load_result.skeleton_data;
 
     marrow::editor::PathConstraintEdit edit;
-    edit.name = unique_constraint_name(state, ConstraintEditKind::Path, "path_constraint");
+    edit.name = unique_constraint_name(state, ConstraintKind::Path, "path_constraint");
     edit.slot_name = named_slot_if_exists(skeleton, "guide")
         .value_or(path_slot_names(skeleton).empty() ? std::string{} : path_slot_names(skeleton).front());
     if (edit.slot_name.empty()) {
@@ -582,7 +584,7 @@ std::optional<marrow::editor::TransformConstraintEdit> make_default_transform_co
 
     marrow::editor::TransformConstraintEdit edit;
     edit.name =
-        unique_constraint_name(state, ConstraintEditKind::Transform, "transform_constraint");
+        unique_constraint_name(state, ConstraintKind::Transform, "transform_constraint");
     edit.source_bone_name = named_bone_if_exists(skeleton, "transform_source")
         .value_or(first_non_root_bone_name(skeleton).value_or(std::string{}));
     if (edit.source_bone_name.empty()) {
@@ -619,7 +621,7 @@ std::optional<marrow::editor::PhysicsConstraintEdit> make_default_physics_constr
     const auto& skeleton = *state.load_result.skeleton_data;
 
     marrow::editor::PhysicsConstraintEdit edit;
-    edit.name = unique_constraint_name(state, ConstraintEditKind::Physics, "physics_constraint");
+    edit.name = unique_constraint_name(state, ConstraintKind::Physics, "physics_constraint");
     edit.bone_names = preferred_chain(skeleton, {"ribbon_01", "ribbon_02"})
         .value_or(first_direct_chain(skeleton, 2).value_or(std::vector<std::string>{}));
     if (edit.bone_names.empty()) {
@@ -685,12 +687,12 @@ void draw_constraints_window(ShellState* state) {
 
     validate_selected_constraint(state);
 
-    const auto constraint_group = [&](ConstraintEditKind kind, std::string_view name) {
+    const auto constraint_group = [&](ConstraintKind kind, std::string_view name) {
         return std::string("constraint:") + constraint_kind_label(kind) + ":" +
             std::string(name);
     };
     const auto commit_constraint_change = [&](const marrow::editor::ProjectData& previous_project,
-                                              ConstraintEditKind kind,
+                                              ConstraintKind kind,
                                               std::string_view name,
                                               std::string failure_message,
                                               std::string success_message,
@@ -746,7 +748,7 @@ void draw_constraints_window(ShellState* state) {
                     project->ik_constraint_edits.push_back(*new_edit);
                     commit_constraint_change(
                         previous_project,
-                        ConstraintEditKind::Ik,
+                        ConstraintKind::Ik,
                         new_edit->name,
                         "IK constraint edit failed",
                         "Added IK constraint " + new_edit->name);
@@ -758,9 +760,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("ik_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.ik_constraints()) {
                 const bool selected =
-                    state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Ik &&
-                    state->selected_constraint->name == constraint.name;
+                    selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Ik &&
+                    selected_constraint(*state)->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_ik_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -770,16 +772,16 @@ void draw_constraints_window(ShellState* state) {
                         Icon::ConstraintIk,
                         label.c_str(),
                         selected)) {
-                    select_constraint(state, ConstraintEditKind::Ik, constraint.name, "Constraints", true);
+                    select_constraint(state, ConstraintKind::Ik, constraint.name, "Constraints", true);
                 }
             }
             ImGui::EndChild();
 
             const std::string selected_name =
-                state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Ik &&
-                    find_named_constraint(skeleton.ik_constraints(), state->selected_constraint->name) != nullptr
-                ? state->selected_constraint->name
+                selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Ik &&
+                    find_named_constraint(skeleton.ik_constraints(), selected_constraint(*state)->constraint_name) != nullptr
+                ? selected_constraint(*state)->constraint_name
                 : (!skeleton.ik_constraints().empty() ? skeleton.ik_constraints().front().name : std::string{});
             if (selected_name.empty()) {
                 ImGui::TextUnformatted("No IK constraints are active in the current runtime preview.");
@@ -874,7 +876,7 @@ void draw_constraints_window(ShellState* state) {
                     mix_changed,
                     EditActionKind::EditProperty,
                     "Updated IK mix on " + selected_name,
-                    constraint_group(ConstraintEditKind::Ik, selected_name),
+                    constraint_group(ConstraintKind::Ik, selected_name),
                     false,
                     "IK constraint edit failed",
                     [&]() {
@@ -906,7 +908,7 @@ void draw_constraints_window(ShellState* state) {
                     project->path_constraint_edits.push_back(*new_edit);
                     commit_constraint_change(
                         previous_project,
-                        ConstraintEditKind::Path,
+                        ConstraintKind::Path,
                         new_edit->name,
                         "Path constraint edit failed",
                         "Added path constraint " + new_edit->name);
@@ -918,9 +920,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("path_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.path_constraints()) {
                 const bool selected =
-                    state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Path &&
-                    state->selected_constraint->name == constraint.name;
+                    selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Path &&
+                    selected_constraint(*state)->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_path_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -932,7 +934,7 @@ void draw_constraints_window(ShellState* state) {
                         selected)) {
                     select_constraint(
                         state,
-                        ConstraintEditKind::Path,
+                        ConstraintKind::Path,
                         constraint.name,
                         "Constraints",
                         true);
@@ -941,10 +943,10 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Path &&
-                    find_named_constraint(skeleton.path_constraints(), state->selected_constraint->name) != nullptr
-                ? state->selected_constraint->name
+                selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Path &&
+                    find_named_constraint(skeleton.path_constraints(), selected_constraint(*state)->constraint_name) != nullptr
+                ? selected_constraint(*state)->constraint_name
                 : (!skeleton.path_constraints().empty() ? skeleton.path_constraints().front().name : std::string{});
             if (selected_name.empty()) {
                 ImGui::TextUnformatted("No path constraints are active in the current runtime preview.");
@@ -968,7 +970,7 @@ void draw_constraints_window(ShellState* state) {
                         project->path_constraint_edits[*edit_index].slot_name = edited_slot;
                         commit_constraint_change(
                             previous_project,
-                            ConstraintEditKind::Path,
+                            ConstraintKind::Path,
                             project->path_constraint_edits[*edit_index].name,
                             "Path constraint edit failed",
                             "Updated guide slot on " + selected_name);
@@ -982,7 +984,7 @@ void draw_constraints_window(ShellState* state) {
                         if (append_direct_child_name(&edit.bone_names)) {
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Path,
+                                ConstraintKind::Path,
                                 edit.name,
                                 "Path constraint edit failed",
                                 "Extended the path chain on " + selected_name);
@@ -1002,7 +1004,7 @@ void draw_constraints_window(ShellState* state) {
                             edit.bone_names.pop_back();
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Path,
+                                ConstraintKind::Path,
                                 edit.name,
                                 "Path constraint edit failed",
                                 "Shortened the path chain on " + selected_name);
@@ -1020,7 +1022,7 @@ void draw_constraints_window(ShellState* state) {
                                 edited_bone;
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Path,
+                                ConstraintKind::Path,
                                 project->path_constraint_edits[*edit_index].name,
                                 "Path constraint edit failed",
                                 "Updated path chain selection on " + selected_name);
@@ -1041,7 +1043,7 @@ void draw_constraints_window(ShellState* state) {
                     position_changed,
                     EditActionKind::EditProperty,
                     "Updated path position on " + selected_name,
-                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    constraint_group(ConstraintKind::Path, selected_name),
                     false,
                     "Path constraint edit failed",
                     [&]() {
@@ -1064,7 +1066,7 @@ void draw_constraints_window(ShellState* state) {
                     spacing_changed,
                     EditActionKind::EditProperty,
                     "Updated path spacing on " + selected_name,
-                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    constraint_group(ConstraintKind::Path, selected_name),
                     false,
                     "Path constraint edit failed",
                     [&]() {
@@ -1091,7 +1093,7 @@ void draw_constraints_window(ShellState* state) {
                                               : marrow::runtime::PathConstraintSpacingMode::Length;
                         commit_constraint_change(
                             previous_project,
-                            ConstraintEditKind::Path,
+                            ConstraintKind::Path,
                             project->path_constraint_edits[*edit_index].name,
                             "Path constraint edit failed",
                             "Updated path spacing mode on " + selected_name);
@@ -1111,7 +1113,7 @@ void draw_constraints_window(ShellState* state) {
                     rotate_mix_changed,
                     EditActionKind::EditProperty,
                     "Updated path rotate mix on " + selected_name,
-                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    constraint_group(ConstraintKind::Path, selected_name),
                     false,
                     "Path constraint edit failed",
                     [&]() {
@@ -1135,7 +1137,7 @@ void draw_constraints_window(ShellState* state) {
                     translate_mix_changed,
                     EditActionKind::EditProperty,
                     "Updated path translate mix on " + selected_name,
-                    constraint_group(ConstraintEditKind::Path, selected_name),
+                    constraint_group(ConstraintKind::Path, selected_name),
                     false,
                     "Path constraint edit failed",
                     [&]() {
@@ -1156,7 +1158,7 @@ void draw_constraints_window(ShellState* state) {
                     project->transform_constraint_edits.push_back(*new_edit);
                     commit_constraint_change(
                         previous_project,
-                        ConstraintEditKind::Transform,
+                        ConstraintKind::Transform,
                         new_edit->name,
                         "Transform constraint edit failed",
                         "Added transform constraint " + new_edit->name);
@@ -1168,9 +1170,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("transform_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.transform_constraints()) {
                 const bool selected =
-                    state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Transform &&
-                    state->selected_constraint->name == constraint.name;
+                    selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Transform &&
+                    selected_constraint(*state)->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_transform_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -1182,7 +1184,7 @@ void draw_constraints_window(ShellState* state) {
                         selected)) {
                     select_constraint(
                         state,
-                        ConstraintEditKind::Transform,
+                        ConstraintKind::Transform,
                         constraint.name,
                         "Constraints",
                         true);
@@ -1191,12 +1193,12 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Transform &&
+                selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Transform &&
                     find_named_constraint(
                         skeleton.transform_constraints(),
-                        state->selected_constraint->name) != nullptr
-                ? state->selected_constraint->name
+                        selected_constraint(*state)->constraint_name) != nullptr
+                ? selected_constraint(*state)->constraint_name
                 : (!skeleton.transform_constraints().empty()
                        ? skeleton.transform_constraints().front().name
                        : std::string{});
@@ -1226,7 +1228,7 @@ void draw_constraints_window(ShellState* state) {
                             edited_source;
                         commit_constraint_change(
                             previous_project,
-                            ConstraintEditKind::Transform,
+                            ConstraintKind::Transform,
                             project->transform_constraint_edits[*edit_index].name,
                             "Transform constraint edit failed",
                             "Updated transform source on " + selected_name);
@@ -1249,7 +1251,7 @@ void draw_constraints_window(ShellState* state) {
                             edit.bone_names.push_back(*candidate);
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Transform,
+                                ConstraintKind::Transform,
                                 edit.name,
                                 "Transform constraint edit failed",
                                 "Added a transform target on " + selected_name);
@@ -1266,7 +1268,7 @@ void draw_constraints_window(ShellState* state) {
                             edit.bone_names.pop_back();
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Transform,
+                                ConstraintKind::Transform,
                                 edit.name,
                                 "Transform constraint edit failed",
                                 "Removed a transform target on " + selected_name);
@@ -1285,7 +1287,7 @@ void draw_constraints_window(ShellState* state) {
                                 edited_bone;
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Transform,
+                                ConstraintKind::Transform,
                                 project->transform_constraint_edits[*edit_index].name,
                                 "Transform constraint edit failed",
                                 "Updated transform target selection on " + selected_name);
@@ -1310,7 +1312,7 @@ void draw_constraints_window(ShellState* state) {
                         changed,
                         EditActionKind::EditProperty,
                         std::move(status),
-                        constraint_group(ConstraintEditKind::Transform, selected_name),
+                        constraint_group(ConstraintKind::Transform, selected_name),
                         false,
                         "Transform constraint edit failed",
                         [&]() {
@@ -1367,7 +1369,7 @@ void draw_constraints_window(ShellState* state) {
                         changed,
                         EditActionKind::EditProperty,
                         std::move(status),
-                        constraint_group(ConstraintEditKind::Transform, selected_name),
+                        constraint_group(ConstraintKind::Transform, selected_name),
                         false,
                         "Transform constraint edit failed",
                         [&]() {
@@ -1437,7 +1439,7 @@ void draw_constraints_window(ShellState* state) {
                     project->physics_constraint_edits.push_back(*new_edit);
                     commit_constraint_change(
                         previous_project,
-                        ConstraintEditKind::Physics,
+                        ConstraintKind::Physics,
                         new_edit->name,
                         "Physics constraint edit failed",
                         "Added physics constraint " + new_edit->name);
@@ -1449,9 +1451,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("physics_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.physics_constraints()) {
                 const bool selected =
-                    state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Physics &&
-                    state->selected_constraint->name == constraint.name;
+                    selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Physics &&
+                    selected_constraint(*state)->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_physics_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -1463,7 +1465,7 @@ void draw_constraints_window(ShellState* state) {
                         selected)) {
                     select_constraint(
                         state,
-                        ConstraintEditKind::Physics,
+                        ConstraintKind::Physics,
                         constraint.name,
                         "Constraints",
                         true);
@@ -1472,12 +1474,12 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                state->selected_constraint.has_value() &&
-                    state->selected_constraint->kind == ConstraintEditKind::Physics &&
+                selected_constraint(*state).has_value() &&
+                    selected_constraint(*state)->kind == ConstraintKind::Physics &&
                     find_named_constraint(
                         skeleton.physics_constraints(),
-                        state->selected_constraint->name) != nullptr
-                ? state->selected_constraint->name
+                        selected_constraint(*state)->constraint_name) != nullptr
+                ? selected_constraint(*state)->constraint_name
                 : (!skeleton.physics_constraints().empty()
                        ? skeleton.physics_constraints().front().name
                        : std::string{});
@@ -1505,7 +1507,7 @@ void draw_constraints_window(ShellState* state) {
                         if (append_direct_child_name(&edit.bone_names)) {
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Physics,
+                                ConstraintKind::Physics,
                                 edit.name,
                                 "Physics constraint edit failed",
                                 "Extended the physics chain on " + selected_name);
@@ -1525,7 +1527,7 @@ void draw_constraints_window(ShellState* state) {
                             edit.bone_names.pop_back();
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Physics,
+                                ConstraintKind::Physics,
                                 edit.name,
                                 "Physics constraint edit failed",
                                 "Shortened the physics chain on " + selected_name);
@@ -1544,7 +1546,7 @@ void draw_constraints_window(ShellState* state) {
                                 edited_bone;
                             commit_constraint_change(
                                 previous_project,
-                                ConstraintEditKind::Physics,
+                                ConstraintKind::Physics,
                                 project->physics_constraint_edits[*edit_index].name,
                                 "Physics constraint edit failed",
                                 "Updated physics chain selection on " + selected_name);
@@ -1570,7 +1572,7 @@ void draw_constraints_window(ShellState* state) {
                         changed,
                         EditActionKind::EditProperty,
                         std::move(status),
-                        constraint_group(ConstraintEditKind::Physics, selected_name),
+                        constraint_group(ConstraintKind::Physics, selected_name),
                         false,
                         "Physics constraint edit failed",
                         [&]() {
@@ -1631,7 +1633,7 @@ void draw_constraints_window(ShellState* state) {
                         changed,
                         EditActionKind::EditProperty,
                         std::move(status),
-                        constraint_group(ConstraintEditKind::Physics, selected_name),
+                        constraint_group(ConstraintKind::Physics, selected_name),
                         false,
                         "Physics constraint edit failed",
                         [&]() {

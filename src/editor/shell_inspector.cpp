@@ -484,20 +484,20 @@ void draw_inspector_window(ShellState* state) {
         ImGui::BeginChild("props_ctx", ImVec2(0.0f, 0.0f),
                           ImGuiChildFlags_AutoResizeY);
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
-        if (state->selected_bone_index.has_value() &&
-            *state->selected_bone_index < skeleton.bones().size()) {
+        if (selected_bone_index(*state).has_value() &&
+            *selected_bone_index(*state) < skeleton.bones().size()) {
             widgets::context_line(
                 state->icons, Icon::NodeBone, t::kPrimary,
-                skeleton.bones()[*state->selected_bone_index].name.c_str(),
+                skeleton.bones()[*selected_bone_index(*state)].name.c_str(),
                 "bone");
         } else {
             ImGui::TextColored(t::kFaint, "No bone selected");
         }
-        if (state->selected_slot_index.has_value() &&
-            *state->selected_slot_index < skeleton.slots().size()) {
+        if (selected_slot_index(*state).has_value() &&
+            *selected_slot_index(*state) < skeleton.slots().size()) {
             widgets::context_line(
                 state->icons, Icon::NodeSlot, t::kTertiaryDim,
-                skeleton.slots()[*state->selected_slot_index].name.c_str(),
+                skeleton.slots()[*selected_slot_index(*state)].name.c_str(),
                 "slot");
         }
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
@@ -511,7 +511,7 @@ void draw_inspector_window(ShellState* state) {
         for (std::size_t bone_index = 0; bone_index < skeleton.bones().size(); ++bone_index) {
             const auto& bone = skeleton.bones()[bone_index];
             const bool selected =
-                state->selected_bone_index.has_value() && *state->selected_bone_index == bone_index;
+                selected_bone_index(*state).has_value() && *selected_bone_index(*state) == bone_index;
             std::string label = bone.name;
             if (bone.parent_index.has_value() && *bone.parent_index < skeleton.bones().size()) {
                 label += " <- " + skeleton.bones()[*bone.parent_index].name;
@@ -524,11 +524,11 @@ void draw_inspector_window(ShellState* state) {
         }
         ImGui::EndChild();
 
-        if (state->selected_bone_index.has_value() &&
-            *state->selected_bone_index < skeleton.bones().size() &&
-            *state->selected_bone_index <
+        if (selected_bone_index(*state).has_value() &&
+            *selected_bone_index(*state) < skeleton.bones().size() &&
+            *selected_bone_index(*state) <
                 state->preview_skeleton->bone_world_transforms().size()) {
-            const std::size_t bone_index = *state->selected_bone_index;
+            const std::size_t bone_index = *selected_bone_index(*state);
             const auto& bone = skeleton.bones()[bone_index];
             const auto& setup_pose = bone.setup_pose;
 
@@ -765,7 +765,7 @@ void draw_inspector_window(ShellState* state) {
             const auto& slot = skeleton.slots()[slot_index];
             const auto* current_attachment = state->preview_skeleton->current_attachment(slot_index);
             const bool selected =
-                state->selected_slot_index.has_value() && *state->selected_slot_index == slot_index;
+                selected_slot_index(*state).has_value() && *selected_slot_index(*state) == slot_index;
             std::string label = slot.name + " -> " +
                 (current_attachment != nullptr ? current_attachment->name : std::string("<none>"));
             if (ImGui::Selectable(
@@ -776,10 +776,10 @@ void draw_inspector_window(ShellState* state) {
         }
         ImGui::EndChild();
 
-        if (state->selected_slot_index.has_value() &&
-            *state->selected_slot_index < skeleton.slots().size() &&
-            *state->selected_slot_index < state->preview_skeleton->slot_states().size()) {
-            const std::size_t slot_index = *state->selected_slot_index;
+        if (selected_slot_index(*state).has_value() &&
+            *selected_slot_index(*state) < skeleton.slots().size() &&
+            *selected_slot_index(*state) < state->preview_skeleton->slot_states().size()) {
+            const std::size_t slot_index = *selected_slot_index(*state);
             const auto& slot = skeleton.slots()[slot_index];
             const auto& slot_state = state->preview_skeleton->slot_states()[slot_index];
             const auto* current_attachment = state->preview_skeleton->current_attachment(slot_index);
@@ -837,9 +837,9 @@ void draw_inspector_window(ShellState* state) {
     }
 
     if (ImGui::CollapsingHeader("Attachments", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (state->selected_slot_index.has_value() &&
-            *state->selected_slot_index < skeleton.slots().size()) {
-            const std::size_t slot_index = *state->selected_slot_index;
+        if (selected_slot_index(*state).has_value() &&
+            *selected_slot_index(*state) < skeleton.slots().size()) {
+            const std::size_t slot_index = *selected_slot_index(*state);
             const auto attachments = collect_slot_attachments(skeleton, slot_index);
 
             ImGui::BeginChild("inspector_attachments", ImVec2(0.0f, 130.0f), true);
@@ -855,9 +855,9 @@ void draw_inspector_window(ShellState* state) {
                     }
 
                     const bool selected =
-                        state->selected_attachment.has_value() &&
+                        selected_attachment(*state).has_value() &&
                         attachment_matches_selection(
-                            *state->selected_attachment,
+                            *selected_attachment(*state),
                             attachment_reference);
                     std::string label = attachment_reference.attachment->name +
                         " [" + source_skin_name(skeleton, attachment_reference.skin_index) +
@@ -874,7 +874,7 @@ void draw_inspector_window(ShellState* state) {
                             selected)) {
                         select_attachment(
                             state,
-                            AttachmentSelection{
+                            PreviewAttachmentSelection{
                                 slot_index,
                                 attachment_reference.skin_index,
                                 attachment_reference.attachment->name},
@@ -886,21 +886,21 @@ void draw_inspector_window(ShellState* state) {
             ImGui::EndChild();
 
             const auto attachment_reference =
-                state->selected_attachment.has_value() &&
-                    state->selected_attachment->slot_index == slot_index
-                ? resolve_attachment_reference(skeleton, *state->selected_attachment)
+                selected_attachment(*state).has_value() &&
+                    selected_attachment(*state)->slot_index == slot_index
+                ? resolve_attachment_reference(skeleton, *selected_attachment(*state))
                 : std::nullopt;
 
             if (attachment_reference.has_value()) {
                 if (ImGui::Button("Apply To Preview Slot")) {
                     apply_attachment_selection_to_preview_slot(
                         state,
-                        *state->selected_attachment,
+                        *selected_attachment(*state),
                         "Inspector",
                         true);
                 }
             }
-            if (state->selected_slot_index.has_value()) {
+            if (selected_slot_index(*state).has_value()) {
                 if (attachment_reference.has_value()) {
                     ImGui::SameLine();
                 }

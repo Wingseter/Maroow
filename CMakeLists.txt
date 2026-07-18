@@ -287,6 +287,7 @@ endif()
 
 add_library(marrow_editor STATIC
     src/editor/module.cpp
+    src/editor/selection.cpp
     src/editor/preferences.cpp
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
@@ -398,6 +399,15 @@ target_include_directories(marrow_preference_tests
 )
 
 target_link_libraries(marrow_preference_tests
+    PRIVATE
+        marrow_editor
+)
+
+add_executable(marrow_selection_tests
+    src/tests/selection_set_tests.cpp
+)
+
+target_link_libraries(marrow_selection_tests
     PRIVATE
         marrow_editor
 )
@@ -620,6 +630,15 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.preference_store PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;preferences;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.selection_set
+        COMMAND marrow_selection_tests
+    )
+    set_tests_properties(marrow.selection_set PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;selection;unit;noninteractive"
     )
 
     add_test(

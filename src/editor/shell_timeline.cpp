@@ -405,12 +405,12 @@ bool timeline_track_matches_selection(
     }
 
     if (track.slot_index.has_value() &&
-        state.selected_slot_index == track.slot_index) {
+        selected_slot_index(state) == track.slot_index) {
         return true;
     }
 
     return track.bone_index.has_value() &&
-        state.selected_bone_index == track.bone_index;
+        selected_bone_index(state) == track.bone_index;
 }
 
 std::optional<double> adjacent_key_time(

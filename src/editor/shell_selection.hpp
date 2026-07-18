@@ -23,7 +23,7 @@ void select_slot(
     bool update_status_message);
 void select_attachment(
     ShellState* state,
-    std::optional<AttachmentSelection> selection,
+    std::optional<PreviewAttachmentSelection> selection,
     std::string_view source,
     bool update_status_message);
 void sync_attachment_selection_for_slot(
@@ -41,7 +41,7 @@ bool set_preview_skin_enabled(
     bool record_history = true);
 bool apply_attachment_selection_to_preview_slot(
     ShellState* state,
-    const AttachmentSelection& selection,
+    const PreviewAttachmentSelection& selection,
     std::string_view source,
     bool update_status_message,
     bool record_history = true);
@@ -68,22 +68,22 @@ std::vector<SlotAttachmentReference> collect_slot_attachments(
     std::size_t slot_index);
 std::optional<SlotAttachmentReference> resolve_attachment_reference(
     const marrow::runtime::SkeletonData& skeleton,
-    const AttachmentSelection& selection);
-std::optional<AttachmentSelection> current_attachment_selection(
+    const PreviewAttachmentSelection& selection);
+std::optional<PreviewAttachmentSelection> current_attachment_selection(
     const ShellState& state,
     std::size_t slot_index);
-std::optional<AttachmentSelection> first_attachment_selection_for_slot(
+std::optional<PreviewAttachmentSelection> first_attachment_selection_for_slot(
     const marrow::runtime::SkeletonData& skeleton,
     std::size_t slot_index);
 std::vector<std::size_t> build_active_preview_skin_indices(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names);
-std::optional<AttachmentSelection> resolve_skin_preview_attachment(
+std::optional<PreviewAttachmentSelection> resolve_skin_preview_attachment(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names,
     std::size_t slot_index);
 bool attachment_matches_selection(
-    const AttachmentSelection& selection,
+    const PreviewAttachmentSelection& selection,
     const SlotAttachmentReference& reference);
 std::vector<std::vector<std::size_t>> build_bone_children(
     const marrow::runtime::SkeletonData& skeleton);

@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 and MAR-154 through MAR-156 are complete; MAR-157 is the next open product milestone.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 and MAR-154 through MAR-157 are complete; MAR-158 is the next open product milestone.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -29,6 +29,7 @@
 - Configure: `cmake -S . -B build`
 - Build: `cmake --build build`
 - Versioned user preference store: `./build/marrow_preference_tests`
+- Typed transient entity selection model: `./build/marrow_selection_tests`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -167,6 +168,31 @@
 - Parameter deformer renderer preparation: `./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_deformer_grid.mskl assets/fixtures/parameter_face_basic.matl`
 - Atlas-free ArtPath renderer preparation: `./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl`
 - Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation, clipping-mask propagation, sequence frame selection, GPU-skinned weighted-mesh draw preparation, animated slot presentation, slot blend modes, straight-alpha/PMA two-color tint propagation, and the single-color shader fast path from the checked-in fixtures
+
+## MAR-157 Typed SelectionSet Validation Results
+
+Validated 2026-07-18. A public UI-free `SelectionSet` now owns exact name-based
+Bone, Slot, Attachment, and Constraint identities with stable insertion order and one active
+item. `ShellState` owns the only entity-selection set; persistence, preview composition,
+history, user preferences, runtime formats, the C ABI, and Agent/MCP remain unchanged.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Typed identity | Bone/Slot type separation, slot+skin+attachment scope, constraint kind+name scope, case-sensitive equality | PASS |
+| Deterministic set | Replace, toggle, ordered range add, duplicate suppression, active fallback, clear, prune, remap/delete, collision tracking, invalid-range atomicity | PASS |
+| Shell compatibility | Active Bone index; active Slot/Attachment slot and owning-bone context; Slot preview attachment; active Constraint kind/name | PASS |
+| Transience | Project bytes, preview/runtime data, dirty state, undo/redo counts, and project/runtime/preview revisions remain unchanged | PASS |
+| Compatibility | `.marrow`, `.mskl` v1, `.mbin` v2, C ABI v1, and the 56-operation Agent/MCP surface are unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build` → configured successfully
+- `cmake --build build -j4` → all targets built
+- `./build/marrow_selection_tests` → 7/7 focused cases passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` → active compatibility and transient-state shell smoke passed
+- `ctest --test-dir build --output-on-failure -L editor` → 7/7 passed
+- `ctest --test-dir build --output-on-failure` → 13/13 passed
+- `git diff --check` → passed
 
 ## MAR-156 Versioned User Preference Store Validation Results
 

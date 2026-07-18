@@ -32,10 +32,10 @@ This directory is organized by product capability, not by code layer. Each docum
    - Dependency order is runtime definitions/project export, 1D shapes, warp/rotation deformers, ArtPath, expression/lip-sync, editor mode, then agent/MCP parity.
 
 3. **Active backlog: imported-rig editing P1 (MAR-154~191)**
-   - The MAR-128 gate passed on 2026-07-16, MAR-154–155 passed on 2026-07-17, and MAR-156 passed on 2026-07-18. The remaining linear dependency chain recorded in the PRD and `editing-gap-analysis.md` begins with MAR-157.
+   - The MAR-128 gate passed on 2026-07-16, MAR-154–155 passed on 2026-07-17, and MAR-156–157 passed on 2026-07-18. The next open checkpoint in the PRD and `editing-gap-analysis.md` is MAR-158.
 
 4. **Deferred enhancement tracks**
-   - Broader AI control, production workflow, Spine parity/export, and runtime SDK work remain useful capability plans, but none overrides the active MAR-157 P1 milestone.
+   - Broader AI control, production workflow, Spine parity/export, and runtime SDK work remain useful capability plans, but none overrides the active MAR-158 P1 milestone.
    - Native rig/mesh topology authoring remains blocked on a versioned canonical `.marrow` authoring-graph decision.
 
 ## Cross-Track Rules

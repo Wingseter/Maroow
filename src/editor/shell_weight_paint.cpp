@@ -232,11 +232,11 @@ void store_mesh_weight_attachment_edit(
 }
 
 std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const ShellState& state) {
-    if (!state.load_result || !state.preview_skeleton || !state.selected_slot_index.has_value()) {
+    if (!state.load_result || !state.preview_skeleton || !selected_slot_index(state).has_value()) {
         return std::nullopt;
     }
 
-    const std::size_t slot_index = *state.selected_slot_index;
+    const std::size_t slot_index = *selected_slot_index(state);
     const auto& skeleton = *state.load_result.skeleton_data;
     if (slot_index >= skeleton.slots().size()) {
         return std::nullopt;
@@ -321,8 +321,8 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     overlay.vertices.reserve(pose->vertices.size());
     for (std::size_t vertex_index = 0; vertex_index < pose->vertices.size(); ++vertex_index) {
         const double selected_weight =
-            state.selected_bone_index.has_value()
-                ? weight_for_bone(geometry.weights[vertex_index], *state.selected_bone_index)
+            selected_bone_index(state).has_value()
+                ? weight_for_bone(geometry.weights[vertex_index], *selected_bone_index(state))
                 : 0.0;
         overlay.vertices.push_back(MeshWeightOverlayVertex{
             screen_from_world(
@@ -342,17 +342,17 @@ bool apply_paint_weight_to_vertex(
     std::size_t vertex_index,
     double stamp_strength,
     marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (!state.load_result || !state.selected_bone_index.has_value() ||
+    if (!state.load_result || !selected_bone_index(state).has_value() ||
         vertex == nullptr ||
         vertex_index >= overlay.vertices.size() ||
-        *state.selected_bone_index >= state.load_result.skeleton_data->bones().size() ||
-        *state.selected_bone_index >= state.preview_skeleton->bone_world_transforms().size()) {
+        *selected_bone_index(state) >= state.load_result.skeleton_data->bones().size() ||
+        *selected_bone_index(state) >= state.preview_skeleton->bone_world_transforms().size()) {
         return false;
     }
 
     marrow::editor::MeshWeightVertexEdit updated = *vertex;
     const auto& skeleton = *state.load_result.skeleton_data;
-    const std::string active_bone_name = skeleton.bones()[*state.selected_bone_index].name;
+    const std::string active_bone_name = skeleton.bones()[*selected_bone_index(state)].name;
     auto influence_it = std::find_if(
         updated.influences.begin(),
         updated.influences.end(),
@@ -370,7 +370,7 @@ bool apply_paint_weight_to_vertex(
                 ? overlay.vertex_offsets[(vertex_index * 2U) + 1U]
                 : 0.0;
         const auto bind_position = inverse_transform_point_safe(
-            state.preview_skeleton->bone_world_transforms()[*state.selected_bone_index],
+            state.preview_skeleton->bone_world_transforms()[*selected_bone_index(state)],
             overlay.vertices[vertex_index].world_position.x,
             overlay.vertices[vertex_index].world_position.y);
         if (!bind_position.has_value()) {
@@ -399,12 +399,12 @@ bool apply_erase_weight_to_vertex(
     const ShellState& state,
     double stamp_strength,
     marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (!state.load_result || !state.selected_bone_index.has_value() || vertex == nullptr) {
+    if (!state.load_result || !selected_bone_index(state).has_value() || vertex == nullptr) {
         return false;
     }
 
     const auto& skeleton = *state.load_result.skeleton_data;
-    if (*state.selected_bone_index >= skeleton.bones().size()) {
+    if (*selected_bone_index(state) >= skeleton.bones().size()) {
         return false;
     }
 
@@ -413,7 +413,7 @@ bool apply_erase_weight_to_vertex(
     }
 
     marrow::editor::MeshWeightVertexEdit updated = *vertex;
-    const std::string active_bone_name = skeleton.bones()[*state.selected_bone_index].name;
+    const std::string active_bone_name = skeleton.bones()[*selected_bone_index(state)].name;
     auto influence_it = std::find_if(
         updated.influences.begin(),
         updated.influences.end(),
@@ -567,9 +567,9 @@ std::string weight_paint_stroke_label(
     const MeshWeightPaintTarget& target) {
     std::string bone_name = "<bone>";
     if (state.load_result &&
-        state.selected_bone_index.has_value() &&
-        *state.selected_bone_index < state.load_result.skeleton_data->bones().size()) {
-        bone_name = state.load_result.skeleton_data->bones()[*state.selected_bone_index].name;
+        selected_bone_index(state).has_value() &&
+        *selected_bone_index(state) < state.load_result.skeleton_data->bones().size()) {
+        bone_name = state.load_result.skeleton_data->bones()[*selected_bone_index(state)].name;
     }
 
     switch (state.weight_paint.mode) {
@@ -651,8 +651,8 @@ bool apply_weight_paint_sample(
 
     if ((state->weight_paint.mode == WeightPaintMode::Paint ||
          state->weight_paint.mode == WeightPaintMode::Erase) &&
-        (!state->selected_bone_index.has_value() ||
-         *state->selected_bone_index >= state->load_result.skeleton_data->bones().size())) {
+        (!selected_bone_index(*state).has_value() ||
+         *selected_bone_index(*state) >= state->load_result.skeleton_data->bones().size())) {
         return false;
     }
 

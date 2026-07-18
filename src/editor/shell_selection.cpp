@@ -20,6 +20,73 @@ namespace marrow::editor::shell {
 using marrow::editor::Icon;
 using marrow::editor::IconRegistry;
 
+std::optional<std::size_t> selected_slot_index(const ShellState& state) {
+    if (!state.load_result) {
+        return std::nullopt;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    if (const auto* slot = state.selection.active_slot()) {
+        return skeleton.find_slot_index(slot->slot_name);
+    }
+    if (const auto* attachment = state.selection.active_attachment()) {
+        return skeleton.find_slot_index(attachment->slot_name);
+    }
+    return std::nullopt;
+}
+
+std::optional<std::size_t> selected_bone_index(const ShellState& state) {
+    if (!state.load_result) {
+        return std::nullopt;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    if (const auto* bone = state.selection.active_bone()) {
+        return skeleton.find_bone_index(bone->bone_name);
+    }
+    const auto slot_index = selected_slot_index(state);
+    if (!slot_index.has_value() || *slot_index >= skeleton.slots().size()) {
+        return std::nullopt;
+    }
+    return skeleton.slots()[*slot_index].bone_index;
+}
+
+std::optional<PreviewAttachmentSelection> selected_attachment(const ShellState& state) {
+    if (!state.load_result) {
+        return std::nullopt;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    if (const auto* attachment = state.selection.active_attachment()) {
+        const auto slot_index = skeleton.find_slot_index(attachment->slot_name);
+        const auto skin_index = skeleton.find_skin_index(attachment->skin_name);
+        if (!slot_index.has_value() || !skin_index.has_value() ||
+            skeleton.find_attachment(
+                *skin_index,
+                *slot_index,
+                attachment->attachment_name) == nullptr) {
+            return std::nullopt;
+        }
+        return PreviewAttachmentSelection{
+            *slot_index,
+            *skin_index,
+            attachment->attachment_name};
+    }
+
+    const auto slot_index = selected_slot_index(state);
+    return slot_index.has_value()
+        ? current_attachment_selection(state, *slot_index)
+        : std::nullopt;
+}
+
+std::optional<marrow::editor::ConstraintSelection> selected_constraint(
+    const ShellState& state) {
+    const auto* selection = state.selection.active_constraint();
+    return selection == nullptr
+        ? std::nullopt
+        : std::optional<marrow::editor::ConstraintSelection>(*selection);
+}
+
 std::string join_strings(const std::vector<std::string>& values) {
     if (values.empty()) {
         return "<none>";
@@ -40,14 +107,15 @@ void select_bone(
     std::optional<std::size_t> bone_index,
     std::string_view source,
     bool update_status_message) {
-    state->selected_bone_index = bone_index;
-
-    if (!update_status_message || !bone_index.has_value() || !state->load_result) {
+    if (!bone_index.has_value() || !state->load_result ||
+        *bone_index >= state->load_result.skeleton_data->bones().size()) {
+        state->selection.clear();
         return;
     }
 
     const auto& bones = state->load_result.skeleton_data->bones();
-    if (*bone_index >= bones.size()) {
+    state->selection.replace(marrow::editor::BoneSelection{bones[*bone_index].name});
+    if (!update_status_message) {
         return;
     }
 
@@ -60,43 +128,55 @@ void select_bone(
 }
 
 void sync_attachment_selection_for_slot(ShellState* state, std::size_t slot_index) {
-    if (!state->load_result) {
-        state->selected_attachment.reset();
+    const auto* active_attachment = state->selection.active_attachment();
+    if (active_attachment == nullptr) {
+        return;
+    }
+    if (!state->load_result || slot_index >= state->load_result.skeleton_data->slots().size()) {
+        state->selection.remap(*active_attachment, std::nullopt);
         return;
     }
 
-    if (state->selected_attachment.has_value() &&
-        state->selected_attachment->slot_index == slot_index &&
-        resolve_attachment_reference(
-            *state->load_result.skeleton_data,
-            *state->selected_attachment).has_value()) {
+    if (active_attachment->slot_name ==
+            state->load_result.skeleton_data->slots()[slot_index].name &&
+        selected_attachment(*state).has_value()) {
         return;
     }
 
     if (const auto current_selection = current_attachment_selection(*state, slot_index)) {
-        state->selected_attachment = current_selection;
+        select_attachment(state, current_selection, "", false);
         return;
     }
 
-    state->selected_attachment =
-        first_attachment_selection_for_slot(*state->load_result.skeleton_data, slot_index);
+    select_attachment(
+        state,
+        first_attachment_selection_for_slot(*state->load_result.skeleton_data, slot_index),
+        "",
+        false);
 }
 
 void select_attachment(
     ShellState* state,
-    std::optional<AttachmentSelection> selection,
+    std::optional<PreviewAttachmentSelection> selection,
     std::string_view source,
     bool update_status_message) {
-    state->selected_attachment = selection;
     if (!selection.has_value() || !state->load_result) {
+        state->selection.clear();
         return;
     }
 
-    state->selected_slot_index = selection->slot_index;
-    if (selection->slot_index < state->load_result.skeleton_data->slots().size()) {
-        state->selected_bone_index =
-            state->load_result.skeleton_data->slots()[selection->slot_index].bone_index;
+    const auto& skeleton = *state->load_result.skeleton_data;
+    const auto reference = resolve_attachment_reference(skeleton, *selection);
+    if (!reference.has_value() || !reference->skin_index.has_value() ||
+        selection->slot_index >= skeleton.slots().size() ||
+        *reference->skin_index >= skeleton.skins().size()) {
+        state->selection.clear();
+        return;
     }
+    state->selection.replace(marrow::editor::AttachmentSelection{
+        skeleton.slots()[selection->slot_index].name,
+        skeleton.skins()[*reference->skin_index].name,
+        reference->attachment->name});
 
     if (!update_status_message) {
         return;
@@ -119,25 +199,15 @@ void select_slot(
     std::optional<std::size_t> slot_index,
     std::string_view source,
     bool update_status_message) {
-    state->selected_slot_index = slot_index;
-    if (!slot_index.has_value() || !state->load_result) {
-        state->selected_attachment.reset();
+    if (!slot_index.has_value() || !state->load_result ||
+        *slot_index >= state->load_result.skeleton_data->slots().size()) {
+        state->selection.clear();
         return;
     }
 
     const auto& skeleton = *state->load_result.skeleton_data;
-    if (*slot_index >= skeleton.slots().size()) {
-        state->selected_attachment.reset();
-        return;
-    }
-
-    state->selected_bone_index = skeleton.slots()[*slot_index].bone_index;
-    if (const auto current_selection = current_attachment_selection(*state, *slot_index)) {
-        state->selected_attachment = current_selection;
-    } else {
-        state->selected_attachment =
-            first_attachment_selection_for_slot(skeleton, *slot_index);
-    }
+    state->selection.replace(marrow::editor::SlotSelection{
+        skeleton.slots()[*slot_index].name});
 
     if (!update_status_message) {
         return;
@@ -167,8 +237,8 @@ bool apply_preview_skin_selection(
         return false;
     }
 
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
+    if (selected_slot_index(*state).has_value()) {
+        sync_attachment_selection_for_slot(state, *selected_slot_index(*state));
     }
 
     if (update_status_message) {
@@ -212,8 +282,8 @@ bool execute_preview_edit_action(
         return false;
     }
 
-    if (state->selected_slot_index.has_value()) {
-        sync_attachment_selection_for_slot(state, *state->selected_slot_index);
+    if (selected_slot_index(*state).has_value()) {
+        sync_attachment_selection_for_slot(state, *selected_slot_index(*state));
     }
     return record_action_from_snapshots(
         state,
@@ -283,7 +353,7 @@ bool set_preview_skin_enabled(
 
 bool apply_attachment_selection_to_preview_slot(
     ShellState* state,
-    const AttachmentSelection& selection,
+    const PreviewAttachmentSelection& selection,
     std::string_view source,
     bool update_status_message,
     bool record_history) {
@@ -355,7 +425,7 @@ bool reset_preview_slot_to_skin_selection(
         if (const auto preview_selection = current_attachment_selection(*state, slot_index)) {
             select_attachment(state, preview_selection, source, false);
         } else {
-            state->selected_attachment.reset();
+            select_attachment(state, std::nullopt, source, false);
         }
     };
 
@@ -463,7 +533,7 @@ std::vector<SlotAttachmentReference> collect_slot_attachments(
 
 std::optional<SlotAttachmentReference> resolve_attachment_reference(
     const marrow::runtime::SkeletonData& skeleton,
-    const AttachmentSelection& selection) {
+    const PreviewAttachmentSelection& selection) {
     if (selection.slot_index >= skeleton.slots().size()) {
         return std::nullopt;
     }
@@ -494,7 +564,7 @@ std::optional<SlotAttachmentReference> resolve_attachment_reference(
         attachment};
 }
 
-std::optional<AttachmentSelection> current_attachment_selection(
+std::optional<PreviewAttachmentSelection> current_attachment_selection(
     const ShellState& state,
     std::size_t slot_index) {
     if (!state.load_result || !state.preview_skeleton ||
@@ -512,14 +582,14 @@ std::optional<AttachmentSelection> current_attachment_selection(
         slot_index,
         slot_state.attachment_name,
         &source_skin_index);
-    return AttachmentSelection{
+    return PreviewAttachmentSelection{
         slot_index,
         source_skin_index,
         slot_state.attachment_name};
 }
 
 
-std::optional<AttachmentSelection> first_attachment_selection_for_slot(
+std::optional<PreviewAttachmentSelection> first_attachment_selection_for_slot(
     const marrow::runtime::SkeletonData& skeleton,
     std::size_t slot_index) {
     const auto attachments = collect_slot_attachments(skeleton, slot_index);
@@ -527,7 +597,7 @@ std::optional<AttachmentSelection> first_attachment_selection_for_slot(
         return std::nullopt;
     }
 
-    return AttachmentSelection{
+    return PreviewAttachmentSelection{
         slot_index,
         attachments.front().skin_index,
         attachments.front().attachment->name};
@@ -554,7 +624,7 @@ std::vector<std::size_t> build_active_preview_skin_indices(
     return skin_indices;
 }
 
-std::optional<AttachmentSelection> resolve_skin_preview_attachment(
+std::optional<PreviewAttachmentSelection> resolve_skin_preview_attachment(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names,
     std::size_t slot_index) {
@@ -584,11 +654,11 @@ std::optional<AttachmentSelection> resolve_skin_preview_attachment(
         return std::nullopt;
     }
 
-    return AttachmentSelection{slot_index, skin_index, attachment_name};
+    return PreviewAttachmentSelection{slot_index, skin_index, attachment_name};
 }
 
 bool attachment_matches_selection(
-    const AttachmentSelection& selection,
+    const PreviewAttachmentSelection& selection,
     const SlotAttachmentReference& reference) {
     return selection.slot_index == reference.slot_index &&
         selection.attachment_name == reference.attachment->name &&
@@ -628,10 +698,9 @@ void draw_slot_hierarchy_node(
     const auto& slot = skeleton.slots()[slot_index];
     const std::vector<SlotAttachmentReference> attachments =
         collect_slot_attachments(skeleton, slot_index);
+    const auto* active_slot = state->selection.active_slot();
     const bool slot_selected =
-        state->selected_slot_index.has_value() &&
-        *state->selected_slot_index == slot_index &&
-        !state->selected_attachment.has_value();
+        active_slot != nullptr && active_slot->slot_name == slot.name;
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
                                ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -659,10 +728,11 @@ void draw_slot_hierarchy_node(
         for (const SlotAttachmentReference& ref : attachments) {
             if (ref.attachment == nullptr) continue;
             const bool attach_selected =
-                state->selected_attachment.has_value() &&
-                state->selected_attachment->slot_index == slot_index &&
-                state->selected_attachment->skin_index == ref.skin_index &&
-                state->selected_attachment->attachment_name == ref.attachment->name;
+                state->selection.active_attachment() != nullptr &&
+                selected_attachment(*state).has_value() &&
+                selected_attachment(*state)->slot_index == slot_index &&
+                selected_attachment(*state)->skin_index == ref.skin_index &&
+                selected_attachment(*state)->attachment_name == ref.attachment->name;
             ImGuiTreeNodeFlags leaf_flags = ImGuiTreeNodeFlags_Leaf |
                                             ImGuiTreeNodeFlags_NoTreePushOnOpen |
                                             ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -679,7 +749,7 @@ void draw_slot_hierarchy_node(
                 leaf_flags,
                 &leaf_clicked);
             if (leaf_clicked) {
-                AttachmentSelection sel;
+                PreviewAttachmentSelection sel;
                 sel.slot_index = slot_index;
                 sel.skin_index = ref.skin_index;
                 sel.attachment_name = ref.attachment->name;
@@ -702,7 +772,7 @@ void draw_hierarchy_node(
     namespace t = marrow::editor::shell::theme;
     const auto& bone = skeleton.bones()[bone_index];
     const bool selected =
-        state->selected_bone_index.has_value() && *state->selected_bone_index == bone_index;
+        selected_bone_index(*state).has_value() && *selected_bone_index(*state) == bone_index;
     // On the active path = this bone is the selected one or an ancestor of it.
     const bool on_path =
         std::find(active_path.begin(), active_path.end(), bone_index) !=
@@ -791,8 +861,8 @@ void draw_hierarchy_window(ShellState* state) {
     // Walk parent links from the selection up to the root: every bone on
     // this chain is rendered as part of the active path.
     std::vector<std::size_t> active_path;
-    if (state->selected_bone_index.has_value()) {
-        std::optional<std::size_t> walk = state->selected_bone_index;
+    if (selected_bone_index(*state).has_value()) {
+        std::optional<std::size_t> walk = selected_bone_index(*state);
         while (walk.has_value() && *walk < skeleton.bones().size()) {
             active_path.push_back(*walk);
             walk = skeleton.bones()[*walk].parent_index;
@@ -839,8 +909,8 @@ void draw_hierarchy_window(ShellState* state) {
             const auto& bone = skeleton.bones()[bone_index];
             if (!contains_case_insensitive(bone.name, filter_sv)) continue;
             const bool selected =
-                state->selected_bone_index.has_value() &&
-                *state->selected_bone_index == bone_index;
+                selected_bone_index(*state).has_value() &&
+                *selected_bone_index(*state) == bone_index;
             ImGui::PushID(static_cast<int>(bone_index));
             if (icon_selectable(state->icons, Icon::NodeBone, bone.name.c_str(), selected)) {
                 select_bone(state, bone_index, "Hierarchy", true);
@@ -852,8 +922,8 @@ void draw_hierarchy_window(ShellState* state) {
             const auto& slot = skeleton.slots()[slot_index];
             if (!contains_case_insensitive(slot.name, filter_sv)) continue;
             const bool selected =
-                state->selected_slot_index.has_value() &&
-                *state->selected_slot_index == slot_index;
+                selected_slot_index(*state).has_value() &&
+                *selected_slot_index(*state) == slot_index;
             ImGui::PushID(static_cast<int>(10000 + slot_index));
             if (icon_selectable(state->icons, Icon::NodeSlot, slot.name.c_str(), selected)) {
                 select_slot(state, std::optional<std::size_t>(slot_index), "Hierarchy", true);

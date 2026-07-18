@@ -43,11 +43,11 @@ std::optional<ViewportTranslateAxis> hit_test_translate_gizmo(
     const ImVec2& position) {
     if (state.shell_mode != ShellMode::Animation ||
         state.selected_animation_name.empty() || state.weight_paint.enabled ||
-        !state.selected_bone_index.has_value() ||
-        *state.selected_bone_index >= layout.bones.size()) {
+        !selected_bone_index(state).has_value() ||
+        *selected_bone_index(state) >= layout.bones.size()) {
         return std::nullopt;
     }
-    const ImVec2 origin = layout.bones[*state.selected_bone_index].screen_position;
+    const ImVec2 origin = layout.bones[*selected_bone_index(state)].screen_position;
     if (squared_distance(origin, position) <=
         kTranslateGizmoHitRadius * kTranslateGizmoHitRadius) {
         return ViewportTranslateAxis::Free;
@@ -71,11 +71,11 @@ void draw_translate_gizmo(
     ImDrawList* draw_list) {
     if (draw_list == nullptr || state.shell_mode != ShellMode::Animation ||
         state.selected_animation_name.empty() ||
-        state.weight_paint.enabled || !state.selected_bone_index.has_value() ||
-        *state.selected_bone_index >= layout.bones.size()) {
+        state.weight_paint.enabled || !selected_bone_index(state).has_value() ||
+        *selected_bone_index(state) >= layout.bones.size()) {
         return;
     }
-    const ImVec2 origin = layout.bones[*state.selected_bone_index].screen_position;
+    const ImVec2 origin = layout.bones[*selected_bone_index(state)].screen_position;
     const ImVec2 x_end(origin.x + kTranslateGizmoLength, origin.y);
     const ImVec2 y_end(origin.x, origin.y - kTranslateGizmoLength);
     draw_list->AddLine(origin, x_end, IM_COL32(239, 91, 91, 255), 3.0f);
@@ -167,11 +167,11 @@ bool begin_viewport_translate_gesture(
     const ImVec2& pointer) {
     if (state == nullptr || state->shell_mode != ShellMode::Animation ||
         state->selected_animation_name.empty() ||
-        !state->selected_bone_index.has_value() || state->preview_skeleton == nullptr ||
+        !selected_bone_index(*state).has_value() || state->preview_skeleton == nullptr ||
         state->load_result.project == nullptr || authoring_gesture_active(*state)) {
         return false;
     }
-    const std::size_t bone_index = *state->selected_bone_index;
+    const std::size_t bone_index = *selected_bone_index(*state);
     if (bone_index >= state->preview_skeleton->bone_world_transforms().size() ||
         bone_index >= state->load_result.skeleton_data->bones().size()) {
         return false;
@@ -587,7 +587,7 @@ void draw_viewport_fallback_scene(
         draw_viewport_pose_fallback(
             layout.bones,
             layout.render_joint_radius,
-            state.selected_bone_index,
+            selected_bone_index(state),
             hovered_bone,
             IM_COL32(214, 163, 76, 220),
             IM_COL32(111, 117, 125, 180),
@@ -616,7 +616,7 @@ void draw_viewport_annotations(
     if (state.viewport.debug_overlay.bones) {
         for (const BoneCanvasNode& node : layout.bones) {
             const bool selected =
-                state.selected_bone_index.has_value() && *state.selected_bone_index == node.bone_index;
+                selected_bone_index(state).has_value() && *selected_bone_index(state) == node.bone_index;
             const bool hovered_selection =
                 hovered_bone.has_value() && *hovered_bone == node.bone_index;
             const float radius = layout.render_joint_radius + (selected ? 2.0f : 0.0f);
@@ -630,10 +630,10 @@ void draw_viewport_annotations(
     }
 
     // ── Glass selection chip (top-left) ──
-    if (state.selected_bone_index.has_value() &&
-        *state.selected_bone_index < bones.size()) {
+    if (selected_bone_index(state).has_value() &&
+        *selected_bone_index(state) < bones.size()) {
         std::ostringstream selection_stream;
-        selection_stream << bones[*state.selected_bone_index].name
+        selection_stream << bones[*selected_bone_index(state)].name
                          << "  ·  pan(" << static_cast<int>(state.viewport.pan_x) << ", "
                          << static_cast<int>(state.viewport.pan_y) << ")"
                          << "  ·  zoom " << state.viewport.zoom;
@@ -837,9 +837,9 @@ void draw_viewport_window(ShellState* state) {
     const bool weight_tool_ready =
         state->weight_paint.enabled &&
         paint_target.has_value() &&
-        state->selected_bone_index.has_value() &&
+        selected_bone_index(*state).has_value() &&
         state->load_result &&
-        *state->selected_bone_index < state->load_result.skeleton_data->bones().size();
+        *selected_bone_index(*state) < state->load_result.skeleton_data->bones().size();
     const std::string preview_label =
         state->selected_animation_name.empty() ? std::string("Setup pose preview")
                                                : "Animation preview / " + state->selected_animation_name;
@@ -963,9 +963,9 @@ void draw_viewport_window(ShellState* state) {
     const bool brush_enabled =
         state->weight_paint.enabled &&
         mesh_weight_overlay.has_value() &&
-        state->selected_bone_index.has_value() &&
+        selected_bone_index(*state).has_value() &&
         state->load_result &&
-        *state->selected_bone_index < state->load_result.skeleton_data->bones().size();
+        *selected_bone_index(*state) < state->load_result.skeleton_data->bones().size();
     std::optional<std::size_t> hovered_bone;
     if (hovered && layout.has_value()) {
         hovered_bone = pick_bone_at_position(*layout, ImGui::GetIO().MousePos);
@@ -1096,7 +1096,7 @@ void draw_viewport_window(ShellState* state) {
     {
         const bool animation_move_ready =
             !weight_tool_ready && !state->selected_animation_name.empty() &&
-            state->selected_bone_index.has_value();
+            selected_bone_index(*state).has_value();
         std::string hint =
             std::string(weight_tool_ready
                             ? "LMB brush weights"
@@ -1367,10 +1367,10 @@ void draw_viewport_settings(ShellState* state) {
             ImGui::TextDisabled("Select a mesh slot to paint weights.");
         }
 
-        if (state->selected_bone_index.has_value() &&
-            *state->selected_bone_index < state->load_result.skeleton_data->bones().size()) {
+        if (selected_bone_index(*state).has_value() &&
+            *selected_bone_index(*state) < state->load_result.skeleton_data->bones().size()) {
             ImGui::Text("Active bone: %s",
-                state->load_result.skeleton_data->bones()[*state->selected_bone_index].name.c_str());
+                state->load_result.skeleton_data->bones()[*selected_bone_index(*state)].name.c_str());
         } else {
             ImGui::TextDisabled("Select a bone for paint target.");
         }
