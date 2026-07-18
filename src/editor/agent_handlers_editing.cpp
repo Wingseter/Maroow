@@ -14,6 +14,27 @@ namespace {
 
 constexpr double kKeyTimeEpsilon = 1e-6;
 
+json::Value animation_duration_value(
+    const runtime::AnimationData& animation,
+    double requested_duration,
+    bool dry_run) {
+    json::Value::Object payload;
+    payload.emplace("dry_run", bool_value(dry_run));
+    payload.emplace("animation", string_value(animation.name));
+    payload.emplace("requested_duration", number_value(requested_duration));
+    payload.emplace("duration", number_value(animation.duration()));
+    payload.emplace("inferred_duration", number_value(animation.inferred_duration()));
+    payload.emplace(
+        "has_explicit_duration",
+        bool_value(animation.explicit_duration.has_value()));
+    if (animation.explicit_duration.has_value()) {
+        payload.emplace(
+            "explicit_duration",
+            number_value(*animation.explicit_duration));
+    }
+    return object_value(std::move(payload));
+}
+
 } // namespace
 
 AgentDispatchResult handle_editing_operation(
@@ -146,6 +167,155 @@ AgentDispatchResult handle_editing_operation(
             op,
             spec,
             object_value(std::move(preview)));
+    }
+
+    if (op == "animation.set_duration") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "animation.set_duration requires an 'args' object.", op, spec);
+        }
+        for (const auto& [name, value] : args->as_object()) {
+            (void)value;
+            if (name != "animation" && name != "duration" && name != "dry_run") {
+                return make_error(
+                    "Unexpected animation.set_duration argument: " + name, op, spec);
+            }
+        }
+
+        const auto animation_name = string_arg(*args, "animation");
+        const auto requested_duration = number_arg(*args, "duration");
+        if (!animation_name.has_value() || animation_name->empty() ||
+            !requested_duration.has_value() || !std::isfinite(*requested_duration) ||
+            *requested_duration < 0.0) {
+            return make_error(
+                "animation.set_duration requires a non-empty animation and finite "
+                "non-negative duration.",
+                op,
+                spec,
+                "validation_failed");
+        }
+        const json::Value* dry_run_value = json::find_member(*args, "dry_run");
+        if (dry_run_value != nullptr && !dry_run_value->is_boolean()) {
+            return make_error(
+                "animation.set_duration dry_run must be a boolean.",
+                op,
+                spec,
+                "validation_failed");
+        }
+        const bool dry_run = bool_arg(args, "dry_run");
+
+        const runtime::SkeletonData& effective_skeleton = *session.runtime_data();
+        if (effective_skeleton.find_animation(*animation_name) == nullptr) {
+            return make_error(
+                "Animation not found: " + std::string(*animation_name),
+                op,
+                spec,
+                "not_found");
+        }
+
+        if (dry_run) {
+            ProjectData candidate = *session.project();
+            const AuthoringResult authoring_result = set_animation_duration(
+                &candidate,
+                effective_skeleton,
+                *animation_name,
+                *requested_duration);
+            if (!authoring_result) {
+                return make_error(
+                    authoring_result.error, op, spec, "validation_failed");
+            }
+            if (session.base_skeleton_document() == nullptr) {
+                return make_error(
+                    "No base skeleton document is loaded.",
+                    op,
+                    spec,
+                    "validation_failed");
+            }
+            const ProjectRuntimeResult candidate_runtime = build_project_runtime(
+                candidate,
+                *session.base_skeleton_document());
+            if (!candidate_runtime) {
+                return make_error(
+                    "Candidate runtime validation failed: " +
+                        (candidate_runtime.error.has_value()
+                             ? candidate_runtime.error->format()
+                             : std::string("unknown runtime build failure")),
+                    op,
+                    spec,
+                    "validation_failed");
+            }
+            const runtime::AnimationData* candidate_animation =
+                candidate_runtime.skeleton_data->find_animation(*animation_name);
+            if (candidate_animation == nullptr) {
+                return make_error(
+                    "Candidate runtime lost animation: " +
+                        std::string(*animation_name),
+                    op,
+                    spec,
+                    "validation_failed");
+            }
+            return make_success(
+                "Animation duration validated.",
+                op,
+                spec,
+                animation_duration_value(
+                    *candidate_animation, *requested_duration, true));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "Set animation duration via Agent",
+            "animation-duration:" + std::string(*animation_name),
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(
+                transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const AuthoringResult authoring_result = set_animation_duration(
+            transaction.project(),
+            effective_skeleton,
+            *animation_name,
+            *requested_duration);
+        if (!authoring_result) {
+            transaction.cancel();
+            return make_error(
+                authoring_result.error, op, spec, "validation_failed");
+        }
+        if (!authoring_result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const SessionResult commit_result = transaction.commit();
+        if (!commit_result) {
+            return make_error(
+                "Failed to set animation duration: " +
+                    commit_result.error->format(),
+                op,
+                spec,
+                "validation_failed");
+        }
+        if (!commit_result.changed) {
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+
+        const runtime::AnimationData* updated_animation =
+            session.runtime_data()->find_animation(*animation_name);
+        if (updated_animation == nullptr) {
+            return make_error(
+                "Updated runtime lost animation: " +
+                    std::string(*animation_name),
+                op,
+                spec,
+                "validation_failed");
+        }
+        return make_success(
+            "Set animation duration successfully.",
+            op,
+            spec,
+            animation_duration_value(
+                *updated_animation, *requested_duration, false));
     }
 
     const marrow::runtime::SkeletonData& skeleton = *session.runtime_data();

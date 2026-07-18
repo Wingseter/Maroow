@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 55> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 56> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -67,6 +67,7 @@ constexpr std::array<OperationExpectation, 55> kExpectedOperations{{
     {"animation.duplicate", "edit", true, false, true},
     {"animation.rename", "edit", true, false, true},
     {"animation.delete", "edit", true, false, true},
+    {"animation.set_duration", "edit", true, false, true},
     {"timeline.retime_keyframes", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
@@ -997,6 +998,20 @@ int main(int argc, char** argv) {
         "timeline.describe initial",
         "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");
     expect_scene_contains(harness, "timeline.describe initial", initial_timeline, "draw_order_keyframes");
+    const DispatchObservation initial_aim_timeline = harness.invoke(
+        "timeline.describe aim initial",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+    harness.expect(
+        number_member(initial_aim_timeline.scene_delta(), "duration") ==
+                std::optional<double>(0.5) &&
+            number_member(initial_aim_timeline.scene_delta(), "inferred_duration") ==
+                std::optional<double>(0.5) &&
+            bool_member(initial_aim_timeline.scene_delta(), "has_explicit_duration") ==
+                std::optional<bool>(true) &&
+            number_member(initial_aim_timeline.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.5),
+        "timeline.describe aim initial",
+        "explicit and inferred duration metadata changed");
     expect_scene_contains(
         harness,
         "mesh.describe",
@@ -1051,6 +1066,8 @@ int main(int argc, char** argv) {
     // Every dry-run-capable edit/import is validated, then diagnostics and the
     // timeline are compared byte-for-byte to prove no authoring mutation.
     const std::string timeline_before_dry_runs = compact_scene_delta(initial_timeline);
+    const std::string aim_timeline_before_dry_runs =
+        compact_scene_delta(initial_aim_timeline);
     const std::string diagnostics_before_dry_runs = compact_scene_delta(initial_diagnostics);
     harness.invoke(
         "animation.create dry-run",
@@ -1068,6 +1085,23 @@ int main(int argc, char** argv) {
         "animation.delete dry-run",
         "{\"op\":\"animation.delete\",\"args\":{\"name\":\"attack\","
         "\"dry_run\":true}}");
+    const DispatchObservation duration_dry_run = harness.invoke(
+        "animation.set_duration dry-run",
+        "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"aim\","
+        "\"duration\":0.75,\"dry_run\":true}}");
+    harness.expect(
+        string_member(duration_dry_run.scene_delta(), "animation") ==
+                std::optional<std::string_view>("aim") &&
+            bool_member(duration_dry_run.scene_delta(), "dry_run") ==
+                std::optional<bool>(true) &&
+            number_member(duration_dry_run.scene_delta(), "duration") ==
+                std::optional<double>(0.75) &&
+            number_member(duration_dry_run.scene_delta(), "inferred_duration") ==
+                std::optional<double>(0.5) &&
+            number_member(duration_dry_run.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.75),
+        "animation.set_duration dry-run",
+        "duration dry-run metadata changed");
     harness.invoke(
         "timeline.retime_keyframes dry-run",
         "{\"op\":\"timeline.retime_keyframes\",\"args\":{\"delta\":0.05,"
@@ -1162,6 +1196,9 @@ int main(int argc, char** argv) {
     const DispatchObservation timeline_after_dry_runs = harness.invoke(
         "timeline.describe after dry-runs",
         "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");
+    const DispatchObservation aim_timeline_after_dry_runs = harness.invoke(
+        "timeline.describe aim after dry-runs",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
     const DispatchObservation diagnostics_after_dry_runs = harness.invoke(
         "project.diagnostics after dry-runs",
         "{\"op\":\"project.diagnostics\"}");
@@ -1170,9 +1207,82 @@ int main(int argc, char** argv) {
         "dry-run timeline immutability",
         "timeline.describe changed after dry-runs");
     harness.expect(
+        compact_scene_delta(aim_timeline_after_dry_runs) ==
+            aim_timeline_before_dry_runs,
+        "duration dry-run immutability",
+        "aim duration changed after a dry-run");
+    harness.expect(
         compact_scene_delta(diagnostics_after_dry_runs) == diagnostics_before_dry_runs,
         "dry-run project immutability",
         "project.diagnostics changed after dry-runs");
+
+    harness.invoke(
+        "animation.set_duration rejected shrink",
+        "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"aim\","
+        "\"duration\":0.25}}",
+        false,
+        "validation_failed");
+    const DispatchObservation aim_after_rejected_shrink = harness.invoke(
+        "timeline.describe aim after rejected shrink",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+    harness.expect(
+        compact_scene_delta(aim_after_rejected_shrink) ==
+            aim_timeline_before_dry_runs,
+        "animation.set_duration rejected shrink",
+        "rejected duration shrink changed the runtime");
+    harness.invoke(
+        "undo after rejected duration shrink",
+        "{\"op\":\"undo\"}",
+        false,
+        "nothing_to_undo");
+
+    const DispatchObservation duration_set = harness.invoke(
+        "animation.set_duration",
+        "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"aim\","
+        "\"duration\":0.75}}");
+    harness.expect(
+        string_member(duration_set.scene_delta(), "animation") ==
+                std::optional<std::string_view>("aim") &&
+            bool_member(duration_set.scene_delta(), "dry_run") ==
+                std::optional<bool>(false) &&
+            number_member(duration_set.scene_delta(), "duration") ==
+                std::optional<double>(0.75) &&
+            number_member(duration_set.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.75),
+        "animation.set_duration",
+        "live duration mutation metadata changed");
+    const DispatchObservation aim_after_duration_set = harness.invoke(
+        "timeline.describe aim after duration set",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+    harness.expect(
+        number_member(aim_after_duration_set.scene_delta(), "duration") ==
+                std::optional<double>(0.75) &&
+            number_member(aim_after_duration_set.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.75),
+        "animation.set_duration",
+        "live duration did not reach the runtime");
+    harness.invoke("undo animation duration", "{\"op\":\"undo\"}");
+    const DispatchObservation aim_after_duration_undo = harness.invoke(
+        "timeline.describe aim after duration undo",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+    harness.expect(
+        number_member(aim_after_duration_undo.scene_delta(), "duration") ==
+                std::optional<double>(0.5) &&
+            number_member(aim_after_duration_undo.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.5),
+        "undo animation duration",
+        "undo did not restore the authored duration");
+    harness.invoke("redo animation duration", "{\"op\":\"redo\"}");
+    const DispatchObservation aim_after_duration_redo = harness.invoke(
+        "timeline.describe aim after duration redo",
+        "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+    harness.expect(
+        number_member(aim_after_duration_redo.scene_delta(), "duration") ==
+                std::optional<double>(0.75) &&
+            number_member(aim_after_duration_redo.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.75),
+        "redo animation duration",
+        "redo did not restore the authored duration edit");
 
     // Pause, terminate, and resume must gate mutations while retaining protocol
     // metadata and monotonic activity IDs.

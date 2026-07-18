@@ -321,6 +321,12 @@ struct PendingEditAction {
     EditorHistorySnapshot before_snapshot;
 };
 
+struct AnimationDurationGesture {
+    std::string animation_name;
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
 struct InspectorTransformGesture {
     ImGuiID item_id{0};
     marrow::editor::TransformTimelineChannel channel{
@@ -441,6 +447,7 @@ struct ShellState {
     WeightPaintSettings weight_paint{};
     marrow::editor::ProjectLoadResult& load_result;
     std::optional<PendingEditAction> pending_edit_action;
+    std::optional<AnimationDurationGesture> animation_duration_gesture;
     std::optional<InspectorTransformGesture> inspector_transform_gesture;
     std::optional<ViewportTranslateGesture> viewport_translate_gesture;
     std::optional<ParameterSliderGesture> parameter_slider_gesture;
@@ -495,6 +502,7 @@ struct ShellState {
 
 inline bool authoring_gesture_active(const ShellState& state) noexcept {
     return state.pending_edit_action.has_value() ||
+        state.animation_duration_gesture.has_value() ||
         state.inspector_transform_gesture.has_value() ||
         state.viewport_translate_gesture.has_value() ||
         state.parameter_slider_gesture.has_value() ||

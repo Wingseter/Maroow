@@ -326,6 +326,7 @@ struct AnimationData {
     AnimationData& operator=(AnimationData&& other) noexcept = default;
 
     std::string name;
+    std::optional<double> explicit_duration;
     std::vector<std::size_t> targeted_bone_indices;
     std::vector<BoneRotateTimeline> bone_rotate_timelines;
     std::vector<BoneInheritTimeline> bone_inherit_timelines;
@@ -515,8 +516,11 @@ struct AnimationData {
     const DrawOrderKeyframe* sample_draw_order(
         double time,
         SamplingContext* context = nullptr) const;
-    /// @brief Returns the maximum authored duration of the animation.
-    /// @return Animation duration in seconds.
+    /// @brief Returns the maximum key-derived duration of the animation.
+    /// @return Last authored timeline-key time in seconds, or zero for an empty clip.
+    double inferred_duration() const;
+    /// @brief Returns the effective explicit-or-inferred clip duration.
+    /// @return Authored explicit duration when present; otherwise inferred duration.
     double duration() const;
 };
 

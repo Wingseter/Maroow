@@ -30,6 +30,40 @@ bool valid_animation_name(std::string_view name) {
     return !name.empty();
 }
 
+AnimationEdit* coalescible_duration_edit(
+    ProjectData* project,
+    std::string_view animation_name) {
+    for (auto iterator = project->animation_edits.rbegin();
+         iterator != project->animation_edits.rend();
+         ++iterator) {
+        if (iterator->kind == AnimationEditKind::SetDuration) {
+            if (iterator->name == animation_name) {
+                return &(*iterator);
+            }
+            continue;
+        }
+        // Catalog and opaque operations may change the identity or meaning of
+        // a name. Never move a duration mutation across such a barrier.
+        break;
+    }
+    return nullptr;
+}
+
+template <typename TimelineEdit>
+void include_animation_timeline_maximum(
+    const std::vector<TimelineEdit>& edits,
+    std::string_view animation_name,
+    double* maximum_time) {
+    for (const TimelineEdit& edit : edits) {
+        if (edit.animation_name != animation_name) {
+            continue;
+        }
+        for (const auto& keyframe : edit.keyframes) {
+            *maximum_time = std::max(*maximum_time, keyframe.time);
+        }
+    }
+}
+
 template <typename Edit>
 void rename_timeline_edits(std::vector<Edit>* edits, std::string_view from, std::string_view to) {
     for (Edit& edit : *edits) {
@@ -1393,6 +1427,145 @@ AuthoringResult delete_animation(
         project->editor_metadata.active_animation =
             replacement != animations->end() ? replacement->first : std::string{};
     }
+    return {true, {}};
+}
+
+AuthoringResult set_animation_duration(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    double duration) {
+    if (project == nullptr) {
+        return missing_project_result();
+    }
+    if (!valid_animation_name(animation_name)) {
+        return invalid_name_result();
+    }
+    if (!std::isfinite(duration) || duration < 0.0 ||
+        duration > static_cast<double>(
+            std::numeric_limits<runtime::AnimationScalar>::max())) {
+        return {
+            false,
+            "Animation duration must be finite, non-negative, and within the runtime float32 range."};
+    }
+
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (animation == nullptr) {
+        return {false, "Animation not found: " + std::string(animation_name)};
+    }
+
+    double inferred_duration = animation->inferred_duration();
+    include_animation_timeline_maximum(
+        project->transform_timeline_edits, animation_name, &inferred_duration);
+    include_animation_timeline_maximum(
+        project->mesh_deform_timeline_edits, animation_name, &inferred_duration);
+    include_animation_timeline_maximum(
+        project->draw_order_timeline_edits, animation_name, &inferred_duration);
+    include_animation_timeline_maximum(
+        project->event_timeline_edits, animation_name, &inferred_duration);
+    include_animation_timeline_maximum(
+        project->slot_color_timeline_edits, animation_name, &inferred_duration);
+    include_animation_timeline_maximum(
+        project->slot_attachment_timeline_edits, animation_name, &inferred_duration);
+    if (!std::isfinite(inferred_duration) || inferred_duration < 0.0 ||
+        inferred_duration > static_cast<double>(
+            std::numeric_limits<runtime::AnimationScalar>::max())) {
+        return {
+            false,
+            "Animation timeline keys must have finite non-negative float32 times."};
+    }
+
+    const double applied_duration = static_cast<double>(
+        static_cast<runtime::AnimationScalar>(duration));
+    const double normalized_inferred_duration = std::max(
+        animation->inferred_duration(),
+        static_cast<double>(
+            static_cast<runtime::AnimationScalar>(inferred_duration)));
+    if (!std::isfinite(applied_duration) ||
+        applied_duration < normalized_inferred_duration) {
+        return {
+            false,
+            "Animation duration cannot be shorter than the last authored key (" +
+                std::to_string(normalized_inferred_duration) + " seconds)."};
+    }
+
+    AnimationEdit* existing = coalescible_duration_edit(project, animation_name);
+    const std::optional<double> current_duration = existing != nullptr
+        ? std::optional<double>(existing->duration)
+        : animation->explicit_duration;
+    if (current_duration.has_value() && *current_duration == applied_duration) {
+        return {};
+    }
+
+    if (existing != nullptr) {
+        existing->duration = applied_duration;
+        return {true, {}};
+    }
+
+    AnimationEdit edit;
+    edit.kind = AnimationEditKind::SetDuration;
+    edit.name = std::string(animation_name);
+    edit.duration = applied_duration;
+    project->animation_edits.push_back(std::move(edit));
+    return {true, {}};
+}
+
+AuthoringResult auto_extend_explicit_animation_durations(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton) {
+    if (project == nullptr) {
+        return missing_project_result();
+    }
+
+    ProjectData candidate = *project;
+    bool changed = false;
+    for (const runtime::AnimationData& animation : effective_skeleton.animations()) {
+        const AnimationEdit* pending_duration =
+            coalescible_duration_edit(&candidate, animation.name);
+        if (!animation.explicit_duration.has_value() && pending_duration == nullptr) {
+            continue;
+        }
+        const double authored_boundary = pending_duration != nullptr
+            ? pending_duration->duration
+            : *animation.explicit_duration;
+        double maximum_time = authored_boundary;
+        include_animation_timeline_maximum(
+            candidate.transform_timeline_edits, animation.name, &maximum_time);
+        include_animation_timeline_maximum(
+            candidate.mesh_deform_timeline_edits, animation.name, &maximum_time);
+        include_animation_timeline_maximum(
+            candidate.draw_order_timeline_edits, animation.name, &maximum_time);
+        include_animation_timeline_maximum(
+            candidate.event_timeline_edits, animation.name, &maximum_time);
+        include_animation_timeline_maximum(
+            candidate.slot_color_timeline_edits, animation.name, &maximum_time);
+        include_animation_timeline_maximum(
+            candidate.slot_attachment_timeline_edits, animation.name, &maximum_time);
+
+        if (!std::isfinite(maximum_time) || maximum_time < 0.0) {
+            return {
+                false,
+                "Animation timeline keys must have finite non-negative times."};
+        }
+        const double normalized_maximum = static_cast<double>(
+            static_cast<runtime::AnimationScalar>(maximum_time));
+        if (normalized_maximum <= authored_boundary) {
+            continue;
+        }
+
+        const AuthoringResult result = set_animation_duration(
+            &candidate, effective_skeleton, animation.name, normalized_maximum);
+        if (!result) {
+            return result;
+        }
+        changed = changed || result.changed;
+    }
+
+    if (!changed) {
+        return {};
+    }
+    *project = std::move(candidate);
     return {true, {}};
 }
 

@@ -72,6 +72,110 @@ bool preview_playback_equal(const PreviewState& left, const PreviewState& right)
         left.reverse == right.reverse;
 }
 
+template <typename Keyframe>
+bool keyframe_timing_equal(
+    const std::vector<Keyframe>& left,
+    const std::vector<Keyframe>& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < left.size(); ++index) {
+        if (left[index].time != right[index].time) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Timeline, typename TargetEqual>
+bool timeline_timing_equal(
+    const std::vector<Timeline>& left,
+    const std::vector<Timeline>& right,
+    TargetEqual target_equal) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < left.size(); ++index) {
+        if (!target_equal(left[index], right[index]) ||
+            !keyframe_timing_equal(
+                left[index].keyframes,
+                right[index].keyframes)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool animation_timing_equal(
+    const runtime::AnimationData& left,
+    const runtime::AnimationData& right) {
+    const auto same_bone = [](const auto& left_timeline, const auto& right_timeline) {
+        return left_timeline.bone_index == right_timeline.bone_index;
+    };
+    const auto same_slot = [](const auto& left_timeline, const auto& right_timeline) {
+        return left_timeline.slot_index == right_timeline.slot_index;
+    };
+    const auto same_mesh = [](const auto& left_timeline, const auto& right_timeline) {
+        return left_timeline.slot_index == right_timeline.slot_index &&
+            left_timeline.attachment_name == right_timeline.attachment_name;
+    };
+
+    if (!timeline_timing_equal(
+            left.bone_rotate_timelines, right.bone_rotate_timelines, same_bone) ||
+        !timeline_timing_equal(
+            left.bone_inherit_timelines, right.bone_inherit_timelines, same_bone) ||
+        !timeline_timing_equal(
+            left.bone_translate_timelines, right.bone_translate_timelines, same_bone) ||
+        !timeline_timing_equal(
+            left.bone_scale_timelines, right.bone_scale_timelines, same_bone) ||
+        !timeline_timing_equal(
+            left.bone_shear_timelines, right.bone_shear_timelines, same_bone) ||
+        !timeline_timing_equal(
+            left.slot_attachment_timelines, right.slot_attachment_timelines, same_slot) ||
+        !timeline_timing_equal(
+            left.slot_color_timelines, right.slot_color_timelines, same_slot) ||
+        !timeline_timing_equal(
+            left.mesh_deform_timelines, right.mesh_deform_timelines, same_mesh)) {
+        return false;
+    }
+
+    if (left.draw_order_timeline_data.has_value() !=
+            right.draw_order_timeline_data.has_value() ||
+        left.event_timeline_data.has_value() != right.event_timeline_data.has_value()) {
+        return false;
+    }
+    if (left.draw_order_timeline_data.has_value() &&
+        !keyframe_timing_equal(
+            left.draw_order_timeline_data->keyframes,
+            right.draw_order_timeline_data->keyframes)) {
+        return false;
+    }
+    return !left.event_timeline_data.has_value() ||
+        keyframe_timing_equal(
+            left.event_timeline_data->keyframes,
+            right.event_timeline_data->keyframes);
+}
+
+bool animation_catalog_or_timing_changed(
+    const runtime::SkeletonData& before,
+    const runtime::SkeletonData& after) {
+    if (before.animations().size() != after.animations().size()) {
+        return true;
+    }
+    for (std::size_t index = 0U; index < before.animations().size(); ++index) {
+        const runtime::AnimationData& left = before.animations()[index];
+        const runtime::AnimationData& right = after.animations()[index];
+        if (left.name != right.name ||
+            left.explicit_duration != right.explicit_duration ||
+            left.inferred_duration() != right.inferred_duration() ||
+            left.duration() != right.duration() ||
+            !animation_timing_equal(left, right)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::optional<std::size_t> root_bone_index(const runtime::SkeletonData& data) {
     if (const auto named_root = data.find_bone_index("root")) {
         return named_root;
@@ -1168,6 +1272,17 @@ struct EditorSession::Impl {
                     "The edit transaction is no longer active.")};
         }
 
+        const AuthoringResult extension_result =
+            auto_extend_explicit_animation_durations(
+                load.project.get(), *load.skeleton_data);
+        if (!extension_result) {
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    extension_result.error)};
+        }
+
         const ProjectRuntimeResult runtime_result = build_project_runtime(
             *load.project,
             *load.base_skeleton_document);
@@ -1185,6 +1300,9 @@ struct EditorSession::Impl {
             active_transaction->pending_preview_state.value_or(current_preview.state);
         const bool playback_changed =
             !preview_playback_equal(current_preview.state, desired_preview);
+        const bool rebuild_playback = playback_changed ||
+            animation_catalog_or_timing_changed(
+                *load.skeleton_data, *runtime_result.skeleton_data);
         const runtime::AnimationStateSnapshot playback_snapshot =
             preview.animation_state()->capture_state();
         PreviewController next_preview;
@@ -1194,7 +1312,7 @@ struct EditorSession::Impl {
                 desired_preview,
                 !playback_changed,
                 &preview_error) ||
-            (!playback_changed &&
+            (!rebuild_playback &&
              !next_preview.restore_playback(playback_snapshot, &preview_error))) {
             return SessionResult{
                 false,
@@ -1250,6 +1368,21 @@ struct EditorSession::Impl {
         }
 
         ActiveTransaction transaction = *active_transaction;
+        const AuthoringResult extension_result =
+            auto_extend_explicit_animation_durations(
+                load.project.get(), *load.skeleton_data);
+        if (!extension_result) {
+            restore_active_transaction();
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    extension_result.error)};
+        }
+        if (extension_result.changed) {
+            transaction.runtime_is_current = false;
+            active_transaction->runtime_is_current = false;
+        }
         HistorySnapshot requested_after = capture_history();
         if (transaction.pending_preview_state.has_value()) {
             requested_after.preview_state = *transaction.pending_preview_state;
@@ -1294,6 +1427,8 @@ struct EditorSession::Impl {
             const bool playback_changed = !preview_playback_equal(
                 preserved_preview.state,
                 requested_after.preview_state);
+            const bool rebuild_playback = playback_changed ||
+                animation_catalog_or_timing_changed(*load.skeleton_data, *next_runtime);
             const runtime::AnimationStateSnapshot playback_snapshot =
                 preview.animation_state()->capture_state();
             PreviewController next_preview;
@@ -1302,7 +1437,7 @@ struct EditorSession::Impl {
                     requested_after.preview_state,
                     !playback_changed,
                     &preview_error) ||
-                (!playback_changed &&
+                (!rebuild_playback &&
                  !next_preview.restore_playback(playback_snapshot, &preview_error))) {
                 *load.project = transaction.before_history.project;
                 preview.restore(transaction.before_preview, nullptr);
@@ -1406,6 +1541,8 @@ struct EditorSession::Impl {
             const bool playback_changed = !preview_playback_equal(
                 current_preview.state,
                 target.preview_state);
+            const bool rebuild_playback = playback_changed ||
+                animation_catalog_or_timing_changed(*load.skeleton_data, *next_runtime);
             const runtime::AnimationStateSnapshot playback_snapshot =
                 preview.animation_state()->capture_state();
             PreviewController next_preview;
@@ -1415,7 +1552,7 @@ struct EditorSession::Impl {
                     target.preview_state,
                     !playback_changed,
                     &preview_error) ||
-                (!playback_changed &&
+                (!rebuild_playback &&
                  !next_preview.restore_playback(playback_snapshot, &preview_error))) {
                 *load.project = current.project;
                 preview.restore(current_preview, nullptr);
@@ -2240,10 +2377,25 @@ SessionResult EditorSession::rebuild_runtime_without_history() {
                 "Cannot rebuild runtime while an edit transaction is active.")};
     }
 
+    const ProjectData project_before_extension = *impl_->load.project;
+    const AuthoringResult extension_result =
+        auto_extend_explicit_animation_durations(
+            impl_->load.project.get(), *impl_->load.skeleton_data);
+    if (!extension_result) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::InvalidTransaction,
+                extension_result.error)};
+    }
+
     const ProjectRuntimeResult runtime_result = build_project_runtime(
         *impl_->load.project,
         *impl_->load.base_skeleton_document);
     if (!runtime_result) {
+        if (extension_result.changed) {
+            *impl_->load.project = project_before_extension;
+        }
         return SessionResult{
             false,
             Impl::make_error(
@@ -2253,6 +2405,8 @@ SessionResult EditorSession::rebuild_runtime_without_history() {
     }
 
     const PreviewController::Snapshot previous_preview = impl_->preview.capture();
+    const bool rebuild_playback = animation_catalog_or_timing_changed(
+        *impl_->load.skeleton_data, *runtime_result.skeleton_data);
     const runtime::AnimationStateSnapshot playback_snapshot =
         impl_->preview.animation_state()->capture_state();
     PreviewController next_preview;
@@ -2262,7 +2416,11 @@ SessionResult EditorSession::rebuild_runtime_without_history() {
             impl_->preview.state(),
             true,
             &preview_error) ||
-        !next_preview.restore_playback(playback_snapshot, &preview_error)) {
+        (!rebuild_playback &&
+         !next_preview.restore_playback(playback_snapshot, &preview_error))) {
+        if (extension_result.changed) {
+            *impl_->load.project = project_before_extension;
+        }
         return SessionResult{
             false,
             Impl::make_error(

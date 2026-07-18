@@ -147,6 +147,30 @@ AuthoringResult delete_animation(
     std::string_view animation_name);
 
 /**
+ * @brief Authors one explicit animation duration through the ordered edit log.
+ *
+ * The requested value is normalized to runtime float32 precision and must not
+ * be shorter than the effective animation's inferred duration. Rejected edits
+ * leave the project unchanged.
+ */
+AuthoringResult set_animation_duration(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    double duration);
+
+/**
+ * @brief Grows explicit durations to cover all current typed timeline overlays.
+ *
+ * Animations without an authored explicit duration remain inference-driven.
+ * This operation never shrinks a duration and applies all required growth
+ * atomically.
+ */
+AuthoringResult auto_extend_explicit_animation_durations(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton);
+
+/**
  * @brief Atomically retimes persisted keys by one shared delta.
  *
  * The requested delta is optionally frame-snapped, then clamped against zero

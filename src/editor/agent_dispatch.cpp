@@ -55,6 +55,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"animation.duplicate", "edit", true, false, true, true, &handle_editing_operation},
     {"animation.rename", "edit", true, false, true, true, &handle_editing_operation},
     {"animation.delete", "edit", true, false, true, true, &handle_editing_operation},
+    {"animation.set_duration", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.retime_keyframes", "edit", true, false, true, true, &handle_editing_operation},
     {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
@@ -1259,6 +1260,15 @@ json::Value timeline_description_value(
 
     object.emplace("exists", bool_value(true));
     object.emplace("duration", number_value(animation->duration()));
+    object.emplace("inferred_duration", number_value(animation->inferred_duration()));
+    object.emplace(
+        "has_explicit_duration",
+        bool_value(animation->explicit_duration.has_value()));
+    if (animation->explicit_duration.has_value()) {
+        object.emplace(
+            "explicit_duration",
+            number_value(*animation->explicit_duration));
+    }
     object.emplace("bone_rotate_timelines", number_value(animation->bone_rotate_timelines.size()));
     object.emplace("bone_translate_timelines", number_value(animation->bone_translate_timelines.size()));
     object.emplace("bone_scale_timelines", number_value(animation->bone_scale_timelines.size()));

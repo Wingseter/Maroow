@@ -112,6 +112,11 @@ python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/nu
 - `attack` and `aim` now validate MAR-013:
   - `attack` is a short non-loop upper-body rotation used to prove track interruption and end/dispose after mixing out.
   - `aim` is a looping upper-body hold used to prove wildcard mix resolution, loop completion callbacks, queue promotion, and empty-animation fade-out back to setup pose.
+- MAR-154 duration compatibility is covered in the same animation trio:
+  - `aim` authors `duration: 0.5`, exactly equal to its inferred last-key time, so runtime and binary
+    smoke tests can verify explicit presence plus inferred/effective values.
+  - `idle` and `attack` deliberately omit `duration`; their effective boundaries remain the inferred
+    `1.0` and `0.4` seconds, respectively, proving old-asset fallback beside the new field.
 - Slot attachment names stay aligned with the draft example so atlas lookups can use `body` and `arm_l` verbatim, while animated swaps still resolve through the same atlas metadata.
 - Point attachment validation uses the `spawn_anchor` slot with local `x`, `y`, and `rotation` data so the runtime can expose world-space spawn anchor transforms from the active pose.
 - Bounding-box validation uses the `hurtbox` slot with a four-vertex polygon so the runtime can transform authored hit-detection shapes into world space.
@@ -131,6 +136,8 @@ python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/nu
   - a shared string table for object keys and string values
   - float32 numeric payloads
   - a packed boolean bitfield
+- Its generic payload preserves the authored `aim.duration` member while keeping `idle` and
+  `attack` absent, and its `AKEY` section quantizes animation time against each effective duration.
 - Regenerate it from the JSON source with:
   - `./build/marrow_inspect --export-binary assets/fixtures/player_idle.mbin assets/fixtures/player_idle.mskl`
 - Validate JSON and binary equivalence with:
@@ -181,6 +188,8 @@ python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/nu
     - `path` stores editor-authored slot binding, constrained chain, position/spacing, and rotate/translate mixes.
     - `transform` stores source/target binding plus rotate/translate/scale/shear mixes and the optional offset block.
     - `physics` stores secondary-motion chains plus inertia, damping, strength, gravity, wind, and mix values.
+- The checked-in project deliberately omits `animation_edits.set_duration`. It therefore proves that an old project continues to inherit `aim`'s explicit `0.5` boundary from the referenced runtime asset while `idle` and `attack` remain inference-driven.
+- MAR-155 project smoke copies this fixture into `/tmp/marrow_mar155_duration.marrow`, then seeds an ordered opaque future operation plus a known `set_duration` carrying an unknown additive field. The smoke verifies lossless semantic preservation, live preview and one-item undo, rejected shrink rollback, key auto-grow/no-shrink, save/reload, and explicit-duration JSON/MBIN export parity without changing the canonical project fixture.
 - the checked-in fixture overrides `idle.bones.spine.rotate`, `idle.deform.body.body_mesh`, `idle.drawOrder`, and `idle.events`, so the editor shell and project smoke validation can prove that project-authored transform, FFD, draw-order, and event edits supersede the referenced runtime skeleton until export time.
 - the authored `idle.drawOrder[1]` key intentionally reorders the visible slots to `body -> fx_mask -> spark_fx -> arm_l` so the sample project still proves draw-order authoring while keeping the exported clipping setup render-valid for the end-to-end renderer smoke path.
 - The checked-in fixture also persists one authored IK, path, transform, and physics constraint edit so the editor shell and project smoke validation can prove that project-authored constraints preview on the helper rig, export into root-level runtime arrays, and round-trip back through the exported `.mskl`.

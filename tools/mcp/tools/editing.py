@@ -417,6 +417,23 @@ def get_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="animation.set_duration",
+            description=(
+                "Set one animation's explicit duration in seconds without allowing "
+                "it to end before its last authored key."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string", "minLength": 1},
+                    "duration": {"type": "number", "minimum": 0},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["animation", "duration"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="timeline.retime_keyframes",
             description=(
                 "Atomically shift typed timeline keys by one delta, with optional "

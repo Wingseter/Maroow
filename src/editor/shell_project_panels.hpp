@@ -18,6 +18,11 @@ bool apply_animation_catalog_action(
     AnimationCatalogAction action,
     std::string_view source_animation,
     std::string_view destination_animation = {});
+bool begin_animation_duration_gesture(
+    ShellState* state,
+    std::string_view animation_name);
+bool apply_animation_duration_gesture(ShellState* state, double duration);
+bool finish_animation_duration_gesture(ShellState* state, bool commit);
 void draw_shell_toolbar(bool* reload_requested, ShellState* state);
 void draw_menu_bar(
     GLFWwindow* window,

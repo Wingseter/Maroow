@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, and MAR-122–128 Maroow-native parameter-modeling checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-154–191 form the next strictly linear editing-P1 dependency chain beginning at MAR-154. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, MAR-122–128 Maroow-native parameter-modeling checkpoint, MAR-154–155 duration checkpoints, and MAR-156 versioned user-preference checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-157–191 form the remaining strictly linear editing-P1 dependency chain beginning at MAR-157. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
   "qualityGates": [
     "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each milestone small, vertical, and independently verifiable while preserving the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -2814,7 +2814,8 @@
       "dependsOn": [
         "MAR-128"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-17"
     },
     {
       "id": "MAR-155",
@@ -2831,7 +2832,8 @@
       "dependsOn": [
         "MAR-154"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-17"
     },
     {
       "id": "MAR-156",
@@ -2848,7 +2850,8 @@
       "dependsOn": [
         "MAR-155"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-18"
     },
     {
       "id": "MAR-157",
@@ -2869,13 +2872,13 @@
     {
       "id": "MAR-158",
       "title": "Migrate editor selection consumers to SelectionSet",
-      "description": "Move shell consumers onto SelectionSet and make source replacement and constraint lifecycle changes prune or remap selection safely.",
+      "description": "Move shell consumers onto SelectionSet, including source-replacement migration and reusable constraint-identity remap/prune primitives; constraint lifecycle invocation remains owned by MAR-178.",
       "acceptanceCriteria": [
         "Hierarchy, inspector, viewport, timeline, constraints, and weight-paint consumers use SelectionSet as their single source of truth.",
         "Reload and atomic runtime-source adoption remap surviving names and prune targets absent from the new imported rig.",
-        "Constraint rename remaps selected and active identities, while delete prunes them without disturbing unrelated selections.",
+        "SelectionSet exposes tested constraint-identity remap and prune primitives that preserve unrelated selections; MAR-178 invokes them from actual constraint rename/delete transactions.",
         "Compatibility accessors remain only a narrow facade and active-item behavior stays deterministic across preview refreshes.",
-        "Project and shell smokes cover reload, missing targets, rename/delete, mixed selection, and unchanged dirty/history state."
+        "Project and shell smokes cover reload, missing targets, mixed selection, direct remap/prune primitive behavior, and unchanged dirty/history state without claiming constraint lifecycle integration."
       ],
       "dependsOn": [
         "MAR-157"
@@ -3333,7 +3336,7 @@
         "Each issue has a stable code, severity, message, typed target, and optional safe-fix ID, with deterministic ordering and identity across unchanged revisions.",
         "Collection is UI-free, read-only, and limited to normally opened sessions; partial or degraded first-open diagnostics and automatic correction are excluded.",
         "project.diagnostics preserves error_count, warning_count, project_dirty, and review_queue_count while adding issues and an issue_count.",
-        "The collector reports orphan overlays, non-canonical weights, explicit durations shorter than the last key, and stale preview references with safe-fix IDs only where applicable.",
+        "The collector reports orphan overlays, non-canonical weights, and stale preview references with safe-fix IDs only where applicable.",
         "Typed targets resolve through SelectionSet and panel-focus metadata without mutating selection during collection.",
         "Project, agent, and MCP tests cover deterministic results, severity counts, legacy summary compatibility, typed targets, revision changes, and zero-mutation inspection."
       ],
@@ -3350,9 +3353,9 @@
         "The Problems view groups and filters issues by severity and displays collector counts without changing project state.",
         "Activating an issue selects its typed target and focuses the appropriate hierarchy, timeline, inspector, weight, or preview panel when the target still exists.",
         "The view refreshes from project and runtime revisions and handles removed targets without stale selection or crashes.",
-        "The only initial fixes are orphan-overlay removal, canonical weight normalization, duration extension to the last key, and stale-preview-reference reset.",
+        "The only initial fixes are orphan-overlay removal, canonical weight normalization, and stale-preview-reference reset.",
         "Inspection never dirties the project; an explicitly invoked fix uses one validated transaction and one undo entry, with no automatic fix on project open.",
-        "Shell and project tests cover grouping, filters, navigation, revision refresh, each allowlisted fix, rejection, undo/redo, and inspection invariants."
+        "Shell and project tests cover grouping, filters, navigation, revision refresh, all three allowlisted fixes, rejection, undo/redo, and inspection invariants."
       ],
       "dependsOn": [
         "MAR-186"

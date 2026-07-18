@@ -645,6 +645,7 @@
       }
     },
     "aim": {
+      "duration": 0.5,
       "bones": {
         "arm_l": {
           "rotate": [

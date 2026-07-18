@@ -96,16 +96,19 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | MAR-122–126 | Runtime-first parameter foundation/export, shapes, deformers, ArtPath, expressions/lip-sync | Sequential from MAR-120 beginning at MAR-122 | Done (validated 2026-07-16) |
 | MAR-127 | Parameter-modeling editor tools | MAR-126, MAR-140, MAR-153 | Done (validated 2026-07-16) |
 | MAR-128 | Parameter/deformer agent commands | MAR-127 | Done (validated 2026-07-16) |
-| MAR-154–191 | Editing P1 backlog | MAR-154 depends on MAR-128; MAR-155–191 each depend on the immediately preceding story | Open backlog |
+| MAR-154 | Runtime explicit clip duration | MAR-128 | Done (validated 2026-07-17) |
+| MAR-155 | Editor duration authoring | MAR-154 | Done (validated 2026-07-17) |
+| MAR-156 | Versioned user preference store | MAR-155 | Done (validated 2026-07-18) |
+| MAR-157–191 | Remaining Editing P1 backlog | Each story depends on the immediately preceding story | Open backlog beginning at MAR-157 |
 
-Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122. The next dependency sequence is the linear MAR-154–191 P1 backlog after the completed MAR-128 gate. These are functional implementation and validation milestones. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
+Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, and MAR-154–156 are also complete. The next dependency sequence is the linear MAR-157–191 P1 backlog. These are functional implementation and validation milestones. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
 
 ## Compatibility boundary
 
 The refactor must preserve:
 
 - C ABI version 1, all C functions, status codes, and ownership rules;
-- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations and six MAR-128 parameter operations for an exact current total of 55;
+- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations, six MAR-128 parameter operations, and MAR-155 `animation.set_duration` for an exact current total of 56;
 - existing `.marrow` compatibility, `.mskl` v1, `.mbin` v2, and `.matl` v1; P1 project fields remain optional and additive;
 - optional parameter-model roots default to empty for old assets, unknown additive `.marrow` fields survive load/save, and direct preview parameter input is not serialized;
 - byte-identical unchanged `.marrow` serialization and equivalent `.mskl`/`.mbin` exports;

@@ -26,6 +26,8 @@ enum class AnimationEditKind {
     Create,
     Rename,
     Delete,
+    SetDuration,
+    Unknown,
 };
 
 /**
@@ -33,13 +35,19 @@ enum class AnimationEditKind {
  *
  * Create stores a complete animation JSON object so duplicates preserve timeline
  * families that the current editor does not understand. Rename moves the
- * effective animation object, and Delete hides it from the authored runtime.
+ * effective animation object, Delete hides it from the authored runtime, and
+ * SetDuration authors the optional runtime duration. Unknown operations remain
+ * opaque editor data and are ignored by this version during materialization.
  */
 struct AnimationEdit {
     AnimationEditKind kind{AnimationEditKind::Create};
     std::string name;
     std::string new_name;
+    double duration{0.0};
     runtime::json::Value animation{runtime::json::Value::Object{}, {}};
+    // Original edit object. Known fields are overlaid during serialization so
+    // additive fields survive; Unknown edits serialize from this value exactly.
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
 };
 
 enum class OnionSkinMode {

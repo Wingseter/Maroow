@@ -204,6 +204,15 @@ Value* find_member(Value& object, std::string_view key);
 std::string serialize_pretty(const Value& value, int indent_size = 2);
 
 /**
+ * @brief Serializes JSON with indentation and round-trip-safe number spelling.
+ *
+ * Unlike the human-oriented serializer, this preserves every parsed double
+ * value exactly when the result is parsed again. It is intended for opaque
+ * additive payloads whose numeric values must survive load/save unchanged.
+ */
+std::string serialize_pretty_round_trip(const Value& value, int indent_size = 2);
+
+/**
  * @brief Serializes a JSON value compactly onto a single line.
  * @param value JSON value to serialize.
  * @return Compact JSON text.

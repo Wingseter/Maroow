@@ -5495,6 +5495,60 @@ std::optional<LoadError> parse_animations(
             animation.event_timeline_data = std::move(parsed_timeline);
         }
 
+        if (const Value* duration_value = find_optional_member(animation_value, "duration")) {
+            const std::string duration_path = path + ".duration";
+            if (const auto error = json::require_type(
+                    document,
+                    *duration_value,
+                    Value::Type::Number,
+                    duration_path)) {
+                return error;
+            }
+
+            const double authored_duration = duration_value->as_number();
+            if (!std::isfinite(authored_duration)) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration must be finite");
+            }
+            if (authored_duration < 0.0) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration must be non-negative");
+            }
+
+            // Timeline key times use AnimationScalar storage. Normalize the authored
+            // boundary through that same representation so a JSON duration literal
+            // exactly matching its last key cannot become microscopically shorter
+            // solely because the key was converted to float32.
+            const AnimationScalar stored_duration =
+                static_cast<AnimationScalar>(authored_duration);
+            if (!std::isfinite(stored_duration)) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration is outside the runtime animation-time range");
+            }
+            const double explicit_duration = static_cast<double>(stored_duration);
+
+            const double inferred_duration = animation.inferred_duration();
+            if (explicit_duration < inferred_duration) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration must not be shorter than the last timeline key (" +
+                        std::to_string(inferred_duration) + ")");
+            }
+
+            animation.explicit_duration = explicit_duration;
+        }
+
         parsed_animations.push_back(std::move(animation));
     }
 

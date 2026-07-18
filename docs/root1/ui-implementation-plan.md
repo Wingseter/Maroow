@@ -1,7 +1,7 @@
 # Maroow Editor UI 디자인 참고 계획 (보관)
 
 > 이 문서는 Stitch 디자인을 해석했던 초기 UI 참고자료이며 더 이상 구현 순서나 소스 구조의 기준이 아니다.
-> 편집 P0(MAR-141~153)와 MAR-122~128 Parameter Modeling은 구현·검증됐다. MAR-121은 MAR-122에 통합된 tracking tombstone이며, 다음 우선순위는 [`editing-gap-analysis.md`](editing-gap-analysis.md)와 `.agents/tasks/prd-marrow-runtime.json`의 MAR-154~191 선형 P1 backlog다. 아래 옛 Phase 순서는 현재 실행 권한이 없는 보관 기록이다.
+> 편집 P0(MAR-141~153), MAR-122~128 Parameter Modeling, MAR-154 runtime duration, MAR-155 editor duration authoring, MAR-156 versioned user preference store는 구현·검증됐다. MAR-121은 MAR-122에 통합된 tracking tombstone이며, 다음 우선순위는 [`editing-gap-analysis.md`](editing-gap-analysis.md)와 `.agents/tasks/prd-marrow-runtime.json`의 MAR-157~191 선형 P1 backlog다. 아래 옛 Phase 순서는 현재 실행 권한이 없는 보관 기록이다.
 
 현재 에디터의 UI-free 저작 경계는 `include/marrow/editor/session.hpp`의 `EditorSession`이고,
 ImGui 구현은 `src/editor/shell_state.hpp`와 `shell_timeline`, `shell_constraints`, `shell_selection`,

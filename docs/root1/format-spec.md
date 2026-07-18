@@ -1,6 +1,7 @@
 # Marrow Format Spec
 
-This page documents the implemented Marrow asset formats and the validated MAR-122~128 optional parameter-model extension.
+This page documents the implemented Marrow asset formats, the validated MAR-122~128 optional
+parameter-model extension, and the independent MAR-156 user-preference document.
 
 ## Shared conventions
 
@@ -9,6 +10,59 @@ This page documents the implemented Marrow asset formats and the validated MAR-1
 - Paths stored inside JSON assets are relative paths unless exported otherwise by the caller.
 - The canonical examples live under `assets/fixtures/` and are cross-referenced in [Fixtures](fixtures.md).
 - MAR-121 is a done tracking tombstone integrated into MAR-122. Every runtime section added by MAR-122~128 is optional; when absent, loaders behave as if the parameter model were empty.
+
+## `editor-settings.json` v1
+
+Purpose: versioned, user-local editor preferences shared by later curve-default and Recent Projects
+features. This file is not a project or runtime asset and is never embedded in `.marrow`, `.mskl`,
+`.mbin`, or `.matl`.
+
+The v1 wire document is:
+
+```json
+{
+  "version": 1,
+  "default_curve": "linear",
+  "recent_projects": []
+}
+```
+
+- `version` is required and must be the exact integer `1`.
+- `default_curve` accepts `linear`, `stepped`, `ease`, `ease_in`, `ease_out`, or
+  `ease_in_out`. A missing, non-string, or unknown token falls back to `linear` without affecting
+  other fields.
+- `recent_projects` is an ordered array of path strings. A missing or non-array field falls back to
+  an empty list; non-string and empty entries are skipped independently. MAR-156 intentionally does
+  not normalize, canonicalize, de-duplicate, bound, check, or promote these paths. MAR-183 owns
+  those Recent Projects policies.
+- Supported v1 roots preserve unknown additive fields when known fields are saved. Unknown field
+  preservation covers logical JSON values, not original whitespace, key ordering, or number
+  spelling.
+- First run returns typed Linear/empty defaults without creating the file. Malformed JSON, a
+  non-object root, and a missing or fractional version also return usable defaults and a diagnostic
+  without automatic repair. An explicit user-triggered save may recover such a malformed document.
+- A future integer version returns defaults plus an unsupported-version diagnostic. Normal save
+  refuses to overwrite that file so a newer editor's data remains protected. Existing-file read
+  failures are likewise non-destructive.
+
+Production path resolution is deterministic:
+
+1. A non-empty absolute `MARROW_CONFIG_HOME` uses
+   `<MARROW_CONFIG_HOME>/editor-settings.json` on every platform.
+2. macOS uses `$HOME/Library/Application Support/Marrow/editor-settings.json`.
+3. Linux uses `$XDG_CONFIG_HOME/marrow/editor-settings.json` when `XDG_CONFIG_HOME` is non-empty
+   and absolute.
+4. Linux otherwise uses `$HOME/.config/marrow/editor-settings.json`.
+
+Empty variables are treated as unset. Relative `MARROW_CONFIG_HOME`, relative Linux
+`XDG_CONFIG_HOME`, relative `HOME`, and a missing required `HOME` are path errors; resolution never
+falls back to the current directory. The explicit `PreferenceStore` path constructor is reserved for
+isolated tests and tools.
+
+Saving creates the parent directory, writes pretty JSON to a unique same-directory temporary file,
+checks write/flush/close, then replaces the destination with one POSIX atomic rename. A failure
+removes only that temporary file and leaves the prior destination bytes unchanged. File locking,
+multi-process merging, and directory `fsync` are outside MAR-156.
 
 ## `.mskl`
 
@@ -120,6 +174,29 @@ The runtime currently supports timeline families for:
 - Mesh deform.
 - Draw order.
 - Events.
+
+Each `animations.<name>` object may also carry an optional `duration` number in seconds. This is
+the authored clip boundary rather than another timeline:
+
+- The value must be finite, non-negative, and no shorter than the animation's inferred duration.
+- Inferred duration is the greatest last-key time across bone rotate/inherit/translate/scale/shear,
+  slot attachment/color, mesh deform, draw-order, and event timelines.
+- A pose-identical single key at a non-zero time still authors that timeline boundary and contributes
+  to inference; constant-timeline pruning is limited to identity keys at time zero.
+- Validation compares the stored runtime timing values exactly; it does not apply an epsilon,
+  clamp the value, or silently replace it with `max(duration, inferred)`.
+- JSON duration values are normalized to the same float32 animation-time representation as key
+  times. Values outside that runtime range are rejected, and a literal equal to its last key stays
+  exactly equal after both values enter runtime storage.
+- When `duration` is absent, the effective clip boundary is the inferred duration. An empty clip
+  therefore has an effective duration of `0`; an empty clip with an explicit zero or positive value
+  uses that authored value.
+- A duration longer than the last key holds the final sampled pose until the explicit boundary.
+  Looping, completion callbacks, queue promotion, reverse playback, events/root motion, and state
+  restoration all use that effective explicit-or-inferred boundary.
+
+This optional field is additive: `.mskl` remains version `1`, older assets retain last-key fallback,
+and the C ABI v1 exposes no new field or function.
 
 Keyframe fields vary by timeline type but always include `time` and may include `curve` for interpolation. Supported `curve` encodings are:
 
@@ -548,11 +625,18 @@ Operational notes:
 
 - The file still preserves the validated runtime document structure.
 - Version `2` adds quantized rotate/translate data so the runtime can inspect or use optimized animation playback data without changing the logical skeleton document.
+- The generic document payload preserves whether each animation authored `duration` and preserves
+  its numeric value within the existing float32 JSON/MBIN round-trip tolerance.
+- The `AKEY` packed duration and 16-bit key-time quantization use the effective
+  explicit-or-inferred duration. The packed value is never used to infer whether the source authored
+  the optional field; authored presence comes only from the generic document payload.
 - Use `inspect_skeleton_binary()` or `marrow_inspect --compare` to validate JSON/binary equivalence and packed-animation metadata.
 
 ## `.marrow`
 
 Purpose: editor project document that references runtime assets and stores authoring-only state.
+User preferences belong to the separate `editor-settings.json`; preference load/save never changes
+project serialization, dirty state, history, or project/runtime/preview revisions.
 
 Current loader behavior:
 
@@ -613,14 +697,25 @@ Optional ordered animation-catalog operations applied to the referenced base ske
 "animation_edits": [
   { "op": "create", "name": "idle_copy", "animation": {} },
   { "op": "rename", "from": "idle", "to": "idle_main" },
+  { "op": "set_duration", "name": "idle_main", "duration": 1.5 },
   { "op": "delete", "name": "walk" }
 ]
 ```
 
 - `create` stores a complete animation JSON object. Duplicate therefore deep-copies timeline families unknown to the current editor and remains independent of later source edits.
 - `rename` atomically remaps the animation catalog, mixing entries, editor timeline overlays, and compatible preview/queue references.
+- `set_duration` authors the target animation's explicit runtime `duration` in seconds. `name` resolves
+  against the catalog produced by all preceding operations. The value must be finite, non-negative,
+  representable by runtime animation-time storage, and no shorter than the target's last authored key.
+  The editor stores the normalized applied value and never substitutes `max(requested, inferred)` for
+  an invalid manual request.
 - `delete` removes the animation plus its mixing entries and editor timeline overlays.
 - Operations are applied in array order. Empty names, missing sources, duplicate destinations, and deleting the last remaining animation are rejected.
+- Creating or moving a key past an existing explicit boundary extends that boundary in the same
+  transaction. Removing a key or moving it left never shrinks an explicit duration automatically.
+- Projects that omit `set_duration` retain the base asset's authored presence or inferred last-key
+  fallback. Unknown future animation-edit operation objects are retained losslessly and ignored by
+  this version's materializer so load/save does not erase additive data it does not understand.
 - The exported `.mskl`/`.mbin` contains the resulting animation catalog; `animation_edits` remains editor-only and does not change runtime format versions.
 
 ### `timeline_edits`

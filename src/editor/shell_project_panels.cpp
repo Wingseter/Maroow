@@ -23,6 +23,7 @@
 #include "shell_viewport_ui.hpp"
 #include "shell_weight_paint.hpp"
 #include "shell_widgets.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor::shell {
 
@@ -217,7 +218,8 @@ void draw_animation_catalog(ShellState* state) {
 
     const bool edit_blocked =
         authoring_gesture_active(*state) || state->session.transaction_active();
-    const bool has_selection = selected_animation(*state) != nullptr;
+    const marrow::runtime::AnimationData* selected_clip = selected_animation(*state);
+    const bool has_selection = selected_clip != nullptr;
     ImGui::BeginDisabled(edit_blocked);
     if (ImGui::Button("Create...")) {
         state->error_message.clear();
@@ -258,10 +260,189 @@ void draw_animation_catalog(ShellState* state) {
     if (skeleton.animations().size() <= 1U && has_selection) {
         ImGui::TextDisabled("The last animation cannot be deleted.");
     }
+
+    if (selected_clip != nullptr) {
+        const std::string animation_name = selected_clip->name;
+        double edited_duration = selected_clip->duration();
+        const double inferred_duration = selected_clip->inferred_duration();
+        const bool has_explicit_duration = selected_clip->explicit_duration.has_value();
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Clip Timing");
+        ImGui::TextDisabled(
+            "Inferred %.3fs  |  %s",
+            inferred_duration,
+            has_explicit_duration ? "explicit boundary" : "inferred fallback");
+
+        const bool owns_duration_gesture =
+            state->animation_duration_gesture.has_value() &&
+            state->animation_duration_gesture->animation_name == animation_name;
+        const bool duration_blocked =
+            (authoring_gesture_active(*state) && !owns_duration_gesture) ||
+            (state->session.transaction_active() && !owns_duration_gesture);
+        ImGui::BeginDisabled(duration_blocked);
+        ImGui::SetNextItemWidth(180.0f);
+        const bool duration_changed = ImGui::DragScalar(
+            "Clip Duration",
+            ImGuiDataType_Double,
+            &edited_duration,
+            0.01f,
+            nullptr,
+            nullptr,
+            "%.3f s");
+        const bool duration_activated = ImGui::IsItemActivated();
+        const bool duration_deactivated = ImGui::IsItemDeactivated();
+        const bool duration_deactivated_after_edit = ImGui::IsItemDeactivatedAfterEdit();
+        const bool duration_escape =
+            ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        ImGui::EndDisabled();
+
+        if (duration_activated) {
+            (void)begin_animation_duration_gesture(state, animation_name);
+        }
+        if (duration_changed &&
+            state->animation_duration_gesture.has_value() &&
+            state->animation_duration_gesture->animation_name == animation_name) {
+            (void)apply_animation_duration_gesture(state, edited_duration);
+        }
+        if (state->animation_duration_gesture.has_value() &&
+            state->animation_duration_gesture->animation_name == animation_name) {
+            if (duration_escape) {
+                (void)finish_animation_duration_gesture(state, false);
+            } else if (duration_deactivated_after_edit || duration_deactivated) {
+                (void)finish_animation_duration_gesture(state, true);
+            }
+        }
+    }
     draw_animation_catalog_popups(state);
 }
 
 } // namespace
+
+bool begin_animation_duration_gesture(
+    ShellState* state,
+    std::string_view animation_name) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.project == nullptr || animation_name.empty()) {
+        return false;
+    }
+    if (authoring_gesture_active(*state) || state->session.transaction_active()) {
+        state->status_message = "Finish the active edit before changing clip duration";
+        return false;
+    }
+    if (state->session.runtime_data() == nullptr ||
+        state->session.runtime_data()->find_animation(animation_name) == nullptr) {
+        state->error_message =
+            "Animation not found: " + std::string(animation_name);
+        state->status_message = "Clip duration edit failed";
+        return false;
+    }
+
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Set animation clip duration",
+        "animation-duration:" + std::string(animation_name),
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error().has_value()
+            ? transaction.error()->format()
+            : "Could not start the clip duration edit.";
+        state->status_message = "Clip duration edit failed";
+        return false;
+    }
+
+    AnimationDurationGesture gesture;
+    gesture.animation_name = std::string(animation_name);
+    gesture.transaction = std::move(transaction);
+    state->animation_duration_gesture.emplace(std::move(gesture));
+    state->error_message.clear();
+    return true;
+}
+
+bool apply_animation_duration_gesture(ShellState* state, double duration) {
+    if (state == nullptr || !state->animation_duration_gesture.has_value() ||
+        state->session.runtime_data() == nullptr) {
+        return false;
+    }
+
+    AnimationDurationGesture& gesture = *state->animation_duration_gesture;
+    const marrow::editor::AuthoringResult mutation =
+        marrow::editor::set_animation_duration(
+            gesture.transaction.project(),
+            *state->session.runtime_data(),
+            gesture.animation_name,
+            duration);
+    if (!mutation) {
+        const std::string error = mutation.error.empty()
+            ? "The requested clip duration is invalid."
+            : mutation.error;
+        AnimationDurationGesture cancelled = std::move(gesture);
+        state->animation_duration_gesture.reset();
+        cancelled.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = error;
+        state->status_message = "Clip duration edit rejected";
+        return false;
+    }
+    if (!mutation.changed) {
+        return true;
+    }
+
+    const marrow::editor::SessionResult refreshed = gesture.transaction.refresh_runtime();
+    if (!refreshed) {
+        const std::string error = refreshed.error.has_value()
+            ? refreshed.error->format()
+            : "The clip duration preview could not be refreshed.";
+        AnimationDurationGesture cancelled = std::move(gesture);
+        state->animation_duration_gesture.reset();
+        cancelled.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = error;
+        state->status_message = "Clip duration preview failed";
+        return false;
+    }
+
+    gesture.changed = true;
+    sync_shell_from_editor_session(state);
+    state->error_message.clear();
+    state->status_message =
+        "Previewing clip duration for " + gesture.animation_name;
+    return true;
+}
+
+bool finish_animation_duration_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->animation_duration_gesture.has_value()) {
+        return false;
+    }
+
+    AnimationDurationGesture gesture =
+        std::move(*state->animation_duration_gesture);
+    state->animation_duration_gesture.reset();
+    if (!commit || !gesture.changed) {
+        gesture.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        if (!commit) {
+            state->status_message = "Cancelled clip duration edit";
+        }
+        return false;
+    }
+
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error.has_value()
+            ? result.error->format()
+            : "The clip duration edit could not be committed.";
+        state->status_message = "Clip duration edit failed";
+        return false;
+    }
+    state->error_message.clear();
+    state->status_message = "Updated clip duration for " + gesture.animation_name;
+    return result.changed;
+}
 
 ShellMode current_shell_mode(const ShellState* state) {
     return state == nullptr ? ShellMode::Setup : state->shell_mode;

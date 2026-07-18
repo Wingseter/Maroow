@@ -34,6 +34,7 @@ async def test(parameter_only=False):
         "animation.duplicate",
         "animation.rename",
         "animation.delete",
+        "animation.set_duration",
         "timeline.retime_keyframes",
     }
     assert all(name in operations_json for name in new_edit_operations)
@@ -41,9 +42,9 @@ async def test(parameter_only=False):
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 55
+    assert len(registry_names) == 56
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 55
+    assert len(mcp_names) == 56
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -70,6 +71,13 @@ async def test(parameter_only=False):
             "requires_review": False,
             "dry_run_supported": True,
         }
+    assert registry_by_name["animation.set_duration"] == {
+        "name": "animation.set_duration",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
 
     mcp_edit_tools = {tool.name for tool in editing.get_tools()}
     assert new_edit_operations <= mcp_edit_tools
@@ -386,6 +394,87 @@ async def test(parameter_only=False):
         )
     )
     require_ok("project.diagnostics", await client.send_command("project.diagnostics"))
+
+    aim_duration_before = require_ok(
+        "timeline.describe aim before duration edit",
+        await client.send_command("timeline.describe", {"animation": "aim"}),
+    )
+    assert aim_duration_before["scene_delta"]["duration"] == 0.5
+    assert aim_duration_before["scene_delta"]["inferred_duration"] == 0.5
+    assert aim_duration_before["scene_delta"]["has_explicit_duration"] is True
+    assert aim_duration_before["scene_delta"]["explicit_duration"] == 0.5
+    duration_dry_run = require_ok(
+        "animation.set_duration dry-run",
+        await client.send_command(
+            "animation.set_duration",
+            {"animation": "aim", "duration": 0.75, "dry_run": True},
+        ),
+    )
+    assert duration_dry_run["scene_delta"] == {
+        "animation": "aim",
+        "dry_run": True,
+        "duration": 0.75,
+        "explicit_duration": 0.75,
+        "has_explicit_duration": True,
+        "inferred_duration": 0.5,
+        "requested_duration": 0.75,
+    }
+    aim_after_duration_dry_run = require_ok(
+        "timeline.describe aim after duration dry-run",
+        await client.send_command("timeline.describe", {"animation": "aim"}),
+    )
+    assert aim_after_duration_dry_run["scene_delta"] == aim_duration_before["scene_delta"]
+
+    rejected_duration = require_rejected(
+        "animation.set_duration rejected shrink",
+        await client.send_command(
+            "animation.set_duration",
+            {"animation": "aim", "duration": 0.25},
+        ),
+    )
+    assert rejected_duration["error"]["code"] == "validation_failed"
+    aim_after_rejected_duration = require_ok(
+        "timeline.describe aim after rejected duration",
+        await client.send_command("timeline.describe", {"animation": "aim"}),
+    )
+    assert aim_after_rejected_duration["scene_delta"] == aim_duration_before["scene_delta"]
+    no_duration_history = require_rejected(
+        "undo after rejected duration",
+        await client.send_command("undo"),
+    )
+    assert no_duration_history["error"]["code"] == "nothing_to_undo"
+
+    duration_live = require_ok(
+        "animation.set_duration",
+        await client.send_command(
+            "animation.set_duration",
+            {"animation": "aim", "duration": 0.75},
+        ),
+    )
+    assert duration_live["scene_delta"]["animation"] == "aim"
+    assert duration_live["scene_delta"]["dry_run"] is False
+    assert duration_live["scene_delta"]["duration"] == 0.75
+    assert duration_live["scene_delta"]["explicit_duration"] == 0.75
+    aim_after_duration_live = require_ok(
+        "timeline.describe aim after duration edit",
+        await client.send_command("timeline.describe", {"animation": "aim"}),
+    )
+    assert aim_after_duration_live["scene_delta"]["duration"] == 0.75
+    assert aim_after_duration_live["scene_delta"]["explicit_duration"] == 0.75
+    require_ok("undo animation duration", await client.send_command("undo"))
+    aim_after_duration_undo = require_ok(
+        "timeline.describe aim after duration undo",
+        await client.send_command("timeline.describe", {"animation": "aim"}),
+    )
+    assert aim_after_duration_undo["scene_delta"]["duration"] == 0.5
+    assert aim_after_duration_undo["scene_delta"]["explicit_duration"] == 0.5
+    require_ok("redo animation duration", await client.send_command("redo"))
+    aim_after_duration_redo = require_ok(
+        "timeline.describe aim after duration redo",
+        await client.send_command("timeline.describe", {"animation": "aim"}),
+    )
+    assert aim_after_duration_redo["scene_delta"]["duration"] == 0.75
+    assert aim_after_duration_redo["scene_delta"]["explicit_duration"] == 0.75
 
     require_ok(
         "animation.create dry-run",

@@ -512,6 +512,216 @@ bool validate_animation_catalog_smoke(const std::filesystem::path& project_path)
     return true;
 }
 
+bool validate_animation_duration_shell_smoke(
+    const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(
+            &state, "aim", "Animation duration smoke", false, true)) {
+        std::cerr << "Animation duration smoke could not load the aim clip.\n";
+        return false;
+    }
+
+    const auto find_aim = [&]() {
+        return state.session.runtime_data() != nullptr
+            ? state.session.runtime_data()->find_animation("aim")
+            : nullptr;
+    };
+    const auto duration_is = [&](double expected) {
+        const auto* animation = find_aim();
+        return animation != nullptr && animation->explicit_duration.has_value() &&
+            std::abs(animation->duration() - expected) <= 1e-6;
+    };
+    const auto preview_states_equal = [](
+        const marrow::editor::PreviewState& left,
+        const marrow::editor::PreviewState& right) {
+        if (left.animation_name != right.animation_name ||
+            left.time_seconds != right.time_seconds || left.loop != right.loop ||
+            left.playing != right.playing ||
+            left.queue_enabled != right.queue_enabled ||
+            left.queued_animation_name != right.queued_animation_name ||
+            left.queue_delay != right.queue_delay ||
+            left.mix_duration != right.mix_duration || left.reverse != right.reverse ||
+            left.skin_names != right.skin_names ||
+            left.slot_overrides.size() != right.slot_overrides.size() ||
+            left.direct_parameter_values != right.direct_parameter_values ||
+            left.active_expression != right.active_expression ||
+            left.synthetic_amplitude != right.synthetic_amplitude ||
+            left.synthetic_phoneme != right.synthetic_phoneme) {
+            return false;
+        }
+        for (std::size_t index = 0U; index < left.slot_overrides.size(); ++index) {
+            const auto& left_override = left.slot_overrides[index];
+            const auto& right_override = right.slot_overrides[index];
+            if (left_override.has_value() != right_override.has_value()) {
+                return false;
+            }
+            if (left_override.has_value() &&
+                (left_override->skin_index != right_override->skin_index ||
+                 left_override->attachment_name != right_override->attachment_name)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const auto* initial_aim = find_aim();
+    if (initial_aim == nullptr || !initial_aim->explicit_duration.has_value() ||
+        std::abs(initial_aim->inferred_duration() - 0.5) > 1e-6 ||
+        !duration_is(0.5)) {
+        std::cerr << "Animation duration smoke requires the explicit aim fixture boundary.\n";
+        return false;
+    }
+
+    state.session.clear_history();
+    const std::string baseline_project =
+        marrow::editor::serialize_project(*state.session.project());
+    if (!begin_animation_duration_gesture(&state, "aim") ||
+        !apply_animation_duration_gesture(&state, 0.8) ||
+        !state.animation_duration_gesture.has_value() ||
+        !state.session.transaction_active() || !duration_is(0.8) ||
+        std::abs(timeline_preview_duration(state) - 0.8) > 1e-6 ||
+        state.session.undo_count() != 0U || !state.project_dirty) {
+        std::cerr << "Animation duration gesture did not update the live preview atomically.\n";
+        return false;
+    }
+    if (!finish_animation_duration_gesture(&state, true) ||
+        state.animation_duration_gesture.has_value() ||
+        state.session.transaction_active() || state.session.undo_count() != 1U ||
+        !state.session.dirty() || !duration_is(0.8)) {
+        std::cerr << "Animation duration gesture did not commit one dirty history item.\n";
+        return false;
+    }
+    const std::string extended_project =
+        marrow::editor::serialize_project(*state.session.project());
+    if (extended_project == baseline_project || !undo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != baseline_project ||
+        !duration_is(0.5) || !redo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != extended_project ||
+        !duration_is(0.8) || state.session.undo_count() != 1U) {
+        std::cerr << "Animation duration undo/redo did not restore exact project boundaries.\n";
+        return false;
+    }
+
+    if (!state.session.set_queue("attack", 0.0, std::nullopt)) {
+        std::cerr << "Animation duration smoke could not stage a queued preview.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    if (!scrub_timeline_time(
+            &state, 0.7, "Animation duration queue smoke", false)) {
+        std::cerr << "Animation duration smoke could not seek the queued preview.\n";
+        return false;
+    }
+    const auto current_before_queue_rebuild =
+        state.animation_state != nullptr
+        ? state.animation_state->get_current(0U)
+        : nullptr;
+    if (current_before_queue_rebuild == nullptr ||
+        current_before_queue_rebuild->animation_name != "aim" ||
+        !begin_animation_duration_gesture(&state, "aim") ||
+        !apply_animation_duration_gesture(&state, 0.6)) {
+        std::cerr << "Animation duration queue smoke could not start from the primary clip.\n";
+        return false;
+    }
+    const auto current_after_queue_rebuild =
+        state.animation_state != nullptr
+        ? state.animation_state->get_current(0U)
+        : nullptr;
+    if (current_after_queue_rebuild == nullptr ||
+        current_after_queue_rebuild->animation_name != "attack" ||
+        std::abs(state.timeline_time_seconds - 0.7) > 1e-6) {
+        std::cerr << "Animation duration live preview retained the old queue boundary.\n";
+        return false;
+    }
+    (void)finish_animation_duration_gesture(&state, false);
+    const auto current_after_queue_cancel =
+        state.animation_state != nullptr
+        ? state.animation_state->get_current(0U)
+        : nullptr;
+    if (!duration_is(0.8) || current_after_queue_cancel == nullptr ||
+        current_after_queue_cancel->animation_name != "aim" ||
+        state.session.undo_count() != 1U || !state.session.clear_queue()) {
+        std::cerr << "Animation duration queue-boundary cancellation was not exact.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+
+    if (!scrub_timeline_time(
+            &state, 0.75, "Animation duration smoke", false) ||
+        std::abs(state.timeline_time_seconds - 0.75) > 1e-6 ||
+        !begin_animation_duration_gesture(&state, "aim") ||
+        !apply_animation_duration_gesture(&state, 0.6) || !duration_is(0.6) ||
+        std::abs(state.timeline_time_seconds - 0.6) > 1e-6 ||
+        !finish_animation_duration_gesture(&state, true) ||
+        state.session.undo_count() != 2U) {
+        std::cerr << "Animation duration tail shrink did not clamp the live playhead.\n";
+        return false;
+    }
+    const std::string shrunken_project =
+        marrow::editor::serialize_project(*state.session.project());
+    if (!undo_project_change(&state) || !duration_is(0.8) ||
+        std::abs(state.timeline_time_seconds - 0.75) > 1e-6 ||
+        !redo_project_change(&state) || !duration_is(0.6) ||
+        std::abs(state.timeline_time_seconds - 0.6) > 1e-6 ||
+        marrow::editor::serialize_project(*state.session.project()) != shrunken_project) {
+        std::cerr << "Animation duration tail-shrink history lost its preview boundary.\n";
+        return false;
+    }
+
+    const auto duration_tracks = build_timeline_tracks(
+        *state.session.runtime_data(), *find_aim());
+    if (duration_tracks.empty() || duration_tracks.front().key_times.empty()) {
+        std::cerr << "Animation duration smoke could not stage selection invariants.\n";
+        return false;
+    }
+    state.selected_bone_index = 0U;
+    state.selected_slot_index = 0U;
+    state.selected_timeline_track_id = duration_tracks.front().id;
+    state.timeline_editor.selected_keys = {
+        timeline_key_ref(duration_tracks.front(), 0U)};
+
+    const std::string before_rejection =
+        marrow::editor::serialize_project(*state.session.project());
+    const marrow::editor::PreviewState preview_before_rejection =
+        state.session.preview_state();
+    const auto selected_bone_before = state.selected_bone_index;
+    const auto selected_slot_before = state.selected_slot_index;
+    const auto selected_track_before = state.selected_timeline_track_id;
+    const auto selected_keys_before = state.timeline_editor.selected_keys;
+    const std::size_t undo_before = state.session.undo_count();
+    const std::size_t redo_before = state.session.redo_count();
+    const bool dirty_before = state.session.dirty();
+    const std::uint64_t project_revision_before = state.session.project_revision();
+    const std::uint64_t runtime_revision_before = state.session.runtime_revision();
+    const std::uint64_t preview_revision_before = state.session.preview_revision();
+
+    if (!begin_animation_duration_gesture(&state, "aim") ||
+        apply_animation_duration_gesture(&state, 0.49) ||
+        state.animation_duration_gesture.has_value() ||
+        state.session.transaction_active() ||
+        marrow::editor::serialize_project(*state.session.project()) != before_rejection ||
+        !preview_states_equal(
+            state.session.preview_state(), preview_before_rejection) ||
+        state.selected_bone_index != selected_bone_before ||
+        state.selected_slot_index != selected_slot_before ||
+        state.selected_timeline_track_id != selected_track_before ||
+        state.timeline_editor.selected_keys != selected_keys_before ||
+        state.session.undo_count() != undo_before ||
+        state.session.redo_count() != redo_before ||
+        state.session.dirty() != dirty_before ||
+        state.session.project_revision() != project_revision_before ||
+        state.session.runtime_revision() != runtime_revision_before ||
+        state.session.preview_revision() != preview_revision_before ||
+        !duration_is(0.6)) {
+        std::cerr << "Rejected animation duration changed project, preview, selection, or history.\n";
+        return false;
+    }
+
+    return true;
+}
+
 const marrow::renderer::RegionAttachmentDrawCommand* find_region_attachment(
     const marrow::renderer::PreparedScene& scene,
     std::string_view slot_name) {
@@ -2045,6 +2255,7 @@ int run_headless_smoke(const Options& options) {
     shell_state.session.clear_history();
 
     if (!validate_animation_catalog_smoke(options.project_path) ||
+        !validate_animation_duration_shell_smoke(options.project_path) ||
         !validate_viewport_camera_smoke(options.project_path) ||
         !validate_viewport_prepared_scene_renderer_smoke(options.project_path)) {
         ImGui::DestroyContext();

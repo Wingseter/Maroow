@@ -678,8 +678,16 @@ std::optional<LoadError> parse_animation_edits(
                 document, edit_value, "op", edit_path, &operation)) {
             return error;
         }
+        if (operation.empty()) {
+            return validation_error(
+                document,
+                edit_value.location(),
+                edit_path + ".op",
+                "operation must not be empty");
+        }
 
         AnimationEdit edit;
+        edit.preserved_source = edit_value;
         if (operation == "create") {
             edit.kind = AnimationEditKind::Create;
             if (const auto error = read_required_string(
@@ -713,16 +721,32 @@ std::optional<LoadError> parse_animation_edits(
                     document, edit_value, "name", edit_path, &edit.name)) {
                 return error;
             }
+        } else if (operation == "set_duration") {
+            edit.kind = AnimationEditKind::SetDuration;
+            if (const auto error = read_required_string(
+                    document, edit_value, "name", edit_path, &edit.name)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, edit_value, "duration", edit_path, &edit.duration)) {
+                return error;
+            }
+            if (!std::isfinite(edit.duration) || edit.duration < 0.0 ||
+                edit.duration > static_cast<double>(
+                    std::numeric_limits<runtime::AnimationScalar>::max())) {
+                return validation_error(
+                    document,
+                    edit_value.location(),
+                    edit_path + ".duration",
+                    "duration must be finite, non-negative, and within the runtime float32 range");
+            }
         } else {
-            return validation_error(
-                document,
-                edit_value.location(),
-                edit_path + ".op",
-                "operation must be create, rename, or delete");
+            edit.kind = AnimationEditKind::Unknown;
         }
 
-        if (edit.name.empty() ||
-            (edit.kind == AnimationEditKind::Rename && edit.new_name.empty())) {
+        if (edit.kind != AnimationEditKind::Unknown &&
+            (edit.name.empty() ||
+             (edit.kind == AnimationEditKind::Rename && edit.new_name.empty()))) {
             return validation_error(
                 document,
                 edit_value.location(),
@@ -3822,21 +3846,34 @@ Value build_animation_edits_value(const std::vector<AnimationEdit>& edits) {
     Value::Array values;
     values.reserve(edits.size());
     for (const AnimationEdit& edit : edits) {
-        Value::Object object;
+        if (edit.kind == AnimationEditKind::Unknown) {
+            values.push_back(edit.preserved_source);
+            continue;
+        }
+        Value::Object object = edit.preserved_source.is_object()
+            ? edit.preserved_source.as_object()
+            : Value::Object{};
         switch (edit.kind) {
         case AnimationEditKind::Create:
-            object.emplace("op", make_string_value("create"));
-            object.emplace("name", make_string_value(edit.name));
-            object.emplace("animation", edit.animation);
+            object["op"] = make_string_value("create");
+            object["name"] = make_string_value(edit.name);
+            object["animation"] = edit.animation;
             break;
         case AnimationEditKind::Rename:
-            object.emplace("op", make_string_value("rename"));
-            object.emplace("from", make_string_value(edit.name));
-            object.emplace("to", make_string_value(edit.new_name));
+            object["op"] = make_string_value("rename");
+            object["from"] = make_string_value(edit.name);
+            object["to"] = make_string_value(edit.new_name);
             break;
         case AnimationEditKind::Delete:
-            object.emplace("op", make_string_value("delete"));
-            object.emplace("name", make_string_value(edit.name));
+            object["op"] = make_string_value("delete");
+            object["name"] = make_string_value(edit.name);
+            break;
+        case AnimationEditKind::SetDuration:
+            object["op"] = make_string_value("set_duration");
+            object["name"] = make_string_value(edit.name);
+            object["duration"] = make_number_value(edit.duration);
+            break;
+        case AnimationEditKind::Unknown:
             break;
         }
         values.push_back(make_object_value(std::move(object)));
@@ -4256,6 +4293,15 @@ void apply_animation_edits(Value* root, const std::vector<AnimationEdit>& edits)
             animations->as_object().erase(edit.name);
             remove_animation_mixing_references(root, edit.name);
             break;
+        case AnimationEditKind::SetDuration: {
+            Value* animation = marrow::runtime::json::find_member(*animations, edit.name);
+            if (animation != nullptr && animation->is_object()) {
+                animation->as_object()["duration"] = make_number_value(edit.duration);
+            }
+            break;
+        }
+        case AnimationEditKind::Unknown:
+            break;
         }
     }
 }
@@ -4335,6 +4381,26 @@ std::optional<LoadError> validate_animation_edit_sequence(
             names.erase(target);
             break;
         }
+        case AnimationEditKind::SetDuration:
+            if (!contains(edit.name)) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "set_duration target does not exist: " + edit.name);
+            }
+            if (!std::isfinite(edit.duration) || edit.duration < 0.0 ||
+                edit.duration > static_cast<double>(
+                    std::numeric_limits<runtime::AnimationScalar>::max())) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path + ".duration",
+                    "duration must be finite, non-negative, and within the runtime float32 range");
+            }
+            break;
+        case AnimationEditKind::Unknown:
+            break;
         }
     }
     return std::nullopt;
@@ -4706,6 +4772,18 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
     }
 
     for (const AnimationEdit& edit : project.animation_edits) {
+        if (edit.kind == AnimationEditKind::Unknown) {
+            const Value* operation = edit.preserved_source.is_object()
+                ? find_optional_member(edit.preserved_source, "op")
+                : nullptr;
+            if (operation == nullptr || !operation->is_string() ||
+                operation->as_string().empty()) {
+                error_out->message =
+                    "unknown animation edits require a preserved non-empty operation";
+                return false;
+            }
+            continue;
+        }
         if (edit.name.empty()) {
             error_out->message = "animation edits require non-empty animation names";
             return false;
@@ -4718,6 +4796,14 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
             (edit.new_name.empty() || edit.name == edit.new_name)) {
             error_out->message =
                 "animation rename edits require distinct non-empty names";
+            return false;
+        }
+        if (edit.kind == AnimationEditKind::SetDuration &&
+            (!std::isfinite(edit.duration) || edit.duration < 0.0 ||
+             edit.duration > static_cast<double>(
+                 std::numeric_limits<runtime::AnimationScalar>::max()))) {
+            error_out->message =
+                "animation duration edits require finite non-negative float32 values";
             return false;
         }
     }

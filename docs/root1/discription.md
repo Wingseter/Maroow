@@ -33,6 +33,7 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 
 - 베이스 `.mskl`은 본, 슬롯, 스킨, 어태치먼트와 메시 topology의 소유자다.
 - `.marrow`는 베이스 런타임 자산 참조와 이름 기반 애니메이션·제약·웨이트 편집 overlay, editor-only metadata를 저장한다. 활성 파라미터 마일스톤의 optional `parameter_model`과 P1의 duration operation, viewport snap, curve/loop metadata, constraint lifecycle, inherit overlay, PSD provenance도 모두 additive 필드다. 알 수 없는 additive 필드는 load/save에서 보존한다.
+- 사용자별 UI 기본값은 프로젝트 상태와 분리된 versioned `editor-settings.json`에 저장한다. MAR-156의 UI-free `PreferenceStore`는 curve 기본 preset과 raw Recent Projects 경로를 공유 저장하며 `.marrow` dirty/history/revision, runtime 포맷, C ABI, Agent/MCP 표면을 변경하지 않는다.
 - Parameter slider와 agent `parameter.set`은 ID 기반 direct preview 입력이며 `.marrow`나 runtime export에 저장하지 않는다. Persistent parameter-model CRUD만 project dirty 상태를 바꾼다.
 - Setup Pose는 현재 읽기 전용이다. Animation 모드의 본 포즈 변경은 현재 playhead의 키프레임으로 저장해야 하며, 저장되지 않는 preview-only 포즈/색상 편집은 허용하지 않는다.
 - 본·슬롯·스킨·어태치먼트 생성/삭제, 재부모화, 메시 topology·경로 제어점 편집, multi-selection group transform, partial/degraded project open은 현재 P1 범위 밖이다.
@@ -794,11 +795,11 @@ JSON 외에 **바이너리 포맷**으로 내보내기. 프로덕션 배포용.
 
 1. **완료: 편집 P0 (MAR-141~153)** - Setup Pose 읽기 전용화, Animation auto-key, 안정적 카메라/이동 기즈모, 도프시트 조작, 슬롯 타임라인, 애니메이션 CRUD와 E2E guardrail
 2. **완료: 파라미터 트랙 (MAR-122~128)** - MAR-121의 런타임 기반을 MAR-122에 통합하고 정의·export·shape/deformer·ArtPath·expression/lip-sync·editor·agent surface를 검증
-3. **다음: 편집 P1 (MAR-154~191)** - duration·preferences·typed selection, 회전/스케일/FFD/snap, graph·retime·preview, weight·constraint lifecycle, atomic file workflow·inherit, structured Problems, staged/atomic PSD 재임포트와 E2E
+3. **진행 중: 편집 P1 (MAR-154~191)** - MAR-154 runtime explicit duration, MAR-155 editor duration authoring, MAR-156 versioned user preference store가 완료됐다. 다음 MAR-157부터 typed selection, 회전/스케일/FFD/snap, graph·retime·preview, weight·constraint lifecycle, atomic file workflow·inherit, structured Problems, staged/atomic PSD 재임포트와 E2E를 순서대로 닫는다.
 4. **보류: 자체 리그 저작 재검토** - canonical `.marrow` authoring graph와 stable ID 전환 설계가 승인된 뒤에만 리그/메시 topology 저작을 시작
 
-P1 시작 gate인 MAR-128 완료 checkpoint는 2026-07-16에 통과했다. MAR-154는 MAR-128에 의존하고 MAR-155~191은 각각 바로 앞 번호의
-스토리에 의존하는 선형 dependency chain이다. 각 milestone checkpoint는 기능·검증 경계이며 자동 커밋 단위가 아니다. 38개 story의 title과 수직 scope는
+P1 시작 gate인 MAR-128 완료 checkpoint는 2026-07-16에, MAR-154 runtime duration과 MAR-155 editor duration checkpoint는 2026-07-17에, MAR-156 user preference checkpoint는 2026-07-18에 통과했다. 다음 open milestone은
+MAR-157이며 MAR-157~191은 각각 바로 앞 번호의 스토리에 의존하는 선형 dependency chain이다. 각 milestone checkpoint는 기능·검증 경계이며 자동 커밋 단위가 아니다. 38개 story의 title과 수직 scope는
 [`editing-gap-analysis.md`](editing-gap-analysis.md)의 P1 표를 따른다.
 
 > 새 포맷이나 평가 기능은 계속 런타임에서 먼저 검증한다. 편집 P0는 이미 구현된 런타임 위의 데이터 유실·직접 조작·타임라인 UX 갭을 먼저 닫은 예외적인 제품 완성도 단계였다. P1도 `.mskl` v1/`.mbin` v2/C ABI v1 compatibility를 유지한다.

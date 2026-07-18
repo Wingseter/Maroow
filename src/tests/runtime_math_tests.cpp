@@ -1515,6 +1515,576 @@ void test_animation_timeline_index_and_sampling_cursor(TestContext& context) {
         "rewinding the sample time should reset the cached rotate cursor");
 }
 
+void test_animation_explicit_duration(TestContext& context) {
+    constexpr std::string_view duration_source = R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "explicit_duration_test",
+    "width": 1,
+    "height": 1
+  },
+  "bones": [
+    { "name": "root" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "animations": {
+    "missing": {
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    },
+    "equal": {
+      "duration": 0.3,
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    },
+    "longer": {
+      "duration": 1.0,
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    },
+    "empty_missing": {},
+    "empty_zero": { "duration": 0.0 },
+    "empty_positive": { "duration": 0.75 },
+    "constant_boundary": {
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.6, "angle": 0.0 }
+          ]
+        }
+      }
+    }
+  }
+})json";
+
+    const auto document_result =
+        marrow::runtime::json::parse_document(duration_source, "explicit_duration_test.mskl");
+    context.expect(
+        static_cast<bool>(document_result),
+        document_result.error.has_value()
+            ? document_result.error->format()
+            : "explicit-duration document should parse");
+    if (!document_result) {
+        return;
+    }
+
+    const auto data_result = marrow::runtime::load_skeleton_data(*document_result.document);
+    context.expect(
+        static_cast<bool>(data_result),
+        data_result.error.has_value()
+            ? data_result.error->format()
+            : "explicit-duration document should load");
+    if (!data_result) {
+        return;
+    }
+
+    const auto& data = data_result.skeleton_data;
+    const AnimationData* missing = data->find_animation("missing");
+    const AnimationData* equal = data->find_animation("equal");
+    const AnimationData* longer = data->find_animation("longer");
+    const AnimationData* empty_missing = data->find_animation("empty_missing");
+    const AnimationData* empty_zero = data->find_animation("empty_zero");
+    const AnimationData* empty_positive = data->find_animation("empty_positive");
+    const AnimationData* constant_boundary = data->find_animation("constant_boundary");
+    context.expect(missing != nullptr, "missing-duration animation should load");
+    context.expect(equal != nullptr, "equal-duration animation should load");
+    context.expect(longer != nullptr, "longer-duration animation should load");
+    context.expect(empty_missing != nullptr, "empty animation without duration should load");
+    context.expect(empty_zero != nullptr, "empty animation with zero duration should load");
+    context.expect(empty_positive != nullptr, "empty animation with positive duration should load");
+    context.expect(
+        constant_boundary != nullptr,
+        "pose-identical nonzero boundary animation should load");
+    if (missing == nullptr || equal == nullptr || longer == nullptr ||
+        empty_missing == nullptr || empty_zero == nullptr || empty_positive == nullptr ||
+        constant_boundary == nullptr) {
+        return;
+    }
+
+    const double stored_decimal = static_cast<double>(
+        static_cast<marrow::runtime::AnimationScalar>(0.3));
+    context.expect(
+        !missing->explicit_duration.has_value(),
+        "missing duration should preserve inferred fallback presence");
+    context.expect_near(
+        missing->inferred_duration(),
+        stored_decimal,
+        "missing duration should infer the last key");
+    context.expect_near(
+        missing->duration(),
+        stored_decimal,
+        "missing duration should use the inferred last key");
+
+    context.expect(
+        equal->explicit_duration.has_value(),
+        "decimal duration equal to the last key should remain explicit");
+    if (equal->explicit_duration.has_value()) {
+        context.expect_near(
+            *equal->explicit_duration,
+            stored_decimal,
+            "equal decimal duration should normalize to timeline storage");
+    }
+    context.expect_near(
+        equal->inferred_duration(),
+        stored_decimal,
+        "equal duration should retain its inferred boundary");
+    context.expect_near(
+        equal->duration(),
+        stored_decimal,
+        "equal duration should use its explicit boundary");
+
+    context.expect(
+        longer->explicit_duration.has_value(),
+        "longer duration should remain explicit");
+    context.expect_near(longer->inferred_duration(), stored_decimal, "longer inferred duration");
+    context.expect_near(longer->duration(), 1.0, "longer effective duration");
+
+    context.expect(
+        !empty_missing->explicit_duration.has_value(),
+        "empty missing duration should retain absence");
+    context.expect_near(empty_missing->inferred_duration(), 0.0, "empty inferred duration");
+    context.expect_near(empty_missing->duration(), 0.0, "empty fallback duration");
+    context.expect(
+        empty_zero->explicit_duration.has_value(),
+        "empty zero duration should retain explicit presence");
+    context.expect_near(empty_zero->duration(), 0.0, "empty explicit zero duration");
+    context.expect(
+        empty_positive->explicit_duration.has_value(),
+        "empty positive duration should retain explicit presence");
+    context.expect_near(
+        empty_positive->inferred_duration(),
+        0.0,
+        "empty positive duration should still infer zero");
+    context.expect_near(
+        empty_positive->duration(),
+        0.75,
+        "empty positive duration should use the explicit value");
+
+    const double stored_constant_boundary = static_cast<double>(
+        static_cast<marrow::runtime::AnimationScalar>(0.6));
+    context.expect(
+        !constant_boundary->explicit_duration.has_value(),
+        "pose-identical boundary should retain inferred duration mode");
+    context.expect(
+        constant_boundary->bone_rotate_timelines.size() == 1U,
+        "pose-identical nonzero key should not be pruned");
+    context.expect_near(
+        constant_boundary->inferred_duration(),
+        stored_constant_boundary,
+        "pose-identical nonzero key should define inferred duration");
+    context.expect_near(
+        constant_boundary->duration(),
+        stored_constant_boundary,
+        "pose-identical nonzero key should define effective fallback duration");
+
+    AnimationData copied = *longer;
+    context.expect(
+        copied.explicit_duration == longer->explicit_duration,
+        "copy construction should preserve explicit duration");
+    AnimationData assigned;
+    assigned = *longer;
+    context.expect(
+        assigned.explicit_duration == longer->explicit_duration,
+        "copy assignment should preserve explicit duration");
+
+    const auto make_single_duration_source = [](std::string_view duration_member) {
+        return std::string(R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": { "name": "duration_validation", "width": 1, "height": 1 },
+  "bones": [{ "name": "root" }],
+  "slots": [{ "name": "body", "bone": "root", "attachment": "body" }],
+  "animations": {
+    "clip": {
+)json") + std::string(duration_member) + R"json(
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    }
+  }
+})json";
+    };
+    const auto expect_loader_rejection = [&](std::string_view duration_member,
+                                             std::string_view label) {
+        const auto parsed = marrow::runtime::json::parse_document(
+            make_single_duration_source(duration_member),
+            std::string(label) + ".mskl");
+        context.expect(
+            static_cast<bool>(parsed),
+            parsed.error.has_value() ? parsed.error->format() : "validation JSON should parse");
+        if (!parsed) {
+            return;
+        }
+
+        const auto loaded = marrow::runtime::load_skeleton_data(*parsed.document);
+        context.expect(!loaded, std::string(label) + " should be rejected");
+        if (loaded.error.has_value()) {
+            context.expect(
+                loaded.error->message.find("$.animations.clip.duration") != std::string::npos,
+                std::string(label) + " should report the duration JSON path");
+        }
+    };
+    expect_loader_rejection("      \"duration\": \"0.3\",", "duration wrong type");
+    expect_loader_rejection("      \"duration\": -0.1,", "negative duration");
+    expect_loader_rejection("      \"duration\": 0.29,", "duration shorter than last key");
+    expect_loader_rejection("      \"duration\": 1e39,", "duration outside runtime range");
+
+    auto non_finite_document = marrow::runtime::json::parse_document(
+        make_single_duration_source("      \"duration\": 1.0,"),
+        "non_finite_duration.mskl");
+    context.expect(
+        static_cast<bool>(non_finite_document),
+        non_finite_document.error.has_value()
+            ? non_finite_document.error->format()
+            : "non-finite mutation source should parse");
+    if (non_finite_document) {
+        auto* animations_value = marrow::runtime::json::find_member(
+            non_finite_document.document->root,
+            "animations");
+        auto* clip_value = animations_value != nullptr
+            ? marrow::runtime::json::find_member(*animations_value, "clip")
+            : nullptr;
+        auto* duration_value = clip_value != nullptr
+            ? marrow::runtime::json::find_member(*clip_value, "duration")
+            : nullptr;
+        context.expect(duration_value != nullptr, "non-finite source should expose duration");
+        if (duration_value != nullptr) {
+            *duration_value = marrow::runtime::json::Value(
+                std::numeric_limits<double>::infinity(),
+                duration_value->location());
+            const auto loaded = marrow::runtime::load_skeleton_data(
+                *non_finite_document.document);
+            context.expect(!loaded, "non-finite duration should be rejected");
+            if (loaded.error.has_value()) {
+                context.expect(
+                    loaded.error->message.find("$.animations.clip.duration") !=
+                        std::string::npos,
+                    "non-finite duration should report the duration JSON path");
+            }
+        }
+    }
+
+    {
+        AnimationState state(data);
+        Skeleton skeleton(data);
+        const auto entry = state.set_animation(0U, "longer", false, 0.0);
+        state.update(0.6);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.6, "tail should sample inside explicit duration");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            30.0,
+            "tail should hold the last authored pose");
+    }
+
+    {
+        AnimationState state(data);
+        int complete_count = 0;
+        state.set_listener(
+            [&](AnimationState&,
+                marrow::runtime::AnimationStateEventType type,
+                const std::shared_ptr<marrow::runtime::TrackEntry>&,
+                const marrow::runtime::AnimationEvent*) {
+                if (type == marrow::runtime::AnimationStateEventType::Complete) {
+                    ++complete_count;
+                }
+            });
+        const auto entry = state.set_animation(0U, "longer", false, 0.0);
+        state.update(0.99);
+        context.expect(!entry->is_complete(), "non-loop clip should not complete before explicit end");
+        context.expect(complete_count == 0, "non-loop callback should wait for explicit end");
+        state.update(0.01);
+        context.expect(entry->is_complete(), "non-loop clip should complete at explicit end");
+        context.expect(complete_count == 1, "non-loop clip should complete exactly once");
+    }
+
+    {
+        AnimationState state(data);
+        Skeleton skeleton(data);
+        int complete_count = 0;
+        state.set_listener(
+            [&](AnimationState&,
+                marrow::runtime::AnimationStateEventType type,
+                const std::shared_ptr<marrow::runtime::TrackEntry>&,
+                const marrow::runtime::AnimationEvent*) {
+                if (type == marrow::runtime::AnimationStateEventType::Complete) {
+                    ++complete_count;
+                }
+            });
+        const auto entry = state.set_animation(0U, "longer", true, 0.0);
+        state.update(1.25);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.25, "loop should wrap at explicit end");
+        context.expect(complete_count == 1, "loop should callback once per explicit boundary");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            25.0,
+            "loop pose should sample from the explicit-duration remainder",
+            1e-4);
+    }
+
+    {
+        AnimationState state(data);
+        state.set_animation(0U, "longer", false, 0.0);
+        state.add_animation(0U, "missing", false, 0.0, 0.0);
+        state.update(0.8);
+        context.expect(
+            state.get_current(0U)->animation_name == "longer",
+            "queue should not promote at the inferred last key");
+        state.update(0.3);
+        const auto current = state.get_current(0U);
+        context.expect(current != nullptr, "queue should retain a current entry");
+        if (current != nullptr) {
+            context.expect(
+                current->animation_name == "missing",
+                "queue should promote at the explicit duration");
+            context.expect_near(current->track_time, 0.1, "queue should carry boundary overshoot");
+        }
+    }
+
+    {
+        AnimationState state(data);
+        Skeleton skeleton(data);
+        const auto entry = state.set_animation(0U, "longer", false, 0.0);
+        entry->reverse = true;
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 1.0, "reverse should begin at explicit end");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            30.0,
+            "reverse should hold the tail pose before the last key");
+        state.update(0.6);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.4, "reverse should traverse explicit tail");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            30.0,
+            "reverse tail should continue holding the last key");
+        state.update(0.2);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.2, "reverse should enter keyed range");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            20.0,
+            "reverse should sample the keyed range after the explicit tail",
+            1e-4);
+    }
+
+    {
+        AnimationState source_state(data);
+        source_state.set_animation(0U, "longer", true, 0.0);
+        source_state.update(0.8);
+        const AnimationStateSnapshot snapshot = source_state.capture_state();
+
+        AnimationState restored_state(data);
+        restored_state.restore_state(snapshot);
+        auto restored_entry = restored_state.get_current(0U);
+        context.expect(restored_entry != nullptr, "snapshot should restore explicit-duration entry");
+        if (restored_entry != nullptr) {
+            context.expect_near(
+                restored_entry->animation_duration(),
+                1.0,
+                "snapshot should resolve the explicit duration from reloaded data");
+            context.expect_near(
+                restored_entry->animation_time(),
+                0.8,
+                "snapshot should preserve explicit tail playback time");
+            restored_state.update(0.3);
+            context.expect_near(
+                restored_entry->animation_time(),
+                0.1,
+                "restored loop should wrap at the explicit duration");
+        }
+    }
+
+    {
+        AnimationState state(data);
+        const auto empty_entry = state.set_empty_animation(0U, 0.4);
+        state.add_animation(0U, "missing", false, 0.0, 0.0);
+        context.expect(empty_entry->is_empty, "synthetic empty entry should remain marked empty");
+        context.expect_near(
+            empty_entry->animation_duration(),
+            0.0,
+            "synthetic empty animation should not acquire a clip duration");
+        context.expect_near(empty_entry->mix_duration, 0.4, "empty entry should retain mix duration");
+        context.expect_near(empty_entry->track_end, 0.4, "empty track end should remain mix duration");
+        context.expect(!empty_entry->is_complete(), "synthetic empty entry should not report complete");
+        state.update(0.39);
+        context.expect(
+            state.get_current(0U) == empty_entry,
+            "synthetic empty should transition using mix duration, not clip duration");
+        state.update(0.02);
+        context.expect(
+            state.get_current(0U) != nullptr &&
+                state.get_current(0U)->animation_name == "missing",
+            "queued clip should start after the empty mix boundary");
+    }
+
+    const std::filesystem::path binary_path =
+        std::filesystem::temp_directory_path() / "marrow_mar154_explicit_duration_test.mbin";
+    if (const auto error = marrow::runtime::write_skeleton_binary_document(
+            *document_result.document,
+            binary_path)) {
+        context.expect(false, error->format());
+    } else {
+        const auto generic_document = marrow::runtime::load_skeleton_document(binary_path);
+        context.expect(
+            static_cast<bool>(generic_document),
+            generic_document.error.has_value()
+                ? generic_document.error->format()
+                : "binary generic document should load");
+        if (generic_document) {
+            const auto* animations_value = marrow::runtime::json::find_member(
+                generic_document.document->root,
+                "animations");
+            const auto* generic_longer = animations_value != nullptr
+                ? marrow::runtime::json::find_member(*animations_value, "longer")
+                : nullptr;
+            const auto* generic_missing = animations_value != nullptr
+                ? marrow::runtime::json::find_member(*animations_value, "missing")
+                : nullptr;
+            const auto* generic_longer_duration = generic_longer != nullptr
+                ? marrow::runtime::json::find_member(*generic_longer, "duration")
+                : nullptr;
+            const auto* generic_missing_duration = generic_missing != nullptr
+                ? marrow::runtime::json::find_member(*generic_missing, "duration")
+                : nullptr;
+            context.expect(
+                generic_longer_duration != nullptr && generic_longer_duration->is_number(),
+                "binary generic payload should preserve explicit duration presence");
+            if (generic_longer_duration != nullptr && generic_longer_duration->is_number()) {
+                context.expect_near(
+                    generic_longer_duration->as_number(),
+                    1.0,
+                    "binary generic payload should preserve explicit duration value");
+            }
+            context.expect(
+                generic_missing_duration == nullptr,
+                "binary generic payload should preserve duration absence");
+        }
+
+        const auto binary_result = marrow::runtime::load_skeleton_data(binary_path);
+        context.expect(
+            static_cast<bool>(binary_result),
+            binary_result.error.has_value()
+                ? binary_result.error->format()
+                : "optimized explicit-duration binary should load");
+        if (binary_result) {
+            const AnimationData* binary_longer =
+                binary_result.skeleton_data->find_animation("longer");
+            const AnimationData* binary_missing =
+                binary_result.skeleton_data->find_animation("missing");
+            context.expect(binary_longer != nullptr, "binary should retain longer animation");
+            context.expect(binary_missing != nullptr, "binary should retain missing animation");
+            if (binary_longer != nullptr) {
+                context.expect(
+                    binary_longer->explicit_duration.has_value(),
+                    "binary runtime should retain explicit duration presence");
+                context.expect_near(
+                    binary_longer->duration(),
+                    1.0,
+                    "binary runtime should retain effective duration");
+                context.expect(
+                    binary_longer->bone_rotate_timelines.size() == 1U &&
+                        binary_longer->bone_rotate_timelines[0].keyframes.size() == 2U,
+                    "AKEY payload should retain both rotate endpoints");
+                if (binary_longer->bone_rotate_timelines.size() == 1U &&
+                    binary_longer->bone_rotate_timelines[0].keyframes.size() == 2U) {
+                    constexpr double u16_range = 65535.0;
+                    const double expected_quantized_time = static_cast<double>(
+                        static_cast<marrow::runtime::AnimationScalar>(
+                            std::round(stored_decimal * u16_range) / u16_range));
+                    const double packed_time = static_cast<double>(
+                        binary_longer->bone_rotate_timelines[0].keyframes[1].time);
+                    context.expect_near(
+                        packed_time,
+                        expected_quantized_time,
+                        "AKEY time should quantize against the explicit tail",
+                        1e-8);
+                    context.expect(
+                        std::abs(packed_time - stored_decimal) > 1e-6,
+                        "AKEY endpoint should demonstrate explicit-tail time scaling");
+                }
+            }
+            if (binary_missing != nullptr) {
+                context.expect(
+                    !binary_missing->explicit_duration.has_value(),
+                    "binary runtime should not infer authored duration presence");
+            }
+
+            const auto comparison = marrow::runtime::compare_animation_roundtrip(
+                *data,
+                *binary_result.skeleton_data);
+            context.expect(
+                static_cast<bool>(comparison),
+                comparison.error.value_or("explicit-duration binary roundtrip should compare"));
+        }
+    }
+    std::error_code remove_error;
+    std::filesystem::remove(binary_path, remove_error);
+
+    const auto make_comparison_data = [](std::optional<double> explicit_duration) {
+        AnimationData animation = make_rotate_animation(
+            "compare",
+            0U,
+            {{0.0, 0.0}, {0.3, 30.0}});
+        animation.explicit_duration = explicit_duration;
+        return make_skeleton_data(
+            {make_bone("root", std::nullopt)},
+            {},
+            {},
+            {},
+            {},
+            {std::move(animation)});
+    };
+    const auto comparison_source = make_comparison_data(1.0);
+    const auto comparison_missing = make_comparison_data(std::nullopt);
+    const auto presence_mismatch = marrow::runtime::compare_animation_roundtrip(
+        *comparison_source,
+        *comparison_missing);
+    context.expect(!presence_mismatch, "comparison should reject explicit-duration presence mismatch");
+    context.expect(
+        presence_mismatch.error.has_value() &&
+            presence_mismatch.error->find("presence mismatch") != std::string::npos,
+        "comparison should identify explicit-duration presence mismatch");
+
+    const auto comparison_different = make_comparison_data(1.1);
+    const auto value_mismatch = marrow::runtime::compare_animation_roundtrip(
+        *comparison_source,
+        *comparison_different);
+    context.expect(!value_mismatch, "comparison should reject explicit-duration value mismatch");
+    context.expect(
+        value_mismatch.error.has_value() &&
+            value_mismatch.error->find("value mismatch") != std::string::npos,
+        "comparison should identify explicit-duration value mismatch");
+}
+
 void test_constraint_fast_math_approximations(TestContext& context) {
     constexpr float kPiF = 3.14159265358979323846f;
     constexpr float kTwoPiF = kPiF * 2.0f;
@@ -4056,6 +4626,7 @@ int main() {
     failures += run_test(
         "Animation Timeline Index And Sampling Cursor",
         test_animation_timeline_index_and_sampling_cursor);
+    failures += run_test("Animation Explicit Duration", test_animation_explicit_duration);
     failures += run_test("Matrix Composition", test_matrix_composition);
     failures += run_test("Topological Bone Reorder", test_topological_bone_reorder);
     failures += run_test(

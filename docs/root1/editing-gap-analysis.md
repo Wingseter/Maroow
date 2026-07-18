@@ -1,6 +1,8 @@
 # Maroow 편집 기능 갭 분석 (vs Spine 4.2/4.3, Live2D Cubism 5.x)
 
-최종 갱신: 2026-07-16. 기준: MAR-141~153 편집 P0와 MAR-122~128 Parameter Modeling 완료 checkpoint 및 `.agents/tasks/prd-marrow-runtime.json`.
+최종 갱신: 2026-07-18. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
+MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
+Preference Store 완료 checkpoint 및 `.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
 
 ---
@@ -11,7 +13,7 @@ Maroow 에디터의 강점은 **"이미 존재하는 리그 위에서의 애니�
 편집 P0 이후에는 트랜스폼 auto-key, 본/IK 타깃 이동 기즈모, 슬롯/디폼/이벤트/드로우오더 키잉,
 다중 키 선택·리타임·복사/잘라내기/붙여넣기, 애니메이션 CRUD, 4종 제약 저작, 웨이트 페인팅,
 어니언 스킨, 트랜잭션 기반 언두를 제공한다. MAR-122~128 이후에는 typed parameter/group/shape/deformer,
-ArtPath, expression/lip-sync, Parameter Modeling mode와 55개 에이전트 오퍼레이션까지 제공한다.
+ArtPath, expression/lip-sync, Parameter Modeling mode와 56개 에이전트 오퍼레이션까지 제공한다.
 
 현재 Spine/Live2D 대비 가장 큰 **미해결** 격차는 세 가지다:
 
@@ -21,6 +23,10 @@ ArtPath, expression/lip-sync, Parameter Modeling mode와 55개 에이전트 오�
 
 이전의 네 번째 핵심 gap이던 **Live2D식 파라미터 모델링 레이어는 해소됐다**. MAR-121은 MAR-122에 통합됐고,
 MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoint가 2026-07-16에 검증됐다.
+이후 MAR-154가 runtime의 authored/inferred/effective clip duration 경계를, MAR-155가
+`.marrow` editor authoring·undo·Agent/MCP·key auto-grow를 2026-07-17에 완료했다.
+MAR-156은 project history와 분리된 versioned user preference store를 2026-07-18에 완료했다.
+다음 open milestone은 transient typed selection domain을 도입하는 MAR-157이다.
 
 ---
 
@@ -44,6 +50,8 @@ MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoi
 | 키프레임 편집 | 본 R/T/S/shear, 슬롯 light RGBA/attachment, 메시 디폼, 드로우오더, 이벤트 — 추가/삭제/시간·값·보간 수정 | `shell_timeline.cpp` |
 | 보간 | 키별 Linear/Stepped/Bezier + 베지어 제어점 4개 숫자 입력 | `shell_timeline.cpp` |
 | 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `shell_timeline.cpp` |
+| Clip duration | runtime authored/inferred/effective 경계, ordered `.marrow set_duration`, live UI·undo, key auto-grow, tail/queue/playhead 재구성, JSON↔MBIN 보존 | `authoring.cpp`, `session.cpp`, `shell_project_panels.cpp` |
+| User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, cross-platform/env resolver, unknown-field 보존, same-directory atomic rename, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
 | 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동 auto-key | `shell_viewport.cpp`, `shell_viewport_ui.cpp` |
 | 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `shell_timeline.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
@@ -52,8 +60,8 @@ MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoi
 | 어니언 스킨 | 프레임/키프레임 모드, 전후 개수, 스텝, 앵커 | `shell_viewport_ui.cpp` |
 | 임포트/익스포트 | PSD→리그 생성, Spine JSON/atlas 임포트, 아틀라스 패킹, `.mskl`/`.mbin`/`.matl` 익스포트 | `psd_import.cpp` 등 |
 | Parameter modeling | raw direct/final preview, 1D shape, 2D warp/rotation, full lattice·pivot gesture, expression/lip-sync, ArtPath runtime/render | `shell_parameters.cpp`, `parameter_project_model.cpp`, `parameter_model.cpp` |
-| 에이전트 표면 | 55개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 30). Animation CRUD·atomic timeline retime·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
-| 종합 회귀 방지 | base-only timeline materialization, typed parameter model save/reload, undo/redo, JSON↔MBIN, 55-op registry와 Parameter shell을 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke.cpp`, `agent_dispatch_smoke.cpp` |
+| 에이전트 표면 | 56개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 31). Animation CRUD·duration·atomic timeline retime·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
+| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 56-op registry와 Parameter shell을 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke.cpp`, `agent_dispatch_smoke.cpp` |
 
 ### 남아 있는 의도적 제한/부분 구현
 
@@ -102,15 +110,18 @@ Spine 편집의 본질은 "뷰포트에서 본을 잡아 끄는 것"이고, Live
 | 그래프(커브) 에디터 — 그래픽 베지어 핸들 드래그 | Graph editor, 4.3 자동 조정 핸들·기본 커브 기억·루프 커브 동기화 [CORE] | Graph editor [CORE] |
 | 선택 키 시간 스케일 | Dopesheet [CORE] | Timeline [CORE] |
 | 재생 속도 조절 | [CORE] | [CORE] |
-| 명시적 clip duration | Animation duration | 씬/타임라인 길이 |
 | 루프 경계 키 자동 복제 | 루프 커브 동기화 (4.2) | 루프 편집 지원 (5.2) |
 | 키 인터폴레이션 프리셋 | 커브 프리셋 | 확장 보간 |
 
 현재 도프시트는 초/프레임 ruler, duration과 독립된 zoom/pan, 안정적 same-time event identity,
 클릭/Cmd·Ctrl toggle/box selection, Add/Remove, 다중 drag retime, 60 FPS snap/Alt bypass,
 typed copy/cut/paste와 compatible single-lane remap을 제공한다. 애니메이션 create/duplicate/rename/delete도
-UI와 agent/MCP 양쪽에 있다. P0에서는 clip 길이를 마지막 키에서 계속 추론한다. MAR-154가 runtime의
-explicit/inferred/effective duration 경계를 먼저 추가하고, MAR-155가 editor authoring·undo·agent/MCP를 연결한다.
+UI와 agent/MCP 양쪽에 있다. MAR-154 이후 runtime은 source asset의 authored duration presence,
+key-derived `inferred_duration()`과 effective `duration()`을 구분하며 playback과 MBIN도 effective boundary를
+사용한다. MAR-155는 ordered `.marrow.animation_edits set_duration`, UI-free setter, live UI·undo,
+Agent/MCP dry-run을 연결했다. 키 생성·오른쪽 이동은 명시 경계를 같은 transaction에서 늘리고,
+왼쪽 이동·삭제는 자동 축소하지 않는다. 수동 값이 마지막 키보다 짧으면 project·preview·selection·history를
+바꾸지 않고 거부한다. Duration이 없는 기존 project/runtime asset은 마지막 키 inferred fallback을 그대로 유지한다.
 
 현재 wire easing은 outgoing segment 전체가 하나의 `[cx1, cy1, cx2, cy2]`를 공유한다. P1 graph는 이 경계를
 유지하며 Transform X/Y나 Slot RGBA component별 독립 curve를 만들지 않고 UI에도 이 제약을 표시한다.
@@ -153,11 +164,12 @@ explicit/inferred/effective duration 경계를 먼저 추가하고, MAR-155가 e
 | Runtime | finite raw direct와 final composed buffer, discrete round/optional clamp, 1D endpoint/linear shape, bilinear warp, rotation pivot/influence, one-level deformer chain과 dependency cache |
 | Renderer | attachment-local final mesh offset, skeleton scale/mirror를 반영한 ArtPath root overlay, deterministic cap/join tessellation, atlas-free preparation과 cache 실패 원자성 |
 | Project/Editor | 일곱 optional parameter family의 typed·lossless save/reload/export, transient non-dirty preview, CRUD, 3×3 full lattice/pivot gesture, confirmed atomic keyform capture |
-| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, C++/Python 55-op exact parity |
+| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration operation 포함 현재 56-op parity |
 | Compatibility/성능 | `.mskl` v1, `.mbin` v2, C ABI v1 유지. CTest 11/11, runtime 4/4, editor 5/5, 200 skeleton `frame_ms=4.45`/`score=100`, parameter `0.07us`/deformer `0.51us` |
 
-29개 runtime/renderer unit, parameter project save/reload와 JSON↔MBIN compare, atlas-free ArtPath renderer,
-55-op Agent smoke, standard/parameter-only MCP socket E2E와 `git diff --check`도 같은 checkpoint에서 통과했다.
+MAR-122~128 checkpoint 당시 29개 runtime/renderer unit, parameter project save/reload와 JSON↔MBIN compare,
+atlas-free ArtPath renderer, 당시 55-op Agent smoke, standard/parameter-only MCP socket E2E와 `git diff --check`가
+통과했다. MAR-154의 duration case가 추가된 현재 runtime/renderer unit 목록은 30개다.
 
 여전히 제외되는 parameter 저작 범위는 ArtPath point GUI, raw mesh topology/vertex sculpting, keyform copy/mirror,
 N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `parameter.set`은 preview-only이며 저장·export하지 않는다.
@@ -185,7 +197,10 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 - 단기 제품은 **임포트 리그 기반 애니메이션/후처리 에디터**다.
 - Setup Pose와 슬롯 dark tint는 P0에서 읽기 전용이다. Animation 모드의 R/T/S/shear 변경은 항상 현재 playhead의 키로 영속화한다.
 - P0 뷰포트는 안정적 카메라와 본/IK 타깃 **이동** 기즈모까지다. 회전·스케일·FFD 직접 조작과 snap은 P1이다.
-- P0 애니메이션 길이는 계속 마지막 키에서 추론한다. MAR-154가 호환 가능한 runtime duration 경계를 만들고 MAR-155가 editor authoring을 연결한다.
+- MAR-154에서 호환 가능한 runtime explicit/inferred/effective duration 경계를, MAR-155에서 editor
+  authoring·undo·Agent/MCP를 완료했다. 키 생성·오른쪽 이동은 같은 transaction에서 duration을 자동 연장하되
+  키 삭제·왼쪽 이동은 자동 축소하지 않으며 마지막 키보다 짧은 수동 축소를 원자적으로 거부한다. Duration이 없는 기존
+  프로젝트와 runtime asset은 계속 마지막 키를 경계로 사용한다.
 - P1은 기존 imported-rig/name-overlay 구조와 `.mskl` v1, `.mbin` v2, C ABI v1을 유지한다. `.marrow` 변경은 optional additive metadata/operation으로 제한한다.
 - 본·슬롯·스킨·어태치먼트와 메시 topology 저작, 경로 제어점 편집, selection group transform, partial/degraded project open은 P1 범위 밖이다.
 - MAR-129~140 리팩터링은 HEAD `4c93ca1`에서 완료됐다. MAR-137은 constraint 모듈 추출만 완료한 것이며 rename/delete는 MAR-178이다.
@@ -229,19 +244,27 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**는 통과했다. 다음 open milestone은 MAR-154이며, **MAR-155부터 MAR-191까지 각 스토리는 바로 앞 번호의 스토리에 의존**한다. 이 선형 dependency chain도 기능 milestone과 focused validation checkpoint로 관리한다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint는 통과했다. 다음 open milestone은 MAR-157이며, **MAR-157부터 MAR-191까지 각 스토리는 바로 앞 번호의 스토리에 의존**한다. 이 선형 dependency chain도 기능 milestone과 focused validation checkpoint로 관리한다.
 
 #### 기반·선택
 
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
-| MAR-154 | Runtime explicit clip duration | `AnimationData::explicit_duration`, `inferred_duration()`, effective `duration()`을 분리한다. 구 자산 fallback, empty clip, loop·queue·complete·reverse·snapshot과 JSON↔MBIN을 검증한다. |
-| MAR-155 | Editor duration authoring | `.marrow.animation_edits`의 `set_duration` operation, UI·undo·agent/MCP를 연결한다. 키 이동은 같은 transaction에서 자동 연장하고 마지막 키보다 짧은 수동 축소는 거부한다. |
-| MAR-156 | User preference store | versioned user-local JSON을 원자 저장한다. macOS `~/Library/Application Support/Marrow/editor-settings.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/marrow/editor-settings.json`, 테스트 `MARROW_CONFIG_HOME`을 사용하며 curve 기본값과 Recent Projects가 공유한다. |
+| MAR-154 | Runtime explicit clip duration (완료, 2026-07-17) | `AnimationData::explicit_duration`, `inferred_duration()`, effective `duration()`을 분리했다. finite/non-negative/last-key 검증, 비제로 identity key boundary, 구 자산 fallback, empty/tail clip, loop·queue·complete·reverse·snapshot, authored presence와 effective-duration AKEY를 JSON↔MBIN fixture로 검증했다. `.mskl` v1, `.mbin` v2, C ABI v1은 유지한다. |
+| MAR-155 | Editor duration authoring (완료, 2026-07-17) | ordered `.marrow.animation_edits set_duration`과 unknown/additive 보존, UI-free mutation, live UI·단일 undo, key auto-grow/no-shrink, 원자적 reject, 56번째 Agent/MCP operation, save/reload·JSON/MBIN export를 project/shell/agent smoke로 검증했다. |
+| MAR-156 | User preference store (완료, 2026-07-18) | versioned user-local JSON, macOS/Linux pure path resolver와 `MARROW_CONFIG_HOME`, six-token curve default, raw Recent Projects 배열, field별 fallback, unknown additive 보존, same-directory temp+atomic rename을 UI-free service와 전용 CTest로 검증했다. Project/session/runtime/C ABI/Agent/MCP와 분리된다. |
 | MAR-157 | Typed SelectionSet | 이름 기반 Bone/Slot/Attachment/Constraint 집합과 단일 active item을 도입하고 기존 단일 선택 accessor를 호환 계층으로 유지한다. |
-| MAR-158 | Selection migration | shell 소비자를 `SelectionSet`으로 이전하고 reload/constraint rename/delete에 prune·remap한다. selection은 project dirty/history에 포함하지 않는다. |
+| MAR-158 | Selection migration | shell 소비자를 `SelectionSet`으로 이전하고 reload remap/prune 및 재사용 가능한 constraint identity remap/prune primitive를 검증한다. 실제 constraint rename/delete transaction 연결은 MAR-178이 담당하며 selection은 project dirty/history에 포함하지 않는다. |
 | MAR-159 | Hierarchy multi-select | plain replace, Cmd/Ctrl toggle, Shift visible-range, Cmd/Ctrl+Shift additive-range gesture를 구현한다. |
 | MAR-160 | Viewport multi-select | hit precedence와 bone-only box select를 추가한다. Inspector/gizmo는 active item만 편집하고 group transform은 하지 않는다. |
+
+MAR-154 checkpoint는 runtime/renderer unit 30개, runtime-labeled CTest 4/4, 전체 CTest 11/11,
+JSON·MBIN fixture smoke와 roundtrip comparison, C ABI smoke 및 `git diff --check`를 통과했다.
+MAR-155 checkpoint는 project duration E2E, shell live/queue/clamp/reject, 56-op Agent dispatch,
+editor-labeled CTest 5/5, Python MCP schema/parity·native socket E2E, JSON/MBIN duration export와 `git diff --check`를 통과했다.
+MAR-156 checkpoint는 first-run/roundtrip/optional fallback/version·malformed 진단, macOS/Linux
+경로와 환경 복원, rename failpoint의 기존 bytes·temp cleanup, 열린 `EditorSession`의 serialization,
+dirty, undo/redo와 세 revision 불변을 `marrow_preference_tests`와 editor/full CTest로 검증했다.
 
 #### 뷰포트 직접 조작
 
@@ -303,12 +326,12 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 | MAR-190 | PSD reimport GUI | preview/confirmation과 missing-layer checklist를 연결한다. Missing은 기본 보존하고 명시 선택만 삭제하며 성공 시 unsaved overlay/history를 유지한 채 runtime source를 교체한다. |
 | MAR-191 | P1 E2E and docs | P1 상호작용, JSON/MBIN export, GUI/agent registry parity, save/reload, failpoint rollback을 종합 검증하고 roadmap·문서·AGENTS 명령을 최종 동기화한다. |
 
-Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical normalize, duration을 마지막 key까지 연장,
-stale preview reference reset만 포함한다. 정상적으로 열린 session만 진단하며 최초 open 실패의 partial/degraded loading이나 자동 수정은 제외한다.
+Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical normalize, stale preview reference reset만 포함한다.
+정상적으로 열린 session만 진단하며 최초 open 실패의 partial/degraded loading이나 자동 수정은 제외한다.
 
 #### P1 검증 기준
 
-- **Runtime unit**: explicit/derived/empty duration, loop·queue·reverse·snapshot, curve flat/overshoot/auto tangent, auto-weight determinism.
+- **Runtime unit**: explicit/inferred/empty duration, loop·queue·reverse·snapshot, curve flat/overshoot/auto tangent, auto-weight determinism.
 - **Project smoke**: 모든 신규 optional schema의 old-project compatibility, constraint rename/delete cascade, inherit/curve metadata, Save As path rebase, JSON↔MBIN equivalence.
 - **Shell smoke**: transformed/reflected/singular gizmo, signed/zero scale, weighted/unweighted/linked FFD, multi-select, snap tie-break, graph point/handle cancel, dirty modal, Problems navigation.
 - **Agent/MCP smoke**: 신규 operation metadata·dry-run·mutation·undo·export preview와 C++/Python registry parity.
@@ -337,7 +360,7 @@ graph 표시, file dialog, transient playback speed는 agent operation 대상이
 
 ## 부록: 조사 출처
 
-- 코드: `src/runtime/parameter_*.cpp`, `src/renderer/module.cpp`, `src/editor/` 전수 (`shell_parameters.cpp`, `parameter_project_model.cpp`, `agent_handlers_parameters.cpp`, `shell_timeline.cpp`, `shell_constraints.cpp`, `shell_weight_paint.cpp`, `shell_viewport*.cpp`, `session.cpp`, `project.cpp` 등)
+- 코드: `src/runtime/skeleton_animation.cpp`, `src/runtime/skeleton_parse.cpp`, `include/marrow/runtime/animation_compare.hpp`, `src/tests/runtime_math_tests.cpp`, `src/samples/runtime_fixture_smoke.cpp`, `src/runtime/parameter_*.cpp`, `src/renderer/module.cpp`, `src/editor/` 전수 (`shell_parameters.cpp`, `parameter_project_model.cpp`, `agent_handlers_parameters.cpp`, `shell_timeline.cpp`, `shell_constraints.cpp`, `shell_weight_paint.cpp`, `shell_viewport*.cpp`, `session.cpp`, `project.cpp` 등)
 - 로드맵: `docs/root1/refector.md`, `docs/root1/format-spec.md`, `.agents/tasks/prd-marrow-runtime.json`
 - Spine: [4.2 릴리스](https://esotericsoftware.com/blog/Spine-4.2-The-physics-revolution) · [4.3 릴리스](https://esotericsoftware.com/blog/Spine-4.3-released) · [User Guide](https://en.esotericsoftware.com/spine-user-guide)
 - Live2D: [Cubism 5.0](https://docs.live2d.com/en/cubism-editor-manual/new-function5-0/) · [5.1](https://docs.live2d.com/en/cubism-editor-manual/new-function5-1/) · [5.2](https://docs.live2d.com/en/cubism-editor-manual/new-function5-2/) · [5.3](https://docs.live2d.com/en/cubism-editor-manual/new-function5-3/)

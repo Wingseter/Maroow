@@ -1692,6 +1692,431 @@ bool validate_animation_catalog_edits(const marrow::editor::ProjectLoadResult& p
     return true;
 }
 
+bool validate_editing_p1_animation_duration(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::AnimationEdit;
+    using marrow::editor::AnimationEditKind;
+    using marrow::editor::EditImpact;
+    using marrow::editor::EditKind;
+    using marrow::editor::EditorSession;
+    using marrow::editor::ProjectData;
+    using marrow::editor::TransformTimelineChannel;
+
+    if (project_result.project == nullptr ||
+        project_result.base_skeleton_document == nullptr ||
+        project_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-155 duration validation requires a loaded project.\n";
+        return false;
+    }
+
+    constexpr double kTolerance = 1e-6;
+    const auto near = [=](double left, double right) {
+        return std::abs(left - right) <= kTolerance;
+    };
+    const auto runtime_duration = [&](const EditorSession& session) {
+        const auto* animation = session.runtime_data() != nullptr
+            ? session.runtime_data()->find_animation("aim")
+            : nullptr;
+        return animation != nullptr
+            ? animation->duration()
+            : std::numeric_limits<double>::quiet_NaN();
+    };
+    const auto runtime_explicit_duration = [&](const EditorSession& session) {
+        const auto* animation = session.runtime_data() != nullptr
+            ? session.runtime_data()->find_animation("aim")
+            : nullptr;
+        return animation != nullptr
+            ? animation->explicit_duration
+            : std::optional<double>{};
+    };
+    const auto has_aim_rotate_key = [&](const ProjectData& project, double time) {
+        const auto* edit = project.find_transform_timeline_edit(
+            "aim", "arm_l", TransformTimelineChannel::Rotate);
+        return edit != nullptr && std::any_of(
+            edit->keyframes.begin(),
+            edit->keyframes.end(),
+            [&](const auto& keyframe) {
+                return std::abs(keyframe.time - time) <= kTolerance;
+            });
+    };
+
+    const std::filesystem::path project_path =
+        "/tmp/marrow_mar155_duration.marrow";
+    const std::filesystem::path json_path =
+        "/tmp/marrow_mar155_duration.mskl";
+    const std::filesystem::path binary_path =
+        "/tmp/marrow_mar155_duration.mbin";
+
+    ProjectData seeded_project = *project_result.project;
+    seeded_project.runtime_assets.skeleton_path =
+        std::filesystem::absolute(seeded_project.resolved_skeleton_path());
+    seeded_project.runtime_assets.atlas_paths = seeded_project.resolved_atlas_paths();
+    for (auto& atlas_path : seeded_project.runtime_assets.atlas_paths) {
+        atlas_path = std::filesystem::absolute(atlas_path);
+    }
+    seeded_project.source_path = project_path;
+    seeded_project.animation_edits.clear();
+
+    const auto unknown_source = marrow::runtime::json::parse_document(
+        R"json({"op":"future_duration_operation","sentinel":17})json");
+    const auto duration_source = marrow::runtime::json::parse_document(
+        R"json({"op":"set_duration","name":"aim","duration":0.6,"future_additive":"keep-duration-field"})json");
+    if (!unknown_source || !duration_source) {
+        std::cerr << "MAR-155 could not prepare additive animation edit fixtures.\n";
+        return false;
+    }
+
+    AnimationEdit unknown_edit;
+    unknown_edit.kind = AnimationEditKind::Unknown;
+    unknown_edit.preserved_source = unknown_source.document->root;
+    seeded_project.animation_edits.push_back(std::move(unknown_edit));
+
+    AnimationEdit duration_edit;
+    duration_edit.kind = AnimationEditKind::SetDuration;
+    duration_edit.name = "aim";
+    duration_edit.duration = 0.6;
+    duration_edit.preserved_source = duration_source.document->root;
+    seeded_project.animation_edits.push_back(std::move(duration_edit));
+
+    const auto seeded_save = marrow::editor::save_project(seeded_project, project_path);
+    if (!seeded_save) {
+        std::cerr << seeded_save.error->format() << '\n';
+        return false;
+    }
+
+    EditorSession session;
+    if (!session.open(project_path) || !session.select_animation("aim") ||
+        !session.seek(0.4)) {
+        std::cerr << "MAR-155 could not open and preview the duration fixture.\n";
+        return false;
+    }
+    session.set_playing(false);
+    const auto initial_explicit_duration = runtime_explicit_duration(session);
+    if (!initial_explicit_duration.has_value() ||
+        !near(*initial_explicit_duration, 0.6) ||
+        !near(runtime_duration(session), 0.6) || session.dirty() ||
+        session.undo_count() != 0U) {
+        std::cerr << "MAR-155 seeded explicit duration did not load cleanly.\n";
+        return false;
+    }
+
+    const std::string manual_before =
+        marrow::editor::serialize_project(*session.project());
+    const std::size_t manual_history_before = session.undo_count();
+    {
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "MAR-155 live duration",
+            "animation-duration:aim",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        const auto authored = marrow::editor::set_animation_duration(
+            transaction.project(), *session.runtime_data(), "aim", 0.75);
+        const auto refreshed = authored ? transaction.refresh_runtime()
+                                        : marrow::editor::SessionResult{};
+        if (!authored || !authored.changed || !refreshed || !refreshed.changed ||
+            !session.transaction_active() || !session.dirty() ||
+            !near(runtime_duration(session), 0.75) ||
+            session.preview_state().animation_name != "aim" ||
+            !near(session.preview_state().time_seconds, 0.4)) {
+            transaction.cancel();
+            std::cerr << "MAR-155 live duration did not refresh preview atomically.\n";
+            return false;
+        }
+        const auto committed = transaction.commit();
+        if (!committed || !committed.changed) {
+            std::cerr << "MAR-155 live duration did not commit.\n";
+            return false;
+        }
+    }
+    const std::string manual_after =
+        marrow::editor::serialize_project(*session.project());
+    if (session.undo_count() != manual_history_before + 1U ||
+        !near(runtime_duration(session), 0.75) || !session.dirty()) {
+        std::cerr << "MAR-155 live duration did not create one dirty history item.\n";
+        return false;
+    }
+    if (!session.undo() ||
+        marrow::editor::serialize_project(*session.project()) != manual_before ||
+        !near(runtime_duration(session), 0.6) || !session.redo() ||
+        marrow::editor::serialize_project(*session.project()) != manual_after ||
+        !near(runtime_duration(session), 0.75)) {
+        std::cerr << "MAR-155 duration undo/redo did not restore exact snapshots.\n";
+        return false;
+    }
+
+    const std::string rejected_project =
+        marrow::editor::serialize_project(*session.project());
+    const auto* rejected_runtime = session.runtime_data();
+    const auto rejected_preview = session.preview_state();
+    const auto rejected_motion = session.preview_root_motion_total();
+    const std::size_t rejected_undo_count = session.undo_count();
+    const std::size_t rejected_redo_count = session.redo_count();
+    const std::uint64_t rejected_project_revision = session.project_revision();
+    const std::uint64_t rejected_runtime_revision = session.runtime_revision();
+    const std::uint64_t rejected_preview_revision = session.preview_revision();
+    const bool rejected_dirty = session.dirty();
+    {
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "MAR-155 rejected duration",
+            "animation-duration:aim",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        const auto rejected = marrow::editor::set_animation_duration(
+            transaction.project(), *session.runtime_data(), "aim", 0.25);
+        if (rejected || rejected.error.empty()) {
+            transaction.cancel();
+            std::cerr << "MAR-155 accepted a duration shorter than the last key.\n";
+            return false;
+        }
+        transaction.cancel();
+    }
+    if (session.transaction_active() || session.runtime_data() != rejected_runtime ||
+        marrow::editor::serialize_project(*session.project()) != rejected_project ||
+        session.undo_count() != rejected_undo_count ||
+        session.redo_count() != rejected_redo_count ||
+        session.project_revision() != rejected_project_revision ||
+        session.runtime_revision() != rejected_runtime_revision ||
+        session.preview_revision() != rejected_preview_revision ||
+        session.dirty() != rejected_dirty ||
+        session.preview_state().animation_name != rejected_preview.animation_name ||
+        !near(session.preview_state().time_seconds, rejected_preview.time_seconds) ||
+        session.preview_state().playing != rejected_preview.playing ||
+        session.preview_state().loop != rejected_preview.loop ||
+        !near(session.preview_root_motion_total().x, rejected_motion.x) ||
+        !near(session.preview_root_motion_total().y, rejected_motion.y)) {
+        std::cerr << "MAR-155 rejected shrink changed project, preview, or history.\n";
+        return false;
+    }
+
+    const std::size_t create_history_before = session.undo_count();
+    {
+        auto transaction = session.begin_edit({
+            EditKind::AddKeyframe,
+            "MAR-155 duration auto-grow create",
+            "timeline:aim:arm_l:rotate",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        marrow::editor::upsert_transform_keyframe(
+            *transaction.project(),
+            *session.runtime_data(),
+            "aim",
+            "arm_l",
+            TransformTimelineChannel::Rotate,
+            1.0,
+            marrow::editor::TransformKeyframePatch{
+                45.0, std::nullopt, std::nullopt});
+        const auto committed = transaction.commit();
+        if (!committed || !committed.changed) {
+            std::cerr << "MAR-155 key creation did not commit with duration growth.\n";
+            return false;
+        }
+    }
+    if (session.undo_count() != create_history_before + 1U ||
+        !near(runtime_duration(session), 1.0) ||
+        !has_aim_rotate_key(*session.project(), 1.0)) {
+        std::cerr << "MAR-155 key creation did not auto-grow explicit duration.\n";
+        return false;
+    }
+    if (!session.undo() || !near(runtime_duration(session), 0.75) ||
+        has_aim_rotate_key(*session.project(), 1.0) || !session.redo() ||
+        !near(runtime_duration(session), 1.0) ||
+        !has_aim_rotate_key(*session.project(), 1.0)) {
+        std::cerr << "MAR-155 key-create undo did not include duration auto-grow.\n";
+        return false;
+    }
+
+    marrow::editor::TimelineKeySelector key_selector;
+    key_selector.kind = marrow::editor::TimelineKeyKind::Transform;
+    key_selector.animation_name = "aim";
+    key_selector.bone_name = "arm_l";
+    key_selector.transform_channel = TransformTimelineChannel::Rotate;
+    key_selector.time = 1.0;
+    const std::size_t move_history_before = session.undo_count();
+    {
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "MAR-155 duration auto-grow move",
+            "timeline:retime",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        const auto moved = marrow::editor::retime_keyframes(
+            transaction.project(), {key_selector}, 0.2, false, 60.0);
+        const auto committed = moved ? transaction.commit()
+                                     : marrow::editor::SessionResult{};
+        if (!moved || !moved.changed || !committed || !committed.changed) {
+            std::cerr << "MAR-155 rightward key move did not commit.\n";
+            return false;
+        }
+    }
+    const double moved_time = 1.2;
+    if (session.undo_count() != move_history_before + 1U ||
+        !near(runtime_duration(session), moved_time) ||
+        !has_aim_rotate_key(*session.project(), moved_time)) {
+        std::cerr << "MAR-155 rightward key move did not grow duration.\n";
+        return false;
+    }
+    if (!session.undo() || !near(runtime_duration(session), 1.0) ||
+        !has_aim_rotate_key(*session.project(), 1.0) || !session.redo() ||
+        !near(runtime_duration(session), moved_time) ||
+        !has_aim_rotate_key(*session.project(), moved_time)) {
+        std::cerr << "MAR-155 key-move undo did not include duration auto-grow.\n";
+        return false;
+    }
+
+    key_selector.time = moved_time;
+    {
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "MAR-155 duration no-shrink left move",
+            "timeline:retime",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        const auto moved = marrow::editor::retime_keyframes(
+            transaction.project(), {key_selector}, -0.3, false, 60.0);
+        const auto committed = moved ? transaction.commit()
+                                     : marrow::editor::SessionResult{};
+        if (!moved || !committed || !committed.changed) {
+            std::cerr << "MAR-155 leftward key move did not commit.\n";
+            return false;
+        }
+    }
+    const double left_time = 0.9;
+    if (!near(runtime_duration(session), moved_time) ||
+        !has_aim_rotate_key(*session.project(), left_time)) {
+        std::cerr << "MAR-155 leftward key move auto-shrank duration.\n";
+        return false;
+    }
+
+    {
+        auto transaction = session.begin_edit({
+            EditKind::RemoveKeyframe,
+            "MAR-155 duration no-shrink delete",
+            "timeline:aim:arm_l:rotate",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        auto* edit = transaction.project()->find_transform_timeline_edit(
+            "aim", "arm_l", TransformTimelineChannel::Rotate);
+        if (edit == nullptr) {
+            transaction.cancel();
+            std::cerr << "MAR-155 could not find the moved key for deletion.\n";
+            return false;
+        }
+        const auto key = marrow::editor::find_keyframe_near_time(
+            edit->keyframes, left_time, kTolerance);
+        if (key == edit->keyframes.end()) {
+            transaction.cancel();
+            std::cerr << "MAR-155 could not resolve the moved key for deletion.\n";
+            return false;
+        }
+        edit->keyframes.erase(key);
+        const auto committed = transaction.commit();
+        if (!committed || !committed.changed) {
+            std::cerr << "MAR-155 key deletion did not commit.\n";
+            return false;
+        }
+    }
+    if (!near(runtime_duration(session), moved_time) ||
+        has_aim_rotate_key(*session.project(), left_time)) {
+        std::cerr << "MAR-155 key deletion auto-shrank explicit duration.\n";
+        return false;
+    }
+
+    const auto saved = session.save(project_path);
+    if (!saved || session.dirty()) {
+        std::cerr << "MAR-155 duration project did not save cleanly.\n";
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(project_path);
+    const auto* reloaded_aim = reloaded
+        ? reloaded.skeleton_data->find_animation("aim")
+        : nullptr;
+    if (!reloaded || reloaded_aim == nullptr ||
+        !reloaded_aim->explicit_duration.has_value() ||
+        !near(*reloaded_aim->explicit_duration, moved_time) ||
+        !near(reloaded_aim->duration(), moved_time) ||
+        !near(reloaded_aim->inferred_duration(), 0.5) ||
+        reloaded.project->animation_edits.size() != 2U ||
+        reloaded.project->animation_edits[0].kind != AnimationEditKind::Unknown ||
+        reloaded.project->animation_edits[1].kind != AnimationEditKind::SetDuration ||
+        !near(reloaded.project->animation_edits[1].duration, moved_time)) {
+        std::cerr << "MAR-155 duration edits did not survive save/reload in order.\n";
+        return false;
+    }
+
+    const auto saved_document = marrow::runtime::json::load_document(project_path);
+    const auto* saved_edits = saved_document
+        ? marrow::runtime::json::find_member(
+              saved_document.document->root, "animation_edits")
+        : nullptr;
+    if (!saved_document || saved_edits == nullptr || !saved_edits->is_array() ||
+        saved_edits->as_array().size() != 2U) {
+        std::cerr << "MAR-155 saved project lost the ordered animation edit log.\n";
+        return false;
+    }
+    const auto* unknown_operation = marrow::runtime::json::find_member(
+        saved_edits->as_array()[0], "op");
+    const auto* unknown_sentinel = marrow::runtime::json::find_member(
+        saved_edits->as_array()[0], "sentinel");
+    const auto* duration_operation = marrow::runtime::json::find_member(
+        saved_edits->as_array()[1], "op");
+    const auto* duration_additive = marrow::runtime::json::find_member(
+        saved_edits->as_array()[1], "future_additive");
+    const auto* saved_duration = marrow::runtime::json::find_member(
+        saved_edits->as_array()[1], "duration");
+    if (unknown_operation == nullptr || !unknown_operation->is_string() ||
+        unknown_operation->as_string() != "future_duration_operation" ||
+        unknown_sentinel == nullptr || !unknown_sentinel->is_number() ||
+        unknown_sentinel->as_number() != 17.0 ||
+        duration_operation == nullptr || !duration_operation->is_string() ||
+        duration_operation->as_string() != "set_duration" ||
+        duration_additive == nullptr || !duration_additive->is_string() ||
+        duration_additive->as_string() != "keep-duration-field" ||
+        saved_duration == nullptr || !saved_duration->is_number() ||
+        !near(saved_duration->as_number(), moved_time)) {
+        std::cerr << "MAR-155 did not preserve unknown/additive animation edit fields.\n";
+        return false;
+    }
+
+    marrow::editor::ProjectExportOptions export_options;
+    export_options.skeleton_output_path = json_path;
+    export_options.binary_output_path = binary_path;
+    const auto exported = session.export_runtime(export_options);
+    if (!exported) {
+        std::cerr << exported.error->format() << '\n';
+        return false;
+    }
+    const auto json_runtime = marrow::runtime::load_skeleton_data(json_path);
+    const auto binary_runtime = marrow::runtime::load_skeleton_data(binary_path);
+    const auto* json_aim = json_runtime
+        ? json_runtime.skeleton_data->find_animation("aim")
+        : nullptr;
+    const auto* binary_aim = binary_runtime
+        ? binary_runtime.skeleton_data->find_animation("aim")
+        : nullptr;
+    if (!json_runtime || !binary_runtime || json_aim == nullptr ||
+        binary_aim == nullptr || !json_aim->explicit_duration.has_value() ||
+        !binary_aim->explicit_duration.has_value() ||
+        !near(*json_aim->explicit_duration, moved_time) ||
+        !near(*binary_aim->explicit_duration, moved_time) ||
+        !near(json_aim->duration(), moved_time) ||
+        !near(binary_aim->duration(), moved_time)) {
+        std::cerr << "MAR-155 JSON/MBIN export lost explicit duration presence or value.\n";
+        return false;
+    }
+    const auto comparison = marrow::runtime::compare_animation_roundtrip(
+        *json_runtime.skeleton_data, *binary_runtime.skeleton_data);
+    if (!comparison) {
+        std::cerr << "MAR-155 JSON/MBIN duration comparison failed: "
+                  << *comparison.error << '\n';
+        return false;
+    }
+
+    std::cout << "Editing P1 duration authoring/rollback/auto-grow/export validated.\n";
+    return true;
+}
+
 bool validate_editing_p0_end_to_end(
     const marrow::editor::ProjectLoadResult& project_result) {
     const std::filesystem::path project_path =
@@ -1965,6 +2390,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!validate_animation_catalog_edits(result)) {
+        return 1;
+    }
+    if (!validate_editing_p1_animation_duration(result)) {
         return 1;
     }
     if (!validate_editing_p0_end_to_end(result)) {
