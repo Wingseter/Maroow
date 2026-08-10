@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "imgui.h"
+
 #include "marrow/editor/project.hpp"
 #include "marrow/runtime/animation.hpp"
 
@@ -85,8 +87,9 @@ bool cut_selected_timeline_keys(
 bool paste_timeline_clipboard(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks);
-bool begin_timeline_retime_gesture_for_smoke(
+bool begin_timeline_retime_gesture(
     ShellState* state,
+    ImGuiID item_id,
     const std::vector<TimelineTrackRow>& tracks);
 bool apply_timeline_retime_delta(
     ShellState* state,

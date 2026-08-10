@@ -1170,11 +1170,11 @@ bool validate_viewport_camera_smoke(
 
     rotation_skeleton.set_scale(-2.0, 3.0);
     rotation_skeleton.update_world_transforms();
-    const auto reflected_root_basis = viewport_rotation_basis_for_smoke(
+    const auto reflected_root_basis = viewport_interaction::rotation_basis(
         rotation_skeleton, *rotation_root);
     if (!reflected_root_basis.has_value() ||
         !angle_matches(
-            viewport_rotation_angle_for_smoke(
+            viewport_interaction::rotation_angle(
                 *reflected_root_basis,
                 pointer_from_matrix(
                     reflected_root_basis->pivot_world,
@@ -1201,13 +1201,13 @@ bool validate_viewport_camera_smoke(
     rotation_skeleton.bone_poses()[*rotation_arm].inherit =
         marrow::runtime::BoneInherit::Normal;
     rotation_skeleton.update_world_transforms();
-    const auto normal_basis = viewport_rotation_basis_for_smoke(
+    const auto normal_basis = viewport_interaction::rotation_basis(
         rotation_skeleton, *rotation_arm);
     const auto normal_parent_world =
         rotation_skeleton.bone_world_transforms()[*rotation_parent];
     if (!normal_basis.has_value() ||
         !angle_matches(
-            viewport_rotation_angle_for_smoke(
+            viewport_interaction::rotation_angle(
                 *normal_basis,
                 pointer_from_matrix(
                     normal_basis->pivot_world,
@@ -1223,13 +1223,13 @@ bool validate_viewport_camera_smoke(
 
     rotation_parent_pose.scale_y = -0.55f;
     rotation_skeleton.update_world_transforms();
-    const auto negative_determinant_basis = viewport_rotation_basis_for_smoke(
+    const auto negative_determinant_basis = viewport_interaction::rotation_basis(
         rotation_skeleton, *rotation_arm);
     const auto reflected_parent_world =
         rotation_skeleton.bone_world_transforms()[*rotation_parent];
     if (!negative_determinant_basis.has_value() ||
         !angle_matches(
-            viewport_rotation_angle_for_smoke(
+            viewport_interaction::rotation_angle(
                 *negative_determinant_basis,
                 pointer_from_matrix(
                     negative_determinant_basis->pivot_world,
@@ -1247,12 +1247,12 @@ bool validate_viewport_camera_smoke(
     rotation_skeleton.bone_poses()[*rotation_arm].inherit =
         marrow::runtime::BoneInherit::OnlyTranslation;
     rotation_skeleton.update_world_transforms();
-    const auto translation_only_basis = viewport_rotation_basis_for_smoke(
+    const auto translation_only_basis = viewport_interaction::rotation_basis(
         rotation_skeleton, *rotation_arm);
     if (!translation_only_basis.has_value() ||
         translation_only_basis->inherit != marrow::runtime::BoneInherit::OnlyTranslation ||
         !angle_matches(
-            viewport_rotation_angle_for_smoke(
+            viewport_interaction::rotation_angle(
                 *translation_only_basis,
                 pointer_from_matrix(
                     translation_only_basis->pivot_world,
@@ -1272,7 +1272,7 @@ bool validate_viewport_camera_smoke(
              marrow::runtime::BoneInherit::NoScaleOrReflection}) {
         rotation_skeleton.bone_poses()[*rotation_arm].inherit = inherit;
         rotation_skeleton.update_world_transforms();
-        if (viewport_rotation_basis_for_smoke(
+        if (viewport_interaction::rotation_basis(
                 rotation_skeleton, *rotation_arm).has_value()) {
             std::cerr << "Viewport rotation exposed an unsupported inherit mode.\n";
             return false;
@@ -1284,7 +1284,7 @@ bool validate_viewport_camera_smoke(
     rotation_parent_pose.scale_x = 0.0f;
     rotation_parent_pose.scale_y = 0.0f;
     rotation_skeleton.update_world_transforms();
-    if (viewport_rotation_basis_for_smoke(
+    if (viewport_interaction::rotation_basis(
             rotation_skeleton, *rotation_arm).has_value()) {
         std::cerr << "Viewport rotation did not reject a singular parent basis.\n";
         return false;
@@ -1292,28 +1292,28 @@ bool validate_viewport_camera_smoke(
     rotation_parent_pose.scale_x = std::numeric_limits<float>::quiet_NaN();
     rotation_parent_pose.scale_y = 1.0f;
     rotation_skeleton.update_world_transforms();
-    if (viewport_rotation_basis_for_smoke(
+    if (viewport_interaction::rotation_basis(
             rotation_skeleton, *rotation_arm).has_value()) {
         std::cerr << "Viewport rotation did not reject non-finite parent math.\n";
         return false;
     }
 
-    if (std::abs(unwrap_viewport_rotation_delta_for_smoke(-340.0) - 20.0) > 1e-9 ||
-        std::abs(unwrap_viewport_rotation_delta_for_smoke(340.0) + 20.0) > 1e-9 ||
-        std::abs(unwrap_viewport_rotation_delta_for_smoke(-180.0) - 180.0) > 1e-9 ||
-        std::abs(unwrap_viewport_rotation_delta_for_smoke(180.0) - 180.0) > 1e-9) {
+    if (std::abs(viewport_interaction::unwrap_rotation_delta(-340.0) - 20.0) > 1e-9 ||
+        std::abs(viewport_interaction::unwrap_rotation_delta(340.0) + 20.0) > 1e-9 ||
+        std::abs(viewport_interaction::unwrap_rotation_delta(-180.0) - 180.0) > 1e-9 ||
+        std::abs(viewport_interaction::unwrap_rotation_delta(180.0) - 180.0) > 1e-9) {
         std::cerr << "Viewport rotation unwrap/tie contract failed.\n";
         return false;
     }
     double negative_multi_turn = 0.0;
     double previous_negative_angle = 0.0;
     for (const double angle : {-90.0, -180.0, 90.0, 0.0, -90.0}) {
-        negative_multi_turn += unwrap_viewport_rotation_delta_for_smoke(
+        negative_multi_turn += viewport_interaction::unwrap_rotation_delta(
             angle - previous_negative_angle);
         previous_negative_angle = angle;
     }
     if (std::abs(negative_multi_turn + 450.0) > 1e-9 ||
-        viewport_rotation_angle_for_smoke(
+        viewport_interaction::rotation_angle(
             *reflected_root_basis,
             ViewportWorldPoint{
                 std::numeric_limits<double>::infinity(),
@@ -1363,19 +1363,19 @@ bool validate_viewport_camera_smoke(
             center.x + static_cast<float>(58.0 * std::cos(radians)),
             center.y - static_cast<float>(58.0 * std::sin(radians)));
     };
-    if (!viewport_rotation_gizmo_visible_for_smoke(
+    if (!viewport_interaction::rotation_gizmo_visible(
             camera_state, *rotation_layout) ||
-        !hit_test_rotation_gizmo_for_smoke(
+        !viewport_interaction::hit_test_rotation_gizmo(
             camera_state, *rotation_layout, ring_point(rotation_center, 0.0)) ||
-        !hit_test_rotation_gizmo_for_smoke(
+        !viewport_interaction::hit_test_rotation_gizmo(
             camera_state,
             *rotation_layout,
             ImVec2(rotation_center.x + 64.0f, rotation_center.y)) ||
-        hit_test_rotation_gizmo_for_smoke(
+        viewport_interaction::hit_test_rotation_gizmo(
             camera_state,
             *rotation_layout,
             ImVec2(rotation_center.x + 65.0f, rotation_center.y)) ||
-        !hit_test_translate_gizmo_for_smoke(
+        !viewport_interaction::hit_test_translate_gizmo(
             camera_state,
             *rotation_layout,
             ImVec2(rotation_center.x + 42.0f, rotation_center.y)).has_value()) {
@@ -1387,7 +1387,7 @@ bool validate_viewport_camera_smoke(
     const auto zoomed_rotation_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
     if (!zoomed_rotation_layout.has_value() ||
-        !hit_test_rotation_gizmo_for_smoke(
+        !viewport_interaction::hit_test_rotation_gizmo(
             camera_state,
             *zoomed_rotation_layout,
             ring_point(
@@ -1402,7 +1402,7 @@ bool validate_viewport_camera_smoke(
 
     camera_state.preview_skeleton->bone_poses()[root_index].inherit =
         marrow::runtime::BoneInherit::NoScale;
-    if (viewport_rotation_gizmo_visible_for_smoke(camera_state, *rotation_layout)) {
+    if (viewport_interaction::rotation_gizmo_visible(camera_state, *rotation_layout)) {
         std::cerr << "Viewport rotation ring remained visible for unsupported inherit.\n";
         return false;
     }
@@ -1410,13 +1410,13 @@ bool validate_viewport_camera_smoke(
         marrow::runtime::BoneInherit::Normal;
     camera_state.selection.replace(
         marrow::editor::SlotSelection{runtime_slots.front().name});
-    if (viewport_rotation_gizmo_visible_for_smoke(camera_state, *rotation_layout)) {
+    if (viewport_interaction::rotation_gizmo_visible(camera_state, *rotation_layout)) {
         std::cerr << "Viewport rotation ring remained visible for an active non-bone.\n";
         return false;
     }
     camera_state.selection = mixed_selection;
     camera_state.weight_paint.enabled = true;
-    if (viewport_rotation_gizmo_visible_for_smoke(camera_state, *rotation_layout)) {
+    if (viewport_interaction::rotation_gizmo_visible(camera_state, *rotation_layout)) {
         std::cerr << "Viewport rotation ring remained visible during weight paint.\n";
         return false;
     }
@@ -1428,7 +1428,7 @@ bool validate_viewport_camera_smoke(
     const bool click_dirty_before = camera_state.session.dirty();
     camera_state.session.set_playing(true);
     sync_shell_from_editor_session(&camera_state);
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 0.0)) ||
@@ -1436,7 +1436,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport rotation did not pause playback and begin a transaction.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(&camera_state, true);
+    viewport_interaction::finish_transform_gesture(&camera_state, true);
     if (marrow::editor::serialize_project(*camera_state.session.project()) !=
             click_project_before ||
         camera_state.session.undo_count() != click_undo_before ||
@@ -1451,7 +1451,7 @@ bool validate_viewport_camera_smoke(
 
     const std::string rotation_project_before =
         marrow::editor::serialize_project(*camera_state.session.project());
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 0.0))) {
@@ -1467,7 +1467,7 @@ bool validate_viewport_camera_smoke(
     }
     const ViewportRotationBasis frozen_basis = rotate_started->basis;
     for (const double degrees : {90.0, 180.0, 270.0, 360.0, 450.0}) {
-        if (!update_viewport_rotate_gesture_for_smoke(
+        if (!viewport_interaction::update_rotate_gesture(
                 &camera_state,
                 *rotation_layout,
                 ring_point(rotation_center, degrees))) {
@@ -1491,7 +1491,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport multi-turn accumulation or frozen basis drifted.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(&camera_state, true);
+    viewport_interaction::finish_transform_gesture(&camera_state, true);
     const std::string rotation_project_after =
         marrow::editor::serialize_project(*camera_state.session.project());
     const auto* root_rotate_edit =
@@ -1513,7 +1513,7 @@ bool validate_viewport_camera_smoke(
         return false;
     }
 
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 0.0))) {
@@ -1526,7 +1526,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport rotation restarted from a normalized preview angle.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    viewport_interaction::finish_transform_gesture(&camera_state, false);
     if (!camera_state.session.undo() ||
         marrow::editor::serialize_project(*camera_state.session.project()) !=
             rotation_project_before ||
@@ -1579,11 +1579,11 @@ bool validate_viewport_camera_smoke(
     };
     const std::string rollback_preview_before =
         camera_preview_signature(*camera_state.preview_skeleton);
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 0.0)) ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 90.0))) {
@@ -1594,7 +1594,7 @@ bool validate_viewport_camera_smoke(
         &camera_state.viewport_transform_gesture->payload);
     if (rebase_rotate == nullptr ||
         std::abs(rebase_rotate->accumulated_rotation - 90.0) > 1e-4 ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state, *rotation_layout, rotation_center)) {
         std::cerr << "Viewport rotation did not suspend at its pivot.\n";
         return false;
@@ -1602,7 +1602,7 @@ bool validate_viewport_camera_smoke(
     rebase_rotate = std::get_if<ViewportRotateGesturePayload>(
         &camera_state.viewport_transform_gesture->payload);
     if (rebase_rotate == nullptr || !rebase_rotate->angular_reference_suspended ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 180.0))) {
@@ -1613,7 +1613,7 @@ bool validate_viewport_camera_smoke(
         &camera_state.viewport_transform_gesture->payload);
     if (rebase_rotate == nullptr ||
         std::abs(rebase_rotate->accumulated_rotation - 90.0) > 1e-4 ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 270.0))) {
@@ -1627,7 +1627,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport rotation did not resume from its rebased angle.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    viewport_interaction::finish_transform_gesture(&camera_state, false);
     if (!rollback_is_exact() ||
         camera_preview_signature(*camera_state.preview_skeleton) !=
             rollback_preview_before) {
@@ -1635,15 +1635,15 @@ bool validate_viewport_camera_smoke(
         return false;
     }
 
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 0.0)) ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ring_point(rotation_center, 90.0)) ||
-        update_viewport_rotate_gesture_for_smoke(
+        viewport_interaction::update_rotate_gesture(
             &camera_state,
             *rotation_layout,
             ImVec2(std::numeric_limits<float>::quiet_NaN(), rotation_center.y)) ||
@@ -1669,11 +1669,11 @@ bool validate_viewport_camera_smoke(
         setup_rotation_layout->bones[*transform_source_index].screen_position;
     const std::string setup_rotation_project_before =
         marrow::editor::serialize_project(*camera_state.session.project());
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *setup_rotation_layout,
             ring_point(setup_rotation_center, 0.0)) ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state,
             *setup_rotation_layout,
             ring_point(setup_rotation_center, 90.0))) {
@@ -1698,7 +1698,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport rotation subtracted setup rotation more than once.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    viewport_interaction::finish_transform_gesture(&camera_state, false);
     if (marrow::editor::serialize_project(*camera_state.session.project()) !=
             setup_rotation_project_before ||
         camera_state.session.undo_count() != 0U) {
@@ -1729,11 +1729,11 @@ bool validate_viewport_camera_smoke(
         materialization_layout->bones[*spine_index].screen_position;
     const std::string materialization_project_before =
         marrow::editor::serialize_project(*camera_state.session.project());
-    if (!begin_viewport_rotate_gesture_for_smoke(
+    if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *materialization_layout,
             ring_point(materialization_center, 0.0)) ||
-        !update_viewport_rotate_gesture_for_smoke(
+        !viewport_interaction::update_rotate_gesture(
             &camera_state,
             *materialization_layout,
             ring_point(materialization_center, 90.0))) {
@@ -1770,7 +1770,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport rotation did not preserve imported keys/curves.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    viewport_interaction::finish_transform_gesture(&camera_state, false);
     if (marrow::editor::serialize_project(*camera_state.session.project()) !=
             materialization_project_before ||
         camera_state.session.undo_count() != 0U) {
@@ -1796,7 +1796,7 @@ bool validate_viewport_camera_smoke(
     }
     scale_math_skeleton.set_scale(-2.0, 3.0);
     scale_math_skeleton.update_world_transforms();
-    const auto reflected_scale_basis = viewport_scale_basis_for_smoke(
+    const auto reflected_scale_basis = viewport_interaction::scale_basis(
         scale_math_skeleton, *scale_root);
     if (!reflected_scale_basis.has_value() ||
         reflected_scale_basis->positive_x_screen_direction.x > -0.99f ||
@@ -1849,7 +1849,7 @@ bool validate_viewport_camera_smoke(
     scale_arm_pose.local_pose.scale_x = -4.0f;
     scale_arm_pose.local_pose.scale_y = 0.25f;
     scale_math_skeleton.update_world_transforms();
-    const auto normal_scale_basis = viewport_scale_basis_for_smoke(
+    const auto normal_scale_basis = viewport_interaction::scale_basis(
         scale_math_skeleton, *scale_arm);
     if (!normal_scale_basis.has_value()) {
         std::cerr << "Viewport scale rejected a reflected non-uniform parent.\n";
@@ -1900,7 +1900,7 @@ bool validate_viewport_camera_smoke(
         marrow::runtime::BoneInherit::OnlyTranslation;
     scale_math_skeleton.update_world_transforms();
     const auto translation_only_scale_basis =
-        viewport_scale_basis_for_smoke(
+        viewport_interaction::scale_basis(
             scale_math_skeleton, *scale_arm);
     if (!translation_only_scale_basis.has_value() ||
         translation_only_scale_basis->inherit !=
@@ -1938,7 +1938,7 @@ bool validate_viewport_camera_smoke(
              marrow::runtime::BoneInherit::NoScaleOrReflection}) {
         scale_arm_pose.inherit = inherit;
         scale_math_skeleton.update_world_transforms();
-        if (viewport_scale_basis_for_smoke(
+        if (viewport_interaction::scale_basis(
                 scale_math_skeleton, *scale_arm).has_value()) {
             std::cerr << "Viewport scale exposed an unsupported inherit mode.\n";
             return false;
@@ -1950,7 +1950,7 @@ bool validate_viewport_camera_smoke(
     scale_parent_pose.scale_x = 0.0f;
     scale_parent_pose.scale_y = 0.0f;
     scale_math_skeleton.update_world_transforms();
-    if (viewport_scale_basis_for_smoke(
+    if (viewport_interaction::scale_basis(
             scale_math_skeleton, *scale_arm).has_value()) {
         std::cerr << "Viewport scale did not reject a singular parent basis.\n";
         return false;
@@ -1960,7 +1960,7 @@ bool validate_viewport_camera_smoke(
     scale_arm_pose.local_pose.shear_x = 0.0f;
     scale_arm_pose.local_pose.shear_y = -90.0f;
     scale_math_skeleton.update_world_transforms();
-    if (viewport_scale_basis_for_smoke(
+    if (viewport_interaction::scale_basis(
             scale_math_skeleton, *scale_arm).has_value()) {
         std::cerr << "Viewport scale did not reject degenerate local axes.\n";
         return false;
@@ -1969,7 +1969,7 @@ bool validate_viewport_camera_smoke(
     scale_parent_pose.scale_x =
         std::numeric_limits<float>::quiet_NaN();
     scale_math_skeleton.update_world_transforms();
-    if (viewport_scale_basis_for_smoke(
+    if (viewport_interaction::scale_basis(
             scale_math_skeleton, *scale_arm).has_value()) {
         std::cerr << "Viewport scale did not reject non-finite parent math.\n";
         return false;
@@ -1977,7 +1977,7 @@ bool validate_viewport_camera_smoke(
     scale_parent_pose.scale_x =
         std::numeric_limits<float>::infinity();
     scale_math_skeleton.update_world_transforms();
-    if (viewport_scale_basis_for_smoke(
+    if (viewport_interaction::scale_basis(
             scale_math_skeleton, *scale_arm).has_value()) {
         std::cerr << "Viewport scale did not reject infinite parent math.\n";
         return false;
@@ -2017,25 +2017,25 @@ bool validate_viewport_camera_smoke(
     const auto scale_focus =
         camera_state.selected_timeline_track_id;
 
-    if (viewport_press_target_for_smoke(
+    if (viewport_interaction::press_target(
             true, true, true, true, true, true) !=
             ViewportPressTarget::ActiveGesture ||
-        viewport_press_target_for_smoke(
+        viewport_interaction::press_target(
             false, true, true, true, true, true) !=
             ViewportPressTarget::WeightBrush ||
-        viewport_press_target_for_smoke(
+        viewport_interaction::press_target(
             false, false, true, true, true, true) !=
             ViewportPressTarget::Translate ||
-        viewport_press_target_for_smoke(
+        viewport_interaction::press_target(
             false, false, false, true, true, true) !=
             ViewportPressTarget::Rotation ||
-        viewport_press_target_for_smoke(
+        viewport_interaction::press_target(
             false, false, false, false, true, true) !=
             ViewportPressTarget::Scale ||
-        viewport_press_target_for_smoke(
+        viewport_interaction::press_target(
             false, false, false, false, false, true) !=
             ViewportPressTarget::Entity ||
-        viewport_press_target_for_smoke(
+        viewport_interaction::press_target(
             false, false, false, false, false, false) !=
             ViewportPressTarget::Box) {
         std::cerr << "Viewport scale press arbitration order changed.\n";
@@ -2044,10 +2044,10 @@ bool validate_viewport_camera_smoke(
 
     auto scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
-    const auto scale_basis = viewport_scale_basis_for_smoke(
+    const auto scale_basis = viewport_interaction::scale_basis(
         *camera_state.preview_skeleton, *spine_index);
     if (!scale_layout.has_value() || !scale_basis.has_value() ||
-        !viewport_scale_gizmo_visible_for_smoke(
+        !viewport_interaction::scale_gizmo_visible(
             camera_state, *scale_layout)) {
         std::cerr << "Viewport scale gizmo was not visible for an active Bone.\n";
         return false;
@@ -2073,7 +2073,7 @@ bool validate_viewport_camera_smoke(
             ConstraintKind::Ik, scale_ik_constraints.front().name}};
     for (const auto& non_bone : scale_non_bones) {
         camera_state.selection.replace(non_bone);
-        if (viewport_scale_gizmo_visible_for_smoke(
+        if (viewport_interaction::scale_gizmo_visible(
                 camera_state, *scale_layout)) {
             std::cerr << "Viewport scale remained visible for an active non-Bone.\n";
             return false;
@@ -2081,7 +2081,7 @@ bool validate_viewport_camera_smoke(
     }
     camera_state.selection = scale_mixed_selection;
     camera_state.weight_paint.enabled = true;
-    if (viewport_scale_gizmo_visible_for_smoke(
+    if (viewport_interaction::scale_gizmo_visible(
             camera_state, *scale_layout)) {
         std::cerr << "Viewport scale remained visible during weight paint.\n";
         return false;
@@ -2092,9 +2092,9 @@ bool validate_viewport_camera_smoke(
     const auto scale_preview_inherit = scale_preview_pose.inherit;
     scale_preview_pose.inherit = marrow::runtime::BoneInherit::NoScale;
     const char* unsupported_scale_hint =
-        viewport_transform_hint_for_smoke(
+        viewport_interaction::transform_hint(
             camera_state, *scale_layout);
-    if (viewport_scale_gizmo_visible_for_smoke(
+    if (viewport_interaction::scale_gizmo_visible(
             camera_state, *scale_layout) ||
         unsupported_scale_hint == nullptr ||
         std::string_view(unsupported_scale_hint).find("noScale") ==
@@ -2132,11 +2132,11 @@ bool validate_viewport_camera_smoke(
         *scale_basis,
         scale_basis->positive_x_screen_direction,
         81.0);
-    if (hit_test_scale_gizmo_for_smoke(
+    if (viewport_interaction::hit_test_scale_gizmo(
             camera_state, *scale_layout, scale_x_handle) !=
             std::optional<ViewportScaleHandle>(
                 ViewportScaleHandle::X) ||
-        hit_test_scale_gizmo_for_smoke(
+        viewport_interaction::hit_test_scale_gizmo(
             camera_state, *scale_layout, scale_x_miss).has_value()) {
         std::cerr << "Viewport scale 74px radius or 6px hit contract failed.\n";
         return false;
@@ -2148,7 +2148,7 @@ bool validate_viewport_camera_smoke(
         *scale_basis,
         scale_basis->positive_x_screen_direction,
         74.0);
-    if (hit_test_scale_gizmo_for_smoke(
+    if (viewport_interaction::hit_test_scale_gizmo(
             camera_state,
             zoomed_scale_layout,
             zoomed_scale_x_handle) !=
@@ -2164,9 +2164,9 @@ bool validate_viewport_camera_smoke(
     scale_math_payload.start_absolute_scale_x = 2.0;
     scale_math_payload.start_absolute_scale_y = -3.0;
     scale_math_payload.handle = ViewportScaleHandle::X;
-    const auto pivot_zero = viewport_scale_candidate_for_smoke(
+    const auto pivot_zero = viewport_interaction::scale_candidate(
         scale_math_payload, *scale_layout, scale_pivot);
-    const auto x_sign_cross = viewport_scale_candidate_for_smoke(
+    const auto x_sign_cross = viewport_interaction::scale_candidate(
         scale_math_payload,
         *scale_layout,
         scale_screen_point(
@@ -2176,7 +2176,7 @@ bool validate_viewport_camera_smoke(
             -74.0));
     scale_math_payload.start_absolute_scale_x = 0.0;
     const auto zero_start_recovery =
-        viewport_scale_candidate_for_smoke(
+        viewport_interaction::scale_candidate(
             scale_math_payload,
             *scale_layout,
             scale_screen_point(
@@ -2187,7 +2187,7 @@ bool validate_viewport_camera_smoke(
     scale_math_payload.handle = ViewportScaleHandle::Uniform;
     scale_math_payload.start_absolute_scale_x = -2.0;
     scale_math_payload.start_absolute_scale_y = 0.5;
-    const auto uniform_flip = viewport_scale_candidate_for_smoke(
+    const auto uniform_flip = viewport_interaction::scale_candidate(
         scale_math_payload,
         *scale_layout,
         scale_screen_point(
@@ -2197,7 +2197,7 @@ bool validate_viewport_camera_smoke(
             -74.0));
     scale_math_payload.start_absolute_scale_x = 0.0;
     scale_math_payload.start_absolute_scale_y = 0.0;
-    const auto zero_uniform = viewport_scale_candidate_for_smoke(
+    const auto zero_uniform = viewport_interaction::scale_candidate(
         scale_math_payload,
         *scale_layout,
         scale_screen_point(
@@ -2230,7 +2230,7 @@ bool validate_viewport_camera_smoke(
         camera_state.session.undo_count();
     camera_state.timeline_playing = true;
     camera_state.session.set_playing(true);
-    if (!begin_viewport_scale_gesture_for_smoke(
+    if (!viewport_interaction::begin_scale_gesture(
             &camera_state,
             *scale_layout,
             ViewportScaleHandle::X,
@@ -2240,7 +2240,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport scale did not pause playback and begin a transaction.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(
+    viewport_interaction::finish_transform_gesture(
         &camera_state, true);
     if (marrow::editor::serialize_project(
             *camera_state.session.project()) != scale_project_before ||
@@ -2249,12 +2249,12 @@ bool validate_viewport_camera_smoke(
         return false;
     }
 
-    if (!begin_viewport_scale_gesture_for_smoke(
+    if (!viewport_interaction::begin_scale_gesture(
             &camera_state,
             *scale_layout,
             ViewportScaleHandle::X,
             scale_x_handle) ||
-        !update_viewport_scale_gesture_for_smoke(
+        !viewport_interaction::update_scale_gesture(
             &camera_state, *scale_layout, scale_pivot)) {
         std::cerr << "Viewport scale gesture could not reach exact zero.\n";
         return false;
@@ -2317,7 +2317,7 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport scale live preview or materialization failed.\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(
+    viewport_interaction::finish_transform_gesture(
         &camera_state, true);
     const std::string scale_project_zero =
         marrow::editor::serialize_project(*camera_state.session.project());
@@ -2334,7 +2334,7 @@ bool validate_viewport_camera_smoke(
 
     scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
-    const auto zero_scale_basis = viewport_scale_basis_for_smoke(
+    const auto zero_scale_basis = viewport_interaction::scale_basis(
         *camera_state.preview_skeleton, *spine_index);
     if (!scale_layout.has_value() ||
         !zero_scale_basis.has_value()) {
@@ -2388,12 +2388,12 @@ bool validate_viewport_camera_smoke(
             camera_state.selected_timeline_track_id ==
                 scale_focus;
     };
-    if (!begin_viewport_scale_gesture_for_smoke(
+    if (!viewport_interaction::begin_scale_gesture(
             &camera_state,
             *scale_layout,
             ViewportScaleHandle::X,
             zero_scale_x_handle) ||
-        !update_viewport_scale_gesture_for_smoke(
+        !viewport_interaction::update_scale_gesture(
             &camera_state,
             *scale_layout,
             zero_scale_x_recovery)) {
@@ -2409,18 +2409,18 @@ bool validate_viewport_camera_smoke(
             1e-5) {
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(
+    viewport_interaction::finish_transform_gesture(
         &camera_state, false);
     if (!scale_rollback_is_exact()) {
         std::cerr << "Viewport scale cancel rollback was not exact.\n";
         return false;
     }
-    if (!begin_viewport_scale_gesture_for_smoke(
+    if (!viewport_interaction::begin_scale_gesture(
             &camera_state,
             *scale_layout,
             ViewportScaleHandle::X,
             zero_scale_x_handle) ||
-        !update_viewport_scale_gesture_for_smoke(
+        !viewport_interaction::update_scale_gesture(
             &camera_state,
             *scale_layout,
             zero_scale_x_recovery) ||
@@ -2429,7 +2429,7 @@ bool validate_viewport_camera_smoke(
         camera_preview_signature(
             *camera_state.preview_skeleton) ==
             zero_scale_preview_before ||
-        update_viewport_scale_gesture_for_smoke(
+        viewport_interaction::update_scale_gesture(
             &camera_state,
             *scale_layout,
             ImVec2(
@@ -2439,16 +2439,16 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport scale non-finite rollback was not exact.\n";
         return false;
     }
-    if (!begin_viewport_scale_gesture_for_smoke(
+    if (!viewport_interaction::begin_scale_gesture(
             &camera_state,
             *scale_layout,
             ViewportScaleHandle::X,
             zero_scale_x_handle) ||
-        !update_viewport_scale_gesture_for_smoke(
+        !viewport_interaction::update_scale_gesture(
             &camera_state,
             *scale_layout,
             zero_scale_x_recovery) ||
-        update_viewport_scale_gesture_for_smoke(
+        viewport_interaction::update_scale_gesture(
             &camera_state,
             *scale_layout,
             ImVec2(
@@ -2472,7 +2472,7 @@ bool validate_viewport_camera_smoke(
     camera_state.session.clear_history();
     scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
-    const auto uniform_zero_basis = viewport_scale_basis_for_smoke(
+    const auto uniform_zero_basis = viewport_interaction::scale_basis(
         *camera_state.preview_skeleton, *spine_index);
     if (!scale_layout.has_value() ||
         !uniform_zero_basis.has_value()) {
@@ -2488,31 +2488,31 @@ bool validate_viewport_camera_smoke(
         *uniform_zero_basis,
         uniform_zero_basis->uniform_screen_direction,
         0.0);
-    if (!begin_viewport_scale_gesture_for_smoke(
+    if (!viewport_interaction::begin_scale_gesture(
             &camera_state,
             *scale_layout,
             ViewportScaleHandle::Uniform,
             uniform_zero_handle) ||
-        !update_viewport_scale_gesture_for_smoke(
+        !viewport_interaction::update_scale_gesture(
             &camera_state,
             *scale_layout,
             uniform_zero_pivot)) {
         std::cerr << "Viewport uniform scale could not reach (0,0).\n";
         return false;
     }
-    finish_viewport_transform_gesture_for_smoke(
+    viewport_interaction::finish_transform_gesture(
         &camera_state, true);
     scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
     const char* zero_uniform_hint =
         scale_layout.has_value()
-        ? viewport_transform_hint_for_smoke(
+        ? viewport_interaction::transform_hint(
               camera_state, *scale_layout)
         : nullptr;
     const auto& zero_uniform_preview =
         camera_state.preview_skeleton->bone_poses()[*spine_index].local_pose;
     if (!scale_layout.has_value() ||
-        viewport_uniform_scale_handle_visible_for_smoke(
+        viewport_interaction::uniform_scale_handle_visible(
             camera_state, *scale_layout) ||
         zero_uniform_hint == nullptr ||
         std::string_view(zero_uniform_hint).find("both axes are zero") ==
@@ -2556,18 +2556,18 @@ bool validate_viewport_camera_smoke(
             *layout, world.world_x, world.world_y);
         const std::string before =
             marrow::editor::serialize_project(*camera_state.session.project());
-        if (!begin_viewport_translate_gesture_for_smoke(
+        if (!viewport_interaction::begin_translate_gesture(
                 &camera_state,
                 *layout,
                 ViewportTranslateAxis::Free,
                 pointer) ||
-            !update_viewport_translate_gesture_for_smoke(
+            !viewport_interaction::update_translate_gesture(
                 &camera_state,
                 *layout,
                 ImVec2(pointer.x + screen_delta.x, pointer.y + screen_delta.y))) {
             return false;
         }
-        finish_viewport_translate_gesture_for_smoke(&camera_state, true);
+        viewport_interaction::finish_transform_gesture(&camera_state, true);
         const auto* edit = camera_state.session.project()->find_transform_timeline_edit(
             "idle",
             bone_name,
@@ -2624,12 +2624,12 @@ bool validate_viewport_camera_smoke(
         camera_state.preview_skeleton->bone_world_transforms()[*singular_arm];
     const ImVec2 singular_pointer = screen_from_world(
         *singular_layout, singular_world.world_x, singular_world.world_y);
-    if (!begin_viewport_translate_gesture_for_smoke(
+    if (!viewport_interaction::begin_translate_gesture(
             &camera_state,
             *singular_layout,
             ViewportTranslateAxis::Free,
             singular_pointer) ||
-        update_viewport_translate_gesture_for_smoke(
+        viewport_interaction::update_translate_gesture(
             &camera_state,
             *singular_layout,
             ImVec2(singular_pointer.x + 10.0f, singular_pointer.y + 10.0f)) ||
@@ -3066,7 +3066,7 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     const double expected_snapped =
         std::round((snap_anchor + 0.021) / frame_seconds) * frame_seconds -
         snap_anchor;
-    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 0.021, true) ||
         !state.timeline_editor.retime_gesture.has_value() ||
         std::abs(
@@ -3086,7 +3086,7 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     state.timeline_editor.selected_keys = {timeline_key_ref(*color_track, 0U)};
     const double expected_clamped =
         color_track->key_times[1] - 0.001 - color_track->key_times[0];
-    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 1.0, false) ||
         !state.timeline_editor.retime_gesture.has_value() ||
         std::abs(
@@ -3107,7 +3107,7 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     state.timeline_editor.selected_keys = {
         timeline_key_ref(*color_track, 0U),
         timeline_key_ref(*attachment_track, 0U)};
-    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 0.02, false) ||
         marrow::editor::serialize_project(*state.session.project()) == retime_baseline) {
         std::cerr << "Timeline P0 live retime did not update the project preview.\n";
@@ -3126,7 +3126,7 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     state.timeline_editor.selected_keys = {
         timeline_key_ref(*color_track, 0U),
         timeline_key_ref(*attachment_track, 0U)};
-    if (!begin_timeline_retime_gesture_for_smoke(&state, tracks) ||
+    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 0.02, false)) {
         std::cerr << "Timeline P0 committed retime could not start.\n";
         return false;
@@ -3791,23 +3791,23 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         hierarchy_slot);
     state->hierarchy_selection_anchor = hierarchy_slot;
     state->selected_timeline_track_id = "viewport-point-smoke";
-    if (!apply_viewport_point_selection_for_smoke(
-            state, hierarchy_bone, false) ||
+    if (!apply_viewport_point_selection_gesture(
+            state, hierarchy_bone, false, false) ||
         state->selection.items() !=
             std::vector<marrow::editor::SelectionItem>{hierarchy_bone} ||
         state->selection.active() == nullptr ||
         *state->selection.active() != hierarchy_bone ||
         state->hierarchy_selection_anchor.has_value() ||
         state->selected_timeline_track_id.has_value() ||
-        !apply_viewport_point_selection_for_smoke(
-            state, hierarchy_slot, true) ||
+        !apply_viewport_point_selection_gesture(
+            state, hierarchy_slot, true, false) ||
         state->selection.items() !=
             std::vector<marrow::editor::SelectionItem>{
                 hierarchy_bone, hierarchy_slot} ||
         state->selection.active() == nullptr ||
         *state->selection.active() != hierarchy_slot ||
-        !apply_viewport_point_selection_for_smoke(
-            state, hierarchy_slot, true) ||
+        !apply_viewport_point_selection_gesture(
+            state, hierarchy_slot, true, false) ||
         state->selection.items() !=
             std::vector<marrow::editor::SelectionItem>{hierarchy_bone} ||
         state->selection.active() == nullptr ||
@@ -4036,13 +4036,13 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
     }
 
     state->selection.replace(hierarchy_constraint);
-    if (!begin_viewport_box_selection_for_smoke(
+    if (!viewport_interaction::begin_box_selection(
             state, full_box_start, false) ||
-        !update_viewport_box_selection_for_smoke(
+        !viewport_interaction::update_box_selection(
             state, ImVec2(full_box_start.x + 3.0f, full_box_start.y)) ||
         !state->viewport_box_selection.has_value() ||
         state->viewport_box_selection->dragged ||
-        finish_viewport_box_selection_for_smoke(
+        viewport_interaction::finish_box_selection(
             state, box_layout, true) ||
         state->selection.items() !=
             std::vector<marrow::editor::SelectionItem>{hierarchy_constraint}) {
@@ -4052,10 +4052,10 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
 
     state->hierarchy_selection_anchor = hierarchy_slot;
     state->selected_timeline_track_id = "viewport-box-forward";
-    if (!begin_viewport_box_selection_for_smoke(
+    if (!viewport_interaction::begin_box_selection(
             state, full_box_start, false) ||
-        !update_viewport_box_selection_for_smoke(state, full_box_end) ||
-        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        !viewport_interaction::update_box_selection(state, full_box_end) ||
+        !viewport_interaction::finish_box_selection(state, box_layout, true) ||
         state->selection.items() != ordered_box_bones ||
         state->selection.active() == nullptr ||
         *state->selection.active() != ordered_box_bones.back() ||
@@ -4065,10 +4065,10 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         return false;
     }
     state->selection.replace(hierarchy_constraint);
-    if (!begin_viewport_box_selection_for_smoke(
+    if (!viewport_interaction::begin_box_selection(
             state, full_box_end, false) ||
-        !update_viewport_box_selection_for_smoke(state, full_box_start) ||
-        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        !viewport_interaction::update_box_selection(state, full_box_start) ||
+        !viewport_interaction::finish_box_selection(state, box_layout, true) ||
         state->selection.items() != ordered_box_bones) {
         std::cerr << "Reverse viewport box did not match the normalized forward rectangle.\n";
         return false;
@@ -4086,10 +4086,10 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
             additive_expected.push_back(item);
         }
     }
-    if (!begin_viewport_box_selection_for_smoke(
+    if (!viewport_interaction::begin_box_selection(
             state, full_box_start, true) ||
-        !update_viewport_box_selection_for_smoke(state, full_box_end) ||
-        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        !viewport_interaction::update_box_selection(state, full_box_end) ||
+        !viewport_interaction::finish_box_selection(state, box_layout, true) ||
         state->selection.items() != additive_expected ||
         state->selection.active() == nullptr ||
         *state->selection.active() != ordered_box_bones.back()) {
@@ -4104,9 +4104,9 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
     const auto additive_before_empty = state->selection.items();
     state->hierarchy_selection_anchor = hierarchy_slot;
     state->selected_timeline_track_id = "viewport-empty-additive";
-    if (!begin_viewport_box_selection_for_smoke(state, empty_start, true) ||
-        !update_viewport_box_selection_for_smoke(state, empty_end) ||
-        finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+    if (!viewport_interaction::begin_box_selection(state, empty_start, true) ||
+        !viewport_interaction::update_box_selection(state, empty_end) ||
+        viewport_interaction::finish_box_selection(state, box_layout, true) ||
         state->selection.items() != additive_before_empty ||
         state->hierarchy_selection_anchor !=
             std::optional<marrow::editor::SelectionItem>(hierarchy_slot) ||
@@ -4114,9 +4114,9 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         std::cerr << "Empty additive viewport box did not remain a strict no-op.\n";
         return false;
     }
-    if (!begin_viewport_box_selection_for_smoke(state, empty_start, false) ||
-        !update_viewport_box_selection_for_smoke(state, empty_end) ||
-        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+    if (!viewport_interaction::begin_box_selection(state, empty_start, false) ||
+        !viewport_interaction::update_box_selection(state, empty_end) ||
+        !viewport_interaction::finish_box_selection(state, box_layout, true) ||
         !state->selection.items().empty() ||
         state->hierarchy_selection_anchor.has_value() ||
         state->selected_timeline_track_id.has_value()) {

@@ -106,97 +106,95 @@ void draw_viewport_window(ShellState* state);
 void draw_viewport_settings(ShellState* state);
 void finalize_orphaned_viewport_transform_gesture(ShellState* state);
 
-// UI-free smoke hooks for exercising the same gesture transaction used by the
-// ImGui viewport without synthesizing platform mouse events.
-bool begin_viewport_translate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    ViewportTranslateAxis axis,
-    const ImVec2& pointer);
-bool update_viewport_translate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer);
-void finish_viewport_translate_gesture_for_smoke(ShellState* state, bool commit);
-std::optional<ViewportTranslateAxis> hit_test_translate_gizmo_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout,
-    const ImVec2& position);
-std::optional<ViewportRotationBasis> viewport_rotation_basis_for_smoke(
-    const marrow::runtime::Skeleton& skeleton,
-    std::size_t bone_index);
-std::optional<double> viewport_rotation_angle_for_smoke(
-    const ViewportRotationBasis& basis,
-    const ViewportWorldPoint& pointer_world);
-double unwrap_viewport_rotation_delta_for_smoke(double delta);
-bool viewport_rotation_gizmo_visible_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout);
-bool hit_test_rotation_gizmo_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout,
-    const ImVec2& position);
-bool begin_viewport_rotate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer);
-bool update_viewport_rotate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer);
-std::optional<ViewportScaleBasis> viewport_scale_basis_for_smoke(
-    const marrow::runtime::Skeleton& skeleton,
-    std::size_t bone_index);
-std::optional<ViewportScaleCandidate> viewport_scale_candidate_for_smoke(
-    const ViewportScaleGesturePayload& payload,
-    const ViewportLayout& layout,
-    const ImVec2& pointer);
-bool viewport_scale_gizmo_visible_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout);
-bool viewport_uniform_scale_handle_visible_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout);
-const char* viewport_transform_hint_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout);
-std::optional<ViewportScaleHandle> hit_test_scale_gizmo_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout,
-    const ImVec2& position);
-bool begin_viewport_scale_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    ViewportScaleHandle handle,
-    const ImVec2& pointer);
-bool update_viewport_scale_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer);
-ViewportPressTarget viewport_press_target_for_smoke(
+// Shell-private interaction boundary shared by the ImGui adapter and the
+// UI-free smoke scenarios. These functions own the actual hit-test,
+// arbitration, and gesture behavior; callers do not get a parallel test path.
+namespace viewport_interaction {
+
+ViewportPressTarget press_target(
     bool active_gesture,
     bool weight_brush,
     bool translate,
     bool rotation,
     bool scale,
     bool entity);
-void finish_viewport_transform_gesture_for_smoke(
+std::optional<ViewportTranslateAxis> hit_test_translate_gizmo(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ImVec2& position);
+std::optional<ViewportRotationBasis> rotation_basis(
+    const marrow::runtime::Skeleton& skeleton,
+    std::size_t bone_index);
+std::optional<double> rotation_angle(
+    const ViewportRotationBasis& basis,
+    const ViewportWorldPoint& pointer_world);
+double unwrap_rotation_delta(double delta);
+bool rotation_gizmo_visible(
+    const ShellState& state,
+    const ViewportLayout& layout);
+bool hit_test_rotation_gizmo(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ImVec2& position);
+std::optional<ViewportScaleBasis> scale_basis(
+    const marrow::runtime::Skeleton& skeleton,
+    std::size_t bone_index);
+std::optional<ViewportScaleCandidate> scale_candidate(
+    const ViewportScaleGesturePayload& payload,
+    const ViewportLayout& layout,
+    const ImVec2& pointer);
+bool scale_gizmo_visible(
+    const ShellState& state,
+    const ViewportLayout& layout);
+bool uniform_scale_handle_visible(
+    const ShellState& state,
+    const ViewportLayout& layout);
+const char* transform_hint(
+    const ShellState& state,
+    const ViewportLayout& layout);
+std::optional<ViewportScaleHandle> hit_test_scale_gizmo(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ImVec2& position);
+bool begin_translate_gesture(
     ShellState* state,
-    bool commit);
-bool apply_viewport_point_selection_for_smoke(
+    const ViewportLayout& layout,
+    ViewportTranslateAxis axis,
+    const ImVec2& pointer);
+bool update_translate_gesture(
     ShellState* state,
-    const marrow::editor::SelectionItem& item,
-    bool command_modifier);
-bool begin_viewport_box_selection_for_smoke(
+    const ViewportLayout& layout,
+    const ImVec2& pointer);
+bool begin_rotate_gesture(
+    ShellState* state,
+    const ViewportLayout& layout,
+    const ImVec2& pointer);
+bool update_rotate_gesture(
+    ShellState* state,
+    const ViewportLayout& layout,
+    const ImVec2& pointer);
+bool begin_scale_gesture(
+    ShellState* state,
+    const ViewportLayout& layout,
+    ViewportScaleHandle handle,
+    const ImVec2& pointer);
+bool update_scale_gesture(
+    ShellState* state,
+    const ViewportLayout& layout,
+    const ImVec2& pointer);
+void finish_transform_gesture(ShellState* state, bool commit);
+bool begin_box_selection(
     ShellState* state,
     const ImVec2& pointer,
     bool additive);
-bool update_viewport_box_selection_for_smoke(
+bool update_box_selection(
     ShellState* state,
     const ImVec2& pointer);
-bool finish_viewport_box_selection_for_smoke(
+bool finish_box_selection(
     ShellState* state,
     const ViewportLayout& layout,
     bool commit);
+
+} // namespace viewport_interaction
 
 } // namespace marrow::editor::shell

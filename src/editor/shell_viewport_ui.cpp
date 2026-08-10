@@ -35,7 +35,7 @@ void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
     }
 }
 
-namespace {
+namespace viewport_interaction {
 
 constexpr float kTranslateGizmoLength = 42.0f;
 constexpr float kTranslateGizmoHitRadius = 7.0f;
@@ -46,7 +46,7 @@ constexpr float kScaleGizmoRadius = 74.0f;
 constexpr float kScaleGizmoHitRadius = 6.0f;
 constexpr float kViewportBoxDragThreshold = 4.0f;
 
-ViewportPressTarget viewport_press_target(
+ViewportPressTarget press_target(
     bool active_gesture,
     bool weight_brush,
     bool translate,
@@ -87,7 +87,7 @@ const char* unsupported_rotation_inherit_hint(marrow::runtime::BoneInherit inher
     return nullptr;
 }
 
-std::optional<ViewportRotationBasis> rotation_basis_impl(
+std::optional<ViewportRotationBasis> rotation_basis(
     const marrow::runtime::Skeleton& skeleton,
     std::size_t bone_index) {
     if (skeleton.data() == nullptr ||
@@ -161,7 +161,7 @@ std::optional<ViewportRotationBasis> rotation_basis_impl(
     return basis;
 }
 
-std::optional<double> rotation_angle_impl(
+std::optional<double> rotation_angle(
     const ViewportRotationBasis& basis,
     const ViewportWorldPoint& pointer_world) {
     if (!finite_world_point(pointer_world) ||
@@ -181,7 +181,7 @@ std::optional<double> rotation_angle_impl(
     return std::isfinite(angle) ? std::optional<double>(angle) : std::nullopt;
 }
 
-double unwrap_rotation_delta_impl(double delta) {
+double unwrap_rotation_delta(double delta) {
     if (!std::isfinite(delta)) {
         return delta;
     }
@@ -194,7 +194,7 @@ double unwrap_rotation_delta_impl(double delta) {
     return wrapped;
 }
 
-std::optional<ViewportScaleBasis> scale_basis_impl(
+std::optional<ViewportScaleBasis> scale_basis(
     const marrow::runtime::Skeleton& skeleton,
     std::size_t bone_index) {
     if (skeleton.data() == nullptr ||
@@ -320,7 +320,7 @@ const ImVec2& scale_handle_direction(
     return basis.positive_x_screen_direction;
 }
 
-std::optional<ViewportScaleCandidate> scale_candidate_impl(
+std::optional<ViewportScaleCandidate> scale_candidate(
     const ViewportScaleGesturePayload& payload,
     const ViewportLayout& layout,
     const ImVec2& pointer) {
@@ -577,7 +577,7 @@ std::optional<std::size_t> scale_gizmo_bone_index(
     const ViewportLayout& layout) {
     const auto bone_index = rotation_gizmo_bone_index(state, layout);
     if (!bone_index.has_value() ||
-        !scale_basis_impl(*state.preview_skeleton, *bone_index).has_value()) {
+        !scale_basis(*state.preview_skeleton, *bone_index).has_value()) {
         return std::nullopt;
     }
     return bone_index;
@@ -618,7 +618,7 @@ ViewportScaleBasis visible_scale_basis(
             return scale->basis;
         }
     }
-    return *scale_basis_impl(*state.preview_skeleton, bone_index);
+    return *scale_basis(*state.preview_skeleton, bone_index);
 }
 
 ImVec2 scale_gizmo_center(
@@ -655,13 +655,13 @@ bool uniform_scale_handle_enabled(
         (values->scale_x != 0.0 || values->scale_y != 0.0);
 }
 
-const char* active_transform_gizmo_hint(
+const char* transform_hint(
     const ShellState& state,
-    const ViewportLayout* layout) {
+    const ViewportLayout& layout) {
     const char* hint = active_rotation_inherit_hint(state);
-    if (hint == nullptr && layout != nullptr) {
+    if (hint == nullptr) {
         const auto scale_bone_index =
-            scale_gizmo_bone_index(state, *layout);
+            scale_gizmo_bone_index(state, layout);
         if (scale_bone_index.has_value() &&
             !uniform_scale_handle_enabled(state, *scale_bone_index)) {
             hint = "Uniform scale unavailable: both axes are zero";
@@ -808,7 +808,7 @@ void draw_scale_gizmo(
         text.c_str());
 }
 
-bool begin_viewport_box_selection(
+bool begin_box_selection(
     ShellState* state,
     const ImVec2& pointer,
     bool additive) {
@@ -821,7 +821,7 @@ bool begin_viewport_box_selection(
     return true;
 }
 
-bool update_viewport_box_selection(
+bool update_box_selection(
     ShellState* state,
     const ImVec2& pointer) {
     if (state == nullptr || !state->viewport_box_selection.has_value()) {
@@ -837,7 +837,7 @@ bool update_viewport_box_selection(
     return true;
 }
 
-bool finish_viewport_box_selection(
+bool finish_box_selection(
     ShellState* state,
     const ViewportLayout& layout,
     bool commit) {
@@ -856,7 +856,7 @@ bool finish_viewport_box_selection(
         true);
 }
 
-std::optional<marrow::runtime::AttachmentVertex> local_position_for_world_target_impl(
+std::optional<marrow::runtime::AttachmentVertex> local_position_for_world_target(
     const marrow::runtime::Skeleton& skeleton,
     std::size_t bone_index,
     const ViewportWorldPoint& target) {
@@ -944,7 +944,7 @@ void restore_viewport_transform_context(
     state->selected_timeline_track_id = gesture.timeline_focus_before;
 }
 
-void finish_viewport_transform_gesture(ShellState* state, bool commit) {
+void finish_transform_gesture(ShellState* state, bool commit) {
     if (state == nullptr || !state->viewport_transform_gesture.has_value()) {
         return;
     }
@@ -985,7 +985,7 @@ void finish_viewport_transform_gesture(ShellState* state, bool commit) {
         format_time_seconds(gesture.time_seconds);
 }
 
-bool begin_viewport_translate_gesture(
+bool begin_translate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
     ViewportTranslateAxis axis,
@@ -1044,7 +1044,7 @@ bool begin_viewport_translate_gesture(
     return true;
 }
 
-bool update_viewport_translate_gesture(
+bool update_translate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
     const ImVec2& pointer) {
@@ -1055,12 +1055,12 @@ bool update_viewport_translate_gesture(
     auto& gesture = *state->viewport_transform_gesture;
     auto* translate = std::get_if<ViewportTranslateGesturePayload>(&gesture.payload);
     if (translate == nullptr || !viewport_transform_context_valid(*state, gesture)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         return false;
     }
     const ViewportWorldPoint pointer_world = world_from_screen(layout, pointer);
     if (!finite_world_point(pointer_world)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = "Cannot move a bone with a non-finite pointer.";
         return false;
     }
@@ -1076,12 +1076,12 @@ bool update_viewport_translate_gesture(
     if (translate->axis != ViewportTranslateAxis::X) {
         target.y += delta_y;
     }
-    const auto local = local_position_for_world_target_impl(
+    const auto local = local_position_for_world_target(
         *state->preview_skeleton, gesture.bone_index, target);
     if (!local.has_value()) {
         const std::string error =
             "Cannot move a bone through a singular parent transform.";
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = error;
         return false;
     }
@@ -1099,7 +1099,7 @@ bool update_viewport_translate_gesture(
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = error;
         return false;
     }
@@ -1108,7 +1108,7 @@ bool update_viewport_translate_gesture(
     return true;
 }
 
-bool begin_viewport_rotate_gesture(
+bool begin_rotate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
     const ImVec2& pointer) {
@@ -1119,10 +1119,10 @@ bool begin_viewport_rotate_gesture(
     if (!bone_index.has_value() || state->session.runtime_data() == nullptr) {
         return false;
     }
-    const auto basis = rotation_basis_impl(*state->preview_skeleton, *bone_index);
+    const auto basis = rotation_basis(*state->preview_skeleton, *bone_index);
     const ViewportWorldPoint pointer_world = world_from_screen(layout, pointer);
     const auto wrapped_angle = basis.has_value()
-        ? rotation_angle_impl(*basis, pointer_world)
+        ? rotation_angle(*basis, pointer_world)
         : std::nullopt;
     const auto* animation = state->session.runtime_data()->find_animation(
         state->selected_animation_name);
@@ -1178,7 +1178,7 @@ bool begin_viewport_rotate_gesture(
     return true;
 }
 
-bool update_viewport_rotate_gesture(
+bool update_rotate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
     const ImVec2& pointer) {
@@ -1190,7 +1190,7 @@ bool update_viewport_rotate_gesture(
     if (rotate == nullptr || !viewport_transform_context_valid(*state, gesture) ||
         !std::isfinite(layout.pixels_per_unit) || layout.pixels_per_unit <= 0.0f ||
         !std::isfinite(pointer.x) || !std::isfinite(pointer.y)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = "Bone rotation was cancelled after viewport context loss.";
         return false;
     }
@@ -1199,7 +1199,7 @@ bool update_viewport_rotate_gesture(
     const ImVec2 pivot_screen = screen_from_world(
         layout, rotate->basis.pivot_world.x, rotate->basis.pivot_world.y);
     if (!std::isfinite(pivot_screen.x) || !std::isfinite(pivot_screen.y)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = "Bone rotation was cancelled after invalid viewport math.";
         return false;
     }
@@ -1211,9 +1211,9 @@ bool update_viewport_rotate_gesture(
     }
 
     const ViewportWorldPoint pointer_world = world_from_screen(layout, pointer);
-    const auto wrapped_angle = rotation_angle_impl(rotate->basis, pointer_world);
+    const auto wrapped_angle = rotation_angle(rotate->basis, pointer_world);
     if (!wrapped_angle.has_value()) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = "Bone rotation was cancelled after invalid parent-space math.";
         return false;
     }
@@ -1224,11 +1224,11 @@ bool update_viewport_rotate_gesture(
         return true;
     }
 
-    const double step = unwrap_rotation_delta_impl(
+    const double step = unwrap_rotation_delta(
         *wrapped_angle - *rotate->previous_wrapped_angle);
     rotate->previous_wrapped_angle = *wrapped_angle;
     if (!std::isfinite(step)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = "Bone rotation was cancelled after a non-finite angle.";
         return false;
     }
@@ -1238,7 +1238,7 @@ bool update_viewport_rotate_gesture(
     const double accumulated = rotate->accumulated_rotation + step;
     const double candidate = rotate->start_absolute_rotation + accumulated;
     if (!std::isfinite(accumulated) || !std::isfinite(candidate)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = "Bone rotation was cancelled after a non-finite result.";
         return false;
     }
@@ -1254,7 +1254,7 @@ bool update_viewport_rotate_gesture(
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = error;
         return false;
     }
@@ -1265,7 +1265,7 @@ bool update_viewport_rotate_gesture(
     return true;
 }
 
-bool begin_viewport_scale_gesture(
+bool begin_scale_gesture(
     ShellState* state,
     const ViewportLayout& layout,
     ViewportScaleHandle handle,
@@ -1280,7 +1280,7 @@ bool begin_viewport_scale_gesture(
         return false;
     }
     const auto basis =
-        scale_basis_impl(*state->preview_skeleton, *bone_index);
+        scale_basis(*state->preview_skeleton, *bone_index);
     const auto start_scale =
         effective_scale_at_playhead(*state, *bone_index);
     if (!basis.has_value() || !start_scale.has_value() ||
@@ -1348,7 +1348,7 @@ bool begin_viewport_scale_gesture(
     return true;
 }
 
-bool update_viewport_scale_gesture(
+bool update_scale_gesture(
     ShellState* state,
     const ViewportLayout& layout,
     const ImVec2& pointer) {
@@ -1360,16 +1360,16 @@ bool update_viewport_scale_gesture(
         std::get_if<ViewportScaleGesturePayload>(&gesture.payload);
     if (scale == nullptr ||
         !viewport_transform_context_valid(*state, gesture)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message =
             "Bone scale was cancelled after viewport context loss.";
         return false;
     }
     scale->pointer_screen = pointer;
     const auto candidate =
-        scale_candidate_impl(*scale, layout, pointer);
+        scale_candidate(*scale, layout, pointer);
     if (!candidate.has_value()) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message =
             "Bone scale was cancelled after invalid local-axis math.";
         return false;
@@ -1399,7 +1399,7 @@ bool update_viewport_scale_gesture(
         gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->error_message = error;
         return false;
     }
@@ -1410,97 +1410,19 @@ bool update_viewport_scale_gesture(
     return true;
 }
 
-} // namespace
-
-bool begin_viewport_translate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    ViewportTranslateAxis axis,
-    const ImVec2& pointer) {
-    return begin_viewport_translate_gesture(state, layout, axis, pointer);
-}
-
-bool update_viewport_translate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer) {
-    return update_viewport_translate_gesture(state, layout, pointer);
-}
-
-void finish_viewport_translate_gesture_for_smoke(ShellState* state, bool commit) {
-    finish_viewport_transform_gesture(state, commit);
-}
-
-std::optional<ViewportTranslateAxis> hit_test_translate_gizmo_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout,
-    const ImVec2& position) {
-    return hit_test_translate_gizmo(state, layout, position);
-}
-
-std::optional<ViewportRotationBasis> viewport_rotation_basis_for_smoke(
-    const marrow::runtime::Skeleton& skeleton,
-    std::size_t bone_index) {
-    return rotation_basis_impl(skeleton, bone_index);
-}
-
-std::optional<double> viewport_rotation_angle_for_smoke(
-    const ViewportRotationBasis& basis,
-    const ViewportWorldPoint& pointer_world) {
-    return rotation_angle_impl(basis, pointer_world);
-}
-
-double unwrap_viewport_rotation_delta_for_smoke(double delta) {
-    return unwrap_rotation_delta_impl(delta);
-}
-
-bool viewport_rotation_gizmo_visible_for_smoke(
+bool rotation_gizmo_visible(
     const ShellState& state,
     const ViewportLayout& layout) {
     return rotation_gizmo_bone_index(state, layout).has_value();
 }
 
-bool hit_test_rotation_gizmo_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout,
-    const ImVec2& position) {
-    return hit_test_rotation_gizmo(state, layout, position);
-}
-
-bool begin_viewport_rotate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer) {
-    return begin_viewport_rotate_gesture(state, layout, pointer);
-}
-
-bool update_viewport_rotate_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer) {
-    return update_viewport_rotate_gesture(state, layout, pointer);
-}
-
-std::optional<ViewportScaleBasis> viewport_scale_basis_for_smoke(
-    const marrow::runtime::Skeleton& skeleton,
-    std::size_t bone_index) {
-    return scale_basis_impl(skeleton, bone_index);
-}
-
-std::optional<ViewportScaleCandidate> viewport_scale_candidate_for_smoke(
-    const ViewportScaleGesturePayload& payload,
-    const ViewportLayout& layout,
-    const ImVec2& pointer) {
-    return scale_candidate_impl(payload, layout, pointer);
-}
-
-bool viewport_scale_gizmo_visible_for_smoke(
+bool scale_gizmo_visible(
     const ShellState& state,
     const ViewportLayout& layout) {
     return scale_gizmo_bone_index(state, layout).has_value();
 }
 
-bool viewport_uniform_scale_handle_visible_for_smoke(
+bool uniform_scale_handle_visible(
     const ShellState& state,
     const ViewportLayout& layout) {
     const auto bone_index = scale_gizmo_bone_index(state, layout);
@@ -1508,89 +1430,15 @@ bool viewport_uniform_scale_handle_visible_for_smoke(
         uniform_scale_handle_enabled(state, *bone_index);
 }
 
-const char* viewport_transform_hint_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout) {
-    return active_transform_gizmo_hint(state, &layout);
-}
+} // namespace viewport_interaction
 
-std::optional<ViewportScaleHandle> hit_test_scale_gizmo_for_smoke(
-    const ShellState& state,
-    const ViewportLayout& layout,
-    const ImVec2& position) {
-    return hit_test_scale_gizmo(state, layout, position);
-}
-
-bool begin_viewport_scale_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    ViewportScaleHandle handle,
-    const ImVec2& pointer) {
-    return begin_viewport_scale_gesture(state, layout, handle, pointer);
-}
-
-bool update_viewport_scale_gesture_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    const ImVec2& pointer) {
-    return update_viewport_scale_gesture(state, layout, pointer);
-}
-
-ViewportPressTarget viewport_press_target_for_smoke(
-    bool active_gesture,
-    bool weight_brush,
-    bool translate,
-    bool rotation,
-    bool scale,
-    bool entity) {
-    return viewport_press_target(
-        active_gesture,
-        weight_brush,
-        translate,
-        rotation,
-        scale,
-        entity);
-}
-
-void finish_viewport_transform_gesture_for_smoke(
-    ShellState* state,
-    bool commit) {
-    finish_viewport_transform_gesture(state, commit);
-}
-
-bool apply_viewport_point_selection_for_smoke(
-    ShellState* state,
-    const marrow::editor::SelectionItem& item,
-    bool command_modifier) {
-    return apply_viewport_point_selection_gesture(
-        state, item, command_modifier, false);
-}
-
-bool begin_viewport_box_selection_for_smoke(
-    ShellState* state,
-    const ImVec2& pointer,
-    bool additive) {
-    return begin_viewport_box_selection(state, pointer, additive);
-}
-
-bool update_viewport_box_selection_for_smoke(
-    ShellState* state,
-    const ImVec2& pointer) {
-    return update_viewport_box_selection(state, pointer);
-}
-
-bool finish_viewport_box_selection_for_smoke(
-    ShellState* state,
-    const ViewportLayout& layout,
-    bool commit) {
-    return finish_viewport_box_selection(state, layout, commit);
-}
+using namespace viewport_interaction;
 
 std::optional<marrow::runtime::AttachmentVertex> bone_local_position_from_world(
     const marrow::runtime::Skeleton& skeleton,
     std::size_t bone_index,
     const ViewportWorldPoint& target) {
-    return local_position_for_world_target_impl(skeleton, bone_index, target);
+    return local_position_for_world_target(skeleton, bone_index, target);
 }
 
 
@@ -2267,7 +2115,7 @@ void draw_viewport_selection_feedback(
 
 void draw_viewport_window(ShellState* state) {
     if (!ImGui::Begin(kViewportWindowTitle)) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->viewport_box_selection.reset();
         ImGui::End();
         return;
@@ -2275,7 +2123,7 @@ void draw_viewport_window(ShellState* state) {
 
     // No scene → editorial empty state, no chrome.
     if (!state->load_result) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->viewport_box_selection.reset();
         widgets::empty_hero(
             "VIEWPORT",
@@ -2361,7 +2209,7 @@ void draw_viewport_window(ShellState* state) {
 
     const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
     if (canvas_size.x < 32.0f || canvas_size.y < 32.0f) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->viewport_box_selection.reset();
         ImGui::End();
         return;
@@ -2422,7 +2270,7 @@ void draw_viewport_window(ShellState* state) {
 
     const auto layout = build_viewport_layout(*state, canvas_origin, canvas_size);
     if (!layout.has_value()) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         state->viewport_box_selection.reset();
     }
     std::optional<marrow::renderer::PreparedScene> frame_scene;
@@ -2501,7 +2349,7 @@ void draw_viewport_window(ShellState* state) {
         // Deterministic press arbitration: an active edit/brush consumes the
         // press, then translate Free/X/Y, rotation, scale, entity picking,
         // and only a confirmed empty-space press may seed a box gesture.
-        switch (viewport_press_target(
+        switch (press_target(
             authoring_gesture_active(*state),
             brush_enabled,
             hovered_translate_axis.has_value(),
@@ -2515,14 +2363,14 @@ void draw_viewport_window(ShellState* state) {
             begin_weight_paint_stroke(state, mesh_weight_overlay->target);
             break;
         case ViewportPressTarget::Translate:
-            (void)begin_viewport_translate_gesture(
+            (void)begin_translate_gesture(
                 state, *layout, *hovered_translate_axis, io.MousePos);
             break;
         case ViewportPressTarget::Rotation:
-            (void)begin_viewport_rotate_gesture(state, *layout, io.MousePos);
+            (void)begin_rotate_gesture(state, *layout, io.MousePos);
             break;
         case ViewportPressTarget::Scale:
-            (void)begin_viewport_scale_gesture(
+            (void)begin_scale_gesture(
                 state, *layout, *hovered_scale_handle, io.MousePos);
             break;
         case ViewportPressTarget::Entity:
@@ -2530,7 +2378,7 @@ void draw_viewport_window(ShellState* state) {
                 state, hovered_entity->item, command_modifier, true);
             break;
         case ViewportPressTarget::Box:
-            (void)begin_viewport_box_selection(
+            (void)begin_box_selection(
                 state, io.MousePos, command_modifier);
             break;
         }
@@ -2540,14 +2388,14 @@ void draw_viewport_window(ShellState* state) {
         !ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         if (std::holds_alternative<ViewportRotateGesturePayload>(
                 state->viewport_transform_gesture->payload)) {
-            (void)update_viewport_rotate_gesture(
+            (void)update_rotate_gesture(
                 state, *layout, ImGui::GetIO().MousePos);
         } else if (std::holds_alternative<ViewportScaleGesturePayload>(
                        state->viewport_transform_gesture->payload)) {
-            (void)update_viewport_scale_gesture(
+            (void)update_scale_gesture(
                 state, *layout, ImGui::GetIO().MousePos);
         } else {
-            (void)update_viewport_translate_gesture(
+            (void)update_translate_gesture(
                 state, *layout, ImGui::GetIO().MousePos);
         }
     }
@@ -2577,11 +2425,11 @@ void draw_viewport_window(ShellState* state) {
     }
     if (state->viewport_box_selection.has_value() && layout.has_value() &&
         ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        (void)update_viewport_box_selection(state, ImGui::GetIO().MousePos);
+        (void)update_box_selection(state, ImGui::GetIO().MousePos);
     }
     if (state->viewport_box_selection.has_value() && layout.has_value() &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        (void)finish_viewport_box_selection(state, *layout, true);
+        (void)finish_box_selection(state, *layout, true);
     }
 
     const ImVec2 canvas_end(
@@ -2661,8 +2509,9 @@ void draw_viewport_window(ShellState* state) {
         const bool animation_move_ready =
             !weight_tool_ready && !state->selected_animation_name.empty() &&
             resolved.active_bone_index.has_value();
-        const char* transform_hint = active_transform_gizmo_hint(
-            *state, layout.has_value() ? &*layout : nullptr);
+        const char* transform_hint = layout.has_value()
+            ? viewport_interaction::transform_hint(*state, *layout)
+            : active_rotation_inherit_hint(*state);
         std::string hint =
             std::string(weight_tool_ready
                             ? "LMB brush weights"
@@ -2728,11 +2577,11 @@ void finalize_orphaned_viewport_transform_gesture(ShellState* state) {
     const bool cancel = ImGui::GetCurrentContext() == nullptr ||
         ImGui::IsKeyPressed(ImGuiKey_Escape, false);
     if (cancel) {
-        finish_viewport_transform_gesture(state, false);
+        finish_transform_gesture(state, false);
         return;
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        finish_viewport_transform_gesture(state, true);
+        finish_transform_gesture(state, true);
     }
 }
 

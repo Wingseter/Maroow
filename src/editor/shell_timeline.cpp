@@ -2099,12 +2099,6 @@ void finish_timeline_retime_gesture(ShellState* state, bool commit) {
     }
 }
 
-bool begin_timeline_retime_gesture_for_smoke(
-    ShellState* state,
-    const std::vector<TimelineTrackRow>& tracks) {
-    return begin_timeline_retime_gesture(state, 0U, tracks);
-}
-
 bool apply_timeline_retime_delta(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks,
