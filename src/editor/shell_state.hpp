@@ -708,7 +708,6 @@ bool record_action_from_snapshots(
     std::string label,
     std::string group,
     bool allow_merge);
-void finalize_orphaned_edit_action(ShellState* state);
 void cancel_authoring_gestures(ShellState* state, std::string_view reason);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);

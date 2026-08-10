@@ -20,6 +20,7 @@
 #include "shell_constraints.hpp"
 #include "shell_asset_watch.hpp"
 #include "shell_agent_panel.hpp"
+#include "shell_coalesced_edit.hpp"
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
@@ -4274,22 +4275,156 @@ int run_headless_smoke(const Options& options) {
     sync_shell_from_editor_session_if_revised(&shell_state);
 
     shell_state.session.clear_history();
-    const std::string notes_before_orphan =
+    const auto metadata_descriptor = [](
+                                         std::string label,
+                                         std::string group) {
+        return CoalescedEditDescriptor{
+            EditActionKind::EditProperty,
+            std::move(label),
+            std::move(group),
+            false,
+            CoalescedEditPolicy::ProjectMetadataOnly,
+            {}};
+    };
+    const auto mutate_notes = [&](const CoalescedEditFrame& frame,
+                                  std::string suffix,
+                                  std::string label,
+                                  std::string group) {
+        return apply_coalesced_edit_frame(
+            &shell_state,
+            frame,
+            metadata_descriptor(std::move(label), std::move(group)),
+            [&]() {
+                shell_state.load_result.project->editor_metadata.notes += suffix;
+            });
+    };
+
+    const std::string notes_before_coalesced =
         shell_state.load_result.project->editor_metadata.notes;
-    shell_state.pending_edit_action = PendingEditAction{
-        0x4d415252U,
-        EditActionKind::EditProperty,
-        "Finalize orphaned smoke edit",
-        "orphaned-smoke-edit",
-        false,
-        capture_history_snapshot(shell_state)};
-    shell_state.load_result.project->editor_metadata.notes += " [orphaned edit]";
-    finalize_orphaned_edit_action(&shell_state);
+    constexpr ImGuiID no_movement_id = 0x4d415201U;
+    if (!mutate_notes(
+            CoalescedEditFrame{no_movement_id, true, false, false, false},
+            {},
+            "No-movement smoke edit",
+            "coalesced-no-movement") ||
+        !mutate_notes(
+            CoalescedEditFrame{no_movement_id, false, false, false, true},
+            {},
+            "No-movement smoke edit",
+            "coalesced-no-movement") ||
+        shell_state.pending_edit_action.has_value() || shell_state.session.can_undo() ||
+        shell_state.load_result.project->editor_metadata.notes != notes_before_coalesced) {
+        std::cerr << "No-movement coalesced edit created history or changed metadata.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    constexpr ImGuiID multi_sample_id = 0x4d415202U;
+    const std::string multi_sample_suffix = " [sample one] [sample two]";
+    if (!mutate_notes(
+            CoalescedEditFrame{multi_sample_id, true, true, false, false},
+            " [sample one]",
+            "Multi-sample smoke edit",
+            "coalesced-multi-sample") ||
+        !mutate_notes(
+            CoalescedEditFrame{multi_sample_id, false, true, false, false},
+            " [sample two]",
+            "Multi-sample smoke edit",
+            "coalesced-multi-sample") ||
+        !mutate_notes(
+            CoalescedEditFrame{multi_sample_id, false, false, true, true},
+            {},
+            "Multi-sample smoke edit",
+            "coalesced-multi-sample") ||
+        !shell_state.session.can_undo() ||
+        shell_state.load_result.project->editor_metadata.notes !=
+            notes_before_coalesced + multi_sample_suffix ||
+        !undo_project_change(&shell_state) || shell_state.session.can_undo() ||
+        shell_state.load_result.project->editor_metadata.notes != notes_before_coalesced ||
+        !redo_project_change(&shell_state) ||
+        shell_state.load_result.project->editor_metadata.notes !=
+            notes_before_coalesced + multi_sample_suffix ||
+        !undo_project_change(&shell_state)) {
+        std::cerr << "Multi-sample coalesced edit did not produce exactly one undo action.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.session.clear_history();
+
+    if (shell_state.load_result.project->ik_constraint_edits.empty()) {
+        std::cerr << "Coalesced runtime rollback smoke requires an IK constraint edit.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    const std::string target_before_failure =
+        shell_state.load_result.project->ik_constraint_edits.front().target_bone_name;
+    constexpr ImGuiID rebuild_failure_id = 0x4d415203U;
+    if (apply_coalesced_edit_frame(
+            &shell_state,
+            CoalescedEditFrame{rebuild_failure_id, true, true, false, false},
+            CoalescedEditDescriptor{
+                EditActionKind::EditProperty,
+                "Invalid runtime smoke edit",
+                "coalesced-runtime-failure",
+                false,
+                CoalescedEditPolicy::ProjectRuntime,
+                "Runtime smoke edit failed"},
+            [&]() {
+                shell_state.load_result.project->ik_constraint_edits.front()
+                    .target_bone_name.clear();
+            }) ||
+        shell_state.pending_edit_action.has_value() || shell_state.session.can_undo() ||
+        shell_state.load_result.project->ik_constraint_edits.front().target_bone_name !=
+            target_before_failure ||
+        shell_state.error_message.empty() ||
+        shell_state.status_message != "Runtime smoke edit failed") {
+        std::cerr << "Failed coalesced runtime sample did not roll back atomically.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.error_message.clear();
+    shell_state.status_message.clear();
+
+    constexpr ImGuiID orphan_id = 0x4d415204U;
+    if (!mutate_notes(
+            CoalescedEditFrame{orphan_id, true, true, false, false},
+            " [orphaned edit]",
+            "Finalize orphaned smoke edit",
+            "orphaned-smoke-edit")) {
+        std::cerr << "Could not stage an orphaned coalesced edit.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    finalize_orphaned_coalesced_edit(&shell_state);
     if (shell_state.pending_edit_action.has_value() || !shell_state.session.can_undo() ||
-        shell_state.load_result.project->editor_metadata.notes == notes_before_orphan ||
+        shell_state.load_result.project->editor_metadata.notes == notes_before_coalesced ||
         !undo_project_change(&shell_state) ||
-        shell_state.load_result.project->editor_metadata.notes != notes_before_orphan) {
+        shell_state.load_result.project->editor_metadata.notes != notes_before_coalesced) {
         std::cerr << "Orphaned shell gesture did not finalize into unified history.\n";
+        ImGui::DestroyContext();
+        return 1;
+    }
+    shell_state.session.clear_history();
+
+    const auto validate_cancelled_coalesced_edit = [&](ImGuiID item_id,
+                                                        std::string_view reason) {
+        if (!mutate_notes(
+                CoalescedEditFrame{item_id, true, true, false, false},
+                " [cancelled edit]",
+                "Cancelled smoke edit",
+                "coalesced-cancel")) {
+            return false;
+        }
+        cancel_authoring_gestures(&shell_state, reason);
+        const bool restored = !shell_state.pending_edit_action.has_value() &&
+            !shell_state.session.can_undo() &&
+            shell_state.load_result.project->editor_metadata.notes == notes_before_coalesced;
+        shell_state.status_message.clear();
+        return restored;
+    };
+    if (!validate_cancelled_coalesced_edit(0x4d415205U, "focus loss") ||
+        !validate_cancelled_coalesced_edit(0x4d415206U, "shutdown")) {
+        std::cerr << "Focus-loss/shutdown did not cancel a coalesced edit cleanly.\n";
         ImGui::DestroyContext();
         return 1;
     }

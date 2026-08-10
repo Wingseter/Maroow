@@ -13,6 +13,7 @@
 
 #include "imgui.h"
 
+#include "shell_coalesced_edit.hpp"
 #include "shell_state.hpp"
 #include "shell_widgets.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
@@ -34,55 +35,17 @@ bool apply_constraint_project_drag(
     bool allow_merge,
     std::string failure_status,
     MutateFn mutate) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const ImGuiID item_id = ImGui::GetItemID();
-    if (ImGui::IsItemActivated()) {
-        state->pending_edit_action = PendingEditAction{
-            item_id,
+    return apply_coalesced_edit_frame(
+        state,
+        coalesced_edit_frame_from_last_item(changed),
+        CoalescedEditDescriptor{
             kind,
             std::move(label),
             std::move(group),
             allow_merge,
-            capture_history_snapshot(*state)};
-    }
-
-    if (changed) {
-        const EditorHistorySnapshot rollback = capture_history_snapshot(*state, false);
-        mutate();
-        if (!rebuild_project_runtime(state)) {
-            const std::string rebuild_error = state->error_message;
-            restore_history_snapshot(state, rollback);
-            state->pending_edit_action.reset();
-            state->error_message = rebuild_error;
-            state->status_message = std::move(failure_status);
-            return false;
-        }
-    }
-
-    if (ImGui::IsItemDeactivatedAfterEdit() &&
-        state->pending_edit_action.has_value() &&
-        state->pending_edit_action->item_id == item_id) {
-        PendingEditAction pending = std::move(*state->pending_edit_action);
-        state->pending_edit_action.reset();
-        return record_action_from_snapshots(
-            state,
-            pending.before_snapshot,
-            pending.kind,
-            std::move(pending.label),
-            std::move(pending.group),
-            pending.allow_merge);
-    }
-
-    if (ImGui::IsItemDeactivated() &&
-        state->pending_edit_action.has_value() &&
-        state->pending_edit_action->item_id == item_id) {
-        state->pending_edit_action.reset();
-    }
-
-    return true;
+            CoalescedEditPolicy::ProjectRuntime,
+            std::move(failure_status)},
+        std::move(mutate));
 }
 
 } // namespace

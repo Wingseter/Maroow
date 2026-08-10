@@ -14,6 +14,7 @@
 
 #include "imgui.h"
 
+#include "shell_coalesced_edit.hpp"
 #include "shell_selection.hpp"
 #include "shell_theme.hpp"
 #include "shell_timeline.hpp"
@@ -985,6 +986,53 @@ void finish_transform_gesture(ShellState* state, bool commit) {
         format_time_seconds(gesture.time_seconds);
 }
 
+bool begin_viewport_transform_gesture(
+    ShellState* state,
+    std::size_t bone_index,
+    const char* action,
+    const char* group_prefix,
+    ViewportTransformGesturePayload payload) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.project == nullptr ||
+        state->session.runtime_data() == nullptr ||
+        state->selected_animation_name.empty() ||
+        !std::isfinite(state->timeline_time_seconds) ||
+        bone_index >= state->session.runtime_data()->bones().size() ||
+        authoring_gesture_active(*state)) {
+        return false;
+    }
+
+    const std::string bone_name =
+        state->session.runtime_data()->bones()[bone_index].name;
+    state->timeline_playing = false;
+    state->session.set_playing(false);
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::MoveBone,
+        std::string(action) + " bone " + bone_name,
+        std::string(group_prefix) + ":" + state->selected_animation_name + ":" + bone_name,
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    ViewportTransformGesture gesture;
+    gesture.bone_index = bone_index;
+    gesture.bone_name = bone_name;
+    gesture.animation_name = state->selected_animation_name;
+    gesture.time_seconds = state->timeline_time_seconds;
+    gesture.selection_before = state->selection;
+    gesture.hierarchy_anchor_before = state->hierarchy_selection_anchor;
+    gesture.timeline_focus_before = state->selected_timeline_track_id;
+    gesture.transaction = std::move(transaction);
+    gesture.payload = std::move(payload);
+    state->viewport_transform_gesture.emplace(std::move(gesture));
+    return true;
+}
+
 bool begin_translate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
@@ -1012,36 +1060,15 @@ bool begin_translate_gesture(
         !std::isfinite(world.world_y) || !std::isfinite(state->timeline_time_seconds)) {
         return false;
     }
-    state->timeline_playing = false;
-    state->session.set_playing(false);
-    const std::string bone_name = state->load_result.skeleton_data->bones()[bone_index].name;
-    auto transaction = state->session.begin_edit({
-        marrow::editor::EditKind::MoveBone,
-        "Move bone " + bone_name,
-        "viewport-translate:" + state->selected_animation_name + ":" + bone_name,
-        false,
-        marrow::editor::EditImpact::Project |
-            marrow::editor::EditImpact::Runtime |
-            marrow::editor::EditImpact::Preview});
-    if (!transaction) {
-        state->error_message = transaction.error()->format();
-        return false;
-    }
-    ViewportTransformGesture gesture;
-    gesture.bone_index = bone_index;
-    gesture.bone_name = bone_name;
-    gesture.animation_name = state->selected_animation_name;
-    gesture.time_seconds = state->timeline_time_seconds;
-    gesture.selection_before = state->selection;
-    gesture.hierarchy_anchor_before = state->hierarchy_selection_anchor;
-    gesture.timeline_focus_before = state->selected_timeline_track_id;
-    gesture.transaction = std::move(transaction);
-    gesture.payload = ViewportTranslateGesturePayload{
-        axis,
-        pointer_world,
-        ViewportWorldPoint{world.world_x, world.world_y}};
-    state->viewport_transform_gesture.emplace(std::move(gesture));
-    return true;
+    return begin_viewport_transform_gesture(
+        state,
+        bone_index,
+        "Move",
+        "viewport-translate",
+        ViewportTranslateGesturePayload{
+            axis,
+            pointer_world,
+            ViewportWorldPoint{world.world_x, world.world_y}});
 }
 
 bool update_translate_gesture(
@@ -1140,42 +1167,22 @@ bool begin_rotate_gesture(
         state->error_message = "Cannot rotate a bone with a non-finite starting angle.";
         return false;
     }
-    const std::string bone_name =
-        state->session.runtime_data()->bones()[*bone_index].name;
-    state->timeline_playing = false;
-    state->session.set_playing(false);
-    auto transaction = state->session.begin_edit({
-        marrow::editor::EditKind::MoveBone,
-        "Rotate bone " + bone_name,
-        "viewport-rotate:" + state->selected_animation_name + ":" + bone_name,
-        false,
-        marrow::editor::EditImpact::Project |
-            marrow::editor::EditImpact::Runtime |
-            marrow::editor::EditImpact::Preview});
-    if (!transaction) {
-        state->error_message = transaction.error()->format();
-        return false;
-    }
-
-    ViewportTransformGesture gesture;
-    gesture.bone_index = *bone_index;
-    gesture.bone_name = bone_name;
-    gesture.animation_name = state->selected_animation_name;
-    gesture.time_seconds = state->timeline_time_seconds;
-    gesture.selection_before = state->selection;
-    gesture.hierarchy_anchor_before = state->hierarchy_selection_anchor;
-    gesture.timeline_focus_before = state->selected_timeline_track_id;
-    gesture.transaction = std::move(transaction);
     ViewportRotateGesturePayload rotate;
     rotate.basis = *basis;
     rotate.start_absolute_rotation = start_rotation;
     rotate.previous_wrapped_angle = *wrapped_angle;
     rotate.pointer_screen = pointer;
     rotate.current_absolute_rotation = start_rotation;
-    gesture.payload = rotate;
-    state->viewport_transform_gesture.emplace(std::move(gesture));
-    state->error_message.clear();
-    return true;
+    const bool started = begin_viewport_transform_gesture(
+        state,
+        *bone_index,
+        "Rotate",
+        "viewport-rotate",
+        std::move(rotate));
+    if (started) {
+        state->error_message.clear();
+    }
+    return started;
 }
 
 bool update_rotate_gesture(
@@ -1307,32 +1314,6 @@ bool begin_scale_gesture(
         return false;
     }
 
-    const std::string bone_name =
-        state->session.runtime_data()->bones()[*bone_index].name;
-    state->timeline_playing = false;
-    state->session.set_playing(false);
-    auto transaction = state->session.begin_edit({
-        marrow::editor::EditKind::MoveBone,
-        "Scale bone " + bone_name,
-        "viewport-scale:" + state->selected_animation_name + ":" + bone_name,
-        false,
-        marrow::editor::EditImpact::Project |
-            marrow::editor::EditImpact::Runtime |
-            marrow::editor::EditImpact::Preview});
-    if (!transaction) {
-        state->error_message = transaction.error()->format();
-        return false;
-    }
-
-    ViewportTransformGesture gesture;
-    gesture.bone_index = *bone_index;
-    gesture.bone_name = bone_name;
-    gesture.animation_name = state->selected_animation_name;
-    gesture.time_seconds = state->timeline_time_seconds;
-    gesture.selection_before = state->selection;
-    gesture.hierarchy_anchor_before = state->hierarchy_selection_anchor;
-    gesture.timeline_focus_before = state->selected_timeline_track_id;
-    gesture.transaction = std::move(transaction);
     ViewportScaleGesturePayload scale;
     scale.basis = *basis;
     scale.handle = handle;
@@ -1342,10 +1323,16 @@ bool begin_scale_gesture(
     scale.pointer_screen = pointer;
     scale.current_absolute_scale_x = start_scale->scale_x;
     scale.current_absolute_scale_y = start_scale->scale_y;
-    gesture.payload = scale;
-    state->viewport_transform_gesture.emplace(std::move(gesture));
-    state->error_message.clear();
-    return true;
+    const bool started = begin_viewport_transform_gesture(
+        state,
+        *bone_index,
+        "Scale",
+        "viewport-scale",
+        std::move(scale));
+    if (started) {
+        state->error_message.clear();
+    }
+    return started;
 }
 
 bool update_scale_gesture(
@@ -1443,57 +1430,6 @@ std::optional<marrow::runtime::AttachmentVertex> bone_local_position_from_world(
 
 
 template <typename MutateFn>
-bool apply_coalesced_viewport_drag(
-    ShellState* state,
-    bool changed,
-    std::string label,
-    std::string group,
-    bool allow_merge,
-    MutateFn mutate) {
-    if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
-        return false;
-    }
-
-    const ImGuiID item_id = ImGui::GetItemID();
-    if (ImGui::IsItemActivated()) {
-        state->pending_edit_action = PendingEditAction{
-            item_id,
-            EditActionKind::EditProperty,
-            std::move(label),
-            std::move(group),
-            allow_merge,
-            capture_history_snapshot(*state)};
-    }
-
-    if (changed) {
-        mutate();
-        update_project_dirty_state(state);
-    }
-
-    if (ImGui::IsItemDeactivatedAfterEdit() &&
-        state->pending_edit_action.has_value() &&
-        state->pending_edit_action->item_id == item_id) {
-        PendingEditAction pending = std::move(*state->pending_edit_action);
-        state->pending_edit_action.reset();
-        return record_action_from_snapshots(
-            state,
-            pending.before_snapshot,
-            pending.kind,
-            std::move(pending.label),
-            std::move(pending.group),
-            pending.allow_merge);
-    }
-
-    if (ImGui::IsItemDeactivated() &&
-        state->pending_edit_action.has_value() &&
-        state->pending_edit_action->item_id == item_id) {
-        state->pending_edit_action.reset();
-    }
-
-    return true;
-}
-
-template <typename MutateFn>
 bool apply_coalesced_onion_skin_drag(
     ShellState* state,
     bool changed,
@@ -1501,12 +1437,16 @@ bool apply_coalesced_onion_skin_drag(
     std::string group,
     bool allow_merge,
     MutateFn mutate) {
-    return apply_coalesced_viewport_drag(
+    return apply_coalesced_edit_frame(
         state,
-        changed,
-        std::move(label),
-        std::move(group),
-        allow_merge,
+        coalesced_edit_frame_from_last_item(changed),
+        CoalescedEditDescriptor{
+            EditActionKind::EditProperty,
+            std::move(label),
+            std::move(group),
+            allow_merge,
+            CoalescedEditPolicy::ProjectMetadataOnly,
+            {}},
         [&]() {
             auto settings = state->viewport.onion_skin;
             mutate(&settings);

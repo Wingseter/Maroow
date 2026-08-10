@@ -21,6 +21,7 @@
 
 #include "macos_app_focus.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_coalesced_edit.hpp"
 #include "shell_constraints.hpp"
 #include "shell_agent_panel.hpp"
 #include "shell_inspector.hpp"
@@ -602,7 +603,7 @@ ShellFrameOutcome render_shell_frame(
 
     finalize_orphaned_inspector_transform_gesture(shell_state);
     finalize_orphaned_viewport_transform_gesture(shell_state);
-    finalize_orphaned_edit_action(shell_state);
+    finalize_orphaned_coalesced_edit(shell_state);
 
     if (reload_requested) {
         reload_project(shell_state);

@@ -1,5 +1,6 @@
 #include "shell_state.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_coalesced_edit.hpp"
 #include "shell_selection.hpp"
 #include "shell_weight_paint.hpp"
 
@@ -377,7 +378,32 @@ bool record_action_from_snapshots(
     return true;
 }
 
-void finalize_orphaned_edit_action(ShellState* state) {
+CoalescedEditFrame coalesced_edit_frame_from_last_item(bool changed) {
+    return CoalescedEditFrame{
+        ImGui::GetItemID(),
+        ImGui::IsItemActivated(),
+        changed,
+        ImGui::IsItemDeactivatedAfterEdit(),
+        ImGui::IsItemDeactivated()};
+}
+
+bool finalize_coalesced_edit(ShellState* state, ImGuiID item_id) {
+    if (state == nullptr || !state->pending_edit_action.has_value() ||
+        state->pending_edit_action->item_id != item_id) {
+        return false;
+    }
+    PendingEditAction pending = std::move(*state->pending_edit_action);
+    state->pending_edit_action.reset();
+    return record_action_from_snapshots(
+        state,
+        pending.before_snapshot,
+        pending.kind,
+        std::move(pending.label),
+        std::move(pending.group),
+        pending.allow_merge);
+}
+
+void finalize_orphaned_coalesced_edit(ShellState* state) {
     if (state == nullptr || !state->pending_edit_action.has_value()) {
         return;
     }
@@ -389,15 +415,17 @@ void finalize_orphaned_edit_action(ShellState* state) {
         return;
     }
 
-    PendingEditAction pending = std::move(*state->pending_edit_action);
+    (void)finalize_coalesced_edit(state, item_id);
+}
+
+bool cancel_coalesced_edit(ShellState* state) {
+    if (state == nullptr || !state->pending_edit_action.has_value()) {
+        return false;
+    }
+    const EditorHistorySnapshot before = state->pending_edit_action->before_snapshot;
     state->pending_edit_action.reset();
-    (void)record_action_from_snapshots(
-        state,
-        pending.before_snapshot,
-        pending.kind,
-        std::move(pending.label),
-        std::move(pending.group),
-        pending.allow_merge);
+    restore_history_snapshot(state, before);
+    return true;
 }
 
 void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
@@ -406,13 +434,7 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
     }
 
     bool cancelled = false;
-    if (state->pending_edit_action.has_value()) {
-        const EditorHistorySnapshot before =
-            state->pending_edit_action->before_snapshot;
-        state->pending_edit_action.reset();
-        restore_history_snapshot(state, before);
-        cancelled = true;
-    }
+    cancelled = cancel_coalesced_edit(state);
     if (state->weight_paint_stroke.active) {
         const EditorHistorySnapshot before =
             state->weight_paint_stroke.before_snapshot;
