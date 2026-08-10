@@ -187,6 +187,61 @@ bool apply_persistent_parameter_edit(
     return true;
 }
 
+bool apply_parameter_shape_definition_edit(
+    ShellState* state,
+    std::string label,
+    marrow::editor::ParameterShapeAuthoringDefinition definition) {
+    Value value = marrow::editor::build_parameter_shape_authoring_value(definition);
+    return apply_persistent_parameter_edit(
+        state,
+        std::move(label),
+        [value = std::move(value)](marrow::editor::ProjectData* project) mutable {
+            return marrow::editor::upsert_parameter_shape(
+                project, std::move(value), true);
+        });
+}
+
+bool apply_parameter_deformer_definition_edit(
+    ShellState* state,
+    std::string label,
+    marrow::editor::ParameterDeformerAuthoringDefinition definition) {
+    Value value = marrow::editor::build_parameter_deformer_authoring_value(definition);
+    return apply_persistent_parameter_edit(
+        state,
+        std::move(label),
+        [value = std::move(value)](marrow::editor::ProjectData* project) mutable {
+            return marrow::editor::upsert_parameter_deformer(
+                project, std::move(value), true);
+        });
+}
+
+bool apply_expression_definition_edit(
+    ShellState* state,
+    std::string label,
+    marrow::editor::ExpressionAuthoringDefinition definition) {
+    Value value = marrow::editor::build_expression_authoring_value(definition);
+    return apply_persistent_parameter_edit(
+        state,
+        std::move(label),
+        [value = std::move(value)](marrow::editor::ProjectData* project) mutable {
+            return marrow::editor::upsert_expression(
+                project, std::move(value), true);
+        });
+}
+
+const char* parameter_deformer_axis_name(
+    marrow::runtime::ParameterDeformerAxis axis) {
+    switch (axis) {
+    case marrow::runtime::ParameterDeformerAxis::X:
+        return "x";
+    case marrow::runtime::ParameterDeformerAxis::Y:
+        return "y";
+    case marrow::runtime::ParameterDeformerAxis::Angle:
+        return "angle";
+    }
+    return "unknown";
+}
+
 bool capture_current_keyform(
     ShellState* state,
     std::string id,
@@ -1151,18 +1206,7 @@ void draw_shapes_deformers_window(ShellState* state) {
             is_shape ? model->find_shape(selected_id) : nullptr;
         const marrow::editor::ParameterDeformerAuthoringDefinition* selected_deformer =
             is_shape ? nullptr : model->find_deformer(selected_id);
-        std::optional<Value> selected_storage;
-        if (selected_shape != nullptr) {
-            selected_storage = marrow::editor::build_parameter_shape_authoring_value(
-                *selected_shape);
-        } else if (selected_deformer != nullptr) {
-            selected_storage = marrow::editor::build_parameter_deformer_authoring_value(
-                *selected_deformer);
-        }
-        const Value* selected_definition = selected_storage.has_value()
-            ? &*selected_storage
-            : nullptr;
-        if (selected_definition != nullptr) {
+        if (selected_shape != nullptr || selected_deformer != nullptr) {
             ImGui::SeparatorText("Definition");
             if (selected_shape != nullptr) {
                 bool normalized = selected_shape->blend_mode ==
@@ -1173,16 +1217,10 @@ void draw_shapes_deformers_window(ShellState* state) {
                     edited.blend_mode = normalized
                         ? marrow::runtime::ParameterShapeBlendMode::NormalizedOverride
                         : marrow::runtime::ParameterShapeBlendMode::AdditiveClamped;
-                    Value edited_value =
-                        marrow::editor::build_parameter_shape_authoring_value(edited);
-                    (void)apply_persistent_parameter_edit(
+                    (void)apply_parameter_shape_definition_edit(
                         state,
                         "Edit shape blend mode " + edited.id,
-                        [edited_value = std::move(edited_value)](
-                            marrow::editor::ProjectData* candidate) mutable {
-                            return marrow::editor::upsert_parameter_shape(
-                                candidate, std::move(edited_value), true);
-                        });
+                        std::move(edited));
                     ImGui::End();
                     return;
                 }
@@ -1239,44 +1277,31 @@ void draw_shapes_deformers_window(ShellState* state) {
                             static_cast<std::size_t>(columns),
                             static_cast<std::size_t>(rows));
                     }
-                    Value edited_value =
-                        marrow::editor::build_parameter_deformer_authoring_value(edited);
-                    (void)apply_persistent_parameter_edit(
+                    (void)apply_parameter_deformer_definition_edit(
                         state,
                         "Edit parameter deformer " + edited.id,
-                        [edited_value = std::move(edited_value)](
-                            marrow::editor::ProjectData* candidate) mutable {
-                            return marrow::editor::upsert_parameter_deformer(
-                                candidate, std::move(edited_value), true);
-                        });
+                        std::move(edited));
                     ImGui::End();
                     return;
                 }
             }
             ImGui::SeparatorText("Target Binding");
             if (is_shape) {
-                const Value* parameter =
-                    marrow::runtime::json::find_member(*selected_definition, "parameter");
-                const char* preview = parameter != nullptr && parameter->is_string()
-                    ? parameter->as_string().c_str()
-                    : "<unbound>";
+                const char* preview = selected_shape->parameter.empty()
+                    ? "<unbound>"
+                    : selected_shape->parameter.c_str();
                 if (ImGui::BeginCombo("Parameter", preview)) {
                     for (const ParameterAuthoringDefinition& candidate : model->parameters) {
                         if (candidate.type != ParameterAuthoringType::Continuous) continue;
-                        const bool selected = parameter != nullptr && parameter->is_string() &&
-                            parameter->as_string() == candidate.id;
+                        const bool selected = selected_shape->parameter == candidate.id;
                         if (ImGui::Selectable(candidate.id.c_str(), selected)) {
-                            Value edited = *selected_definition;
-                            edited.as_object()["parameter"] = string_value(candidate.id);
-                            const std::string id = selected_id;
-                            (void)apply_persistent_parameter_edit(
+                            auto edited = *selected_shape;
+                            edited.parameter = candidate.id;
+                            edited.parameter_index.reset();
+                            (void)apply_parameter_shape_definition_edit(
                                 state,
-                                "Bind shape parameter " + id,
-                                [edited = std::move(edited)](
-                                    marrow::editor::ProjectData* project_candidate) mutable {
-                                    return marrow::editor::upsert_parameter_shape(
-                                        project_candidate, std::move(edited), true);
-                                });
+                                "Bind shape parameter " + edited.id,
+                                std::move(edited));
                             ImGui::EndCombo();
                             ImGui::End();
                             return;
@@ -1285,68 +1310,47 @@ void draw_shapes_deformers_window(ShellState* state) {
                     ImGui::EndCombo();
                 }
             } else {
-                const Value* bindings = marrow::runtime::json::find_member(
-                    *selected_definition, "parameter_bindings");
-                if (bindings != nullptr && bindings->is_array()) {
-                    for (std::size_t binding_index = 0U;
-                         binding_index < bindings->as_array().size();
-                         ++binding_index) {
-                        const Value& binding = bindings->as_array()[binding_index];
-                        const Value* parameter =
-                            marrow::runtime::json::find_member(binding, "parameter");
-                        const Value* axis = marrow::runtime::json::find_member(binding, "axis");
-                        const std::string label = axis != nullptr && axis->is_string()
-                            ? "Parameter (" + axis->as_string() + ")"
-                            : "Parameter";
-                        const char* preview = parameter != nullptr && parameter->is_string()
-                            ? parameter->as_string().c_str()
-                            : "<unbound>";
-                        if (ImGui::BeginCombo(
-                                (label + "##" + std::to_string(binding_index)).c_str(),
-                                preview)) {
-                            for (const ParameterAuthoringDefinition& candidate : model->parameters) {
-                                if (candidate.type != ParameterAuthoringType::Continuous) continue;
-                                const bool selected = parameter != nullptr && parameter->is_string() &&
-                                    parameter->as_string() == candidate.id;
-                                if (ImGui::Selectable(candidate.id.c_str(), selected)) {
-                                    Value edited = *selected_definition;
-                                    Value* edited_bindings = marrow::runtime::json::find_member(
-                                        edited, "parameter_bindings");
-                                    edited_bindings->as_array()[binding_index]
-                                        .as_object()["parameter"] = string_value(candidate.id);
-                                    const std::string id = selected_id;
-                                    (void)apply_persistent_parameter_edit(
-                                        state,
-                                        "Bind deformer parameter " + id,
-                                        [edited = std::move(edited)](
-                                            marrow::editor::ProjectData* project_candidate) mutable {
-                                            return marrow::editor::upsert_parameter_deformer(
-                                                project_candidate, std::move(edited), true);
-                                        });
-                                    ImGui::EndCombo();
-                                    ImGui::End();
-                                    return;
-                                }
+                for (std::size_t binding_index = 0U;
+                     binding_index < selected_deformer->parameter_bindings.size();
+                     ++binding_index) {
+                    const auto& binding =
+                        selected_deformer->parameter_bindings[binding_index];
+                    const std::string label = "Parameter (" +
+                        std::string(parameter_deformer_axis_name(binding.axis)) + ")";
+                    const char* preview = binding.parameter.empty()
+                        ? "<unbound>"
+                        : binding.parameter.c_str();
+                    if (ImGui::BeginCombo(
+                            (label + "##" + std::to_string(binding_index)).c_str(),
+                            preview)) {
+                        for (const ParameterAuthoringDefinition& candidate : model->parameters) {
+                            if (candidate.type != ParameterAuthoringType::Continuous) continue;
+                            const bool selected = binding.parameter == candidate.id;
+                            if (ImGui::Selectable(candidate.id.c_str(), selected)) {
+                                auto edited = *selected_deformer;
+                                edited.parameter_bindings[binding_index].parameter = candidate.id;
+                                edited.parameter_bindings[binding_index].parameter_index.reset();
+                                (void)apply_parameter_deformer_definition_edit(
+                                    state,
+                                    "Bind deformer parameter " + edited.id,
+                                    std::move(edited));
+                                ImGui::EndCombo();
+                                ImGui::End();
+                                return;
                             }
-                            ImGui::EndCombo();
                         }
+                        ImGui::EndCombo();
                     }
                 }
             }
 
             const auto* data = state->load_result.skeleton_data.get();
             if (data != nullptr && !data->slots().empty()) {
-                const Value* target_value = is_shape
-                    ? marrow::runtime::json::find_member(*selected_definition, "target_slot")
-                    : marrow::runtime::json::find_member(*selected_definition, "target_slots");
-                std::string current_target;
-                if (is_shape && target_value != nullptr && target_value->is_string()) {
-                    current_target = target_value->as_string();
-                } else if (!is_shape && target_value != nullptr && target_value->is_array() &&
-                           !target_value->as_array().empty() &&
-                           target_value->as_array().front().is_string()) {
-                    current_target = target_value->as_array().front().as_string();
-                }
+                const std::string current_target = is_shape
+                    ? selected_shape->target_slot
+                    : selected_deformer->target_slots.empty()
+                        ? std::string{}
+                        : selected_deformer->target_slots.front();
                 if (ImGui::BeginCombo(
                         "Target Slot",
                         current_target.empty() ? "<none>" : current_target.c_str())) {
@@ -1359,27 +1363,23 @@ void draw_shapes_deformers_window(ShellState* state) {
                             continue;
                         }
                         if (ImGui::Selectable(slot.name.c_str(), current_target == slot.name)) {
-                            Value edited = *selected_definition;
                             if (is_shape) {
-                                edited.as_object()["target_slot"] = string_value(slot.name);
-                                edited.as_object()["target_attachment"] =
-                                    string_value(target_attachment->name);
+                                auto edited = *selected_shape;
+                                edited.target_slot = slot.name;
+                                edited.target_attachment = target_attachment->name;
+                                (void)apply_parameter_shape_definition_edit(
+                                    state,
+                                    "Bind parameter target " + edited.id,
+                                    std::move(edited));
                             } else {
-                                edited.as_object()["target_slots"] = array_value(
-                                    Value::Array{string_value(slot.name)});
+                                auto edited = *selected_deformer;
+                                edited.target_slots = {slot.name};
+                                edited.target_slot_indices.clear();
+                                (void)apply_parameter_deformer_definition_edit(
+                                    state,
+                                    "Bind parameter target " + edited.id,
+                                    std::move(edited));
                             }
-                            const std::string id = selected_id;
-                            (void)apply_persistent_parameter_edit(
-                                state,
-                                "Bind parameter target " + id,
-                                [is_shape, edited = std::move(edited)](
-                                    marrow::editor::ProjectData* project_candidate) mutable {
-                                    return is_shape
-                                        ? marrow::editor::upsert_parameter_shape(
-                                              project_candidate, std::move(edited), true)
-                                        : marrow::editor::upsert_parameter_deformer(
-                                              project_candidate, std::move(edited), true);
-                                });
                             ImGui::EndCombo();
                             ImGui::End();
                             return;
@@ -1390,12 +1390,8 @@ void draw_shapes_deformers_window(ShellState* state) {
             }
             if (!is_shape) {
                 ImGui::SeparatorText("Geometry Gesture");
-                const Value* kind =
-                    marrow::runtime::json::find_member(*selected_definition, "kind");
                 const std::optional<std::size_t> current_keyform =
-                    selected_deformer == nullptr
-                    ? std::nullopt
-                    : current_deformer_keyform_index(
+                    current_deformer_keyform_index(
                           *state, selected_id, *selected_deformer);
                 if (!current_keyform.has_value()) {
                     ImGui::TextDisabled(
@@ -1416,32 +1412,25 @@ void draw_shapes_deformers_window(ShellState* state) {
                             initial_value};
                         ImGui::OpenPopup("Capture Missing Geometry Keyform?");
                     }
-                } else if (kind != nullptr && kind->is_string() &&
-                           kind->as_string() == "rotation") {
-                    const Value* pivot = marrow::runtime::json::find_member(
-                        *selected_definition, "pivot");
-                    if (pivot != nullptr && pivot->is_array() &&
-                        pivot->as_array().size() == 2U &&
-                        pivot->as_array()[0].is_number() &&
-                        pivot->as_array()[1].is_number()) {
-                        if (draw_parameter_geometry_scalar(
-                                state,
-                                selected_id,
-                                "pivot:x",
-                                "Pivot X",
-                                pivot->as_array()[0].as_number()) ||
-                            draw_parameter_geometry_scalar(
-                                state,
-                                selected_id,
-                                "pivot:y",
-                                "Pivot Y",
-                                pivot->as_array()[1].as_number())) {
-                            ImGui::End();
-                            return;
-                        }
+                } else if (selected_deformer->kind ==
+                           marrow::runtime::ParameterDeformerKind::Rotation) {
+                    if (draw_parameter_geometry_scalar(
+                            state,
+                            selected_id,
+                            "pivot:x",
+                            "Pivot X",
+                            selected_deformer->pivot.x) ||
+                        draw_parameter_geometry_scalar(
+                            state,
+                            selected_id,
+                            "pivot:y",
+                            "Pivot Y",
+                            selected_deformer->pivot.y)) {
+                        ImGui::End();
+                        return;
                     }
-                } else if (kind != nullptr && kind->is_string() &&
-                           kind->as_string() == "warp" && selected_deformer != nullptr &&
+                } else if (selected_deformer->kind ==
+                               marrow::runtime::ParameterDeformerKind::Warp &&
                            *current_keyform < selected_deformer->warp_keyforms.size()) {
                     const auto& control_points =
                         selected_deformer->warp_keyforms[*current_keyform].control_points;
@@ -1576,95 +1565,129 @@ void draw_expressions_window(ShellState* state) {
     }
     const marrow::editor::ExpressionAuthoringDefinition* selected_expression =
         model == nullptr ? nullptr : model->find_expression(g_selection.expression_id);
-    std::optional<Value> selected_storage;
     if (selected_expression != nullptr) {
-        selected_storage = marrow::editor::build_expression_authoring_value(
-            *selected_expression);
-    }
-    const Value* selected = selected_storage.has_value() ? &*selected_storage : nullptr;
-    if (selected != nullptr) {
-        auto edited = *selected_expression;
-        bool expression_changed = input_string_field("Name", &edited.name);
-        expression_changed |= ImGui::InputDouble(
-            "Duration", &edited.duration, 0.01, 0.1);
-        expression_changed |= ImGui::InputInt("Priority", &edited.priority);
-        bool override_blend = edited.blend == marrow::runtime::ExpressionBlend::Override;
+        const auto commit_expression_change = [&](auto mutate) {
+            auto edited = *selected_expression;
+            mutate(&edited);
+            return apply_expression_definition_edit(
+                state, "Edit expression " + edited.id, std::move(edited));
+        };
+
+        std::string name = selected_expression->name;
+        if (input_string_field("Name", &name)) {
+            (void)commit_expression_change(
+                [&](auto* edited) { edited->name = std::move(name); });
+            ImGui::End();
+            return;
+        }
+        double duration = selected_expression->duration;
+        if (ImGui::InputDouble("Duration", &duration, 0.01, 0.1)) {
+            (void)commit_expression_change(
+                [&](auto* edited) { edited->duration = duration; });
+            ImGui::End();
+            return;
+        }
+        int priority = selected_expression->priority;
+        if (ImGui::InputInt("Priority", &priority)) {
+            (void)commit_expression_change(
+                [&](auto* edited) { edited->priority = priority; });
+            ImGui::End();
+            return;
+        }
+        bool override_blend = selected_expression->blend ==
+            marrow::runtime::ExpressionBlend::Override;
         if (ImGui::Checkbox("Override Blend", &override_blend)) {
-            edited.blend = override_blend
-                ? marrow::runtime::ExpressionBlend::Override
-                : marrow::runtime::ExpressionBlend::Additive;
-            expression_changed = true;
+            (void)commit_expression_change([&](auto* edited) {
+                edited->blend = override_blend
+                    ? marrow::runtime::ExpressionBlend::Override
+                    : marrow::runtime::ExpressionBlend::Additive;
+            });
+            ImGui::End();
+            return;
         }
         ImGui::SameLine();
-        bool hold = edited.reset_policy == marrow::runtime::ExpressionResetPolicy::Hold;
+        bool hold = selected_expression->reset_policy ==
+            marrow::runtime::ExpressionResetPolicy::Hold;
         if (ImGui::Checkbox("Hold on Deactivate", &hold)) {
-            edited.reset_policy = hold
-                ? marrow::runtime::ExpressionResetPolicy::Hold
-                : marrow::runtime::ExpressionResetPolicy::Restore;
-            expression_changed = true;
+            (void)commit_expression_change([&](auto* edited) {
+                edited->reset_policy = hold
+                    ? marrow::runtime::ExpressionResetPolicy::Hold
+                    : marrow::runtime::ExpressionResetPolicy::Restore;
+            });
+            ImGui::End();
+            return;
         }
         ImGui::SeparatorText("Targets");
-        std::optional<std::size_t> remove_target;
         for (std::size_t target_index = 0U;
-             target_index < edited.targets.size();
+             target_index < selected_expression->targets.size();
              ++target_index) {
-            auto& target = edited.targets[target_index];
+            const auto& target = selected_expression->targets[target_index];
             ImGui::PushID(static_cast<int>(target_index));
             if (ImGui::BeginCombo("Parameter", target.parameter.c_str())) {
                 for (const ParameterAuthoringDefinition& parameter : model->parameters) {
                     const bool used_elsewhere = std::any_of(
-                        edited.targets.begin(), edited.targets.end(),
+                        selected_expression->targets.begin(),
+                        selected_expression->targets.end(),
                         [&](const marrow::runtime::ExpressionTargetDefinition& candidate) {
-                            return &candidate != &target && candidate.parameter == parameter.id;
+                            return &candidate != &target &&
+                                candidate.parameter == parameter.id;
                         });
                     if (used_elsewhere) continue;
                     const bool is_selected = target.parameter == parameter.id;
                     if (ImGui::Selectable(parameter.id.c_str(), is_selected)) {
-                        target.parameter = parameter.id;
-                        expression_changed = true;
+                        (void)commit_expression_change([&](auto* edited) {
+                            edited->targets[target_index].parameter = parameter.id;
+                            edited->targets[target_index].parameter_index.reset();
+                        });
+                        ImGui::EndCombo();
+                        ImGui::PopID();
+                        ImGui::End();
+                        return;
                     }
                 }
                 ImGui::EndCombo();
             }
-            expression_changed |= ImGui::InputDouble("Value", &target.value, 0.01, 0.1);
-            if (edited.targets.size() > 1U && ImGui::SmallButton("Remove Target")) {
-                remove_target = target_index;
+            double target_value = target.value;
+            if (ImGui::InputDouble("Value", &target_value, 0.01, 0.1)) {
+                (void)commit_expression_change([&](auto* edited) {
+                    edited->targets[target_index].value = target_value;
+                });
+                ImGui::PopID();
+                ImGui::End();
+                return;
+            }
+            if (selected_expression->targets.size() > 1U &&
+                ImGui::SmallButton("Remove Target")) {
+                (void)commit_expression_change([&](auto* edited) {
+                    edited->targets.erase(
+                        edited->targets.begin() +
+                        static_cast<std::ptrdiff_t>(target_index));
+                });
+                ImGui::PopID();
+                ImGui::End();
+                return;
             }
             ImGui::PopID();
-        }
-        if (remove_target.has_value()) {
-            edited.targets.erase(edited.targets.begin() +
-                static_cast<std::ptrdiff_t>(*remove_target));
-            expression_changed = true;
         }
         if (ImGui::Button("Add Target")) {
             const auto unused = std::find_if(
                 model->parameters.begin(), model->parameters.end(),
                 [&](const ParameterAuthoringDefinition& parameter) {
                     return std::none_of(
-                        edited.targets.begin(), edited.targets.end(),
+                        selected_expression->targets.begin(),
+                        selected_expression->targets.end(),
                         [&](const marrow::runtime::ExpressionTargetDefinition& target) {
                             return target.parameter == parameter.id;
                         });
                 });
             if (unused != model->parameters.end()) {
-                edited.targets.push_back({unused->id, std::nullopt, unused->default_value});
-                expression_changed = true;
-            }
-        }
-        if (expression_changed) {
-            Value edited_value = marrow::editor::build_expression_authoring_value(edited);
-            const std::string id = edited.id;
-            (void)apply_persistent_parameter_edit(
-                state,
-                "Edit expression " + id,
-                [edited_value = std::move(edited_value)](
-                    marrow::editor::ProjectData* candidate) mutable {
-                    return marrow::editor::upsert_expression(
-                        candidate, std::move(edited_value), true);
+                (void)commit_expression_change([&](auto* edited) {
+                    edited->targets.push_back(
+                        {unused->id, std::nullopt, unused->default_value});
                 });
-            ImGui::End();
-            return;
+                ImGui::End();
+                return;
+            }
         }
         const bool active = state->session.preview_state().active_expression ==
             std::optional<std::string>(g_selection.expression_id);
@@ -1716,6 +1739,30 @@ Value build_lip_mapping_value(
         : object_value();
 }
 
+bool apply_lip_sync_mapping_definition_edit(
+    ShellState* state,
+    std::string label,
+    std::string previous_parameter,
+    marrow::editor::LipSyncMappingAuthoringDefinition definition) {
+    const std::string next_parameter = definition.parameter;
+    Value value = build_lip_mapping_value(definition);
+    return apply_persistent_parameter_edit(
+        state,
+        std::move(label),
+        [previous_parameter = std::move(previous_parameter),
+         next_parameter,
+         value = std::move(value)](
+            marrow::editor::ProjectData* project) mutable {
+            if (previous_parameter != next_parameter) {
+                AuthoringResult removed = marrow::editor::delete_lip_sync_mapping(
+                    project, previous_parameter);
+                if (!removed) return removed;
+            }
+            return marrow::editor::upsert_lip_sync_mapping(
+                project, std::move(value));
+        });
+}
+
 void draw_lip_sync_window(ShellState* state) {
     if (!ImGui::Begin(kLipSyncWindowTitle)) {
         ImGui::End();
@@ -1762,90 +1809,147 @@ void draw_lip_sync_window(ShellState* state) {
             if (g_selection.lip_parameter_id == mapping.parameter) selected_mapping = &mapping;
         }
     }
-    std::optional<Value> selected_storage;
     if (selected_mapping != nullptr) {
-        selected_storage = build_lip_mapping_value(*selected_mapping);
-    }
-    const Value* selected = selected_storage.has_value() ? &*selected_storage : nullptr;
-    if (selected != nullptr) {
-        auto edited = *selected_mapping;
-        const std::string previous_parameter = edited.parameter;
-        bool mapping_changed = false;
-        bool phoneme_source = edited.source == marrow::runtime::LipSyncSource::Phoneme;
+        const auto commit_mapping_change = [&](auto mutate) {
+            auto edited = *selected_mapping;
+            const std::string previous_parameter = edited.parameter;
+            mutate(&edited);
+            const std::string next_parameter = edited.parameter;
+            const bool committed = apply_lip_sync_mapping_definition_edit(
+                state,
+                "Edit lip-sync mapping " + previous_parameter,
+                previous_parameter,
+                std::move(edited));
+            g_selection.lip_parameter_id = next_parameter;
+            return committed;
+        };
+
+        bool phoneme_source = selected_mapping->source ==
+            marrow::runtime::LipSyncSource::Phoneme;
         if (ImGui::Checkbox("Phoneme Source", &phoneme_source)) {
-            edited.source = phoneme_source
-                ? marrow::runtime::LipSyncSource::Phoneme
-                : marrow::runtime::LipSyncSource::Amplitude;
-            mapping_changed = true;
+            (void)commit_mapping_change([&](auto* edited) {
+                edited->source = phoneme_source
+                    ? marrow::runtime::LipSyncSource::Phoneme
+                    : marrow::runtime::LipSyncSource::Amplitude;
+            });
+            ImGui::End();
+            return;
         }
         ImGui::BeginDisabled(blocked);
-        if (ImGui::BeginCombo("Target Parameter", edited.parameter.c_str())) {
+        if (ImGui::BeginCombo("Target Parameter", selected_mapping->parameter.c_str())) {
             for (const ParameterAuthoringDefinition& parameter : model->parameters) {
-                const bool is_selected = edited.parameter == parameter.id;
+                const bool is_selected = selected_mapping->parameter == parameter.id;
                 if (ImGui::Selectable(parameter.id.c_str(), is_selected)) {
-                    edited.parameter = parameter.id;
-                    mapping_changed = true;
+                    (void)commit_mapping_change([&](auto* edited) {
+                        edited->parameter = parameter.id;
+                        edited->parameter_index.reset();
+                    });
+                    ImGui::EndCombo();
+                    ImGui::EndDisabled();
+                    ImGui::End();
+                    return;
                 }
             }
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
-        mapping_changed |= ImGui::InputDouble("Scale", &edited.scale, 0.05, 0.25);
-        mapping_changed |= ImGui::InputDouble("Bias", &edited.bias, 0.05, 0.25);
-        mapping_changed |= ImGui::InputDouble("Attack", &edited.attack, 0.01, 0.1);
-        mapping_changed |= ImGui::InputDouble("Release", &edited.release, 0.01, 0.1);
-        mapping_changed |= ImGui::InputDouble("Smoothing", &edited.smoothing, 0.01, 0.1);
-        ImGui::SeparatorText("Phoneme Map");
-        std::optional<std::size_t> remove_phoneme;
-        for (std::size_t phoneme_index = 0U;
-             phoneme_index < edited.phoneme_map.size();
-             ++phoneme_index) {
-            auto& phoneme = edited.phoneme_map[phoneme_index];
-            ImGui::PushID(static_cast<int>(phoneme_index));
-            mapping_changed |= input_string_field("Phoneme", &phoneme.phoneme);
-            mapping_changed |= ImGui::InputDouble("Value", &phoneme.value, 0.05, 0.25);
-            if (ImGui::SmallButton("Remove Phoneme")) remove_phoneme = phoneme_index;
-            ImGui::PopID();
+        const auto draw_mapping_scalar = [&](const char* label,
+                                             double value,
+                                             double step,
+                                             double step_fast,
+                                             auto assign) {
+            if (!ImGui::InputDouble(label, &value, step, step_fast)) {
+                return false;
+            }
+            (void)commit_mapping_change(
+                [&](auto* edited) { assign(edited, value); });
+            return true;
+        };
+        if (draw_mapping_scalar(
+                "Scale",
+                selected_mapping->scale,
+                0.05,
+                0.25,
+                [](auto* edited, double value) { edited->scale = value; }) ||
+            draw_mapping_scalar(
+                "Bias",
+                selected_mapping->bias,
+                0.05,
+                0.25,
+                [](auto* edited, double value) { edited->bias = value; }) ||
+            draw_mapping_scalar(
+                "Attack",
+                selected_mapping->attack,
+                0.01,
+                0.1,
+                [](auto* edited, double value) { edited->attack = value; }) ||
+            draw_mapping_scalar(
+                "Release",
+                selected_mapping->release,
+                0.01,
+                0.1,
+                [](auto* edited, double value) { edited->release = value; }) ||
+            draw_mapping_scalar(
+                "Smoothing",
+                selected_mapping->smoothing,
+                0.01,
+                0.1,
+                [](auto* edited, double value) { edited->smoothing = value; })) {
+            ImGui::End();
+            return;
         }
-        if (remove_phoneme.has_value()) {
-            edited.phoneme_map.erase(edited.phoneme_map.begin() +
-                static_cast<std::ptrdiff_t>(*remove_phoneme));
-            mapping_changed = true;
+        ImGui::SeparatorText("Phoneme Map");
+        for (std::size_t phoneme_index = 0U;
+             phoneme_index < selected_mapping->phoneme_map.size();
+             ++phoneme_index) {
+            const auto& phoneme = selected_mapping->phoneme_map[phoneme_index];
+            ImGui::PushID(static_cast<int>(phoneme_index));
+            std::string phoneme_name = phoneme.phoneme;
+            if (input_string_field("Phoneme", &phoneme_name)) {
+                (void)commit_mapping_change([&](auto* edited) {
+                    edited->phoneme_map[phoneme_index].phoneme =
+                        std::move(phoneme_name);
+                });
+                ImGui::PopID();
+                ImGui::End();
+                return;
+            }
+            double phoneme_value = phoneme.value;
+            if (ImGui::InputDouble("Value", &phoneme_value, 0.05, 0.25)) {
+                (void)commit_mapping_change([&](auto* edited) {
+                    edited->phoneme_map[phoneme_index].value = phoneme_value;
+                });
+                ImGui::PopID();
+                ImGui::End();
+                return;
+            }
+            if (ImGui::SmallButton("Remove Phoneme")) {
+                (void)commit_mapping_change([&](auto* edited) {
+                    edited->phoneme_map.erase(
+                        edited->phoneme_map.begin() +
+                        static_cast<std::ptrdiff_t>(phoneme_index));
+                });
+                ImGui::PopID();
+                ImGui::End();
+                return;
+            }
+            ImGui::PopID();
         }
         if (ImGui::Button("Add Phoneme")) {
             std::string phoneme = "A";
             for (std::size_t suffix = 1U;
                  std::any_of(
-                     edited.phoneme_map.begin(), edited.phoneme_map.end(),
+                     selected_mapping->phoneme_map.begin(),
+                     selected_mapping->phoneme_map.end(),
                      [&](const marrow::runtime::PhonemeValueDefinition& candidate) {
                          return candidate.phoneme == phoneme;
                      });
                  ++suffix) {
                 phoneme = "A" + std::to_string(suffix);
             }
-            edited.phoneme_map.push_back({std::move(phoneme), 0.0});
-            mapping_changed = true;
-        }
-        if (mapping_changed) {
-            Value edited_value = build_lip_mapping_value(edited);
-            const std::string next_parameter = edited.parameter;
-            (void)apply_persistent_parameter_edit(
-                state,
-                "Edit lip-sync mapping " + previous_parameter,
-                [previous_parameter,
-                 next_parameter,
-                 edited_value = std::move(edited_value)](
-                    marrow::editor::ProjectData* candidate) mutable {
-                    if (previous_parameter != next_parameter) {
-                        AuthoringResult removed =
-                            marrow::editor::delete_lip_sync_mapping(
-                                candidate, previous_parameter);
-                        if (!removed) return removed;
-                    }
-                    return marrow::editor::upsert_lip_sync_mapping(
-                        candidate, std::move(edited_value));
-                });
-            g_selection.lip_parameter_id = next_parameter;
+            (void)commit_mapping_change([&](auto* edited) {
+                edited->phoneme_map.push_back({std::move(phoneme), 0.0});
+            });
             ImGui::End();
             return;
         }
@@ -2048,6 +2152,20 @@ bool validate_parameter_mode_shell_smoke(
         std::cerr << definition_error << '\n';
         return false;
     }
+    warp->as_object()["panel_marker"] = string_value("warp-top");
+    Value* warp_bindings =
+        marrow::runtime::json::find_member(*warp, "parameter_bindings");
+    Value* warp_keyforms = marrow::runtime::json::find_member(*warp, "keyforms");
+    if (warp_bindings == nullptr || !warp_bindings->is_array() ||
+        warp_bindings->as_array().empty() || warp_keyforms == nullptr ||
+        !warp_keyforms->is_array() || warp_keyforms->as_array().empty()) {
+        std::cerr << "Default warp did not expose marker test entries.\n";
+        return false;
+    }
+    warp_bindings->as_array().front().as_object()["panel_marker"] =
+        string_value("warp-binding");
+    warp_keyforms->as_array().front().as_object()["panel_marker"] =
+        string_value("warp-keyform");
     const std::string warp_id = *raw_id(*warp);
     if (!apply_persistent_parameter_edit(
             state,
@@ -2077,34 +2195,70 @@ bool validate_parameter_mode_shell_smoke(
         std::cerr << "Default warp did not expose a complete typed lattice definition.\n";
         return false;
     }
-    if (!apply_persistent_parameter_edit(
+    const std::string warp_typed_before =
+        marrow::editor::serialize_project(*state->session.project());
+    auto edited_warp = *live_warp;
+    edited_warp.name = "Smoke Warp";
+    std::swap(
+        edited_warp.parameter_bindings[0].parameter,
+        edited_warp.parameter_bindings[1].parameter);
+    edited_warp.parameter_bindings[0].parameter_index.reset();
+    edited_warp.parameter_bindings[1].parameter_index.reset();
+    for (auto& keyform : edited_warp.warp_keyforms) {
+        std::swap(keyform.x, keyform.y);
+    }
+    edited_warp.target_slots = {"face"};
+    edited_warp.target_slot_indices.clear();
+    resize_warp_grid(&edited_warp, 3U, 3U);
+    if (!apply_parameter_deformer_definition_edit(
             state,
-            "Resize and name warp deformer smoke",
-            [warp_id](marrow::editor::ProjectData* project) {
-                auto* edited = project->parameter_model->find_deformer(warp_id);
-                if (edited == nullptr) {
-                    return AuthoringResult{false, "Warp deformer is missing.", {}};
-                }
-                edited->name = "Smoke Warp";
-                resize_warp_grid(edited, 3U, 3U);
-                return AuthoringResult{true, {}, {}};
-            })) {
+            "Resize and bind warp deformer smoke",
+            std::move(edited_warp))) {
         std::cerr << state->error_message << '\n';
         return false;
     }
     live_warp = state->session.project()->parameter_model->find_deformer(warp_id);
+    const Value rebuilt_warp = live_warp == nullptr
+        ? object_value()
+        : marrow::editor::build_parameter_deformer_authoring_value(*live_warp);
+    const Value* rebuilt_warp_marker =
+        marrow::runtime::json::find_member(rebuilt_warp, "panel_marker");
+    const Value* rebuilt_warp_bindings =
+        marrow::runtime::json::find_member(rebuilt_warp, "parameter_bindings");
+    const Value* rebuilt_warp_keyforms =
+        marrow::runtime::json::find_member(rebuilt_warp, "keyforms");
+    const std::string warp_typed_after =
+        marrow::editor::serialize_project(*state->session.project());
     if (live_warp == nullptr || live_warp->name != "Smoke Warp" ||
         live_warp->grid_cols != 3U || live_warp->grid_rows != 3U ||
         live_warp->control_points.size() != 9U ||
+        live_warp->parameter_bindings.front().parameter != "editor.smoke.axis" ||
+        rebuilt_warp_marker == nullptr || !rebuilt_warp_marker->is_string() ||
+        rebuilt_warp_marker->as_string() != "warp-top" ||
+        rebuilt_warp_bindings == nullptr || !rebuilt_warp_bindings->is_array() ||
+        rebuilt_warp_bindings->as_array().empty() ||
+        marrow::runtime::json::find_member(
+            rebuilt_warp_bindings->as_array().front(), "panel_marker") == nullptr ||
+        rebuilt_warp_keyforms == nullptr || !rebuilt_warp_keyforms->is_array() ||
+        rebuilt_warp_keyforms->as_array().empty() ||
+        marrow::runtime::json::find_member(
+            rebuilt_warp_keyforms->as_array().front(), "panel_marker") == nullptr ||
         std::any_of(
             live_warp->warp_keyforms.begin(),
             live_warp->warp_keyforms.end(),
             [](const marrow::runtime::WarpDeformerKeyform& keyform) {
                 return keyform.control_points.size() != 9U;
-            })) {
-        std::cerr << "Warp grid edit did not update every lattice keyform.\n";
+            }) ||
+        !state->session.undo() ||
+        marrow::editor::serialize_project(*state->session.project()) != warp_typed_before ||
+        !state->session.redo() ||
+        marrow::editor::serialize_project(*state->session.project()) != warp_typed_after) {
+        std::cerr <<
+            "Typed warp fields, unknown markers, or undo/redo were not preserved.\n";
         return false;
     }
+    sync_shell_from_editor_session(state);
+    live_warp = state->session.project()->parameter_model->find_deformer(warp_id);
     const auto live_warp_keyform = live_warp == nullptr
         ? std::nullopt
         : current_deformer_keyform_index(*state, warp_id, *live_warp);
@@ -2163,6 +2317,16 @@ bool validate_parameter_mode_shell_smoke(
         std::cerr << definition_error << '\n';
         return false;
     }
+    rotation->as_object()["panel_marker"] = string_value("rotation-top");
+    Value* rotation_bindings =
+        marrow::runtime::json::find_member(*rotation, "parameter_bindings");
+    if (rotation_bindings == nullptr || !rotation_bindings->is_array() ||
+        rotation_bindings->as_array().empty()) {
+        std::cerr << "Default rotation did not expose a marker test binding.\n";
+        return false;
+    }
+    rotation_bindings->as_array().front().as_object()["panel_marker"] =
+        string_value("rotation-binding");
     const std::string rotation_id = *raw_id(*rotation);
     if (!apply_persistent_parameter_edit(
             state,
@@ -2188,6 +2352,49 @@ bool validate_parameter_mode_shell_smoke(
         std::cerr << "Rotation creation did not select a continuous parameter and mesh slot.\n";
         return false;
     }
+    const std::string rotation_typed_before =
+        marrow::editor::serialize_project(*state->session.project());
+    auto edited_rotation = *created_rotation;
+    edited_rotation.influence = 0.75;
+    edited_rotation.pivot.x = 0.25F;
+    if (!apply_parameter_deformer_definition_edit(
+            state,
+            "Edit rotation typed fields smoke",
+            std::move(edited_rotation))) {
+        std::cerr << state->error_message << '\n';
+        return false;
+    }
+    created_rotation =
+        state->session.project()->parameter_model->find_deformer(rotation_id);
+    const Value rebuilt_rotation = created_rotation == nullptr
+        ? object_value()
+        : marrow::editor::build_parameter_deformer_authoring_value(*created_rotation);
+    const Value* rebuilt_rotation_marker =
+        marrow::runtime::json::find_member(rebuilt_rotation, "panel_marker");
+    const Value* rebuilt_rotation_bindings =
+        marrow::runtime::json::find_member(rebuilt_rotation, "parameter_bindings");
+    const std::string rotation_typed_after =
+        marrow::editor::serialize_project(*state->session.project());
+    if (created_rotation == nullptr || created_rotation->influence != 0.75 ||
+        std::abs(created_rotation->pivot.x - 0.25F) > 1e-6F ||
+        rebuilt_rotation_marker == nullptr || !rebuilt_rotation_marker->is_string() ||
+        rebuilt_rotation_marker->as_string() != "rotation-top" ||
+        rebuilt_rotation_bindings == nullptr ||
+        !rebuilt_rotation_bindings->is_array() ||
+        rebuilt_rotation_bindings->as_array().empty() ||
+        marrow::runtime::json::find_member(
+            rebuilt_rotation_bindings->as_array().front(), "panel_marker") == nullptr ||
+        !state->session.undo() ||
+        marrow::editor::serialize_project(*state->session.project()) !=
+            rotation_typed_before ||
+        !state->session.redo() ||
+        marrow::editor::serialize_project(*state->session.project()) !=
+            rotation_typed_after) {
+        std::cerr <<
+            "Typed rotation influence/pivot, markers, or undo/redo were not preserved.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
     if (!state->session.set_preview_parameter_value("mouth.open", 0.5)) {
         std::cerr << "Could not position the rotation preview between keyforms.\n";
         return false;
@@ -2284,6 +2491,15 @@ bool validate_parameter_mode_shell_smoke(
         state->session.project()->parameter_model->blend_shapes.front());
     shape.as_object()["id"] = string_value("editor.smoke.shape");
     shape.as_object()["blend_mode"] = string_value("additive_clamped");
+    shape.as_object()["panel_marker"] = string_value("shape-top");
+    Value* shape_keyforms = marrow::runtime::json::find_member(shape, "keyforms");
+    if (shape_keyforms == nullptr || !shape_keyforms->is_array() ||
+        shape_keyforms->as_array().empty()) {
+        std::cerr << "Shape marker smoke requires one typed keyform.\n";
+        return false;
+    }
+    shape_keyforms->as_array().front().as_object()["panel_marker"] =
+        string_value("shape-keyform");
     if (!apply_persistent_parameter_edit(
             state,
             "Create shape smoke",
@@ -2301,6 +2517,46 @@ bool validate_parameter_mode_shell_smoke(
         std::cerr << "Shape blend mode was not preserved by typed authoring.\n";
         return false;
     }
+    const std::string shape_typed_before =
+        marrow::editor::serialize_project(*state->session.project());
+    auto edited_shape = *created_shape;
+    edited_shape.parameter = "editor.smoke.axis";
+    edited_shape.parameter_index.reset();
+    if (!apply_parameter_shape_definition_edit(
+            state,
+            "Edit shape typed fields smoke",
+            std::move(edited_shape))) {
+        std::cerr << state->error_message << '\n';
+        return false;
+    }
+    created_shape =
+        state->session.project()->parameter_model->find_shape("editor.smoke.shape");
+    const Value rebuilt_shape = created_shape == nullptr
+        ? object_value()
+        : marrow::editor::build_parameter_shape_authoring_value(*created_shape);
+    const Value* rebuilt_shape_marker =
+        marrow::runtime::json::find_member(rebuilt_shape, "panel_marker");
+    const Value* rebuilt_shape_keyforms =
+        marrow::runtime::json::find_member(rebuilt_shape, "keyforms");
+    const std::string shape_typed_after =
+        marrow::editor::serialize_project(*state->session.project());
+    if (created_shape == nullptr || created_shape->parameter != "editor.smoke.axis" ||
+        created_shape->blend_mode !=
+            marrow::runtime::ParameterShapeBlendMode::AdditiveClamped ||
+        rebuilt_shape_marker == nullptr || !rebuilt_shape_marker->is_string() ||
+        rebuilt_shape_marker->as_string() != "shape-top" ||
+        rebuilt_shape_keyforms == nullptr || !rebuilt_shape_keyforms->is_array() ||
+        rebuilt_shape_keyforms->as_array().empty() ||
+        marrow::runtime::json::find_member(
+            rebuilt_shape_keyforms->as_array().front(), "panel_marker") == nullptr ||
+        !state->session.undo() ||
+        marrow::editor::serialize_project(*state->session.project()) != shape_typed_before ||
+        !state->session.redo() ||
+        marrow::editor::serialize_project(*state->session.project()) != shape_typed_after) {
+        std::cerr << "Typed shape fields, markers, or undo/redo were not preserved.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
     if (!apply_persistent_parameter_edit(
             state,
             "Delete shape smoke",
@@ -2318,8 +2574,11 @@ bool validate_parameter_mode_shell_smoke(
     expression.as_object()["blend"] = string_value("override");
     expression.as_object()["priority"] = number_value(7.0);
     expression.as_object()["reset_policy"] = string_value("restore");
+    expression.as_object()["panel_marker"] = string_value("expression-top");
     Value* targets = marrow::runtime::json::find_member(expression, "targets");
     targets->as_array().front().as_object()["value"] = number_value(1.0);
+    targets->as_array().front().as_object()["panel_marker"] =
+        string_value("expression-target");
     targets->as_array().push_back(object_value({
         {"parameter", string_value("editor.smoke.axis")},
         {"value", number_value(0.5)},
@@ -2332,6 +2591,7 @@ bool validate_parameter_mode_shell_smoke(
     lip_mapping.as_object()["attack"] = number_value(0.2);
     lip_mapping.as_object()["release"] = number_value(0.2);
     lip_mapping.as_object()["smoothing"] = number_value(0.1);
+    lip_mapping.as_object()["panel_marker"] = string_value("lip-top");
     lip_mapping.as_object()["phoneme_map"] = object_value({
         {"AA", number_value(0.8)},
         {"E", number_value(0.4)},
@@ -2370,6 +2630,88 @@ bool validate_parameter_mode_shell_smoke(
         std::cerr << "Expression or lip-sync authoring fields were not preserved.\n";
         return false;
     }
+
+    const std::string expression_typed_before =
+        marrow::editor::serialize_project(*state->session.project());
+    auto edited_expression = *created_expression;
+    edited_expression.targets[1].value = 0.625;
+    if (!apply_expression_definition_edit(
+            state,
+            "Edit expression target smoke",
+            std::move(edited_expression))) {
+        std::cerr << state->error_message << '\n';
+        return false;
+    }
+    created_expression = state->session.project()->parameter_model->find_expression(
+        "editor.smoke.expression");
+    const Value rebuilt_expression = created_expression == nullptr
+        ? object_value()
+        : marrow::editor::build_expression_authoring_value(*created_expression);
+    const Value* rebuilt_expression_marker =
+        marrow::runtime::json::find_member(rebuilt_expression, "panel_marker");
+    const Value* rebuilt_expression_targets =
+        marrow::runtime::json::find_member(rebuilt_expression, "targets");
+    const std::string expression_typed_after =
+        marrow::editor::serialize_project(*state->session.project());
+    if (created_expression == nullptr || created_expression->targets[1].value != 0.625 ||
+        rebuilt_expression_marker == nullptr ||
+        !rebuilt_expression_marker->is_string() ||
+        rebuilt_expression_marker->as_string() != "expression-top" ||
+        rebuilt_expression_targets == nullptr ||
+        !rebuilt_expression_targets->is_array() ||
+        rebuilt_expression_targets->as_array().empty() ||
+        marrow::runtime::json::find_member(
+            rebuilt_expression_targets->as_array().front(), "panel_marker") == nullptr ||
+        !state->session.undo() ||
+        marrow::editor::serialize_project(*state->session.project()) !=
+            expression_typed_before ||
+        !state->session.redo() ||
+        marrow::editor::serialize_project(*state->session.project()) !=
+            expression_typed_after) {
+        std::cerr <<
+            "Typed expression target, markers, or undo/redo were not preserved.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+
+    created_mapping =
+        state->session.project()->parameter_model->find_lip_mapping("mouth.open");
+    const std::string lip_typed_before =
+        marrow::editor::serialize_project(*state->session.project());
+    auto edited_mapping = *created_mapping;
+    edited_mapping.scale = 0.75;
+    edited_mapping.phoneme_map.front().value = 0.9;
+    if (!apply_lip_sync_mapping_definition_edit(
+            state,
+            "Edit lip-sync mapping typed fields smoke",
+            "mouth.open",
+            std::move(edited_mapping))) {
+        std::cerr << state->error_message << '\n';
+        return false;
+    }
+    created_mapping =
+        state->session.project()->parameter_model->find_lip_mapping("mouth.open");
+    const Value rebuilt_mapping = created_mapping == nullptr
+        ? object_value()
+        : build_lip_mapping_value(*created_mapping);
+    const Value* rebuilt_mapping_marker =
+        marrow::runtime::json::find_member(rebuilt_mapping, "panel_marker");
+    const std::string lip_typed_after =
+        marrow::editor::serialize_project(*state->session.project());
+    if (created_mapping == nullptr || created_mapping->scale != 0.75 ||
+        created_mapping->phoneme_map.empty() ||
+        created_mapping->phoneme_map.front().value != 0.9 ||
+        rebuilt_mapping_marker == nullptr || !rebuilt_mapping_marker->is_string() ||
+        rebuilt_mapping_marker->as_string() != "lip-top" ||
+        !state->session.undo() ||
+        marrow::editor::serialize_project(*state->session.project()) != lip_typed_before ||
+        !state->session.redo() ||
+        marrow::editor::serialize_project(*state->session.project()) != lip_typed_after) {
+        std::cerr <<
+            "Typed lip mapping/phoneme, marker, or undo/redo were not preserved.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
 
     const bool dirty_before_preview = state->session.dirty();
     const std::string project_before_preview =
@@ -2435,12 +2777,22 @@ bool validate_parameter_mode_shell_smoke(
         return false;
     }
 
+    state->session.clear_history();
     const int frame_count = options.auto_close_frames.value_or(1);
     for (int frame = 0; frame < frame_count; ++frame) {
         io.DeltaTime = 1.0f / 60.0f;
         ImGui::NewFrame();
         (void)state->session.advance_parameter_state(io.DeltaTime);
         sync_shell_from_editor_session_if_revised(state);
+        const bool dirty_before_panel = state->session.dirty();
+        const std::string project_before_panel =
+            marrow::editor::serialize_project(*state->session.project());
+        const std::uint64_t project_revision_before_panel =
+            state->session.project_revision();
+        const std::uint64_t runtime_revision_before_panel =
+            state->session.runtime_revision();
+        const std::uint64_t preview_revision_before_panel =
+            state->session.preview_revision();
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, viewport);
         ensure_default_dock_layout(state, dockspace_id, viewport);
@@ -2450,6 +2802,17 @@ bool validate_parameter_mode_shell_smoke(
             ImGui::FindWindowByName(kExpressionsWindowTitle) == nullptr ||
             ImGui::FindWindowByName(kLipSyncWindowTitle) == nullptr) {
             std::cerr << "Parameter mode did not create all four authoring panels.\n";
+            return false;
+        }
+        if (state->session.dirty() != dirty_before_panel ||
+            marrow::editor::serialize_project(*state->session.project()) !=
+                project_before_panel ||
+            state->session.project_revision() != project_revision_before_panel ||
+            state->session.runtime_revision() != runtime_revision_before_panel ||
+            state->session.preview_revision() != preview_revision_before_panel ||
+            state->session.can_undo() || state->session.can_redo()) {
+            std::cerr <<
+                "An input-free parameter panel frame changed project state or history.\n";
             return false;
         }
         ImGui::Render();
