@@ -159,9 +159,13 @@ std::optional<std::string> environment_value(const char* name) {
 void assign_environment_value(
     const char* name,
     const std::optional<std::string>& value) {
+#if defined(_WIN32)
+    const int result = ::_putenv_s(name, value.has_value() ? value->c_str() : "");
+#else
     const int result = value.has_value()
         ? ::setenv(name, value->c_str(), 1)
         : ::unsetenv(name);
+#endif
     if (result != 0) {
         throw std::runtime_error(std::string("failed to update environment variable ") + name);
     }
@@ -594,6 +598,55 @@ void test_pure_path_resolution(TestSuite& suite) {
     result = resolve_preference_settings_path(PreferencePlatform::MacOS, environment);
     suite.expect(!static_cast<bool>(result) && !result.error.empty(),
                  "a relative HOME should be rejected rather than resolved from cwd");
+
+    environment = {};
+#if defined(_WIN32)
+    const fs::path roaming_app_data = "C:\\Users\\Marrow\\AppData\\Roaming";
+#else
+    const fs::path roaming_app_data = "/windows/AppData/Roaming";
+#endif
+    environment.roaming_app_data = roaming_app_data;
+    result = resolve_preference_settings_path(PreferencePlatform::Windows, environment);
+    suite.expect(static_cast<bool>(result) &&
+                     result.settings_path ==
+                         roaming_app_data / "Marrow" / "editor-settings.json",
+                 "Windows should resolve below Roaming AppData/Marrow");
+
+    environment.roaming_app_data = fs::path("relative-appdata");
+    result = resolve_preference_settings_path(PreferencePlatform::Windows, environment);
+    suite.expect(!static_cast<bool>(result) && !result.error.empty(),
+                 "a relative Roaming AppData path should be rejected");
+
+    environment.roaming_app_data.reset();
+    result = resolve_preference_settings_path(PreferencePlatform::Windows, environment);
+    suite.expect(!static_cast<bool>(result) && !result.error.empty(),
+                 "Windows should reject missing Roaming AppData");
+
+#if defined(_WIN32)
+    const fs::path windows_override = "D:\\MarrowConfig";
+#else
+    const fs::path windows_override = "/windows-override";
+#endif
+    environment.marrow_config_home = windows_override.string();
+    environment.roaming_app_data = fs::path("relative-appdata");
+    result = resolve_preference_settings_path(PreferencePlatform::Windows, environment);
+    suite.expect(static_cast<bool>(result) &&
+                     result.settings_path ==
+                         windows_override / "editor-settings.json",
+                 "MARROW_CONFIG_HOME should take priority on Windows");
+
+#if defined(_WIN32)
+    const std::string unicode_override_utf8 = u8"D:\\Marrow-설정";
+#else
+    const std::string unicode_override_utf8 = u8"/windows/Marrow-설정";
+#endif
+    const fs::path unicode_override = fs::u8path(unicode_override_utf8);
+    environment.marrow_config_home = unicode_override_utf8;
+    result = resolve_preference_settings_path(PreferencePlatform::Windows, environment);
+    suite.expect(static_cast<bool>(result) &&
+                     result.settings_path ==
+                         unicode_override / "editor-settings.json",
+                 "Windows UTF-8 config overrides should become native paths without loss");
 }
 
 void test_process_environment_resolution_and_restoration(TestSuite& suite) {
@@ -857,7 +910,7 @@ int main() {
     suite.run("malformed, version, recovery, and path statuses", [&] {
         test_malformed_and_version_statuses(suite);
     });
-    suite.run("pure macOS and Linux path resolution", [&] {
+    suite.run("pure macOS, Linux, and Windows path resolution", [&] {
         test_pure_path_resolution(suite);
     });
     suite.run("process environment priority and restoration", [&] {

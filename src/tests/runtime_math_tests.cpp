@@ -1441,8 +1441,8 @@ void test_animation_timeline_index_and_sampling_cursor(TestContext& context) {
     animation.bone_scale_timelines.push_back(marrow::runtime::BoneScaleTimeline{
         1U,
         {
-            marrow::runtime::VectorKeyframe{0.0, 1.0, 1.0, Interpolation::linear()},
-            marrow::runtime::VectorKeyframe{1.0, 1.5, 0.75, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{0.0, -2.0, 1.5, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{1.0, 2.0, -1.5, Interpolation::linear()},
         }});
     animation.bone_shear_timelines.push_back(marrow::runtime::BoneShearTimeline{
         1U,
@@ -1513,6 +1513,46 @@ void test_animation_timeline_index_and_sampling_cursor(TestContext& context) {
         sampling_context.rotate_last_keyframe_indices.size() == 1U &&
             sampling_context.rotate_last_keyframe_indices[0] == 0U,
         "rewinding the sample time should reset the cached rotate cursor");
+
+    const auto negative_scale =
+        loaded_animation->sample_bone_scale(1U, 0.25, &sampling_context);
+    const auto exact_zero_scale =
+        loaded_animation->sample_bone_scale(1U, 0.5, &sampling_context);
+    const auto reflected_scale =
+        loaded_animation->sample_bone_scale(1U, 0.75, &sampling_context);
+    context.expect(
+        negative_scale.has_value() && exact_zero_scale.has_value() &&
+            reflected_scale.has_value(),
+        "signed scale timeline should sample across zero");
+    if (negative_scale.has_value()) {
+        context.expect_near(
+            negative_scale->x,
+            -1.0,
+            "signed scale should retain a negative x component");
+        context.expect_near(
+            negative_scale->y,
+            0.75,
+            "signed scale should retain a positive y component");
+    }
+    if (exact_zero_scale.has_value()) {
+        context.expect(
+            exact_zero_scale->x == 0.0 && exact_zero_scale->y == 0.0,
+            "linear signed scale crossing should sample exact zero");
+    }
+    if (reflected_scale.has_value()) {
+        context.expect_near(
+            reflected_scale->x,
+            1.0,
+            "signed scale should cross to a positive x component");
+        context.expect_near(
+            reflected_scale->y,
+            -0.75,
+            "signed scale should cross to a negative y component");
+    }
+    context.expect(
+        sampling_context.scale_last_keyframe_indices.size() == 1U &&
+            sampling_context.scale_last_keyframe_indices[0] == 0U,
+        "signed scale sampling should use the cached vector timeline cursor");
 }
 
 void test_animation_explicit_duration(TestContext& context) {
@@ -3323,6 +3363,235 @@ void test_binary_key_quantization_and_reduction(TestContext& context) {
     std::filesystem::remove(binary_path, remove_error);
 }
 
+void test_json_value_string_literal_construction(TestContext& context) {
+    const marrow::runtime::json::Value literal_value("edit_ik_constraint", {});
+    context.expect(
+        literal_value.is_string(),
+        "string literal should construct a JSON string value, not boolean");
+
+    const char* channel_name = "rotate";
+    const marrow::runtime::json::Value pointer_value(channel_name, {});
+    context.expect(
+        pointer_value.is_string(),
+        "const char* should construct a JSON string value, not boolean");
+    if (pointer_value.is_string()) {
+        context.expect(
+            pointer_value.as_string() == "rotate",
+            "const char* JSON value should preserve the string payload");
+    }
+}
+
+void test_binary_multi_turn_rotate_fallback(TestContext& context) {
+    const auto document_result = marrow::runtime::json::parse_document(
+        R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "multi_turn_rotate_fallback",
+    "width": 64,
+    "height": 64
+  },
+  "bones": [
+    { "name": "root" },
+    { "name": "child", "parent": "root" },
+    { "name": "positive_alias", "parent": "root" },
+    { "name": "negative_alias", "parent": "root" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "animations": {
+    "spin": {
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0, "curve": "linear" },
+            { "time": 1.0, "angle": 450.0 }
+          ],
+          "translate": [
+            { "time": 0.0, "x": 0.0, "y": 0.0, "curve": "linear" },
+            { "time": 1.0, "x": 16.0, "y": 8.0 }
+          ]
+        },
+        "child": {
+          "rotate": [
+            { "time": 0.0, "angle": 10.0, "curve": "linear" },
+            { "time": 1.0, "angle": 40.0 }
+          ]
+        },
+        "positive_alias": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0, "curve": "linear" },
+            { "time": 1.0, "angle": 1440.0 }
+          ]
+        },
+        "negative_alias": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0, "curve": "linear" },
+            { "time": 1.0, "angle": -1440.0 }
+          ]
+        }
+      }
+    }
+  }
+})json",
+        "multi_turn_rotate_fallback.mskl");
+    context.expect(
+        static_cast<bool>(document_result),
+        document_result.error.has_value()
+            ? document_result.error->format()
+            : "multi-turn fallback document should parse");
+    if (!document_result) {
+        return;
+    }
+
+    const auto original_result =
+        marrow::runtime::load_skeleton_data(*document_result.document);
+    context.expect(
+        static_cast<bool>(original_result),
+        original_result.error.has_value()
+            ? original_result.error->format()
+            : "multi-turn fallback runtime should load");
+    if (!original_result) {
+        return;
+    }
+
+    const std::filesystem::path binary_path =
+        std::filesystem::temp_directory_path() /
+        "marrow_mar161_multi_turn_rotate_fallback.mbin";
+    if (const auto error = marrow::runtime::write_skeleton_binary_document(
+            *document_result.document,
+            binary_path)) {
+        context.expect(false, error->format());
+        return;
+    }
+
+    marrow::runtime::SkeletonBinaryInspection inspection;
+    if (const auto error = marrow::runtime::inspect_skeleton_binary(binary_path, &inspection)) {
+        context.expect(false, error->format());
+        std::filesystem::remove(binary_path);
+        return;
+    }
+    context.expect(
+        inspection.binary_version == 2U,
+        "multi-turn fallback should retain the MBIN v2 wire version");
+    context.expect(
+        inspection.has_optimized_animation_section,
+        "multi-turn fallback should retain the optional AKEY section");
+    context.expect(
+        inspection.animation_count == 1U,
+        "multi-turn fallback should retain the packed animation entry");
+    context.expect(
+        inspection.rotate_channel_count == 1U,
+        "AKEY should omit every unrepresentable multi-turn rotate channel only");
+    context.expect(
+        inspection.translate_channel_count == 1U,
+        "AKEY should keep independently representable translate channels");
+
+    const auto generic_document = marrow::runtime::load_skeleton_document(binary_path);
+    context.expect(
+        static_cast<bool>(generic_document),
+        generic_document.error.has_value()
+            ? generic_document.error->format()
+            : "multi-turn generic binary document should load");
+    if (generic_document) {
+        const auto* animations =
+            marrow::runtime::json::find_member(generic_document.document->root, "animations");
+        const auto* spin = animations != nullptr
+            ? marrow::runtime::json::find_member(*animations, "spin")
+            : nullptr;
+        const auto* bones = spin != nullptr
+            ? marrow::runtime::json::find_member(*spin, "bones")
+            : nullptr;
+        const auto expect_generic_angle = [&](const char* bone_name, double expected) {
+            const auto* bone = bones != nullptr
+                ? marrow::runtime::json::find_member(*bones, bone_name)
+                : nullptr;
+            const auto* rotate = bone != nullptr
+                ? marrow::runtime::json::find_member(*bone, "rotate")
+                : nullptr;
+            const auto* final_angle = rotate != nullptr && rotate->is_array() &&
+                    rotate->as_array().size() == 2U
+                ? marrow::runtime::json::find_member(rotate->as_array()[1], "angle")
+                : nullptr;
+            context.expect(
+                final_angle != nullptr && final_angle->is_number(),
+                std::string("generic MBIN payload should retain ") + bone_name +
+                    " multi-turn rotate key");
+            if (final_angle != nullptr && final_angle->is_number()) {
+                context.expect_near(
+                    final_angle->as_number(),
+                    expected,
+                    std::string("generic MBIN payload should preserve ") + bone_name +
+                        " raw multi-turn value");
+            }
+        };
+        expect_generic_angle("root", 450.0);
+        expect_generic_angle("positive_alias", 1440.0);
+        expect_generic_angle("negative_alias", -1440.0);
+    }
+
+    const auto binary_result = marrow::runtime::load_skeleton_data(binary_path);
+    context.expect(
+        static_cast<bool>(binary_result),
+        binary_result.error.has_value()
+            ? binary_result.error->format()
+            : "multi-turn fallback binary runtime should load");
+    if (binary_result) {
+        const AnimationData* animation =
+            binary_result.skeleton_data->find_animation("spin");
+        const BoneRotateTimeline* root_rotate = animation != nullptr
+            ? animation->find_rotate_timeline(0U)
+            : nullptr;
+        context.expect(
+            root_rotate != nullptr && root_rotate->keyframes.size() == 2U,
+            "runtime should use the generic multi-turn rotate channel");
+        if (root_rotate != nullptr && root_rotate->keyframes.size() == 2U) {
+            context.expect_near(
+                root_rotate->keyframes.back().angle,
+                450.0,
+                "generic runtime fallback should preserve the raw multi-turn key");
+        }
+        const auto expect_runtime_angle = [&](const char* bone_name, double expected) {
+            const auto bone_index = binary_result.skeleton_data->find_bone_index(bone_name);
+            const BoneRotateTimeline* rotate =
+                animation != nullptr && bone_index.has_value()
+                ? animation->find_rotate_timeline(*bone_index)
+                : nullptr;
+            context.expect(
+                rotate != nullptr && rotate->keyframes.size() == 2U,
+                std::string("runtime should use generic fallback for ") + bone_name);
+            if (rotate != nullptr && rotate->keyframes.size() == 2U) {
+                context.expect_near(
+                    rotate->keyframes.back().angle,
+                    expected,
+                    std::string("runtime should preserve ") + bone_name +
+                        " raw multi-turn key");
+            }
+        };
+        expect_runtime_angle("positive_alias", 1440.0);
+        expect_runtime_angle("negative_alias", -1440.0);
+
+        const auto comparison = marrow::runtime::compare_animation_roundtrip(
+            *original_result.skeleton_data,
+            *binary_result.skeleton_data);
+        context.expect(
+            static_cast<bool>(comparison),
+            comparison.error.value_or("multi-turn binary roundtrip should compare"));
+        if (comparison) {
+            context.expect(
+                comparison.metrics.max_rotation_error_degrees < 0.1,
+                "multi-turn fallback should preserve normalized rotation orientation");
+            context.expect(
+                comparison.metrics.max_translation_error_pixels < 0.5,
+                "neighboring packed translation should remain within tolerance");
+        }
+    }
+
+    std::error_code remove_error;
+    std::filesystem::remove(binary_path, remove_error);
+}
+
 void test_runtime_profiler_frame(TestContext& context) {
     marrow::runtime::ProfilerCapture profiler(true);
     profiler.begin_frame();
@@ -4679,6 +4948,12 @@ int main() {
     failures += run_test(
         "Binary Key Quantization And Reduction",
         test_binary_key_quantization_and_reduction);
+    failures += run_test(
+        "Binary Multi-Turn Rotate Fallback",
+        test_binary_multi_turn_rotate_fallback);
+    failures += run_test(
+        "JSON Value String Literal Construction",
+        test_json_value_string_literal_construction);
     failures += run_test("Runtime Profiler Frame", test_runtime_profiler_frame);
 
     if (failures != 0) {

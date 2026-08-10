@@ -364,10 +364,20 @@ bool icon_tree_node(
     marrow::editor::Icon icon,
     const char* label,
     ImGuiTreeNodeFlags flags,
-    bool* out_clicked) {
+    bool* out_clicked,
+    bool active) {
     const bool open = ImGui::TreeNodeEx(id, flags);
+    const ImVec2 row_min = ImGui::GetItemRectMin();
+    const ImVec2 row_max = ImGui::GetItemRectMax();
     if (out_clicked != nullptr) {
         *out_clicked = ImGui::IsItemClicked();
+    }
+    if (active) {
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            row_min,
+            ImVec2(row_min.x + 2.0f, row_max.y),
+            marrow::editor::shell::theme::u32(
+                marrow::editor::shell::theme::kPrimary));
     }
     ImGui::SameLine(0.0f, 4.0f);
     const ImTextureID tex = icons.get(icon);
@@ -382,7 +392,14 @@ bool icon_tree_node(
             ImVec4(0.882f, 0.886f, 0.918f, 0.90f));
         ImGui::SameLine(0.0f, 6.0f);
     }
-    ImGui::TextUnformatted(label);
+    if (active) {
+        ImGui::TextColored(
+            marrow::editor::shell::theme::kPrimary,
+            "%s",
+            label);
+    } else {
+        ImGui::TextUnformatted(label);
+    }
     return open;
 }
 
@@ -391,7 +408,8 @@ bool icon_selectable(
     const marrow::editor::IconRegistry& icons,
     marrow::editor::Icon icon,
     const char* label,
-    bool selected) {
+    bool selected,
+    bool active) {
     const ImTextureID tex = icons.get(icon);
     const float size = ImGui::GetTextLineHeight();
     const float icon_w = tex != 0 ? size + 6.0f : 0.0f;
@@ -402,6 +420,15 @@ bool icon_selectable(
         selected,
         0,
         ImVec2(0.0f, size));
+    const ImVec2 row_min = ImGui::GetItemRectMin();
+    const ImVec2 row_max = ImGui::GetItemRectMax();
+    if (active) {
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            row_min,
+            ImVec2(row_min.x + 2.0f, row_max.y),
+            marrow::editor::shell::theme::u32(
+                marrow::editor::shell::theme::kPrimary));
+    }
 
     ImGui::SetCursorPosY(row_y);
     if (tex != 0) {
@@ -417,7 +444,14 @@ bool icon_selectable(
         ImGui::Dummy(ImVec2(icon_w, 0.0f));
         ImGui::SameLine(0.0f, 0.0f);
     }
-    ImGui::TextUnformatted(label);
+    if (active) {
+        ImGui::TextColored(
+            marrow::editor::shell::theme::kPrimary,
+            "%s",
+            label);
+    } else {
+        ImGui::TextUnformatted(label);
+    }
     return clicked;
 }
 

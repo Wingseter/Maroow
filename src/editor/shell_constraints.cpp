@@ -1,6 +1,7 @@
 #include "shell_constraints.hpp"
 
 #include "shell_preview.hpp"
+#include "shell_selection.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -236,27 +237,16 @@ bool constraint_exists(
     return false;
 }
 
-void validate_selected_constraint(ShellState* state) {
-    const auto selection = selected_constraint(*state);
-    if (!state->load_result || !selection.has_value()) {
-        return;
-    }
-    if (!constraint_exists(
-            *state->load_result.skeleton_data,
-            selection->kind,
-            selection->constraint_name)) {
-        state->selection.remap(*selection, std::nullopt);
-    }
-}
-
 void select_constraint(
     ShellState* state,
     ConstraintKind kind,
     std::string_view name,
     std::string_view source,
     bool update_status_message) {
+    state->hierarchy_selection_anchor.reset();
     state->selection.replace(
         marrow::editor::ConstraintSelection{kind, std::string(name)});
+    state->selected_timeline_track_id.reset();
     if (!update_status_message) {
         return;
     }
@@ -678,14 +668,13 @@ void draw_constraints_window(ShellState* state) {
     }
 
     const auto& skeleton = *state->load_result.skeleton_data;
+    const ResolvedSelection resolved = resolve_shell_selection(*state);
     auto* project = state->load_result.project.get();
     const std::vector<std::string> bone_options = all_bone_names(skeleton);
     const std::vector<std::string> path_slots = path_slot_names(skeleton);
     constexpr double kZero = 0.0;
     constexpr double kOne = 1.0;
     constexpr double kTen = 10.0;
-
-    validate_selected_constraint(state);
 
     const auto constraint_group = [&](ConstraintKind kind, std::string_view name) {
         return std::string("constraint:") + constraint_kind_label(kind) + ":" +
@@ -760,9 +749,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("ik_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.ik_constraints()) {
                 const bool selected =
-                    selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Ik &&
-                    selected_constraint(*state)->constraint_name == constraint.name;
+                    resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Ik &&
+                    resolved.active_constraint->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_ik_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -778,13 +767,15 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Ik &&
-                    find_named_constraint(skeleton.ik_constraints(), selected_constraint(*state)->constraint_name) != nullptr
-                ? selected_constraint(*state)->constraint_name
-                : (!skeleton.ik_constraints().empty() ? skeleton.ik_constraints().front().name : std::string{});
+                resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Ik &&
+                    find_named_constraint(
+                        skeleton.ik_constraints(),
+                        resolved.active_constraint->constraint_name) != nullptr
+                ? resolved.active_constraint->constraint_name
+                : std::string{};
             if (selected_name.empty()) {
-                ImGui::TextUnformatted("No IK constraints are active in the current runtime preview.");
+                ImGui::TextUnformatted("Select an IK constraint to edit it.");
             } else {
                 const auto runtime_edit = make_ik_constraint_edit_from_runtime(*state, selected_name);
                 const marrow::editor::IkConstraintEdit* project_edit =
@@ -920,9 +911,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("path_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.path_constraints()) {
                 const bool selected =
-                    selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Path &&
-                    selected_constraint(*state)->constraint_name == constraint.name;
+                    resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Path &&
+                    resolved.active_constraint->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_path_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -943,13 +934,15 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Path &&
-                    find_named_constraint(skeleton.path_constraints(), selected_constraint(*state)->constraint_name) != nullptr
-                ? selected_constraint(*state)->constraint_name
-                : (!skeleton.path_constraints().empty() ? skeleton.path_constraints().front().name : std::string{});
+                resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Path &&
+                    find_named_constraint(
+                        skeleton.path_constraints(),
+                        resolved.active_constraint->constraint_name) != nullptr
+                ? resolved.active_constraint->constraint_name
+                : std::string{};
             if (selected_name.empty()) {
-                ImGui::TextUnformatted("No path constraints are active in the current runtime preview.");
+                ImGui::TextUnformatted("Select a path constraint to edit it.");
             } else {
                 const auto runtime_edit = make_path_constraint_edit_from_runtime(*state, selected_name);
                 const marrow::editor::PathConstraintEdit* project_edit =
@@ -1170,9 +1163,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("transform_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.transform_constraints()) {
                 const bool selected =
-                    selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Transform &&
-                    selected_constraint(*state)->constraint_name == constraint.name;
+                    resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Transform &&
+                    resolved.active_constraint->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_transform_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -1193,18 +1186,16 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Transform &&
+                resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Transform &&
                     find_named_constraint(
                         skeleton.transform_constraints(),
-                        selected_constraint(*state)->constraint_name) != nullptr
-                ? selected_constraint(*state)->constraint_name
-                : (!skeleton.transform_constraints().empty()
-                       ? skeleton.transform_constraints().front().name
-                       : std::string{});
+                        resolved.active_constraint->constraint_name) != nullptr
+                ? resolved.active_constraint->constraint_name
+                : std::string{};
             if (selected_name.empty()) {
                 ImGui::TextUnformatted(
-                    "No transform constraints are active in the current runtime preview.");
+                    "Select a transform constraint to edit it.");
             } else {
                 const auto runtime_edit =
                     make_transform_constraint_edit_from_runtime(*state, selected_name);
@@ -1451,9 +1442,9 @@ void draw_constraints_window(ShellState* state) {
             ImGui::BeginChild("physics_constraint_list", ImVec2(0.0f, 120.0f), true);
             for (const auto& constraint : skeleton.physics_constraints()) {
                 const bool selected =
-                    selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Physics &&
-                    selected_constraint(*state)->constraint_name == constraint.name;
+                    resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Physics &&
+                    resolved.active_constraint->constraint_name == constraint.name;
                 const bool has_project_edit =
                     project->find_physics_constraint_edit(constraint.name) != nullptr;
                 const std::string label =
@@ -1474,18 +1465,16 @@ void draw_constraints_window(ShellState* state) {
             ImGui::EndChild();
 
             const std::string selected_name =
-                selected_constraint(*state).has_value() &&
-                    selected_constraint(*state)->kind == ConstraintKind::Physics &&
+                resolved.active_constraint.has_value() &&
+                    resolved.active_constraint->kind == ConstraintKind::Physics &&
                     find_named_constraint(
                         skeleton.physics_constraints(),
-                        selected_constraint(*state)->constraint_name) != nullptr
-                ? selected_constraint(*state)->constraint_name
-                : (!skeleton.physics_constraints().empty()
-                       ? skeleton.physics_constraints().front().name
-                       : std::string{});
+                        resolved.active_constraint->constraint_name) != nullptr
+                ? resolved.active_constraint->constraint_name
+                : std::string{};
             if (selected_name.empty()) {
                 ImGui::TextUnformatted(
-                    "No physics constraints are active in the current runtime preview.");
+                    "Select a physics constraint to edit it.");
             } else {
                 const auto runtime_edit =
                     make_physics_constraint_edit_from_runtime(*state, selected_name);

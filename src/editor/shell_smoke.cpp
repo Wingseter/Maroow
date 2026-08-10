@@ -14,16 +14,6 @@
 #include <type_traits>
 #include <vector>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-
-#if defined(__APPLE__)
-#include <OpenGL/OpenGL.h>
-#include <OpenGL/gl3.h>
-#else
-#include <GL/glcorearb.h>
-#endif
-
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -105,35 +95,145 @@ bool write_text_file(
     return true;
 }
 
-bool rewrite_attack_peak_for_hot_reload(
+enum class SelectionSourceMutation {
+    SeedTemporaryItems,
+    ReorderSurvivors,
+    RemoveTemporaryItems,
+};
+
+bool rewrite_selection_source_for_reload(
     const std::filesystem::path& skeleton_path,
+    SelectionSourceMutation mutation,
     std::string* error_out) {
     std::string text;
     if (!read_text_file(skeleton_path, &text, error_out)) {
         return false;
     }
 
-    const std::size_t attack_section = text.find("\"attack\"");
-    if (attack_section == std::string::npos) {
+    auto parsed = marrow::runtime::json::parse_document(text, skeleton_path);
+    if (!parsed || !parsed.document->root.is_object()) {
         if (error_out != nullptr) {
-            *error_out = "Hot-reload smoke could not find the attack animation in " +
-                skeleton_path.string();
+            *error_out = parsed.error.has_value()
+                ? parsed.error->format()
+                : "MAR-158 source mutation requires a JSON object root";
         }
         return false;
     }
 
-    const std::string before = "\"angle\": 60.0";
-    const std::size_t angle_offset = text.find(before, attack_section);
-    if (angle_offset == std::string::npos) {
+    using marrow::runtime::json::SourceLocation;
+    using marrow::runtime::json::Value;
+    Value& root = parsed.document->root;
+    Value* bones_value = marrow::runtime::json::find_member(root, "bones");
+    Value* slots_value = marrow::runtime::json::find_member(root, "slots");
+    Value* skins_value = marrow::runtime::json::find_member(root, "skins");
+    if (bones_value == nullptr || !bones_value->is_array() ||
+        slots_value == nullptr || !slots_value->is_array() ||
+        skins_value == nullptr || !skins_value->is_object()) {
         if (error_out != nullptr) {
-            *error_out = "Hot-reload smoke could not find the attack peak key in " +
-                skeleton_path.string();
+            *error_out = "MAR-158 source mutation requires bones, slots, and skins";
         }
         return false;
     }
 
-    text.replace(angle_offset, before.size(), "\"angle\": 90.0");
-    return write_text_file(skeleton_path, text, error_out);
+    const auto find_named_array_item = [](Value::Array& values, std::string_view name) {
+        return std::find_if(
+            values.begin(),
+            values.end(),
+            [&](Value& value) {
+                Value* name_value = marrow::runtime::json::find_member(value, "name");
+                return name_value != nullptr && name_value->is_string() &&
+                    name_value->as_string() == name;
+            });
+    };
+
+    auto& bones = bones_value->as_array();
+    auto& slots = slots_value->as_array();
+    auto& root_object = root.as_object();
+    if (mutation == SelectionSourceMutation::SeedTemporaryItems) {
+        if (find_named_array_item(bones, "mar158_leaf") == bones.end()) {
+            Value::Object leaf;
+            leaf.emplace("name", Value(std::string("mar158_leaf"), SourceLocation{}));
+            leaf.emplace("parent", Value(std::string("root"), SourceLocation{}));
+            leaf.emplace("x", Value(24.0, SourceLocation{}));
+            leaf.emplace("y", Value(-36.0, SourceLocation{}));
+            bones.emplace_back(std::move(leaf), SourceLocation{});
+        }
+
+        Value::Object constraint;
+        constraint.emplace("name", Value(std::string("mar158_temp_ik"), SourceLocation{}));
+        Value::Array chain;
+        chain.emplace_back(std::string("mar158_leaf"), SourceLocation{});
+        constraint.emplace("bones", Value(std::move(chain), SourceLocation{}));
+        constraint.emplace("target", Value(std::string("arm_l"), SourceLocation{}));
+        constraint.emplace("mix", Value(1.0, SourceLocation{}));
+        Value::Array constraints;
+        constraints.emplace_back(std::move(constraint), SourceLocation{});
+        root_object["ik"] = Value(std::move(constraints), SourceLocation{});
+    } else if (mutation == SelectionSourceMutation::ReorderSurvivors) {
+        const auto arm = find_named_array_item(bones, "arm_l");
+        const auto body = find_named_array_item(slots, "body");
+        if (arm == bones.end() || body == slots.end()) {
+            if (error_out != nullptr) {
+                *error_out = "MAR-159 source mutation could not find reorder targets";
+            }
+            return false;
+        }
+
+        const auto reordered_arm = find_named_array_item(bones, "arm_l");
+        Value arm_value = std::move(*reordered_arm);
+        bones.erase(reordered_arm);
+        bones.push_back(std::move(arm_value));
+
+        Value body_value = std::move(*body);
+        slots.erase(body);
+        slots.push_back(std::move(body_value));
+
+        Value* animations = marrow::runtime::json::find_member(root, "animations");
+        Value* attack = animations != nullptr
+            ? marrow::runtime::json::find_member(*animations, "attack")
+            : nullptr;
+        Value* attack_bones = attack != nullptr
+            ? marrow::runtime::json::find_member(*attack, "bones")
+            : nullptr;
+        Value* attack_arm = attack_bones != nullptr
+            ? marrow::runtime::json::find_member(*attack_bones, "arm_l")
+            : nullptr;
+        Value* rotate = attack_arm != nullptr
+            ? marrow::runtime::json::find_member(*attack_arm, "rotate")
+            : nullptr;
+        if (rotate == nullptr || !rotate->is_array() || rotate->as_array().size() < 2U) {
+            if (error_out != nullptr) {
+                *error_out = "MAR-158 source mutation could not find the attack peak";
+            }
+            return false;
+        }
+        auto& peak = rotate->as_array()[1U].as_object();
+        peak["angle"] = Value(90.0, SourceLocation{});
+    } else {
+        const auto leaf = find_named_array_item(bones, "mar158_leaf");
+        if (leaf == bones.end()) {
+            if (error_out != nullptr) {
+                *error_out = "MAR-159 source mutation could not find removal target";
+            }
+            return false;
+        }
+        bones.erase(leaf);
+
+        Value* mage = marrow::runtime::json::find_member(*skins_value, "mage");
+        if (mage == nullptr || !mage->is_object() ||
+            mage->as_object().erase("arm_l") != 1U) {
+            if (error_out != nullptr) {
+                *error_out = "MAR-159 source mutation could not remove mage/arm_l";
+            }
+            return false;
+        }
+        root_object.erase("ik");
+    }
+
+    return write_text_file(
+        skeleton_path,
+        marrow::runtime::json::serialize_pretty_round_trip(root) + "\n",
+        error_out);
 }
 
 bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
@@ -184,6 +284,15 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         return false;
     }
 
+    std::string rewrite_error;
+    if (!rewrite_selection_source_for_reload(
+            temp_skeleton,
+            SelectionSourceMutation::SeedTemporaryItems,
+            &rewrite_error)) {
+        std::cerr << rewrite_error << '\n';
+        return false;
+    }
+
     const std::filesystem::path temp_project = temp_root / "hot_reload_smoke.marrow";
     marrow::editor::MinimalProjectOptions project_options;
     project_options.project_path = temp_project;
@@ -209,8 +318,40 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     }
 
     const auto arm_index = hot_reload_state.load_result.skeleton_data->find_bone_index("arm_l");
-    if (!arm_index.has_value()) {
-        std::cerr << "Hot-reload smoke requires the arm_l bone.\n";
+    const auto body_slot_index =
+        hot_reload_state.load_result.skeleton_data->find_slot_index("body");
+    const auto leaf_index =
+        hot_reload_state.load_result.skeleton_data->find_bone_index("mar158_leaf");
+    const auto mage_skin_index =
+        hot_reload_state.load_result.skeleton_data->find_skin_index("mage");
+    const auto initial_arm_slot_index =
+        hot_reload_state.load_result.skeleton_data->find_slot_index("arm_l");
+    if (!arm_index.has_value() || !body_slot_index.has_value() ||
+        !leaf_index.has_value() || !mage_skin_index.has_value() ||
+        !initial_arm_slot_index.has_value() ||
+        hot_reload_state.load_result.skeleton_data->find_attachment(
+            *mage_skin_index,
+            *initial_arm_slot_index,
+            "mage_arm_l") == nullptr) {
+        std::cerr << "Hot-reload smoke requires MAR-158 selection source identities.\n";
+        return false;
+    }
+
+    const marrow::editor::BoneSelection selected_arm{"arm_l"};
+    const marrow::editor::AttachmentSelection selected_mage_arm{
+        "arm_l", "mage", "mage_arm_l"};
+    const marrow::editor::BoneSelection selected_leaf{"mar158_leaf"};
+    const marrow::editor::SlotSelection selected_body{"body"};
+    const marrow::editor::ConstraintSelection selected_temp_ik{
+        ConstraintKind::Ik, "mar158_temp_ik"};
+    if (!hot_reload_state.selection.add_range(
+            {selected_arm,
+             selected_mage_arm,
+             selected_leaf,
+             selected_body,
+             selected_temp_ik},
+            selected_temp_ik)) {
+        std::cerr << "Hot-reload smoke could not prepare mixed selection identities.\n";
         return false;
     }
 
@@ -253,8 +394,13 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         return false;
     }
 
-    std::string rewrite_error;
-    if (!rewrite_attack_peak_for_hot_reload(temp_skeleton, &rewrite_error)) {
+    hot_reload_state.hierarchy_selection_anchor = selected_arm;
+    hot_reload_state.viewport_box_selection = ViewportBoxSelectionGesture{
+        ImVec2(10.0f, 20.0f), ImVec2(80.0f, 90.0f), false, true};
+    if (!rewrite_selection_source_for_reload(
+            temp_skeleton,
+            SelectionSourceMutation::ReorderSurvivors,
+            &rewrite_error)) {
         std::cerr << rewrite_error << '\n';
         return false;
     }
@@ -266,6 +412,39 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         if (!hot_reload_state.error_message.empty()) {
             std::cerr << hot_reload_state.error_message << '\n';
         }
+        return false;
+    }
+
+    const auto remapped_arm_index =
+        hot_reload_state.load_result.skeleton_data->find_bone_index("arm_l");
+    const auto remapped_body_slot_index =
+        hot_reload_state.load_result.skeleton_data->find_slot_index("body");
+    const auto reordered_active = hot_reload_state.selection.active();
+    if (!remapped_arm_index.has_value() || !remapped_body_slot_index.has_value() ||
+        *remapped_arm_index == *arm_index ||
+        *remapped_body_slot_index == *body_slot_index ||
+        hot_reload_state.selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{
+                selected_arm,
+                selected_mage_arm,
+                selected_leaf,
+                selected_body,
+                selected_temp_ik} ||
+        reordered_active == nullptr ||
+        *reordered_active != marrow::editor::SelectionItem(selected_temp_ik) ||
+        hot_reload_state.viewport_box_selection.has_value() ||
+        hot_reload_state.hierarchy_selection_anchor !=
+            std::optional<marrow::editor::SelectionItem>(selected_arm) ||
+        !hot_reload_state.load_result.skeleton_data
+             ->find_bone_index("mar158_leaf")
+             .has_value() ||
+        !marrow::editor::selection_item_exists(
+            selected_mage_arm,
+            *hot_reload_state.load_result.skeleton_data) ||
+        !marrow::editor::selection_item_exists(
+            selected_temp_ik,
+            *hot_reload_state.load_result.skeleton_data)) {
+        std::cerr << "Hot reload did not preserve exact selection and anchor identities across reorder.\n";
         return false;
     }
 
@@ -284,7 +463,9 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
 
     const double post_reload_rotation =
         static_cast<double>(
-            hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
+            hot_reload_state.preview_skeleton
+                ->bone_poses()[*remapped_arm_index]
+                .local_pose.rotation);
     if (std::abs(post_reload_rotation - 22.5) > 1e-3) {
         std::cerr << "Hot-reload smoke did not sample the updated attack pose after reload.\n";
         return false;
@@ -302,9 +483,92 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         return false;
     }
 
+    hot_reload_state.hierarchy_selection_anchor = selected_leaf;
+    if (!rewrite_selection_source_for_reload(
+            temp_skeleton,
+            SelectionSourceMutation::RemoveTemporaryItems,
+            &rewrite_error)) {
+        std::cerr << rewrite_error << '\n';
+        return false;
+    }
+    if (poll_runtime_asset_changes(&hot_reload_state) !=
+        RuntimeAssetPollOutcome::Reloaded) {
+        std::cerr << "Hot reload did not adopt the source deletion stage.\n";
+        return false;
+    }
+
+    const auto final_arm_index =
+        hot_reload_state.load_result.skeleton_data->find_bone_index("arm_l");
+    const auto final_body_slot_index =
+        hot_reload_state.load_result.skeleton_data->find_slot_index("body");
+    const auto surviving_active = hot_reload_state.selection.active();
+    const auto alternate_mage_arm_skin =
+        hot_reload_state.load_result.skeleton_data->find_skin_index("mage_arm");
+    const auto arm_slot_index =
+        hot_reload_state.load_result.skeleton_data->find_slot_index("arm_l");
+    if (!final_arm_index.has_value() || !final_body_slot_index.has_value() ||
+        hot_reload_state.selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{selected_arm, selected_body} ||
+        surviving_active == nullptr ||
+        *surviving_active != marrow::editor::SelectionItem(selected_body) ||
+        hot_reload_state.hierarchy_selection_anchor.has_value() ||
+        hot_reload_state.load_result.skeleton_data
+            ->find_bone_index("mar158_leaf")
+            .has_value() ||
+        marrow::editor::selection_item_exists(
+            selected_mage_arm,
+            *hot_reload_state.load_result.skeleton_data) ||
+        marrow::editor::selection_item_exists(
+            selected_temp_ik,
+            *hot_reload_state.load_result.skeleton_data) ||
+        !alternate_mage_arm_skin.has_value() || !arm_slot_index.has_value() ||
+        hot_reload_state.load_result.skeleton_data->find_attachment(
+            *alternate_mage_arm_skin,
+            *arm_slot_index,
+            "mage_arm_l") == nullptr) {
+        std::cerr << "Hot reload did not prune exact missing selection and anchor identities.\n";
+        return false;
+    }
+
+    hot_reload_state.selection.add_range({selected_arm}, selected_arm);
+    const ResolvedSelection remapped_arm = resolve_shell_selection(hot_reload_state);
+    hot_reload_state.selection.add_range({selected_body}, selected_body);
+    const ResolvedSelection remapped_body = resolve_shell_selection(hot_reload_state);
+    if (remapped_arm.active_bone_index != final_arm_index ||
+        remapped_body.active_slot_index != final_body_slot_index ||
+        hot_reload_state.selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{selected_arm, selected_body}) {
+        std::cerr << "Surviving selection names did not resolve to reordered runtime indices.\n";
+        return false;
+    }
+
+    const std::vector<marrow::editor::SelectionItem> selection_before_project_reload =
+        hot_reload_state.selection.items();
+    const marrow::editor::SelectionItem active_before_project_reload =
+        *hot_reload_state.selection.active();
+    hot_reload_state.hierarchy_selection_anchor = selected_arm;
+    hot_reload_state.viewport_box_selection = ViewportBoxSelectionGesture{
+        ImVec2(30.0f, 40.0f), ImVec2(130.0f, 140.0f), true, true};
+    if (!reload_project(&hot_reload_state) ||
+        hot_reload_state.selection.items() != selection_before_project_reload ||
+        hot_reload_state.selection.active() == nullptr ||
+        *hot_reload_state.selection.active() != active_before_project_reload ||
+        hot_reload_state.viewport_box_selection.has_value() ||
+        hot_reload_state.hierarchy_selection_anchor !=
+            std::optional<marrow::editor::SelectionItem>(selected_arm)) {
+        std::cerr << "Project reload did not preserve surviving exact selection and anchor identities.\n";
+        return false;
+    }
+
     const auto stable_document = hot_reload_state.load_result.base_skeleton_document;
     const auto stable_runtime = hot_reload_state.load_result.skeleton_data;
     const auto stable_atlases = hot_reload_state.load_result.atlas_data;
+    const std::vector<marrow::editor::SelectionItem> stable_selection_items =
+        hot_reload_state.selection.items();
+    const marrow::editor::SelectionItem stable_active_selection =
+        *hot_reload_state.selection.active();
+    const std::optional<marrow::editor::SelectionItem> stable_hierarchy_anchor =
+        hot_reload_state.hierarchy_selection_anchor;
     if (!write_text_file(temp_skeleton, "{}\n", &rewrite_error)) {
         std::cerr << rewrite_error << '\n';
         return false;
@@ -313,6 +577,10 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         hot_reload_state.load_result.base_skeleton_document.get() != stable_document.get() ||
         hot_reload_state.load_result.skeleton_data.get() != stable_runtime.get() ||
         hot_reload_state.load_result.atlas_data.size() != stable_atlases.size() ||
+        hot_reload_state.selection.items() != stable_selection_items ||
+        hot_reload_state.selection.active() == nullptr ||
+        *hot_reload_state.selection.active() != stable_active_selection ||
+        hot_reload_state.hierarchy_selection_anchor != stable_hierarchy_anchor ||
         hot_reload_state.error_message.empty()) {
         std::cerr << "Failed hot reload did not retain the previous source/runtime bundle.\n";
         return false;
@@ -770,152 +1038,6 @@ const marrow::renderer::ClipAttachmentDrawCommand* find_clip_attachment(
     return iterator != scene.clip_attachments.end() ? &(*iterator) : nullptr;
 }
 
-std::array<std::uint8_t, 4> read_viewport_pixel(
-    const ViewportRenderResources& resources,
-    int x,
-    int y) {
-    std::array<std::uint8_t, 4> pixel{};
-    const int safe_x = std::clamp(x, 0, resources.framebuffer_width - 1);
-    const int safe_y = std::clamp(y, 0, resources.framebuffer_height - 1);
-    glBindFramebuffer(GL_FRAMEBUFFER, resources.framebuffer);
-    glReadPixels(safe_x, safe_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    return pixel;
-}
-
-bool pixels_match(
-    const std::array<std::uint8_t, 4>& left,
-    const std::array<std::uint8_t, 4>& right,
-    int tolerance = 6) {
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (std::abs(static_cast<int>(left[index]) - static_cast<int>(right[index])) > tolerance) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool point_in_polygon(
-    const std::vector<marrow::renderer::RenderPoint>& polygon,
-    const marrow::renderer::RenderPoint& point) {
-    if (polygon.size() < 3U) {
-        return false;
-    }
-
-    bool inside = false;
-    for (std::size_t index = 0, previous = polygon.size() - 1U;
-         index < polygon.size();
-         previous = index++) {
-        const auto& current = polygon[index];
-        const auto& prior = polygon[previous];
-        const bool intersects =
-            ((current.y > point.y) != (prior.y > point.y)) &&
-            (point.x <
-             ((prior.x - current.x) * (point.y - current.y) / (prior.y - current.y)) +
-                 current.x);
-        if (intersects) {
-            inside = !inside;
-        }
-    }
-    return inside;
-}
-
-#if defined(__APPLE__)
-struct ScopedViewportSmokeContext {
-    CGLPixelFormatObj pixel_format{nullptr};
-    CGLContextObj context{nullptr};
-
-    void destroy() {
-        if (context != nullptr) {
-            if (CGLGetCurrentContext() == context) {
-                CGLSetCurrentContext(nullptr);
-            }
-            CGLReleaseContext(context);
-            context = nullptr;
-        }
-        if (pixel_format != nullptr) {
-            CGLReleasePixelFormat(pixel_format);
-            pixel_format = nullptr;
-        }
-    }
-
-    ~ScopedViewportSmokeContext() {
-        destroy();
-    }
-};
-
-std::optional<std::string> initialize_viewport_smoke_context(
-    ScopedViewportSmokeContext* smoke_context) {
-    const auto make_attributes =
-        [](bool accelerated, bool allow_offline) -> std::vector<CGLPixelFormatAttribute> {
-        std::vector<CGLPixelFormatAttribute> attributes;
-        attributes.reserve(13);
-        attributes.push_back(kCGLPFAOpenGLProfile);
-        attributes.push_back(static_cast<CGLPixelFormatAttribute>(kCGLOGLPVersion_3_2_Core));
-        if (accelerated) {
-            attributes.push_back(kCGLPFAAccelerated);
-        }
-        attributes.push_back(kCGLPFAColorSize);
-        attributes.push_back(static_cast<CGLPixelFormatAttribute>(24));
-        attributes.push_back(kCGLPFAAlphaSize);
-        attributes.push_back(static_cast<CGLPixelFormatAttribute>(8));
-        attributes.push_back(kCGLPFADepthSize);
-        attributes.push_back(static_cast<CGLPixelFormatAttribute>(24));
-        attributes.push_back(kCGLPFAStencilSize);
-        attributes.push_back(static_cast<CGLPixelFormatAttribute>(8));
-        if (allow_offline) {
-            attributes.push_back(kCGLPFAAllowOfflineRenderers);
-        }
-        attributes.push_back(static_cast<CGLPixelFormatAttribute>(0));
-        return attributes;
-    };
-
-    const std::array<std::pair<bool, bool>, 4> pixel_format_attempts{{
-        {true, true},
-        {false, true},
-        {true, false},
-        {false, false},
-    }};
-
-    GLint pixel_format_count = 0;
-    CGLError pixel_format_error = kCGLBadAttribute;
-    for (const auto [accelerated, allow_offline] : pixel_format_attempts) {
-        const std::vector<CGLPixelFormatAttribute> attributes =
-            make_attributes(accelerated, allow_offline);
-        smoke_context->pixel_format = nullptr;
-        pixel_format_count = 0;
-        pixel_format_error = CGLChoosePixelFormat(
-            attributes.data(),
-            &smoke_context->pixel_format,
-            &pixel_format_count);
-        if (pixel_format_error == kCGLNoError &&
-            smoke_context->pixel_format != nullptr &&
-            pixel_format_count > 0) {
-            break;
-        }
-    }
-
-    if (pixel_format_error != kCGLNoError ||
-        smoke_context->pixel_format == nullptr ||
-        pixel_format_count <= 0) {
-        return "Viewport renderer smoke failed to create an offscreen macOS GL pixel format.";
-    }
-
-    const CGLError context_error =
-        CGLCreateContext(smoke_context->pixel_format, nullptr, &smoke_context->context);
-    if (context_error != kCGLNoError || smoke_context->context == nullptr) {
-        return "Viewport renderer smoke failed to create an offscreen macOS GL context.";
-    }
-
-    const CGLError current_error = CGLSetCurrentContext(smoke_context->context);
-    if (current_error != kCGLNoError) {
-        return "Viewport renderer smoke failed to make the offscreen macOS GL context current.";
-    }
-
-    return std::nullopt;
-}
-#endif
-
 bool validate_viewport_camera_smoke(
     const std::filesystem::path& project_path) {
     ShellState camera_state;
@@ -1011,6 +1133,1403 @@ bool validate_viewport_camera_smoke(
     drag_skeleton.update_world_transforms();
     if (bone_local_position_from_world(drag_skeleton, *arm_index, arm_target).has_value()) {
         std::cerr << "Viewport translate did not reject a singular parent transform.\n";
+        return false;
+    }
+
+    marrow::runtime::Skeleton rotation_skeleton(camera_state.load_result.skeleton_data);
+    const auto rotation_root = rotation_skeleton.data()->find_bone_index("root");
+    const auto rotation_arm = rotation_skeleton.data()->find_bone_index("arm_l");
+    if (!rotation_root.has_value() || !rotation_arm.has_value()) {
+        std::cerr << "Viewport rotation smoke could not find root/arm_l.\n";
+        return false;
+    }
+    const auto rotation_parent =
+        rotation_skeleton.data()->bones()[*rotation_arm].parent_index;
+    if (!rotation_parent.has_value()) {
+        std::cerr << "Viewport rotation smoke expected arm_l to have a parent.\n";
+        return false;
+    }
+    const auto angle_matches = [](std::optional<double> actual, double expected) {
+        return actual.has_value() && std::isfinite(*actual) &&
+            std::abs(*actual - expected) <= 1e-4;
+    };
+    const auto pointer_from_matrix = [](
+                                         const ViewportWorldPoint& pivot,
+                                         double a,
+                                         double b,
+                                         double c,
+                                         double d,
+                                         double degrees) {
+        const double radians = degrees * static_cast<double>(kPi) / 180.0;
+        const double local_x = std::cos(radians);
+        const double local_y = std::sin(radians);
+        return ViewportWorldPoint{
+            pivot.x + (a * local_x) + (b * local_y),
+            pivot.y + (c * local_x) + (d * local_y)};
+    };
+
+    rotation_skeleton.set_scale(-2.0, 3.0);
+    rotation_skeleton.update_world_transforms();
+    const auto reflected_root_basis = viewport_rotation_basis_for_smoke(
+        rotation_skeleton, *rotation_root);
+    if (!reflected_root_basis.has_value() ||
+        !angle_matches(
+            viewport_rotation_angle_for_smoke(
+                *reflected_root_basis,
+                pointer_from_matrix(
+                    reflected_root_basis->pivot_world,
+                    -2.0,
+                    0.0,
+                    0.0,
+                    3.0,
+                    135.0)),
+            135.0)) {
+        std::cerr << "Viewport rotation root reflection basis was incorrect.\n";
+        return false;
+    }
+
+    rotation_skeleton.set_scale(1.0, 1.0);
+    auto& rotation_parent_pose =
+        rotation_skeleton.bone_poses()[*rotation_parent].local_pose;
+    rotation_parent_pose.x += 13.0f;
+    rotation_parent_pose.y -= 17.0f;
+    rotation_parent_pose.rotation = 37.0f;
+    rotation_parent_pose.scale_x = 1.75f;
+    rotation_parent_pose.scale_y = 0.55f;
+    rotation_parent_pose.shear_x = 11.0f;
+    rotation_parent_pose.shear_y = -9.0f;
+    rotation_skeleton.bone_poses()[*rotation_arm].inherit =
+        marrow::runtime::BoneInherit::Normal;
+    rotation_skeleton.update_world_transforms();
+    const auto normal_basis = viewport_rotation_basis_for_smoke(
+        rotation_skeleton, *rotation_arm);
+    const auto normal_parent_world =
+        rotation_skeleton.bone_world_transforms()[*rotation_parent];
+    if (!normal_basis.has_value() ||
+        !angle_matches(
+            viewport_rotation_angle_for_smoke(
+                *normal_basis,
+                pointer_from_matrix(
+                    normal_basis->pivot_world,
+                    normal_parent_world.a,
+                    normal_parent_world.b,
+                    normal_parent_world.c,
+                    normal_parent_world.d,
+                    -123.0)),
+            -123.0)) {
+        std::cerr << "Viewport rotation did not invert a translated/sheared parent.\n";
+        return false;
+    }
+
+    rotation_parent_pose.scale_y = -0.55f;
+    rotation_skeleton.update_world_transforms();
+    const auto negative_determinant_basis = viewport_rotation_basis_for_smoke(
+        rotation_skeleton, *rotation_arm);
+    const auto reflected_parent_world =
+        rotation_skeleton.bone_world_transforms()[*rotation_parent];
+    if (!negative_determinant_basis.has_value() ||
+        !angle_matches(
+            viewport_rotation_angle_for_smoke(
+                *negative_determinant_basis,
+                pointer_from_matrix(
+                    negative_determinant_basis->pivot_world,
+                    reflected_parent_world.a,
+                    reflected_parent_world.b,
+                    reflected_parent_world.c,
+                    reflected_parent_world.d,
+                    72.0)),
+            72.0)) {
+        std::cerr << "Viewport rotation rejected a finite negative determinant.\n";
+        return false;
+    }
+
+    rotation_skeleton.set_scale(-1.5, 2.25);
+    rotation_skeleton.bone_poses()[*rotation_arm].inherit =
+        marrow::runtime::BoneInherit::OnlyTranslation;
+    rotation_skeleton.update_world_transforms();
+    const auto translation_only_basis = viewport_rotation_basis_for_smoke(
+        rotation_skeleton, *rotation_arm);
+    if (!translation_only_basis.has_value() ||
+        translation_only_basis->inherit != marrow::runtime::BoneInherit::OnlyTranslation ||
+        !angle_matches(
+            viewport_rotation_angle_for_smoke(
+                *translation_only_basis,
+                pointer_from_matrix(
+                    translation_only_basis->pivot_world,
+                    -1.5,
+                    0.0,
+                    0.0,
+                    2.25,
+                    -48.0)),
+            -48.0)) {
+        std::cerr << "Viewport rotation OnlyTranslation basis ignored skeleton scale.\n";
+        return false;
+    }
+
+    for (const auto inherit : {
+             marrow::runtime::BoneInherit::NoRotationOrReflection,
+             marrow::runtime::BoneInherit::NoScale,
+             marrow::runtime::BoneInherit::NoScaleOrReflection}) {
+        rotation_skeleton.bone_poses()[*rotation_arm].inherit = inherit;
+        rotation_skeleton.update_world_transforms();
+        if (viewport_rotation_basis_for_smoke(
+                rotation_skeleton, *rotation_arm).has_value()) {
+            std::cerr << "Viewport rotation exposed an unsupported inherit mode.\n";
+            return false;
+        }
+    }
+
+    rotation_skeleton.bone_poses()[*rotation_arm].inherit =
+        marrow::runtime::BoneInherit::Normal;
+    rotation_parent_pose.scale_x = 0.0f;
+    rotation_parent_pose.scale_y = 0.0f;
+    rotation_skeleton.update_world_transforms();
+    if (viewport_rotation_basis_for_smoke(
+            rotation_skeleton, *rotation_arm).has_value()) {
+        std::cerr << "Viewport rotation did not reject a singular parent basis.\n";
+        return false;
+    }
+    rotation_parent_pose.scale_x = std::numeric_limits<float>::quiet_NaN();
+    rotation_parent_pose.scale_y = 1.0f;
+    rotation_skeleton.update_world_transforms();
+    if (viewport_rotation_basis_for_smoke(
+            rotation_skeleton, *rotation_arm).has_value()) {
+        std::cerr << "Viewport rotation did not reject non-finite parent math.\n";
+        return false;
+    }
+
+    if (std::abs(unwrap_viewport_rotation_delta_for_smoke(-340.0) - 20.0) > 1e-9 ||
+        std::abs(unwrap_viewport_rotation_delta_for_smoke(340.0) + 20.0) > 1e-9 ||
+        std::abs(unwrap_viewport_rotation_delta_for_smoke(-180.0) - 180.0) > 1e-9 ||
+        std::abs(unwrap_viewport_rotation_delta_for_smoke(180.0) - 180.0) > 1e-9) {
+        std::cerr << "Viewport rotation unwrap/tie contract failed.\n";
+        return false;
+    }
+    double negative_multi_turn = 0.0;
+    double previous_negative_angle = 0.0;
+    for (const double angle : {-90.0, -180.0, 90.0, 0.0, -90.0}) {
+        negative_multi_turn += unwrap_viewport_rotation_delta_for_smoke(
+            angle - previous_negative_angle);
+        previous_negative_angle = angle;
+    }
+    if (std::abs(negative_multi_turn + 450.0) > 1e-9 ||
+        viewport_rotation_angle_for_smoke(
+            *reflected_root_basis,
+            ViewportWorldPoint{
+                std::numeric_limits<double>::infinity(),
+                reflected_root_basis->pivot_world.y})
+            .has_value()) {
+        std::cerr << "Viewport rotation negative multi-turn/Inf rejection failed.\n";
+        return false;
+    }
+
+    const std::size_t root_index = *rotation_root;
+    const auto& runtime_slots = camera_state.session.runtime_data()->slots();
+    if (runtime_slots.empty() ||
+        !scrub_timeline_time(
+            &camera_state, 0.37, "Viewport rotation smoke", false)) {
+        std::cerr << "Viewport rotation smoke could not stage its timeline context.\n";
+        return false;
+    }
+    camera_state.selection.replace(
+        marrow::editor::SlotSelection{runtime_slots.front().name});
+    camera_state.selection.toggle(marrow::editor::BoneSelection{"root"});
+    const marrow::editor::SelectionSet mixed_selection = camera_state.selection;
+    camera_state.hierarchy_selection_anchor =
+        marrow::editor::SlotSelection{runtime_slots.front().name};
+    camera_state.selected_timeline_track_id = "viewport-rotate-focus";
+    const auto mixed_anchor = camera_state.hierarchy_selection_anchor;
+    const auto mixed_focus = camera_state.selected_timeline_track_id;
+    const auto selection_matches = [](
+                                       const marrow::editor::SelectionSet& left,
+                                       const marrow::editor::SelectionSet& right) {
+        if (left.items() != right.items()) return false;
+        const auto* left_active = left.active();
+        const auto* right_active = right.active();
+        return (left_active == nullptr && right_active == nullptr) ||
+            (left_active != nullptr && right_active != nullptr &&
+             *left_active == *right_active);
+    };
+    auto rotation_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    if (!rotation_layout.has_value() || root_index >= rotation_layout->bones.size()) {
+        std::cerr << "Viewport rotation smoke could not build a root layout.\n";
+        return false;
+    }
+    ImVec2 rotation_center = rotation_layout->bones[root_index].screen_position;
+    const auto ring_point = [](const ImVec2& center, double degrees) {
+        const double radians = degrees * static_cast<double>(kPi) / 180.0;
+        return ImVec2(
+            center.x + static_cast<float>(58.0 * std::cos(radians)),
+            center.y - static_cast<float>(58.0 * std::sin(radians)));
+    };
+    if (!viewport_rotation_gizmo_visible_for_smoke(
+            camera_state, *rotation_layout) ||
+        !hit_test_rotation_gizmo_for_smoke(
+            camera_state, *rotation_layout, ring_point(rotation_center, 0.0)) ||
+        !hit_test_rotation_gizmo_for_smoke(
+            camera_state,
+            *rotation_layout,
+            ImVec2(rotation_center.x + 64.0f, rotation_center.y)) ||
+        hit_test_rotation_gizmo_for_smoke(
+            camera_state,
+            *rotation_layout,
+            ImVec2(rotation_center.x + 65.0f, rotation_center.y)) ||
+        !hit_test_translate_gizmo_for_smoke(
+            camera_state,
+            *rotation_layout,
+            ImVec2(rotation_center.x + 42.0f, rotation_center.y)).has_value()) {
+        std::cerr << "Viewport rotation ring radius/band or translate priority target failed.\n";
+        return false;
+    }
+    const double zoom_before_ring_test = camera_state.viewport.zoom;
+    camera_state.viewport.zoom *= 1.8;
+    const auto zoomed_rotation_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    if (!zoomed_rotation_layout.has_value() ||
+        !hit_test_rotation_gizmo_for_smoke(
+            camera_state,
+            *zoomed_rotation_layout,
+            ring_point(
+                zoomed_rotation_layout->bones[root_index].screen_position,
+                90.0))) {
+        std::cerr << "Viewport rotation ring did not remain fixed in screen space.\n";
+        return false;
+    }
+    camera_state.viewport.zoom = zoom_before_ring_test;
+    rotation_layout = build_viewport_layout(camera_state, canvas_origin, canvas_size);
+    rotation_center = rotation_layout->bones[root_index].screen_position;
+
+    camera_state.preview_skeleton->bone_poses()[root_index].inherit =
+        marrow::runtime::BoneInherit::NoScale;
+    if (viewport_rotation_gizmo_visible_for_smoke(camera_state, *rotation_layout)) {
+        std::cerr << "Viewport rotation ring remained visible for unsupported inherit.\n";
+        return false;
+    }
+    camera_state.preview_skeleton->bone_poses()[root_index].inherit =
+        marrow::runtime::BoneInherit::Normal;
+    camera_state.selection.replace(
+        marrow::editor::SlotSelection{runtime_slots.front().name});
+    if (viewport_rotation_gizmo_visible_for_smoke(camera_state, *rotation_layout)) {
+        std::cerr << "Viewport rotation ring remained visible for an active non-bone.\n";
+        return false;
+    }
+    camera_state.selection = mixed_selection;
+    camera_state.weight_paint.enabled = true;
+    if (viewport_rotation_gizmo_visible_for_smoke(camera_state, *rotation_layout)) {
+        std::cerr << "Viewport rotation ring remained visible during weight paint.\n";
+        return false;
+    }
+    camera_state.weight_paint.enabled = false;
+
+    const std::string click_project_before =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    const std::size_t click_undo_before = camera_state.session.undo_count();
+    const bool click_dirty_before = camera_state.session.dirty();
+    camera_state.session.set_playing(true);
+    sync_shell_from_editor_session(&camera_state);
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 0.0)) ||
+        camera_state.timeline_playing || !camera_state.session.transaction_active()) {
+        std::cerr << "Viewport rotation did not pause playback and begin a transaction.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(&camera_state, true);
+    if (marrow::editor::serialize_project(*camera_state.session.project()) !=
+            click_project_before ||
+        camera_state.session.undo_count() != click_undo_before ||
+        camera_state.session.dirty() != click_dirty_before ||
+        camera_state.session.transaction_active() || camera_state.timeline_playing ||
+        !selection_matches(camera_state.selection, mixed_selection) ||
+        camera_state.hierarchy_selection_anchor != mixed_anchor ||
+        camera_state.selected_timeline_track_id != mixed_focus) {
+        std::cerr << "Viewport rotation click materialized a track or changed context.\n";
+        return false;
+    }
+
+    const std::string rotation_project_before =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 0.0))) {
+        std::cerr << "Viewport multi-turn rotation gesture did not begin.\n";
+        return false;
+    }
+    const auto* rotate_started = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    if (rotate_started == nullptr ||
+        std::abs(rotate_started->start_absolute_rotation) > 1e-6) {
+        std::cerr << "Viewport rotation did not capture the raw effective start.\n";
+        return false;
+    }
+    const ViewportRotationBasis frozen_basis = rotate_started->basis;
+    for (const double degrees : {90.0, 180.0, 270.0, 360.0, 450.0}) {
+        if (!update_viewport_rotate_gesture_for_smoke(
+                &camera_state,
+                *rotation_layout,
+                ring_point(rotation_center, degrees))) {
+            std::cerr << "Viewport multi-turn rotation update failed.\n";
+            return false;
+        }
+    }
+    const auto* rotate_live = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    const auto* live_idle = camera_state.session.runtime_data()->find_animation("idle");
+    const auto live_rotation = live_idle != nullptr
+        ? live_idle->sample_bone_rotation(root_index, 0.37)
+        : std::nullopt;
+    if (rotate_live == nullptr ||
+        std::abs(rotate_live->current_absolute_rotation - 450.0) > 1e-4 ||
+        std::abs(rotate_live->basis.inverse_a - frozen_basis.inverse_a) > 1e-12 ||
+        std::abs(rotate_live->basis.inverse_b - frozen_basis.inverse_b) > 1e-12 ||
+        std::abs(rotate_live->basis.inverse_c - frozen_basis.inverse_c) > 1e-12 ||
+        std::abs(rotate_live->basis.inverse_d - frozen_basis.inverse_d) > 1e-12 ||
+        !live_rotation.has_value() || std::abs(*live_rotation - 450.0) > 1e-3) {
+        std::cerr << "Viewport multi-turn accumulation or frozen basis drifted.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(&camera_state, true);
+    const std::string rotation_project_after =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    const auto* root_rotate_edit =
+        camera_state.session.project()->find_transform_timeline_edit(
+            "idle", "root", marrow::editor::TransformTimelineChannel::Rotate);
+    const bool has_raw_450_key = root_rotate_edit != nullptr && std::any_of(
+        root_rotate_edit->keyframes.begin(),
+        root_rotate_edit->keyframes.end(),
+        [](const auto& key) {
+            return std::abs(key.time - 0.37) <= 1e-6 &&
+                std::abs(key.angle - 450.0) <= 1e-4;
+        });
+    if (!has_raw_450_key || rotation_project_after == rotation_project_before ||
+        camera_state.session.undo_count() != click_undo_before + 1U ||
+        !selection_matches(camera_state.selection, mixed_selection) ||
+        camera_state.hierarchy_selection_anchor != mixed_anchor ||
+        camera_state.selected_timeline_track_id != mixed_focus) {
+        std::cerr << "Viewport rotation did not commit one raw multi-turn undo item.\n";
+        return false;
+    }
+
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 0.0))) {
+        return false;
+    }
+    const auto* raw_restart = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    if (raw_restart == nullptr ||
+        std::abs(raw_restart->start_absolute_rotation - 450.0) > 1e-3) {
+        std::cerr << "Viewport rotation restarted from a normalized preview angle.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    if (!camera_state.session.undo() ||
+        marrow::editor::serialize_project(*camera_state.session.project()) !=
+            rotation_project_before ||
+        !camera_state.session.redo() ||
+        marrow::editor::serialize_project(*camera_state.session.project()) !=
+            rotation_project_after ||
+        !camera_state.session.undo()) {
+        std::cerr << "Viewport rotation undo/redo was not atomic.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&camera_state);
+    camera_state.session.clear_history();
+    if (marrow::editor::serialize_project(*camera_state.session.project()) !=
+        rotation_project_before) {
+        return false;
+    }
+
+    const auto camera_preview_signature = [](const marrow::runtime::Skeleton& skeleton) {
+        std::ostringstream stream;
+        stream << std::setprecision(std::numeric_limits<double>::max_digits10);
+        for (const auto& bone : skeleton.bone_poses()) {
+            stream << bone.local_pose.x << ',' << bone.local_pose.y << ','
+                   << bone.local_pose.rotation << ',' << bone.local_pose.scale_x << ','
+                   << bone.local_pose.scale_y << ',' << bone.local_pose.shear_x << ','
+                   << bone.local_pose.shear_y << ',' << static_cast<int>(bone.inherit) << ';';
+        }
+        for (const auto& world : skeleton.bone_world_transforms()) {
+            stream << world.a << ',' << world.b << ',' << world.c << ',' << world.d << ','
+                   << world.world_x << ',' << world.world_y << ';';
+        }
+        return stream.str();
+    };
+    const auto rollback_runtime_before = camera_state.session.runtime_data();
+    const auto rollback_is_exact = [&]() {
+        return marrow::editor::serialize_project(*camera_state.session.project()) ==
+                rotation_project_before &&
+            camera_state.session.runtime_data() == rollback_runtime_before &&
+            camera_preview_signature(*camera_state.preview_skeleton) ==
+                camera_preview_signature(
+                    *marrow::editor::EditorSessionShellBinding::preview_skeleton(
+                        camera_state.session)) &&
+            camera_state.session.undo_count() == 0U &&
+            camera_state.session.redo_count() == 0U &&
+            !camera_state.session.dirty() && !camera_state.project_dirty &&
+            !camera_state.session.transaction_active() &&
+            !camera_state.viewport_transform_gesture.has_value() &&
+            selection_matches(camera_state.selection, mixed_selection) &&
+            camera_state.hierarchy_selection_anchor == mixed_anchor &&
+            camera_state.selected_timeline_track_id == mixed_focus;
+    };
+    const std::string rollback_preview_before =
+        camera_preview_signature(*camera_state.preview_skeleton);
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 0.0)) ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 90.0))) {
+        std::cerr << "Viewport pivot-rebase rollback gesture did not begin.\n";
+        return false;
+    }
+    auto* rebase_rotate = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    if (rebase_rotate == nullptr ||
+        std::abs(rebase_rotate->accumulated_rotation - 90.0) > 1e-4 ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state, *rotation_layout, rotation_center)) {
+        std::cerr << "Viewport rotation did not suspend at its pivot.\n";
+        return false;
+    }
+    rebase_rotate = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    if (rebase_rotate == nullptr || !rebase_rotate->angular_reference_suspended ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 180.0))) {
+        std::cerr << "Viewport rotation did not rebase after crossing its pivot.\n";
+        return false;
+    }
+    rebase_rotate = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    if (rebase_rotate == nullptr ||
+        std::abs(rebase_rotate->accumulated_rotation - 90.0) > 1e-4 ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 270.0))) {
+        std::cerr << "Viewport rotation pivot re-entry introduced a jump.\n";
+        return false;
+    }
+    rebase_rotate = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    if (rebase_rotate == nullptr ||
+        std::abs(rebase_rotate->accumulated_rotation - 180.0) > 1e-4) {
+        std::cerr << "Viewport rotation did not resume from its rebased angle.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    if (!rollback_is_exact() ||
+        camera_preview_signature(*camera_state.preview_skeleton) !=
+            rollback_preview_before) {
+        std::cerr << "Viewport rotation Escape rollback was not exact.\n";
+        return false;
+    }
+
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 0.0)) ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ring_point(rotation_center, 90.0)) ||
+        update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *rotation_layout,
+            ImVec2(std::numeric_limits<float>::quiet_NaN(), rotation_center.y)) ||
+        !rollback_is_exact() ||
+        camera_preview_signature(*camera_state.preview_skeleton) !=
+            rollback_preview_before) {
+        std::cerr << "Viewport rotation non-finite failure rollback was not exact.\n";
+        return false;
+    }
+
+    const auto transform_source_index =
+        camera_state.session.runtime_data()->find_bone_index("transform_source");
+    if (!transform_source_index.has_value() ||
+        !scrub_timeline_time(
+            &camera_state, 0.41, "Viewport setup rotation smoke", false)) {
+        return false;
+    }
+    select_bone(&camera_state, *transform_source_index, "Smoke", false);
+    auto setup_rotation_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    if (!setup_rotation_layout.has_value()) return false;
+    const ImVec2 setup_rotation_center =
+        setup_rotation_layout->bones[*transform_source_index].screen_position;
+    const std::string setup_rotation_project_before =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *setup_rotation_layout,
+            ring_point(setup_rotation_center, 0.0)) ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *setup_rotation_layout,
+            ring_point(setup_rotation_center, 90.0))) {
+        std::cerr << "Viewport nonzero-setup rotation gesture failed.\n";
+        return false;
+    }
+    const auto* setup_rotate = std::get_if<ViewportRotateGesturePayload>(
+        &camera_state.viewport_transform_gesture->payload);
+    const auto* setup_edit = camera_state.session.project()->find_transform_timeline_edit(
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate);
+    const bool setup_key_once = setup_edit != nullptr && std::any_of(
+        setup_edit->keyframes.begin(), setup_edit->keyframes.end(), [](const auto& key) {
+            return std::abs(key.time - 0.41) <= 1e-6 &&
+                std::abs(key.angle - 90.0) <= 1e-4;
+        });
+    if (setup_rotate == nullptr ||
+        std::abs(setup_rotate->start_absolute_rotation - 30.0) > 1e-4 ||
+        std::abs(setup_rotate->current_absolute_rotation - 120.0) > 1e-4 ||
+        !setup_key_once) {
+        std::cerr << "Viewport rotation subtracted setup rotation more than once.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    if (marrow::editor::serialize_project(*camera_state.session.project()) !=
+            setup_rotation_project_before ||
+        camera_state.session.undo_count() != 0U) {
+        std::cerr << "Viewport nonzero-setup rollback was not exact.\n";
+        return false;
+    }
+
+    if (!scrub_timeline_time(
+            &camera_state, 0.37, "Viewport materialization smoke", false)) {
+        return false;
+    }
+    const auto spine_index = camera_state.session.runtime_data()->find_bone_index("spine");
+    const auto* idle_before_materialization =
+        camera_state.session.runtime_data()->find_animation("idle");
+    const auto* source_rotate =
+        spine_index.has_value() && idle_before_materialization != nullptr
+        ? idle_before_materialization->find_rotate_timeline(*spine_index)
+        : nullptr;
+    if (!spine_index.has_value() || source_rotate == nullptr) {
+        return false;
+    }
+    const auto source_keys = source_rotate->keyframes;
+    select_bone(&camera_state, *spine_index, "Smoke", false);
+    auto materialization_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    if (!materialization_layout.has_value()) return false;
+    const ImVec2 materialization_center =
+        materialization_layout->bones[*spine_index].screen_position;
+    const std::string materialization_project_before =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    if (!begin_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *materialization_layout,
+            ring_point(materialization_center, 0.0)) ||
+        !update_viewport_rotate_gesture_for_smoke(
+            &camera_state,
+            *materialization_layout,
+            ring_point(materialization_center, 90.0))) {
+        std::cerr << "Viewport imported rotation materialization failed.\n";
+        return false;
+    }
+    const auto* materialized = camera_state.session.project()->find_transform_timeline_edit(
+        "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+    const auto same_curve = [](const auto& left, const auto& right) {
+        if (left.kind() != right.kind()) return false;
+        const auto& l = left.cubic_bezier();
+        const auto& r = right.cubic_bezier();
+        return l.cx1 == r.cx1 && l.cy1 == r.cy1 &&
+            l.cx2 == r.cx2 && l.cy2 == r.cy2;
+    };
+    bool source_keys_preserved = materialized != nullptr;
+    for (const auto& source_key : source_keys) {
+        const auto found = materialized == nullptr
+            ? std::vector<marrow::editor::TransformKeyframeEdit>::const_iterator{}
+            : std::find_if(
+                  materialized->keyframes.begin(),
+                  materialized->keyframes.end(),
+                  [&](const auto& key) {
+                      return std::abs(key.time - source_key.time) <= 1e-6;
+                  });
+        if (materialized == nullptr || found == materialized->keyframes.end() ||
+            std::abs(found->angle - source_key.angle) > 1e-5 ||
+            !same_curve(found->interpolation, source_key.interpolation)) {
+            source_keys_preserved = false;
+            break;
+        }
+    }
+    if (!source_keys_preserved) {
+        std::cerr << "Viewport rotation did not preserve imported keys/curves.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(&camera_state, false);
+    if (marrow::editor::serialize_project(*camera_state.session.project()) !=
+            materialization_project_before ||
+        camera_state.session.undo_count() != 0U) {
+        std::cerr << "Viewport imported materialization rollback was not exact.\n";
+        return false;
+    }
+
+    marrow::runtime::Skeleton scale_math_skeleton(
+        camera_state.load_result.skeleton_data);
+    const auto scale_root =
+        scale_math_skeleton.data()->find_bone_index("root");
+    const auto scale_arm =
+        scale_math_skeleton.data()->find_bone_index("arm_l");
+    if (!scale_root.has_value() || !scale_arm.has_value()) {
+        std::cerr << "Viewport scale smoke could not find root/arm_l.\n";
+        return false;
+    }
+    const auto scale_parent =
+        scale_math_skeleton.data()->bones()[*scale_arm].parent_index;
+    if (!scale_parent.has_value()) {
+        std::cerr << "Viewport scale smoke expected arm_l to have a parent.\n";
+        return false;
+    }
+    scale_math_skeleton.set_scale(-2.0, 3.0);
+    scale_math_skeleton.update_world_transforms();
+    const auto reflected_scale_basis = viewport_scale_basis_for_smoke(
+        scale_math_skeleton, *scale_root);
+    if (!reflected_scale_basis.has_value() ||
+        reflected_scale_basis->positive_x_screen_direction.x > -0.99f ||
+        reflected_scale_basis->positive_y_screen_direction.y > -0.99f) {
+        std::cerr << "Viewport scale root reflection basis was incorrect.\n";
+        return false;
+    }
+
+    scale_math_skeleton.set_scale(1.0, 1.0);
+    auto& scale_parent_pose =
+        scale_math_skeleton.bone_poses()[*scale_parent].local_pose;
+    auto& scale_arm_pose =
+        scale_math_skeleton.bone_poses()[*scale_arm];
+    const auto expected_scale_screen_axis = [](
+                                                double parent_a,
+                                                double parent_b,
+                                                double parent_c,
+                                                double parent_d,
+                                                double angle_degrees) {
+        const double radians =
+            angle_degrees * static_cast<double>(kPi) / 180.0;
+        const double local_x = std::cos(radians);
+        const double local_y = std::sin(radians);
+        double screen_x = parent_a * local_x + parent_b * local_y;
+        double screen_y = -(parent_c * local_x + parent_d * local_y);
+        const double length = std::hypot(screen_x, screen_y);
+        screen_x /= length;
+        screen_y /= length;
+        return ImVec2(
+            static_cast<float>(screen_x),
+            static_cast<float>(screen_y));
+    };
+    const auto scale_axis_matches = [](const ImVec2& actual, const ImVec2& expected) {
+        return std::abs(
+                   static_cast<double>(actual.x) -
+                   static_cast<double>(expected.x)) <= 1e-5 &&
+            std::abs(
+                static_cast<double>(actual.y) -
+                static_cast<double>(expected.y)) <= 1e-5;
+    };
+    scale_parent_pose.rotation = 37.0f;
+    scale_parent_pose.scale_x = 1.75f;
+    scale_parent_pose.scale_y = -0.55f;
+    scale_parent_pose.shear_x = 11.0f;
+    scale_parent_pose.shear_y = -9.0f;
+    scale_arm_pose.inherit = marrow::runtime::BoneInherit::Normal;
+    scale_arm_pose.local_pose.rotation = 23.0f;
+    scale_arm_pose.local_pose.shear_x = 7.0f;
+    scale_arm_pose.local_pose.shear_y = -13.0f;
+    scale_arm_pose.local_pose.scale_x = -4.0f;
+    scale_arm_pose.local_pose.scale_y = 0.25f;
+    scale_math_skeleton.update_world_transforms();
+    const auto normal_scale_basis = viewport_scale_basis_for_smoke(
+        scale_math_skeleton, *scale_arm);
+    if (!normal_scale_basis.has_value()) {
+        std::cerr << "Viewport scale rejected a reflected non-uniform parent.\n";
+        return false;
+    }
+    const double normal_scale_axis_determinant =
+        static_cast<double>(
+            normal_scale_basis->positive_x_screen_direction.x) *
+            static_cast<double>(
+                normal_scale_basis->positive_y_screen_direction.y) -
+        static_cast<double>(
+            normal_scale_basis->positive_x_screen_direction.y) *
+            static_cast<double>(
+                normal_scale_basis->positive_y_screen_direction.x);
+    if (!std::isfinite(normal_scale_axis_determinant) ||
+        std::abs(normal_scale_axis_determinant) <= 1e-4) {
+        std::cerr << "Viewport scale produced a degenerate local-axis basis.\n";
+        return false;
+    }
+    const auto scale_normal_parent_world =
+        scale_math_skeleton.bone_world_transforms()[*scale_parent];
+    const ImVec2 expected_normal_x = expected_scale_screen_axis(
+        scale_normal_parent_world.a,
+        scale_normal_parent_world.b,
+        scale_normal_parent_world.c,
+        scale_normal_parent_world.d,
+        static_cast<double>(scale_arm_pose.local_pose.rotation) +
+            static_cast<double>(scale_arm_pose.local_pose.shear_x));
+    const ImVec2 expected_normal_y = expected_scale_screen_axis(
+        scale_normal_parent_world.a,
+        scale_normal_parent_world.b,
+        scale_normal_parent_world.c,
+        scale_normal_parent_world.d,
+        static_cast<double>(scale_arm_pose.local_pose.rotation) + 90.0 +
+            static_cast<double>(scale_arm_pose.local_pose.shear_y));
+    if (!scale_axis_matches(
+            normal_scale_basis->positive_x_screen_direction,
+            expected_normal_x) ||
+        !scale_axis_matches(
+            normal_scale_basis->positive_y_screen_direction,
+            expected_normal_y)) {
+        std::cerr << "Viewport scale Normal axes ignored evaluated parent rotation/shear.\n";
+        return false;
+    }
+
+    scale_math_skeleton.set_scale(-1.5, 2.25);
+    scale_arm_pose.inherit =
+        marrow::runtime::BoneInherit::OnlyTranslation;
+    scale_math_skeleton.update_world_transforms();
+    const auto translation_only_scale_basis =
+        viewport_scale_basis_for_smoke(
+            scale_math_skeleton, *scale_arm);
+    if (!translation_only_scale_basis.has_value() ||
+        translation_only_scale_basis->inherit !=
+            marrow::runtime::BoneInherit::OnlyTranslation) {
+        std::cerr << "Viewport scale OnlyTranslation basis ignored skeleton scale.\n";
+        return false;
+    }
+    const ImVec2 expected_translation_only_x = expected_scale_screen_axis(
+        -1.5,
+        0.0,
+        0.0,
+        2.25,
+        static_cast<double>(scale_arm_pose.local_pose.rotation) +
+            static_cast<double>(scale_arm_pose.local_pose.shear_x));
+    const ImVec2 expected_translation_only_y = expected_scale_screen_axis(
+        -1.5,
+        0.0,
+        0.0,
+        2.25,
+        static_cast<double>(scale_arm_pose.local_pose.rotation) + 90.0 +
+            static_cast<double>(scale_arm_pose.local_pose.shear_y));
+    if (!scale_axis_matches(
+            translation_only_scale_basis->positive_x_screen_direction,
+            expected_translation_only_x) ||
+        !scale_axis_matches(
+            translation_only_scale_basis->positive_y_screen_direction,
+            expected_translation_only_y)) {
+        std::cerr << "Viewport scale OnlyTranslation axes used the live parent basis.\n";
+        return false;
+    }
+
+    for (const auto inherit : {
+             marrow::runtime::BoneInherit::NoRotationOrReflection,
+             marrow::runtime::BoneInherit::NoScale,
+             marrow::runtime::BoneInherit::NoScaleOrReflection}) {
+        scale_arm_pose.inherit = inherit;
+        scale_math_skeleton.update_world_transforms();
+        if (viewport_scale_basis_for_smoke(
+                scale_math_skeleton, *scale_arm).has_value()) {
+            std::cerr << "Viewport scale exposed an unsupported inherit mode.\n";
+            return false;
+        }
+    }
+
+    scale_math_skeleton.set_scale(1.0, 1.0);
+    scale_arm_pose.inherit = marrow::runtime::BoneInherit::Normal;
+    scale_parent_pose.scale_x = 0.0f;
+    scale_parent_pose.scale_y = 0.0f;
+    scale_math_skeleton.update_world_transforms();
+    if (viewport_scale_basis_for_smoke(
+            scale_math_skeleton, *scale_arm).has_value()) {
+        std::cerr << "Viewport scale did not reject a singular parent basis.\n";
+        return false;
+    }
+    scale_parent_pose.scale_x = 1.0f;
+    scale_parent_pose.scale_y = 1.0f;
+    scale_arm_pose.local_pose.shear_x = 0.0f;
+    scale_arm_pose.local_pose.shear_y = -90.0f;
+    scale_math_skeleton.update_world_transforms();
+    if (viewport_scale_basis_for_smoke(
+            scale_math_skeleton, *scale_arm).has_value()) {
+        std::cerr << "Viewport scale did not reject degenerate local axes.\n";
+        return false;
+    }
+    scale_arm_pose.local_pose.shear_y = 0.0f;
+    scale_parent_pose.scale_x =
+        std::numeric_limits<float>::quiet_NaN();
+    scale_math_skeleton.update_world_transforms();
+    if (viewport_scale_basis_for_smoke(
+            scale_math_skeleton, *scale_arm).has_value()) {
+        std::cerr << "Viewport scale did not reject non-finite parent math.\n";
+        return false;
+    }
+    scale_parent_pose.scale_x =
+        std::numeric_limits<float>::infinity();
+    scale_math_skeleton.update_world_transforms();
+    if (viewport_scale_basis_for_smoke(
+            scale_math_skeleton, *scale_arm).has_value()) {
+        std::cerr << "Viewport scale did not reject infinite parent math.\n";
+        return false;
+    }
+
+    if (!scrub_timeline_time(
+            &camera_state, 0.37, "Viewport scale smoke", false)) {
+        return false;
+    }
+    const auto* scale_idle =
+        camera_state.session.runtime_data()->find_animation("idle");
+    const auto* source_scale =
+        scale_idle != nullptr
+        ? scale_idle->find_scale_timeline(*spine_index)
+        : nullptr;
+    const auto start_scale =
+        scale_idle != nullptr
+        ? scale_idle->sample_bone_scale(*spine_index, 0.37)
+        : std::nullopt;
+    if (source_scale == nullptr || !start_scale.has_value()) {
+        std::cerr << "Viewport scale smoke requires an effective scale track.\n";
+        return false;
+    }
+    const auto source_scale_keys = source_scale->keyframes;
+    camera_state.selection.replace(
+        marrow::editor::SlotSelection{runtime_slots.front().name});
+    camera_state.selection.toggle(
+        marrow::editor::BoneSelection{"spine"});
+    const marrow::editor::SelectionSet scale_mixed_selection =
+        camera_state.selection;
+    camera_state.hierarchy_selection_anchor =
+        marrow::editor::SlotSelection{runtime_slots.front().name};
+    camera_state.selected_timeline_track_id =
+        "viewport-scale-focus";
+    const auto scale_anchor =
+        camera_state.hierarchy_selection_anchor;
+    const auto scale_focus =
+        camera_state.selected_timeline_track_id;
+
+    if (viewport_press_target_for_smoke(
+            true, true, true, true, true, true) !=
+            ViewportPressTarget::ActiveGesture ||
+        viewport_press_target_for_smoke(
+            false, true, true, true, true, true) !=
+            ViewportPressTarget::WeightBrush ||
+        viewport_press_target_for_smoke(
+            false, false, true, true, true, true) !=
+            ViewportPressTarget::Translate ||
+        viewport_press_target_for_smoke(
+            false, false, false, true, true, true) !=
+            ViewportPressTarget::Rotation ||
+        viewport_press_target_for_smoke(
+            false, false, false, false, true, true) !=
+            ViewportPressTarget::Scale ||
+        viewport_press_target_for_smoke(
+            false, false, false, false, false, true) !=
+            ViewportPressTarget::Entity ||
+        viewport_press_target_for_smoke(
+            false, false, false, false, false, false) !=
+            ViewportPressTarget::Box) {
+        std::cerr << "Viewport scale press arbitration order changed.\n";
+        return false;
+    }
+
+    auto scale_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    const auto scale_basis = viewport_scale_basis_for_smoke(
+        *camera_state.preview_skeleton, *spine_index);
+    if (!scale_layout.has_value() || !scale_basis.has_value() ||
+        !viewport_scale_gizmo_visible_for_smoke(
+            camera_state, *scale_layout)) {
+        std::cerr << "Viewport scale gizmo was not visible for an active Bone.\n";
+        return false;
+    }
+    const auto scale_mage_skin =
+        camera_state.load_result.skeleton_data->find_skin_index("mage");
+    const auto scale_arm_slot =
+        camera_state.load_result.skeleton_data->find_slot_index("arm_l");
+    const auto& scale_ik_constraints =
+        camera_state.load_result.skeleton_data->ik_constraints();
+    if (!scale_mage_skin.has_value() || !scale_arm_slot.has_value() ||
+        scale_ik_constraints.empty() ||
+        camera_state.load_result.skeleton_data->find_attachment(
+            *scale_mage_skin, *scale_arm_slot, "mage_arm_l") == nullptr) {
+        std::cerr << "Viewport scale non-Bone visibility smoke lacks fixture identities.\n";
+        return false;
+    }
+    const std::array<marrow::editor::SelectionItem, 3> scale_non_bones{
+        marrow::editor::SlotSelection{runtime_slots.front().name},
+        marrow::editor::AttachmentSelection{
+            "arm_l", "mage", "mage_arm_l"},
+        marrow::editor::ConstraintSelection{
+            ConstraintKind::Ik, scale_ik_constraints.front().name}};
+    for (const auto& non_bone : scale_non_bones) {
+        camera_state.selection.replace(non_bone);
+        if (viewport_scale_gizmo_visible_for_smoke(
+                camera_state, *scale_layout)) {
+            std::cerr << "Viewport scale remained visible for an active non-Bone.\n";
+            return false;
+        }
+    }
+    camera_state.selection = scale_mixed_selection;
+    camera_state.weight_paint.enabled = true;
+    if (viewport_scale_gizmo_visible_for_smoke(
+            camera_state, *scale_layout)) {
+        std::cerr << "Viewport scale remained visible during weight paint.\n";
+        return false;
+    }
+    camera_state.weight_paint.enabled = false;
+    auto& scale_preview_pose =
+        camera_state.preview_skeleton->bone_poses()[*spine_index];
+    const auto scale_preview_inherit = scale_preview_pose.inherit;
+    scale_preview_pose.inherit = marrow::runtime::BoneInherit::NoScale;
+    const char* unsupported_scale_hint =
+        viewport_transform_hint_for_smoke(
+            camera_state, *scale_layout);
+    if (viewport_scale_gizmo_visible_for_smoke(
+            camera_state, *scale_layout) ||
+        unsupported_scale_hint == nullptr ||
+        std::string_view(unsupported_scale_hint).find("noScale") ==
+            std::string_view::npos) {
+        std::cerr << "Viewport scale unsupported-inherit hint was missing.\n";
+        return false;
+    }
+    scale_preview_pose.inherit = scale_preview_inherit;
+
+    const auto scale_screen_point = [](
+                                        const ViewportLayout& layout,
+                                        const ViewportScaleBasis& basis,
+                                        const ImVec2& direction,
+                                        double projection) {
+        const ImVec2 pivot = screen_from_world(
+            layout, basis.pivot_world.x, basis.pivot_world.y);
+        return ImVec2(
+            pivot.x + static_cast<float>(
+                          static_cast<double>(direction.x) * projection),
+            pivot.y + static_cast<float>(
+                          static_cast<double>(direction.y) * projection));
+    };
+    const ImVec2 scale_pivot = scale_screen_point(
+        *scale_layout,
+        *scale_basis,
+        scale_basis->positive_x_screen_direction,
+        0.0);
+    const ImVec2 scale_x_handle = scale_screen_point(
+        *scale_layout,
+        *scale_basis,
+        scale_basis->positive_x_screen_direction,
+        74.0);
+    const ImVec2 scale_x_miss = scale_screen_point(
+        *scale_layout,
+        *scale_basis,
+        scale_basis->positive_x_screen_direction,
+        81.0);
+    if (hit_test_scale_gizmo_for_smoke(
+            camera_state, *scale_layout, scale_x_handle) !=
+            std::optional<ViewportScaleHandle>(
+                ViewportScaleHandle::X) ||
+        hit_test_scale_gizmo_for_smoke(
+            camera_state, *scale_layout, scale_x_miss).has_value()) {
+        std::cerr << "Viewport scale 74px radius or 6px hit contract failed.\n";
+        return false;
+    }
+    ViewportLayout zoomed_scale_layout = *scale_layout;
+    zoomed_scale_layout.pixels_per_unit *= 2.0f;
+    const ImVec2 zoomed_scale_x_handle = scale_screen_point(
+        zoomed_scale_layout,
+        *scale_basis,
+        scale_basis->positive_x_screen_direction,
+        74.0);
+    if (hit_test_scale_gizmo_for_smoke(
+            camera_state,
+            zoomed_scale_layout,
+            zoomed_scale_x_handle) !=
+        std::optional<ViewportScaleHandle>(
+            ViewportScaleHandle::X)) {
+        std::cerr << "Viewport scale handles changed size with zoom.\n";
+        return false;
+    }
+
+    ViewportScaleGesturePayload scale_math_payload;
+    scale_math_payload.basis = *scale_basis;
+    scale_math_payload.start_projection_pixels = 74.0;
+    scale_math_payload.start_absolute_scale_x = 2.0;
+    scale_math_payload.start_absolute_scale_y = -3.0;
+    scale_math_payload.handle = ViewportScaleHandle::X;
+    const auto pivot_zero = viewport_scale_candidate_for_smoke(
+        scale_math_payload, *scale_layout, scale_pivot);
+    const auto x_sign_cross = viewport_scale_candidate_for_smoke(
+        scale_math_payload,
+        *scale_layout,
+        scale_screen_point(
+            *scale_layout,
+            *scale_basis,
+            scale_basis->positive_x_screen_direction,
+            -74.0));
+    scale_math_payload.start_absolute_scale_x = 0.0;
+    const auto zero_start_recovery =
+        viewport_scale_candidate_for_smoke(
+            scale_math_payload,
+            *scale_layout,
+            scale_screen_point(
+                *scale_layout,
+                *scale_basis,
+                scale_basis->positive_x_screen_direction,
+                148.0));
+    scale_math_payload.handle = ViewportScaleHandle::Uniform;
+    scale_math_payload.start_absolute_scale_x = -2.0;
+    scale_math_payload.start_absolute_scale_y = 0.5;
+    const auto uniform_flip = viewport_scale_candidate_for_smoke(
+        scale_math_payload,
+        *scale_layout,
+        scale_screen_point(
+            *scale_layout,
+            *scale_basis,
+            scale_basis->uniform_screen_direction,
+            -74.0));
+    scale_math_payload.start_absolute_scale_x = 0.0;
+    scale_math_payload.start_absolute_scale_y = 0.0;
+    const auto zero_uniform = viewport_scale_candidate_for_smoke(
+        scale_math_payload,
+        *scale_layout,
+        scale_screen_point(
+            *scale_layout,
+            *scale_basis,
+            scale_basis->uniform_screen_direction,
+            148.0));
+    constexpr double kScaleScreenTolerance = 1e-5;
+    if (!pivot_zero.has_value() || pivot_zero->scale_x != 0.0 ||
+        std::abs(pivot_zero->scale_y + 3.0) > kScaleScreenTolerance ||
+        !x_sign_cross.has_value() ||
+        std::abs(x_sign_cross->scale_x + 2.0) > kScaleScreenTolerance ||
+        std::abs(x_sign_cross->scale_y + 3.0) > kScaleScreenTolerance ||
+        !zero_start_recovery.has_value() ||
+        std::abs(zero_start_recovery->scale_x - 1.0) >
+            kScaleScreenTolerance ||
+        std::abs(zero_start_recovery->scale_y + 3.0) >
+            kScaleScreenTolerance ||
+        !uniform_flip.has_value() ||
+        std::abs(uniform_flip->scale_x - 2.0) > kScaleScreenTolerance ||
+        std::abs(uniform_flip->scale_y + 0.5) > kScaleScreenTolerance ||
+        zero_uniform.has_value()) {
+        std::cerr << "Viewport signed scale mapping contract failed.\n";
+        return false;
+    }
+
+    const std::string scale_project_before =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    const std::size_t scale_undo_before =
+        camera_state.session.undo_count();
+    camera_state.timeline_playing = true;
+    camera_state.session.set_playing(true);
+    if (!begin_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ViewportScaleHandle::X,
+            scale_x_handle) ||
+        camera_state.timeline_playing ||
+        !camera_state.session.transaction_active()) {
+        std::cerr << "Viewport scale did not pause playback and begin a transaction.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(
+        &camera_state, true);
+    if (marrow::editor::serialize_project(
+            *camera_state.session.project()) != scale_project_before ||
+        camera_state.session.undo_count() != scale_undo_before) {
+        std::cerr << "Viewport scale click materialized a track or history.\n";
+        return false;
+    }
+
+    if (!begin_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ViewportScaleHandle::X,
+            scale_x_handle) ||
+        !update_viewport_scale_gesture_for_smoke(
+            &camera_state, *scale_layout, scale_pivot)) {
+        std::cerr << "Viewport scale gesture could not reach exact zero.\n";
+        return false;
+    }
+    const auto* live_scale =
+        std::get_if<ViewportScaleGesturePayload>(
+            &camera_state.viewport_transform_gesture->payload);
+    const auto* materialized_scale =
+        camera_state.session.project()->find_transform_timeline_edit(
+            "idle",
+            "spine",
+            marrow::editor::TransformTimelineChannel::Scale);
+    const auto curve_matches = [](const auto& left, const auto& right) {
+        if (left.kind() != right.kind()) return false;
+        if (left.kind() !=
+            marrow::runtime::InterpolationKind::CubicBezier) {
+            return true;
+        }
+        const auto& l = left.cubic_bezier();
+        const auto& r = right.cubic_bezier();
+        return l.cx1 == r.cx1 && l.cy1 == r.cy1 &&
+            l.cx2 == r.cx2 && l.cy2 == r.cy2;
+    };
+    bool scale_source_keys_preserved =
+        materialized_scale != nullptr;
+    for (const auto& source_key : source_scale_keys) {
+        const auto found = materialized_scale == nullptr
+            ? std::vector<
+                  marrow::editor::TransformKeyframeEdit>::const_iterator{}
+            : std::find_if(
+                  materialized_scale->keyframes.begin(),
+                  materialized_scale->keyframes.end(),
+                  [&](const auto& key) {
+                      return std::abs(
+                                 key.time - source_key.time) <= 1e-6;
+                  });
+        if (materialized_scale == nullptr ||
+            found == materialized_scale->keyframes.end() ||
+            std::abs(found->x - source_key.x) > 1e-6 ||
+            std::abs(found->y - source_key.y) > 1e-6 ||
+            !curve_matches(
+                found->interpolation,
+                source_key.interpolation)) {
+            scale_source_keys_preserved = false;
+            break;
+        }
+    }
+    const auto& live_preview_scale_pose =
+        camera_state.preview_skeleton->bone_poses()[*spine_index].local_pose;
+    if (live_scale == nullptr ||
+        live_scale->current_absolute_scale_x != 0.0 ||
+        std::abs(
+            live_scale->current_absolute_scale_y -
+            start_scale->y) > 1e-5 ||
+        live_preview_scale_pose.scale_x != 0.0f ||
+        std::abs(
+            static_cast<double>(live_preview_scale_pose.scale_y) -
+            start_scale->y) > 1e-5 ||
+        !scale_source_keys_preserved) {
+        std::cerr << "Viewport scale live preview or materialization failed.\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(
+        &camera_state, true);
+    const std::string scale_project_zero =
+        marrow::editor::serialize_project(*camera_state.session.project());
+    if (scale_project_zero == scale_project_before ||
+        camera_state.session.undo_count() !=
+            scale_undo_before + 1U ||
+        !selection_matches(
+            camera_state.selection, scale_mixed_selection) ||
+        camera_state.hierarchy_selection_anchor != scale_anchor ||
+        camera_state.selected_timeline_track_id != scale_focus) {
+        std::cerr << "Viewport scale did not commit one active-only undo item.\n";
+        return false;
+    }
+
+    scale_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    const auto zero_scale_basis = viewport_scale_basis_for_smoke(
+        *camera_state.preview_skeleton, *spine_index);
+    if (!scale_layout.has_value() ||
+        !zero_scale_basis.has_value()) {
+        return false;
+    }
+    const ImVec2 zero_scale_x_handle = scale_screen_point(
+        *scale_layout,
+        *zero_scale_basis,
+        zero_scale_basis->positive_x_screen_direction,
+        74.0);
+    const ImVec2 zero_scale_x_recovery = scale_screen_point(
+        *scale_layout,
+        *zero_scale_basis,
+        zero_scale_basis->positive_x_screen_direction,
+        148.0);
+    const auto zero_scale_runtime_before =
+        camera_state.session.runtime_data();
+    const std::string zero_scale_preview_before =
+        camera_preview_signature(*camera_state.preview_skeleton);
+    const bool zero_scale_dirty_before =
+        camera_state.session.dirty();
+    const bool zero_scale_project_dirty_before =
+        camera_state.project_dirty;
+    const std::size_t zero_scale_undo_before =
+        camera_state.session.undo_count();
+    const std::size_t zero_scale_redo_before =
+        camera_state.session.redo_count();
+    const auto scale_rollback_is_exact = [&]() {
+        return marrow::editor::serialize_project(
+                   *camera_state.session.project()) ==
+                scale_project_zero &&
+            camera_state.session.runtime_data() ==
+                zero_scale_runtime_before &&
+            camera_preview_signature(
+                *camera_state.preview_skeleton) ==
+                zero_scale_preview_before &&
+            camera_state.session.dirty() ==
+                zero_scale_dirty_before &&
+            camera_state.project_dirty ==
+                zero_scale_project_dirty_before &&
+            camera_state.session.undo_count() ==
+                zero_scale_undo_before &&
+            camera_state.session.redo_count() ==
+                zero_scale_redo_before &&
+            !camera_state.session.transaction_active() &&
+            !camera_state.viewport_transform_gesture.has_value() &&
+            selection_matches(
+                camera_state.selection, scale_mixed_selection) &&
+            camera_state.hierarchy_selection_anchor ==
+                scale_anchor &&
+            camera_state.selected_timeline_track_id ==
+                scale_focus;
+    };
+    if (!begin_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ViewportScaleHandle::X,
+            zero_scale_x_handle) ||
+        !update_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            zero_scale_x_recovery)) {
+        std::cerr << "Viewport scale could not recover an exact-zero axis.\n";
+        return false;
+    }
+    const auto* recovered_scale =
+        std::get_if<ViewportScaleGesturePayload>(
+            &camera_state.viewport_transform_gesture->payload);
+    if (recovered_scale == nullptr ||
+        std::abs(
+            recovered_scale->current_absolute_scale_x - 1.0) >
+            1e-5) {
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(
+        &camera_state, false);
+    if (!scale_rollback_is_exact()) {
+        std::cerr << "Viewport scale cancel rollback was not exact.\n";
+        return false;
+    }
+    if (!begin_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ViewportScaleHandle::X,
+            zero_scale_x_handle) ||
+        !update_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            zero_scale_x_recovery) ||
+        marrow::editor::serialize_project(
+            *camera_state.session.project()) == scale_project_zero ||
+        camera_preview_signature(
+            *camera_state.preview_skeleton) ==
+            zero_scale_preview_before ||
+        update_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ImVec2(
+                std::numeric_limits<float>::quiet_NaN(),
+                zero_scale_x_handle.y)) ||
+        !scale_rollback_is_exact()) {
+        std::cerr << "Viewport scale non-finite rollback was not exact.\n";
+        return false;
+    }
+    if (!begin_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ViewportScaleHandle::X,
+            zero_scale_x_handle) ||
+        !update_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            zero_scale_x_recovery) ||
+        update_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ImVec2(
+                std::numeric_limits<float>::infinity(),
+                zero_scale_x_handle.y)) ||
+        !scale_rollback_is_exact()) {
+        std::cerr << "Viewport scale infinite rollback was not exact.\n";
+        return false;
+    }
+    if (!camera_state.session.undo() ||
+        marrow::editor::serialize_project(
+            *camera_state.session.project()) != scale_project_before ||
+        !camera_state.session.redo() ||
+        marrow::editor::serialize_project(
+            *camera_state.session.project()) != scale_project_zero ||
+        !camera_state.session.undo()) {
+        std::cerr << "Viewport scale undo/redo was not atomic.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&camera_state);
+    camera_state.session.clear_history();
+    scale_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    const auto uniform_zero_basis = viewport_scale_basis_for_smoke(
+        *camera_state.preview_skeleton, *spine_index);
+    if (!scale_layout.has_value() ||
+        !uniform_zero_basis.has_value()) {
+        return false;
+    }
+    const ImVec2 uniform_zero_handle = scale_screen_point(
+        *scale_layout,
+        *uniform_zero_basis,
+        uniform_zero_basis->uniform_screen_direction,
+        74.0);
+    const ImVec2 uniform_zero_pivot = scale_screen_point(
+        *scale_layout,
+        *uniform_zero_basis,
+        uniform_zero_basis->uniform_screen_direction,
+        0.0);
+    if (!begin_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            ViewportScaleHandle::Uniform,
+            uniform_zero_handle) ||
+        !update_viewport_scale_gesture_for_smoke(
+            &camera_state,
+            *scale_layout,
+            uniform_zero_pivot)) {
+        std::cerr << "Viewport uniform scale could not reach (0,0).\n";
+        return false;
+    }
+    finish_viewport_transform_gesture_for_smoke(
+        &camera_state, true);
+    scale_layout = build_viewport_layout(
+        camera_state, canvas_origin, canvas_size);
+    const char* zero_uniform_hint =
+        scale_layout.has_value()
+        ? viewport_transform_hint_for_smoke(
+              camera_state, *scale_layout)
+        : nullptr;
+    const auto& zero_uniform_preview =
+        camera_state.preview_skeleton->bone_poses()[*spine_index].local_pose;
+    if (!scale_layout.has_value() ||
+        viewport_uniform_scale_handle_visible_for_smoke(
+            camera_state, *scale_layout) ||
+        zero_uniform_hint == nullptr ||
+        std::string_view(zero_uniform_hint).find("both axes are zero") ==
+            std::string_view::npos ||
+        zero_uniform_preview.scale_x != 0.0f ||
+        zero_uniform_preview.scale_y != 0.0f ||
+        camera_state.session.undo_count() != 1U) {
+        std::cerr << "Viewport (0,0) uniform hide/hint contract failed.\n";
+        return false;
+    }
+    if (!camera_state.session.undo()) {
+        return false;
+    }
+    sync_shell_from_editor_session(&camera_state);
+    camera_state.session.clear_history();
+    if (marrow::editor::serialize_project(
+            *camera_state.session.project()) != scale_project_before) {
         return false;
     }
 
@@ -1114,7 +2633,7 @@ bool validate_viewport_camera_smoke(
             &camera_state,
             *singular_layout,
             ImVec2(singular_pointer.x + 10.0f, singular_pointer.y + 10.0f)) ||
-        camera_state.viewport_translate_gesture.has_value() ||
+        camera_state.viewport_transform_gesture.has_value() ||
         marrow::editor::serialize_project(*camera_state.session.project()) != singular_before) {
         std::cerr << "Viewport singular-parent gesture did not cancel without mutation.\n";
         return false;
@@ -1194,524 +2713,45 @@ bool validate_viewport_camera_smoke(
 
 bool validate_viewport_prepared_scene_renderer_smoke(
     const std::filesystem::path& project_path) {
-#if defined(__APPLE__)
-    ScopedViewportSmokeContext smoke_context;
-    if (const auto error = initialize_viewport_smoke_context(&smoke_context)) {
-        std::cerr << *error << '\n';
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) || state.preview_skeleton == nullptr ||
+        state.load_result.atlas_data.empty()) {
+        std::cerr << "Viewport command smoke could not load the preview scene.\n";
         return false;
     }
-#else
-    glfwSetErrorCallback(glfw_error_callback);
-    glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
-    glfwInitHint(GLFW_COCOA_MENUBAR, GLFW_FALSE);
-    if (!glfwInit()) {
-        std::cerr << "Viewport renderer smoke failed to initialize GLFW.\n";
-        return false;
-    }
-
-    configure_glfw_for_editor();
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    GLFWwindow* window =
-        glfwCreateWindow(640, 480, "Marrow Viewport Renderer Smoke", nullptr, nullptr);
-    if (window == nullptr) {
-        std::cerr << "Viewport renderer smoke failed to create a hidden GL window.\n";
-        glfwTerminate();
-        return false;
-    }
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(0);
-#endif
-
-    ViewportRenderResources resources;
-    auto cleanup = [&]() {
-        destroy_viewport_renderer(&resources);
-#if defined(__APPLE__)
-        smoke_context.destroy();
-#else
-        glfwDestroyWindow(window);
-        glfwTerminate();
-#endif
-    };
-
-    ShellState shell_state;
-    shell_state.project_path = project_path;
-    if (!reload_project(&shell_state)) {
-        std::cerr << shell_state.error_message << '\n';
-        cleanup();
-        return false;
-    }
-    shell_state.viewport.pan_x = 0.0;
-    shell_state.viewport.pan_y = 0.0;
-    shell_state.viewport.zoom = 1.0;
-    shell_state.viewport.debug_overlay = {};
-
-    if (const auto error = initialize_viewport_renderer(&resources)) {
-        std::cerr << *error << '\n';
-        cleanup();
-        return false;
-    }
-    if (const auto error = ensure_viewport_framebuffer(&resources, 640, 480)) {
-        std::cerr << *error << '\n';
-        cleanup();
-        return false;
-    }
-
-    const auto render_scene_to_pixels =
-        [&](const ShellState& render_state,
-            const ViewportLayout& layout,
-            const marrow::renderer::PreparedScene& scene,
-            const ViewportGeometryPass& overlay_geometry,
-            const ImVec2& sample_point) {
-            const ViewportGeometryPass empty_background;
-            const std::vector<OnionSkinTexturedGhost> no_ghosts;
-            if (const auto error = render_prepared_scene_framebuffer(
-                    layout,
-                    empty_background,
-                    overlay_geometry,
-                    no_ghosts,
-                    scene,
-                    resolve_viewport_atlas_image_path(render_state, scene),
-                    &resources)) {
-                std::cerr << *error << '\n';
-                return std::optional<std::array<std::uint8_t, 4>>{};
-            }
-
-            return std::optional<std::array<std::uint8_t, 4>>{read_viewport_pixel(
-                resources,
-                static_cast<int>(std::lround(sample_point.x)),
-                resources.framebuffer_height - 1 -
-                    static_cast<int>(std::lround(sample_point.y)))};
-        };
-
-    const auto setup_layout = build_viewport_layout(
-        shell_state,
+    const auto layout = build_viewport_layout(
+        state,
         ImVec2(0.0f, 0.0f),
-        ImVec2(static_cast<float>(resources.framebuffer_width),
-               static_cast<float>(resources.framebuffer_height)));
-    if (!setup_layout.has_value()) {
-        std::cerr << "Viewport renderer smoke could not build the setup-pose layout.\n";
-        cleanup();
+        ImVec2(640.0f, 480.0f));
+    if (!layout.has_value()) {
+        std::cerr << "Viewport command smoke could not build the camera layout.\n";
         return false;
     }
-
-    const auto setup_scene_result = marrow::renderer::prepare_setup_pose_scene(
-        *shell_state.preview_skeleton,
-        *shell_state.load_result.atlas_data.front());
-    if (!setup_scene_result) {
-        std::cerr << setup_scene_result.error_message << '\n';
-        cleanup();
+    const auto scene_result = marrow::renderer::prepare_setup_pose_scene(
+        *state.preview_skeleton,
+        *state.load_result.atlas_data.front());
+    if (!scene_result) {
+        std::cerr << scene_result.error_message << '\n';
         return false;
     }
-
-    const marrow::renderer::PreparedScene& setup_scene = *setup_scene_result.scene;
-    const auto body_draw_index = find_region_attachment_index(setup_scene, "body");
-    const auto* body_attachment = find_region_attachment(setup_scene, "body");
-    const auto* spark_attachment = find_region_attachment(setup_scene, "spark_fx");
-    const auto* clip_attachment = find_clip_attachment(setup_scene, "fx_mask");
-    if (!body_draw_index.has_value() ||
-        body_attachment == nullptr ||
-        spark_attachment == nullptr ||
-        clip_attachment == nullptr) {
-        std::cerr << "Viewport renderer smoke could not resolve the expected setup-pose attachments.\n";
-        cleanup();
+    const auto commands = marrow::renderer::build_render_command_list(
+        *scene_result.scene,
+        viewport_projection_matrix(*layout));
+    if (!commands || commands.command_list->commands.empty() ||
+        commands.command_list->ordered_events.empty() ||
+        commands.command_list->bone_palette.empty()) {
+        std::cerr << "Viewport command smoke did not produce a complete render list.\n";
         return false;
     }
-
-    const ImVec2 body_center = screen_from_world(
-        *setup_layout,
-        (body_attachment->vertices[0].position.x + body_attachment->vertices[2].position.x) * 0.5,
-        (body_attachment->vertices[0].position.y + body_attachment->vertices[2].position.y) * 0.5);
-    double body_min_x = body_attachment->vertices[0].position.x;
-    double body_max_x = body_attachment->vertices[0].position.x;
-    double body_min_y = body_attachment->vertices[0].position.y;
-    double body_max_y = body_attachment->vertices[0].position.y;
-    for (const auto& vertex : body_attachment->vertices) {
-        body_min_x = std::min(body_min_x, vertex.position.x);
-        body_max_x = std::max(body_max_x, vertex.position.x);
-        body_min_y = std::min(body_min_y, vertex.position.y);
-        body_max_y = std::max(body_max_y, vertex.position.y);
-    }
-    std::vector<ImVec2> body_sample_points;
-    body_sample_points.reserve(25);
-    for (int row = 1; row <= 5; ++row) {
-        const double row_ratio = static_cast<double>(row) / 6.0;
-        const double y = body_min_y + ((body_max_y - body_min_y) * row_ratio);
-        for (int column = 1; column <= 5; ++column) {
-            const double column_ratio = static_cast<double>(column) / 6.0;
-            const double x = body_min_x + ((body_max_x - body_min_x) * column_ratio);
-            body_sample_points.push_back(screen_from_world(*setup_layout, x, y));
-        }
-    }
-    marrow::renderer::PreparedScene blank_scene = setup_scene;
-    blank_scene.clip_attachments.clear();
-    blank_scene.draw_commands.clear();
-    blank_scene.ordered_events.clear();
-    const auto background_pixel =
-        render_scene_to_pixels(shell_state, *setup_layout, blank_scene, {}, body_center);
-    const auto setup_body_pixel =
-        render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, body_center);
-    if (!background_pixel.has_value() || !setup_body_pixel.has_value()) {
-        cleanup();
+    ViewportGeometryPass background;
+    ViewportGeometryPass foreground;
+    build_viewport_background_geometry(state, *layout, {}, &background);
+    build_viewport_overlay_geometry(state, *layout, std::nullopt, nullptr, &foreground);
+    if (background.line_vertices.empty() && background.triangle_vertices.empty()) {
+        std::cerr << "Viewport command smoke did not produce background geometry.\n";
         return false;
     }
-    if (pixels_match(*setup_body_pixel, *background_pixel)) {
-        std::cerr << "Viewport renderer smoke did not draw the setup-pose body region.\n";
-        cleanup();
-        return false;
-    }
-
-    marrow::renderer::PreparedScene tinted_scene = setup_scene;
-    if (auto* body_command = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(
-            &tinted_scene.draw_commands[*body_draw_index])) {
-        body_command->blend_mode = marrow::runtime::BlendMode::Normal;
-    } else {
-        std::cerr << "Viewport renderer smoke lost the setup-pose body command.\n";
-        cleanup();
-        return false;
-    }
-    marrow::renderer::PreparedScene no_dark_scene = tinted_scene;
-    if (auto* body_command = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(
-            &no_dark_scene.draw_commands[*body_draw_index])) {
-        body_command->dark_color.reset();
-    } else {
-        std::cerr << "Viewport renderer smoke could not retarget the body two-color test.\n";
-        cleanup();
-        return false;
-    }
-    bool two_color_changed = false;
-    for (const ImVec2& sample_point : body_sample_points) {
-        const auto tinted_pixel =
-            render_scene_to_pixels(shell_state, *setup_layout, tinted_scene, {}, sample_point);
-        const auto no_dark_pixel =
-            render_scene_to_pixels(shell_state, *setup_layout, no_dark_scene, {}, sample_point);
-        if (tinted_pixel.has_value() &&
-            no_dark_pixel.has_value() &&
-            !pixels_match(*tinted_pixel, *no_dark_pixel)) {
-            two_color_changed = true;
-            break;
-        }
-    }
-    if (!two_color_changed) {
-        std::cerr << "Viewport renderer smoke did not apply the two-color tint path.\n";
-        cleanup();
-        return false;
-    }
-
-    auto render_body_blend_mode =
-        [&](marrow::runtime::BlendMode blend_mode,
-            const ImVec2& sample_point) -> std::optional<std::array<std::uint8_t, 4>> {
-            marrow::renderer::PreparedScene blend_scene = setup_scene;
-            auto* body_command = std::get_if<marrow::renderer::RegionAttachmentDrawCommand>(
-                &blend_scene.draw_commands[*body_draw_index]);
-            if (body_command == nullptr) {
-                return std::nullopt;
-            }
-            body_command->dark_color.reset();
-            body_command->blend_mode = blend_mode;
-            return render_scene_to_pixels(shell_state, *setup_layout, blend_scene, {}, sample_point);
-        };
-    bool blend_modes_diverged = false;
-    for (const ImVec2& sample_point : body_sample_points) {
-        const auto normal_pixel =
-            render_body_blend_mode(marrow::runtime::BlendMode::Normal, sample_point);
-        const auto additive_pixel =
-            render_body_blend_mode(marrow::runtime::BlendMode::Additive, sample_point);
-        const auto multiply_pixel =
-            render_body_blend_mode(marrow::runtime::BlendMode::Multiply, sample_point);
-        const auto screen_pixel =
-            render_body_blend_mode(marrow::runtime::BlendMode::Screen, sample_point);
-        if (normal_pixel.has_value() &&
-            additive_pixel.has_value() &&
-            multiply_pixel.has_value() &&
-            screen_pixel.has_value() &&
-            !pixels_match(*normal_pixel, *additive_pixel) &&
-            !pixels_match(*normal_pixel, *multiply_pixel) &&
-            !pixels_match(*normal_pixel, *screen_pixel)) {
-            blend_modes_diverged = true;
-            break;
-        }
-    }
-    if (!blend_modes_diverged) {
-        std::cerr << "Viewport renderer smoke did not vary the framebuffer result across blend modes.\n";
-        cleanup();
-        return false;
-    }
-
-    double spark_min_x = spark_attachment->vertices[0].position.x;
-    double spark_max_x = spark_attachment->vertices[0].position.x;
-    double spark_min_y = spark_attachment->vertices[0].position.y;
-    double spark_max_y = spark_attachment->vertices[0].position.y;
-    for (const auto& vertex : spark_attachment->vertices) {
-        spark_min_x = std::min(spark_min_x, vertex.position.x);
-        spark_max_x = std::max(spark_max_x, vertex.position.x);
-        spark_min_y = std::min(spark_min_y, vertex.position.y);
-        spark_max_y = std::max(spark_max_y, vertex.position.y);
-    }
-    std::vector<ImVec2> clipped_spark_sample_points;
-    clipped_spark_sample_points.reserve(16);
-    for (int row = 1; row <= 4; ++row) {
-        const double row_ratio = static_cast<double>(row) / 5.0;
-        const double y = spark_min_y + ((spark_max_y - spark_min_y) * row_ratio);
-        for (int column = 1; column <= 4; ++column) {
-            const double column_ratio = static_cast<double>(column) / 5.0;
-            const double x = spark_min_x + ((spark_max_x - spark_min_x) * column_ratio);
-            if (point_in_polygon(clip_attachment->polygon, {x, y})) {
-                continue;
-            }
-            clipped_spark_sample_points.push_back(screen_from_world(*setup_layout, x, y));
-        }
-    }
-    if (clipped_spark_sample_points.empty()) {
-        std::cerr << "Viewport renderer smoke could not find a spark sample outside the clip polygon.\n";
-        cleanup();
-        return false;
-    }
-
-    marrow::renderer::PreparedScene unclipped_scene = setup_scene;
-    unclipped_scene.clip_attachments.clear();
-    unclipped_scene.ordered_events.clear();
-    for (std::size_t draw_index = 0; draw_index < unclipped_scene.draw_commands.size(); ++draw_index) {
-        std::visit(
-            [](auto& attachment) {
-                attachment.clip_attachment_name.reset();
-                using Attachment = std::remove_cv_t<
-                    std::remove_reference_t<decltype(attachment)>>;
-                if constexpr (!std::is_same_v<
-                                  Attachment,
-                                  marrow::renderer::PreparedStrokeCommand>) {
-                    attachment.masked_vertices.clear();
-                    attachment.masked_indices.clear();
-                }
-            },
-            unclipped_scene.draw_commands[draw_index]);
-        unclipped_scene.ordered_events.push_back({
-            marrow::renderer::PreparedSceneEventKind::Draw,
-            draw_index,
-        });
-    }
-    bool clipping_applied = false;
-    for (const ImVec2& sample_point : clipped_spark_sample_points) {
-        const auto clipped_spark_pixel =
-            render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, sample_point);
-        const auto unclipped_spark_pixel =
-            render_scene_to_pixels(shell_state, *setup_layout, unclipped_scene, {}, sample_point);
-        if (clipped_spark_pixel.has_value() &&
-            unclipped_spark_pixel.has_value() &&
-            !pixels_match(*clipped_spark_pixel, *unclipped_spark_pixel) &&
-            !pixels_match(*unclipped_spark_pixel, *background_pixel)) {
-            clipping_applied = true;
-            break;
-        }
-    }
-    if (!clipping_applied) {
-        std::cerr << "Viewport renderer smoke did not apply stencil clipping to the spark attachment.\n";
-        cleanup();
-        return false;
-    }
-
-    const auto spine_index = shell_state.load_result.skeleton_data->find_bone_index("spine");
-    if (!spine_index.has_value()) {
-        std::cerr << "Viewport renderer smoke requires the spine bone.\n";
-        cleanup();
-        return false;
-    }
-    const ImVec2 spine_screen = setup_layout->bones[*spine_index].screen_position;
-    const auto setup_spine_pixel =
-        render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, spine_screen);
-    if (!setup_spine_pixel.has_value()) {
-        cleanup();
-        return false;
-    }
-
-    select_bone(&shell_state, *spine_index, "Smoke", false);
-    shell_state.viewport.debug_overlay.bones = true;
-    ViewportGeometryPass overlay_geometry;
-    build_viewport_overlay_geometry(
-        shell_state,
-        *setup_layout,
-        selected_bone_index(shell_state),
-        nullptr,
-        &overlay_geometry);
-    bool overlay_changed = false;
-    for (int offset_y = -3; offset_y <= 3 && !overlay_changed; ++offset_y) {
-        for (int offset_x = -3; offset_x <= 3; ++offset_x) {
-            const ImVec2 overlay_sample_point(
-                spine_screen.x + static_cast<float>(offset_x),
-                spine_screen.y + static_cast<float>(offset_y));
-            const auto base_pixel =
-                render_scene_to_pixels(shell_state, *setup_layout, setup_scene, {}, overlay_sample_point);
-            const auto overlay_pixel = render_scene_to_pixels(
-                shell_state,
-                *setup_layout,
-                setup_scene,
-                overlay_geometry,
-                overlay_sample_point);
-            if (base_pixel.has_value() &&
-                overlay_pixel.has_value() &&
-                !pixels_match(*base_pixel, *overlay_pixel)) {
-                overlay_changed = true;
-                break;
-            }
-        }
-    }
-    if (!overlay_changed) {
-        std::cerr << "Viewport renderer smoke did not draw the debug bone overlay on top of the character.\n";
-        cleanup();
-        return false;
-    }
-
-    ShellState camera_state = {};
-    camera_state.project_path = project_path;
-    if (!reload_project(&camera_state)) {
-        std::cerr << camera_state.error_message << '\n';
-        cleanup();
-        return false;
-    }
-    select_bone(&camera_state, *spine_index, "Smoke", false);
-    camera_state.viewport.debug_overlay.bones = true;
-    camera_state.viewport.pan_x = 96.0;
-    camera_state.viewport.pan_y = -54.0;
-    camera_state.viewport.zoom = 1.35;
-    const auto panned_layout = build_viewport_layout(
-        camera_state,
-        ImVec2(0.0f, 0.0f),
-        ImVec2(static_cast<float>(resources.framebuffer_width),
-               static_cast<float>(resources.framebuffer_height)));
-    if (!panned_layout.has_value()) {
-        std::cerr << "Viewport renderer smoke could not build the panned layout.\n";
-        cleanup();
-        return false;
-    }
-    ViewportGeometryPass panned_overlay_geometry;
-    build_viewport_overlay_geometry(
-        camera_state,
-        *panned_layout,
-        selected_bone_index(camera_state),
-        nullptr,
-        &panned_overlay_geometry);
-    const ImVec2 panned_body_center = screen_from_world(
-        *panned_layout,
-        (body_attachment->vertices[0].position.x + body_attachment->vertices[2].position.x) * 0.5,
-        (body_attachment->vertices[0].position.y + body_attachment->vertices[2].position.y) * 0.5);
-    const ImVec2 panned_spine_screen = panned_layout->bones[*spine_index].screen_position;
-    const auto panned_body_pixel = render_scene_to_pixels(
-        camera_state,
-        *panned_layout,
-        setup_scene,
-        panned_overlay_geometry,
-        panned_body_center);
-    const auto panned_spine_pixel = render_scene_to_pixels(
-        camera_state,
-        *panned_layout,
-        setup_scene,
-        panned_overlay_geometry,
-        panned_spine_screen);
-    if (!panned_body_pixel.has_value() ||
-        !panned_spine_pixel.has_value() ||
-        pixels_match(*panned_body_pixel, *background_pixel) ||
-        pixels_match(*panned_spine_pixel, *background_pixel) ||
-        std::abs(panned_body_center.x - body_center.x) < 20.0f ||
-        std::abs(panned_spine_screen.x - spine_screen.x) < 20.0f) {
-        std::cerr << "Viewport renderer smoke did not apply the shared pan/zoom camera to the character and overlay.\n";
-        cleanup();
-        return false;
-    }
-
-    ShellState mesh_state;
-    mesh_state.project_path = project_path;
-    if (!reload_project(&mesh_state)) {
-        std::cerr << mesh_state.error_message << '\n';
-        cleanup();
-        return false;
-    }
-    mesh_state.viewport.pan_x = 0.0;
-    mesh_state.viewport.pan_y = 0.0;
-    mesh_state.viewport.zoom = 1.0;
-    mesh_state.preview_skin_names = {"default"};
-    mesh_state.preview_slot_overrides.assign(
-        mesh_state.preview_slot_overrides.size(),
-        std::nullopt);
-    if (!refresh_preview_pose(&mesh_state)) {
-        std::cerr << mesh_state.error_message << '\n';
-        cleanup();
-        return false;
-    }
-    const auto body_slot_index = mesh_state.load_result.skeleton_data->find_slot_index("body");
-    const auto warrior_skin_index = mesh_state.load_result.skeleton_data->find_skin_index("warrior");
-    if (!body_slot_index.has_value() ||
-        !warrior_skin_index.has_value() ||
-        !set_preview_skin_enabled(&mesh_state, *warrior_skin_index, true, false)) {
-        std::cerr << "Viewport renderer smoke could not activate the warrior mesh skin.\n";
-        cleanup();
-        return false;
-    }
-    if (!set_selected_animation(&mesh_state, "idle", "Smoke", false, true) ||
-        !scrub_timeline_time(&mesh_state, 0.5, "Smoke", false)) {
-        std::cerr << "Viewport renderer smoke could not scrub the animated warrior preview pose.\n";
-        cleanup();
-        return false;
-    }
-    const auto* warrior_attachment =
-        mesh_state.preview_skeleton->current_attachment(*body_slot_index);
-    if (warrior_attachment == nullptr || warrior_attachment->name != "warrior_body") {
-        std::cerr << "Viewport renderer smoke did not apply the warrior body attachment.\n";
-        cleanup();
-        return false;
-    }
-    const auto mesh_layout = build_viewport_layout(
-        mesh_state,
-        ImVec2(0.0f, 0.0f),
-        ImVec2(static_cast<float>(resources.framebuffer_width),
-               static_cast<float>(resources.framebuffer_height)));
-    if (!mesh_layout.has_value()) {
-        std::cerr << "Viewport renderer smoke could not build the mesh layout.\n";
-        cleanup();
-        return false;
-    }
-    const auto mesh_scene_result = marrow::renderer::prepare_setup_pose_scene(
-        *mesh_state.preview_skeleton,
-        *mesh_state.load_result.atlas_data.front());
-    if (!mesh_scene_result) {
-        std::cerr << mesh_scene_result.error_message << '\n';
-        cleanup();
-        return false;
-    }
-    const auto* mesh_attachment = find_dynamic_mesh_attachment(*mesh_scene_result.scene, "body");
-    if (mesh_attachment == nullptr) {
-        std::cerr << "Viewport renderer smoke did not resolve the warrior body mesh.\n";
-        cleanup();
-        return false;
-    }
-    const auto mesh_vertices = marrow::renderer::evaluate_gpu_skinned_vertices(
-        *mesh_attachment,
-        mesh_scene_result.scene->bone_palette);
-    if (!mesh_vertices || mesh_vertices.vertices.empty()) {
-        std::cerr << "Viewport renderer smoke could not evaluate the warrior body mesh.\n";
-        cleanup();
-        return false;
-    }
-    double mesh_center_x = 0.0;
-    double mesh_center_y = 0.0;
-    for (const auto& vertex : mesh_vertices.vertices) {
-        mesh_center_x += vertex.position.x;
-        mesh_center_y += vertex.position.y;
-    }
-    mesh_center_x /= static_cast<double>(mesh_vertices.vertices.size());
-    mesh_center_y /= static_cast<double>(mesh_vertices.vertices.size());
-    const ImVec2 mesh_center = screen_from_world(*mesh_layout, mesh_center_x, mesh_center_y);
-    const auto mesh_pixel = render_scene_to_pixels(
-        mesh_state,
-        *mesh_layout,
-        *mesh_scene_result.scene,
-        {},
-        mesh_center);
-    if (!mesh_pixel.has_value() || pixels_match(*mesh_pixel, *background_pixel)) {
-        std::cerr << "Viewport renderer smoke did not draw the warrior GPU-skinned mesh attachment.\n";
-        cleanup();
-        return false;
-    }
-
-    cleanup();
     return true;
 }
 
@@ -2165,12 +3205,17 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         std::cerr << "SelectionSet shell smoke requires at least one bone and slot.\n";
         return false;
     }
-    const std::size_t bone_index = 0U;
+    const std::size_t bone_index =
+        skeleton.find_bone_index("arm_l").value_or(0U);
     const std::size_t slot_index = 0U;
     select_bone(state, bone_index, "SelectionSet smoke", false);
+    ResolvedSelection resolved = resolve_shell_selection(*state);
     if (state->selection.items().size() != 1U ||
         state->selection.active_bone() == nullptr ||
         state->selection.active_bone()->bone_name != skeleton.bones()[bone_index].name ||
+        resolved.active_bone_index != bone_index ||
+        resolved.context_bone_index != bone_index ||
+        resolved.active_slot_index.has_value() ||
         selected_bone_index(*state) != bone_index ||
         selected_slot_index(*state).has_value() || selected_attachment(*state).has_value() ||
         selected_constraint(*state).has_value()) {
@@ -2179,10 +3224,14 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
     }
 
     select_slot(state, slot_index, "SelectionSet smoke", false);
+    resolved = resolve_shell_selection(*state);
     const auto slot_attachment = selected_attachment(*state);
     if (state->selection.items().size() != 1U ||
         state->selection.active_slot() == nullptr ||
         state->selection.active_slot()->slot_name != skeleton.slots()[slot_index].name ||
+        resolved.active_bone_index.has_value() ||
+        resolved.active_slot_index != slot_index ||
+        resolved.context_bone_index != skeleton.slots()[slot_index].bone_index ||
         selected_slot_index(*state) != slot_index ||
         selected_bone_index(*state) != skeleton.slots()[slot_index].bone_index ||
         !slot_attachment.has_value()) {
@@ -2191,6 +3240,7 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
     }
 
     select_attachment(state, slot_attachment, "SelectionSet smoke", false);
+    resolved = resolve_shell_selection(*state);
     const auto* named_attachment = state->selection.active_attachment();
     const auto resolved_attachment = selected_attachment(*state);
     if (named_attachment == nullptr || !slot_attachment->skin_index.has_value() ||
@@ -2202,6 +3252,10 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         resolved_attachment->slot_index != slot_attachment->slot_index ||
         resolved_attachment->skin_index != slot_attachment->skin_index ||
         resolved_attachment->attachment_name != slot_attachment->attachment_name ||
+        resolved.active_bone_index.has_value() ||
+        resolved.active_slot_index != slot_index ||
+        !resolved.active_attachment.has_value() ||
+        resolved.context_bone_index != skeleton.slots()[slot_index].bone_index ||
         selected_slot_index(*state) != slot_index ||
         selected_bone_index(*state) != skeleton.slots()[slot_index].bone_index) {
         std::cerr << "Attachment SelectionSet name identity resolution failed.\n";
@@ -2237,8 +3291,13 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         constraint_identity->constraint_name,
         "SelectionSet smoke",
         false);
+    resolved = resolve_shell_selection(*state);
     if (state->selection.items().size() != 1U ||
         state->selection.active_constraint() == nullptr ||
+        resolved.active_constraint != constraint_identity ||
+        resolved.active_bone_index.has_value() ||
+        resolved.active_slot_index.has_value() ||
+        resolved.context_bone_index.has_value() ||
         selected_constraint(*state) != constraint_identity ||
         selected_bone_index(*state).has_value() || selected_slot_index(*state).has_value() ||
         selected_attachment(*state).has_value()) {
@@ -2248,7 +3307,356 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
 
     const marrow::editor::BoneSelection mixed_bone{skeleton.bones()[bone_index].name};
     const marrow::editor::SlotSelection mixed_slot{skeleton.slots()[slot_index].name};
+    const marrow::editor::AttachmentSelection mixed_attachment{
+        skeleton.slots()[slot_index].name,
+        skeleton.skins()[*slot_attachment->skin_index].name,
+        slot_attachment->attachment_name};
+
+    const marrow::editor::SelectionItem hierarchy_root =
+        marrow::editor::BoneSelection{"root"};
+    const marrow::editor::SelectionItem hierarchy_spine =
+        marrow::editor::BoneSelection{"spine"};
+    const marrow::editor::SelectionItem hierarchy_bone = mixed_bone;
+    const marrow::editor::SelectionItem hierarchy_slot = mixed_slot;
+    const marrow::editor::SelectionItem hierarchy_attachment = mixed_attachment;
+    const marrow::editor::SelectionItem hierarchy_constraint = *constraint_identity;
+    const std::vector<marrow::editor::SelectionItem> hierarchy_visible{
+        hierarchy_root,
+        hierarchy_spine,
+        hierarchy_bone,
+        hierarchy_slot,
+        hierarchy_attachment};
+    const HierarchySelectionModifiers plain_modifiers{};
+    const HierarchySelectionModifiers command_modifiers{true, false};
+    const HierarchySelectionModifiers shift_modifiers{false, true};
+    const HierarchySelectionModifiers command_shift_modifiers{true, true};
+
+    if (!hierarchy_command_modifier(true, false, true) ||
+        hierarchy_command_modifier(true, true, false) ||
+        !hierarchy_command_modifier(false, true, false) ||
+        hierarchy_command_modifier(false, false, true)) {
+        std::cerr << "Hierarchy command modifier did not follow macOS Super and non-macOS Ctrl semantics.\n";
+        return false;
+    }
+
     state->selection.clear();
+    state->hierarchy_selection_anchor.reset();
+    state->selected_timeline_track_id = "hierarchy-smoke-track";
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_spine,
+            plain_modifiers,
+            true) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_spine} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_spine ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_spine ||
+        state->selected_timeline_track_id.has_value() ||
+        state->status_message.find("active bone spine") == std::string::npos ||
+        state->status_message.find("1 selected") == std::string::npos) {
+        std::cerr << "Plain hierarchy selection did not replace, activate, anchor, clear timeline focus, and report status.\n";
+        return false;
+    }
+
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_bone,
+            command_modifiers,
+            false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_spine, hierarchy_bone} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_bone ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_bone ||
+        !apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_bone,
+            command_modifiers,
+            false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_spine} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_spine ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_bone) {
+        std::cerr << "Command hierarchy toggle did not add/remove or preserve deterministic active fallback and anchor.\n";
+        return false;
+    }
+
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_slot,
+            shift_modifiers,
+            false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_bone, hierarchy_slot} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_slot ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_bone ||
+        hierarchy_row_selection_state(*state, hierarchy_bone) !=
+            HierarchyRowSelectionState::Selected ||
+        hierarchy_row_selection_state(*state, hierarchy_slot) !=
+            HierarchyRowSelectionState::Active ||
+        hierarchy_row_selection_state(*state, hierarchy_root) !=
+            HierarchyRowSelectionState::Unselected) {
+        std::cerr << "A toggled-off visible anchor did not drive Shift range selection or distinct row presentation states.\n";
+        return false;
+    }
+
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_spine,
+            plain_modifiers,
+            false) ||
+        !state->selection.add_range({hierarchy_constraint}, hierarchy_constraint) ||
+        !apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_attachment,
+            shift_modifiers,
+            false)) {
+        std::cerr << "Forward hierarchy range selection could not be prepared.\n";
+        return false;
+    }
+    const std::vector<marrow::editor::SelectionItem> visual_order_range{
+        hierarchy_spine,
+        hierarchy_bone,
+        hierarchy_slot,
+        hierarchy_attachment};
+    if (state->selection.items() != visual_order_range ||
+        state->selection.contains(hierarchy_constraint) ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_attachment ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_spine) {
+        std::cerr << "Forward Shift range did not replace mixed selection in visual order.\n";
+        return false;
+    }
+
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_attachment,
+            plain_modifiers,
+            false) ||
+        !apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_spine,
+            shift_modifiers,
+            false) ||
+        state->selection.items() != visual_order_range ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_spine ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_attachment) {
+        std::cerr << "Reverse Shift range did not retain top-to-bottom visual storage order.\n";
+        return false;
+    }
+
+    state->selection.replace(hierarchy_constraint);
+    state->hierarchy_selection_anchor.reset();
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_spine,
+            command_modifiers,
+            false) ||
+        !apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_attachment,
+            command_shift_modifiers,
+            true) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{
+                hierarchy_constraint,
+                hierarchy_spine,
+                hierarchy_bone,
+                hierarchy_slot,
+                hierarchy_attachment} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_attachment ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_spine ||
+        hierarchy_row_selection_state(*state, hierarchy_spine) !=
+            HierarchyRowSelectionState::Selected ||
+        hierarchy_row_selection_state(*state, hierarchy_attachment) !=
+            HierarchyRowSelectionState::Active ||
+        hierarchy_row_selection_state(*state, hierarchy_root) !=
+            HierarchyRowSelectionState::Unselected ||
+        state->status_message.find("active attachment ") == std::string::npos ||
+        state->status_message.find("5 selected") == std::string::npos) {
+        std::cerr << "Command+Shift hierarchy range did not preserve mixed insertion order, activate the click, or classify rows.\n";
+        return false;
+    }
+
+    state->selection.clear();
+    state->selection.add_range(
+        {hierarchy_constraint, hierarchy_spine},
+        hierarchy_spine);
+    state->hierarchy_selection_anchor = hierarchy_spine;
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            hierarchy_visible,
+            hierarchy_spine,
+            command_modifiers,
+            true) ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_constraint ||
+        state->status_message.find(
+            std::string("active ") +
+            constraint_kind_label(constraint_identity->kind) +
+            " constraint " + constraint_identity->constraint_name) ==
+            std::string::npos) {
+        std::cerr << "Hierarchy toggle fallback status did not report the exact active Constraint identity.\n";
+        return false;
+    }
+
+    const std::vector<marrow::editor::SelectionItem> collapsed_visible{
+        hierarchy_root,
+        hierarchy_spine,
+        hierarchy_slot,
+        hierarchy_attachment};
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            collapsed_visible,
+            hierarchy_spine,
+            plain_modifiers,
+            false) ||
+        !apply_hierarchy_selection_gesture(
+            state,
+            collapsed_visible,
+            hierarchy_attachment,
+            shift_modifiers,
+            false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{
+                hierarchy_spine,
+                hierarchy_slot,
+                hierarchy_attachment} ||
+        state->selection.contains(hierarchy_bone)) {
+        std::cerr << "Collapsed or filtered hierarchy rows leaked into a visible Shift range.\n";
+        return false;
+    }
+
+    state->hierarchy_selection_anchor = hierarchy_slot;
+    const std::vector<marrow::editor::SelectionItem> selection_before_hidden_anchor =
+        state->selection.items();
+    if (reconcile_hierarchy_anchor_visibility(state, collapsed_visible) ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_slot ||
+        !reconcile_hierarchy_anchor_visibility(
+            state,
+            {hierarchy_root, hierarchy_spine}) ||
+        state->hierarchy_selection_anchor.has_value() ||
+        state->selection.items() != selection_before_hidden_anchor) {
+        std::cerr << "Hierarchy visibility reconciliation did not retain a visible anchor or clear only a hidden anchor.\n";
+        return false;
+    }
+
+    state->selection.replace(hierarchy_constraint);
+    state->hierarchy_selection_anchor = hierarchy_attachment;
+    const std::vector<marrow::editor::SelectionItem> invalid_anchor_visible{
+        hierarchy_root,
+        hierarchy_spine,
+        hierarchy_slot};
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            invalid_anchor_visible,
+            hierarchy_slot,
+            shift_modifiers,
+            false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_slot} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_slot ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_slot) {
+        std::cerr << "Shift with an invalid hierarchy anchor did not fall back to plain replacement.\n";
+        return false;
+    }
+
+    state->selection.clear();
+    state->selection.add_range(
+        {hierarchy_constraint, hierarchy_slot},
+        hierarchy_constraint);
+    state->hierarchy_selection_anchor = hierarchy_attachment;
+    if (!apply_hierarchy_selection_gesture(
+            state,
+            invalid_anchor_visible,
+            hierarchy_slot,
+            command_shift_modifiers,
+            false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{
+                hierarchy_constraint,
+                hierarchy_slot} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_slot ||
+        !state->hierarchy_selection_anchor.has_value() ||
+        *state->hierarchy_selection_anchor != hierarchy_slot) {
+        std::cerr << "Command+Shift with an invalid anchor did not add-or-activate a single item.\n";
+        return false;
+    }
+
+    state->hierarchy_selection_anchor = hierarchy_spine;
+    select_bone(state, bone_index, "Viewport", false);
+    if (state->hierarchy_selection_anchor.has_value()) {
+        std::cerr << "Viewport selection did not clear the hierarchy range anchor.\n";
+        return false;
+    }
+    state->hierarchy_selection_anchor = hierarchy_spine;
+    select_slot(state, slot_index, "Timeline", false);
+    if (state->hierarchy_selection_anchor.has_value()) {
+        std::cerr << "Timeline slot selection did not clear the hierarchy range anchor.\n";
+        return false;
+    }
+    ShellState global_timeline_state;
+    global_timeline_state.hierarchy_selection_anchor = hierarchy_spine;
+    TimelineTrackRow global_timeline_track;
+    global_timeline_track.id = "global:events";
+    global_timeline_track.label = "Events";
+    (void)focus_timeline_track(
+        &global_timeline_state,
+        global_timeline_track,
+        0.0,
+        "Timeline",
+        false);
+    if (global_timeline_state.hierarchy_selection_anchor.has_value()) {
+        std::cerr << "Global timeline track selection did not clear the hierarchy range anchor.\n";
+        return false;
+    }
+    state->hierarchy_selection_anchor = hierarchy_spine;
+    select_attachment(state, slot_attachment, "Viewport", false);
+    if (state->hierarchy_selection_anchor.has_value()) {
+        std::cerr << "External attachment selection did not clear the hierarchy range anchor.\n";
+        return false;
+    }
+    state->hierarchy_selection_anchor = hierarchy_spine;
+    select_constraint(
+        state,
+        constraint_identity->kind,
+        constraint_identity->constraint_name,
+        "Constraints",
+        false);
+    if (state->hierarchy_selection_anchor.has_value()) {
+        std::cerr << "Constraint selection did not clear the hierarchy range anchor.\n";
+        return false;
+    }
+
+    state->selection.clear();
+    state->hierarchy_selection_anchor.reset();
+    state->selected_timeline_track_id.reset();
     if (!state->selection.add_range(
             {mixed_bone, *constraint_identity, mixed_slot},
             mixed_slot) ||
@@ -2264,6 +3672,458 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
         std::cerr << "Mixed SelectionSet did not expose only its active constraint.\n";
         return false;
     }
+
+    const auto* animation = selected_animation(*state);
+    if (animation == nullptr) {
+        std::cerr << "SelectionSet consumer smoke requires an active animation.\n";
+        return false;
+    }
+    const std::vector<TimelineTrackRow> tracks =
+        build_timeline_tracks(skeleton, *animation);
+    const auto bone_track = std::find_if(
+        tracks.begin(),
+        tracks.end(),
+        [&](const TimelineTrackRow& track) {
+            return track.bone_index == bone_index;
+        });
+    const auto slot_track = std::find_if(
+        tracks.begin(),
+        tracks.end(),
+        [&](const TimelineTrackRow& track) {
+            return track.slot_index == slot_index;
+        });
+    if (bone_track == tracks.end() || slot_track == tracks.end()) {
+        std::cerr << "SelectionSet consumer smoke requires bone and slot timeline rows.\n";
+        return false;
+    }
+
+    state->selection.replace(mixed_bone);
+    resolved = resolve_shell_selection(*state);
+    if (!timeline_track_matches_selection(*state, *bone_track) ||
+        timeline_track_matches_selection(*state, *slot_track) ||
+        !resolved.active_bone_index.has_value()) {
+        std::cerr << "Active Bone did not exclusively drive bone consumers.\n";
+        return false;
+    }
+
+    state->selection.replace(mixed_slot);
+    resolved = resolve_shell_selection(*state);
+    WeightPaintSelectionContext paint_context =
+        resolve_weight_paint_selection_context(*state);
+    if (!timeline_track_matches_selection(*state, *slot_track) ||
+        timeline_track_matches_selection(*state, *bone_track) ||
+        resolved.active_bone_index.has_value() ||
+        paint_context.target_slot_index != slot_index ||
+        paint_context.influence_bone_index != skeleton.slots()[slot_index].bone_index) {
+        std::cerr << "Active Slot did not drive slot context and single-item paint fallback.\n";
+        return false;
+    }
+
+    state->selection.replace(mixed_attachment);
+    resolved = resolve_shell_selection(*state);
+    paint_context = resolve_weight_paint_selection_context(*state);
+    if (!timeline_track_matches_selection(*state, *slot_track) ||
+        timeline_track_matches_selection(*state, *bone_track) ||
+        resolved.active_bone_index.has_value() ||
+        !paint_context.target_attachment.has_value() ||
+        paint_context.target_attachment->slot_index != slot_index ||
+        paint_context.influence_bone_index != skeleton.slots()[slot_index].bone_index) {
+        std::cerr << "Active Attachment did not drive its slot and paint context.\n";
+        return false;
+    }
+
+    state->selection.replace(*constraint_identity);
+    paint_context = resolve_weight_paint_selection_context(*state);
+    if (timeline_track_matches_selection(*state, *bone_track) ||
+        timeline_track_matches_selection(*state, *slot_track) ||
+        paint_context.target_slot_index.has_value() ||
+        paint_context.influence_bone_index.has_value()) {
+        std::cerr << "Active Constraint leaked into timeline or weight-paint consumers.\n";
+        return false;
+    }
+
+    state->selection.clear();
+    state->selection.add_range(
+        {mixed_slot, mixed_attachment, mixed_bone},
+        mixed_bone);
+    paint_context = resolve_weight_paint_selection_context(*state);
+    if (!paint_context.target_attachment.has_value() ||
+        paint_context.target_attachment->attachment_name !=
+            mixed_attachment.attachment_name ||
+        paint_context.influence_bone_index != bone_index) {
+        std::cerr << "Mixed active Bone did not use the last Attachment paint target.\n";
+        return false;
+    }
+
+    state->selection.add_range({*constraint_identity}, *constraint_identity);
+    paint_context = resolve_weight_paint_selection_context(*state);
+    if (!paint_context.target_attachment.has_value() ||
+        paint_context.influence_bone_index.has_value()) {
+        std::cerr << "Active Constraint did not disable mixed Paint/Erase influence.\n";
+        return false;
+    }
+
+    // Click order must not matter: the same {bone, slot} pair paints with the
+    // selected bone whichever of the two was clicked last.
+    state->selection.clear();
+    state->selection.add_range({mixed_bone, mixed_slot}, mixed_slot);
+    paint_context = resolve_weight_paint_selection_context(*state);
+    if (paint_context.target_slot_index != slot_index ||
+        paint_context.influence_bone_index != bone_index) {
+        std::cerr << "Slot-active {bone, slot} selection lost its selected influence bone.\n";
+        return false;
+    }
+    state->selection.clear();
+    state->selection.add_range({mixed_slot, mixed_bone}, mixed_bone);
+    const WeightPaintSelectionContext reversed_context =
+        resolve_weight_paint_selection_context(*state);
+    if (reversed_context.influence_bone_index !=
+        paint_context.influence_bone_index) {
+        std::cerr << "Weight-paint influence bone depended on selection click order.\n";
+        return false;
+    }
+
+    // MAR-160 point selection shares SelectionSet with the hierarchy and uses
+    // the same platform command modifier resolved above.
+    state->selection.clear();
+    state->selection.add_range(
+        {hierarchy_constraint, hierarchy_slot},
+        hierarchy_slot);
+    state->hierarchy_selection_anchor = hierarchy_slot;
+    state->selected_timeline_track_id = "viewport-point-smoke";
+    if (!apply_viewport_point_selection_for_smoke(
+            state, hierarchy_bone, false) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_bone} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_bone ||
+        state->hierarchy_selection_anchor.has_value() ||
+        state->selected_timeline_track_id.has_value() ||
+        !apply_viewport_point_selection_for_smoke(
+            state, hierarchy_slot, true) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{
+                hierarchy_bone, hierarchy_slot} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_slot ||
+        !apply_viewport_point_selection_for_smoke(
+            state, hierarchy_slot, true) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_bone} ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != hierarchy_bone ||
+        hierarchy_row_selection_state(*state, hierarchy_bone) !=
+            HierarchyRowSelectionState::Active) {
+        std::cerr << "Viewport plain/toggle point selection did not synchronize exact hierarchy identities.\n";
+        return false;
+    }
+
+    const auto viewport_layout = build_viewport_layout(
+        *state,
+        ImVec2(0.0f, 0.0f),
+        ImVec2(1280.0f, 720.0f));
+    if (!viewport_layout.has_value() || state->load_result.atlas_data.empty()) {
+        std::cerr << "MAR-160 smoke could not build viewport hit geometry.\n";
+        return false;
+    }
+
+    // Category, distance, and stable-order comparisons are tested separately
+    // so an overlap cannot depend on variant iteration or container order.
+    const std::vector<ViewportEntityHitCandidate> overlap_candidates{
+        {hierarchy_attachment,
+         ViewportEntityHitPriority::AttachmentSurface,
+         0.0f,
+         0U},
+        {hierarchy_slot, ViewportEntityHitPriority::SlotHandle, 0.0f, 0U},
+        {hierarchy_bone, ViewportEntityHitPriority::BoneBody, 0.0f, 0U},
+        {hierarchy_root, ViewportEntityHitPriority::BoneJoint, 0.0f, 0U},
+        {hierarchy_constraint,
+         ViewportEntityHitPriority::ConstraintTarget,
+         100.0f,
+         99U}};
+    const auto overlap_pick =
+        resolve_viewport_entity_hit_candidates(overlap_candidates);
+    const auto distance_pick = resolve_viewport_entity_hit_candidates({
+        {hierarchy_root, ViewportEntityHitPriority::BoneJoint, 9.0f, 0U},
+        {hierarchy_bone, ViewportEntityHitPriority::BoneJoint, 4.0f, 9U}});
+    const auto order_pick = resolve_viewport_entity_hit_candidates({
+        {hierarchy_root, ViewportEntityHitPriority::BoneJoint, 4.0f, 8U},
+        {hierarchy_bone, ViewportEntityHitPriority::BoneJoint, 4.0f, 2U}});
+    if (!overlap_pick.has_value() || overlap_pick->item != hierarchy_constraint ||
+        !distance_pick.has_value() || distance_pick->item != hierarchy_bone ||
+        !order_pick.has_value() || order_pick->item != hierarchy_bone) {
+        std::cerr << "Viewport overlap precedence was not category, distance, then stable order.\n";
+        return false;
+    }
+
+    const auto overlay_before = state->viewport.debug_overlay;
+    state->viewport.debug_overlay = {};
+    state->viewport.debug_overlay.bones = false;
+    const auto scene_result = marrow::renderer::prepare_setup_pose_scene(
+        *state->preview_skeleton,
+        *state->load_result.atlas_data.front());
+    if (!scene_result) {
+        std::cerr << scene_result.error_message << '\n';
+        return false;
+    }
+    const ViewportEntityHitGeometry drawable_geometry =
+        build_viewport_entity_hit_geometry(
+            *state, *viewport_layout, &*scene_result.scene);
+    const auto slot_marker = std::find_if(
+        drawable_geometry.circles.begin(),
+        drawable_geometry.circles.end(),
+        [](const ViewportHitCircle& circle) {
+            return circle.marker_shape == ViewportHitMarkerShape::Diamond &&
+                std::get_if<marrow::editor::SlotSelection>(
+                    &circle.candidate.item) != nullptr;
+        });
+    if (drawable_geometry.triangles.empty() ||
+        slot_marker == drawable_geometry.circles.end() ||
+        std::any_of(
+            drawable_geometry.triangles.begin(),
+            drawable_geometry.triangles.end(),
+            [&](const ViewportHitTriangle& triangle) {
+                return std::get_if<marrow::editor::AttachmentSelection>(
+                           &triangle.candidate.item) == nullptr ||
+                    !marrow::editor::selection_item_exists(
+                        triangle.candidate.item, skeleton);
+            })) {
+        std::cerr << "Viewport prepared-region hit geometry lost typed attachment or slot identities.\n";
+        return false;
+    }
+    const auto slot_pick = pick_viewport_entity_at_position(
+        *state, *viewport_layout, drawable_geometry, slot_marker->center);
+    if (!slot_pick.has_value() ||
+        std::get_if<marrow::editor::SlotSelection>(&slot_pick->item) == nullptr) {
+        std::cerr << "Viewport slot centroid did not outrank its rendered attachment surface.\n";
+        return false;
+    }
+    ViewportEntityHitGeometry attachment_only_geometry;
+    attachment_only_geometry.triangles = drawable_geometry.triangles;
+    const auto& triangle = attachment_only_geometry.triangles.front();
+    const ImVec2 triangle_center(
+        (triangle.points[0].x + triangle.points[1].x + triangle.points[2].x) /
+            3.0f,
+        (triangle.points[0].y + triangle.points[1].y + triangle.points[2].y) /
+            3.0f);
+    const auto attachment_pick = pick_viewport_entity_at_position(
+        *state,
+        *viewport_layout,
+        attachment_only_geometry,
+        triangle_center);
+    if (!attachment_pick.has_value() ||
+        std::get_if<marrow::editor::AttachmentSelection>(
+            &attachment_pick->item) == nullptr) {
+        std::cerr << "Viewport rendered-region triangle was not pickable as an Attachment.\n";
+        return false;
+    }
+    // A degenerate (zero-area) triangle - e.g. an attachment scaled to
+    // exactly zero - must not hit-test as covering the entire viewport.
+    ViewportEntityHitGeometry degenerate_geometry;
+    ViewportHitTriangle degenerate_triangle = drawable_geometry.triangles.front();
+    degenerate_triangle.points = {
+        ImVec2(120.0f, 90.0f), ImVec2(120.0f, 90.0f), ImVec2(120.0f, 90.0f)};
+    degenerate_geometry.triangles.push_back(degenerate_triangle);
+    const auto degenerate_pick = pick_viewport_entity_at_position(
+        *state, *viewport_layout, degenerate_geometry, ImVec2(400.0f, 300.0f));
+    if (degenerate_pick.has_value()) {
+        std::cerr << "Viewport degenerate triangle hit-tested as covering the viewport.\n";
+        return false;
+    }
+
+    state->viewport.debug_overlay.bones = true;
+    state->viewport.debug_overlay.ik_constraints = true;
+    state->viewport.debug_overlay.path_constraints = true;
+    state->viewport.debug_overlay.physics_constraints = true;
+    const ViewportEntityHitGeometry constraint_geometry =
+        build_viewport_entity_hit_geometry(
+            *state, *viewport_layout, nullptr);
+    auto constraint_probe = std::optional<ImVec2>{};
+    if (const auto marker = std::find_if(
+            constraint_geometry.circles.begin(),
+            constraint_geometry.circles.end(),
+            [](const ViewportHitCircle& circle) {
+                return std::get_if<marrow::editor::ConstraintSelection>(
+                           &circle.candidate.item) != nullptr;
+            });
+        marker != constraint_geometry.circles.end()) {
+        constraint_probe = marker->center;
+    } else if (const auto segment = std::find_if(
+                   constraint_geometry.segments.begin(),
+                   constraint_geometry.segments.end(),
+                   [](const ViewportHitSegment& value) {
+                       return std::get_if<marrow::editor::ConstraintSelection>(
+                                  &value.candidate.item) != nullptr;
+                   });
+               segment != constraint_geometry.segments.end()) {
+        constraint_probe = ImVec2(
+            (segment->start.x + segment->end.x) * 0.5f,
+            (segment->start.y + segment->end.y) * 0.5f);
+    }
+    if (!constraint_probe.has_value()) {
+        std::cerr << "Viewport constraint overlays did not expose a pick target.\n";
+        return false;
+    }
+    const auto constraint_pick = pick_viewport_entity_at_position(
+        *state,
+        *viewport_layout,
+        constraint_geometry,
+        *constraint_probe);
+    if (!constraint_pick.has_value() ||
+        std::get_if<marrow::editor::ConstraintSelection>(
+            &constraint_pick->item) == nullptr ||
+        !marrow::editor::selection_item_exists(
+            constraint_pick->item, skeleton)) {
+        std::cerr << "Viewport visible constraint target did not outrank overlapping bones.\n";
+        return false;
+    }
+
+    state->viewport.debug_overlay.bones = true;
+    ViewportLayout box_layout = *viewport_layout;
+    std::reverse(box_layout.bones.begin(), box_layout.bones.end());
+    const auto inactive_node = std::find_if(
+        box_layout.bones.begin(),
+        box_layout.bones.end(),
+        [](const BoneCanvasNode& node) { return node.active; });
+    if (inactive_node == box_layout.bones.end()) {
+        std::cerr << "Viewport box smoke requires a runtime-active bone.\n";
+        return false;
+    }
+    const std::size_t excluded_bone_index = inactive_node->bone_index;
+    inactive_node->active = false;
+    const ImVec2 full_box_start(
+        box_layout.canvas_origin.x - 1.0f,
+        box_layout.canvas_origin.y - 1.0f);
+    const ImVec2 full_box_end(
+        box_layout.canvas_end.x + 1.0f,
+        box_layout.canvas_end.y + 1.0f);
+    state->viewport.debug_overlay.bones = false;
+    if (!collect_viewport_box_bones(
+             *state, box_layout, full_box_start, full_box_end)
+             .empty()) {
+        std::cerr << "Viewport box selected Bones while the bone overlay was hidden.\n";
+        return false;
+    }
+    state->viewport.debug_overlay.bones = true;
+    const std::vector<marrow::editor::SelectionItem> ordered_box_bones =
+        collect_viewport_box_bones(
+            *state, box_layout, full_box_start, full_box_end);
+    if (ordered_box_bones.empty() ||
+        !std::is_sorted(
+            ordered_box_bones.begin(),
+            ordered_box_bones.end(),
+            [&](const marrow::editor::SelectionItem& left,
+                const marrow::editor::SelectionItem& right) {
+                const auto* left_bone =
+                    std::get_if<marrow::editor::BoneSelection>(&left);
+                const auto* right_bone =
+                    std::get_if<marrow::editor::BoneSelection>(&right);
+                return skeleton.find_bone_index(left_bone->bone_name) <
+                    skeleton.find_bone_index(right_bone->bone_name);
+            }) ||
+        std::any_of(
+            ordered_box_bones.begin(),
+            ordered_box_bones.end(),
+            [&](const marrow::editor::SelectionItem& item) {
+                const auto* bone =
+                    std::get_if<marrow::editor::BoneSelection>(&item);
+                return bone == nullptr ||
+                    skeleton.find_bone_index(bone->bone_name) ==
+                        excluded_bone_index;
+            })) {
+        std::cerr << "Viewport box collection was not active-Bone-only in stable skeleton order.\n";
+        return false;
+    }
+
+    state->selection.replace(hierarchy_constraint);
+    if (!begin_viewport_box_selection_for_smoke(
+            state, full_box_start, false) ||
+        !update_viewport_box_selection_for_smoke(
+            state, ImVec2(full_box_start.x + 3.0f, full_box_start.y)) ||
+        !state->viewport_box_selection.has_value() ||
+        state->viewport_box_selection->dragged ||
+        finish_viewport_box_selection_for_smoke(
+            state, box_layout, true) ||
+        state->selection.items() !=
+            std::vector<marrow::editor::SelectionItem>{hierarchy_constraint}) {
+        std::cerr << "Viewport box drag threshold materialized a click/no-movement selection.\n";
+        return false;
+    }
+
+    state->hierarchy_selection_anchor = hierarchy_slot;
+    state->selected_timeline_track_id = "viewport-box-forward";
+    if (!begin_viewport_box_selection_for_smoke(
+            state, full_box_start, false) ||
+        !update_viewport_box_selection_for_smoke(state, full_box_end) ||
+        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        state->selection.items() != ordered_box_bones ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != ordered_box_bones.back() ||
+        state->hierarchy_selection_anchor.has_value() ||
+        state->selected_timeline_track_id.has_value()) {
+        std::cerr << "Forward viewport box did not replace in skeleton order and synchronize hierarchy context.\n";
+        return false;
+    }
+    state->selection.replace(hierarchy_constraint);
+    if (!begin_viewport_box_selection_for_smoke(
+            state, full_box_end, false) ||
+        !update_viewport_box_selection_for_smoke(state, full_box_start) ||
+        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        state->selection.items() != ordered_box_bones) {
+        std::cerr << "Reverse viewport box did not match the normalized forward rectangle.\n";
+        return false;
+    }
+
+    state->selection.clear();
+    state->selection.add_range(
+        {hierarchy_constraint, hierarchy_slot, ordered_box_bones.front()},
+        hierarchy_slot);
+    std::vector<marrow::editor::SelectionItem> additive_expected{
+        hierarchy_constraint, hierarchy_slot, ordered_box_bones.front()};
+    for (const auto& item : ordered_box_bones) {
+        if (std::find(additive_expected.begin(), additive_expected.end(), item) ==
+            additive_expected.end()) {
+            additive_expected.push_back(item);
+        }
+    }
+    if (!begin_viewport_box_selection_for_smoke(
+            state, full_box_start, true) ||
+        !update_viewport_box_selection_for_smoke(state, full_box_end) ||
+        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        state->selection.items() != additive_expected ||
+        state->selection.active() == nullptr ||
+        *state->selection.active() != ordered_box_bones.back()) {
+        std::cerr << "Additive viewport box did not retain its mixed prefix and append missing Bones.\n";
+        return false;
+    }
+
+    const ImVec2 empty_start(
+        box_layout.canvas_end.x + 100.0f,
+        box_layout.canvas_end.y + 100.0f);
+    const ImVec2 empty_end(empty_start.x + 30.0f, empty_start.y + 30.0f);
+    const auto additive_before_empty = state->selection.items();
+    state->hierarchy_selection_anchor = hierarchy_slot;
+    state->selected_timeline_track_id = "viewport-empty-additive";
+    if (!begin_viewport_box_selection_for_smoke(state, empty_start, true) ||
+        !update_viewport_box_selection_for_smoke(state, empty_end) ||
+        finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        state->selection.items() != additive_before_empty ||
+        state->hierarchy_selection_anchor !=
+            std::optional<marrow::editor::SelectionItem>(hierarchy_slot) ||
+        state->selected_timeline_track_id != "viewport-empty-additive") {
+        std::cerr << "Empty additive viewport box did not remain a strict no-op.\n";
+        return false;
+    }
+    if (!begin_viewport_box_selection_for_smoke(state, empty_start, false) ||
+        !update_viewport_box_selection_for_smoke(state, empty_end) ||
+        !finish_viewport_box_selection_for_smoke(state, box_layout, true) ||
+        !state->selection.items().empty() ||
+        state->hierarchy_selection_anchor.has_value() ||
+        state->selected_timeline_track_id.has_value()) {
+        std::cerr << "Empty plain viewport box did not clear selection and hierarchy context.\n";
+        return false;
+    }
+    state->viewport.debug_overlay = overlay_before;
     state->selection.clear();
 
     if (marrow::editor::serialize_project(*state->load_result.project) != project_before ||
@@ -2491,9 +4351,11 @@ int run_headless_smoke(const Options& options) {
             return 1;
         }
 
-        if (kViewportImageUv0.x != 0.0f || kViewportImageUv0.y != 1.0f ||
-            kViewportImageUv1.x != 1.0f || kViewportImageUv1.y != 0.0f) {
-            std::cerr << "Viewport image UVs are not flipped for the OpenGL framebuffer texture.\n";
+        const ViewportTextureUv top_left_uv = viewport_texture_uv(true);
+        const ViewportTextureUv bottom_left_uv = viewport_texture_uv(false);
+        if (top_left_uv.v0 != 0.0f || top_left_uv.v1 != 1.0f ||
+            bottom_left_uv.v0 != 1.0f || bottom_left_uv.v1 != 0.0f) {
+            std::cerr << "Viewport image UVs do not follow the Sokol texture origin.\n";
             ImGui::DestroyContext();
             return 1;
         }
@@ -4883,7 +6745,7 @@ int run_headless_smoke(const Options& options) {
         handle_project_history_shortcuts(&shell_state);
 
         bool reload_requested = false;
-        draw_menu_bar(nullptr, &reload_requested, &shell_state);
+        (void)draw_menu_bar(&reload_requested, &shell_state);
         const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
         const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
         ensure_default_dock_layout(&shell_state, dockspace_id, main_viewport);
@@ -4949,6 +6811,46 @@ int run_headless_smoke(const Options& options) {
             ImGui::DestroyContext();
             return 1;
         }
+    }
+
+    // MAR-159: the anchor resets only when filter/tree-collapse removes it
+    // from the visible order. A Hierarchy window whose dock tab is hidden
+    // renders no rows at all; that degenerate frame must not clear it.
+    {
+        const auto& smoke_skeleton = *shell_state.load_result.skeleton_data;
+        std::optional<std::string> child_bone_name;
+        for (const auto& bone : smoke_skeleton.bones()) {
+            if (bone.parent_index.has_value()) {
+                child_bone_name = bone.name;
+                break;
+            }
+        }
+        if (!child_bone_name.has_value()) {
+            std::cerr << "Hidden-tab anchor smoke requires a child bone in the fixture.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        shell_state.hierarchy_selection_anchor =
+            marrow::editor::BoneSelection{*child_bone_name};
+        ImGui::DockBuilderDockWindow(
+            kPropertiesWindowTitle, shell_state.dock_layout.hierarchy_node_id);
+        for (int hidden_frame = 0; hidden_frame < 2; ++hidden_frame) {
+            io.DeltaTime = 1.0f / 60.0f;
+            ImGui::NewFrame();
+            ImGui::DockSpaceOverViewport(0U, ImGui::GetMainViewport());
+            draw_hierarchy_window(&shell_state);
+            draw_inspector_window(&shell_state);
+            if (hidden_frame == 0) {
+                ImGui::SetWindowFocus(kPropertiesWindowTitle);
+            }
+            ImGui::Render();
+        }
+        if (!shell_state.hierarchy_selection_anchor.has_value()) {
+            std::cerr << "Hidden hierarchy dock tab cleared the selection anchor.\n";
+            ImGui::DestroyContext();
+            return 1;
+        }
+        shell_state.hierarchy_selection_anchor.reset();
     }
 
     std::cout << shell_state.status_message << '\n'

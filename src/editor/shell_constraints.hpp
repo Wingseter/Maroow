@@ -27,7 +27,6 @@ const ConstraintType* find_named_constraint(
 }
 
 const char* constraint_kind_label(ConstraintKind kind);
-void validate_selected_constraint(ShellState* state);
 void select_constraint(
     ShellState* state,
     ConstraintKind kind,

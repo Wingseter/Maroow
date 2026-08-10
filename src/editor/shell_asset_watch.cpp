@@ -5,7 +5,6 @@
 #include <system_error>
 #include <utility>
 
-#include "shell_constraints.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_state.hpp"
@@ -176,10 +175,15 @@ bool reload_runtime_source_assets(ShellState* state) {
         return false;
     }
 
-    if (selected_slot_index(*state).has_value()) {
-        sync_attachment_selection_for_slot(state, *selected_slot_index(*state));
-    }
-    validate_selected_constraint(state);
+    // Runtime source adoption may reorder or move bones. Never carry a stale
+    // screen-space marquee into the newly adopted preview.
+    state->viewport_box_selection.reset();
+    marrow::editor::reconcile_selection_to_runtime(
+        state->selection,
+        *state->load_result.skeleton_data);
+    reconcile_hierarchy_anchor_to_runtime(
+        state,
+        *state->load_result.skeleton_data);
 
     state->status_message =
         "Hot-reloaded runtime assets: " + join_paths(current_runtime_asset_paths(*state));

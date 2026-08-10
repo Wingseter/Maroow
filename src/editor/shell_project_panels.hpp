@@ -4,6 +4,11 @@
 
 namespace marrow::editor::shell {
 
+enum class ProjectMenuAction {
+    None,
+    QuitRequested,
+};
+
 enum class AnimationCatalogAction {
     Create,
     Duplicate,
@@ -24,8 +29,7 @@ bool begin_animation_duration_gesture(
 bool apply_animation_duration_gesture(ShellState* state, double duration);
 bool finish_animation_duration_gesture(ShellState* state, bool commit);
 void draw_shell_toolbar(bool* reload_requested, ShellState* state);
-void draw_menu_bar(
-    GLFWwindow* window,
+ProjectMenuAction draw_menu_bar(
     bool* reload_requested,
     ShellState* state);
 void draw_project_window(bool* reload_requested, ShellState* state);

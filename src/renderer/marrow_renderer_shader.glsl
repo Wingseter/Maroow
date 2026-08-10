@@ -155,3 +155,32 @@ void main() {
 @end
 
 @program two_color two_color_vs two_color_fs
+
+@vs viewport_overlay_vs
+layout(binding=0) uniform viewport_overlay_vs_params {
+    vec2 view_size;
+};
+
+layout(location=0) in vec2 a_position;
+layout(location=1) in vec4 a_color;
+layout(location=0) out vec4 v_color;
+
+void main() {
+    vec2 normalized_position = vec2(
+        (a_position.x / view_size.x) * 2.0 - 1.0,
+        1.0 - ((a_position.y / view_size.y) * 2.0));
+    v_color = a_color;
+    gl_Position = vec4(normalized_position, 0.0, 1.0);
+}
+@end
+
+@fs viewport_overlay_fs
+layout(location=0) in vec4 v_color;
+layout(location=0) out vec4 frag_color;
+
+void main() {
+    frag_color = v_color;
+}
+@end
+
+@program viewport_overlay viewport_overlay_vs viewport_overlay_fs

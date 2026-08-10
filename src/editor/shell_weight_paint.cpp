@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "shell_selection.hpp"
+#include "windowing.hpp"
 
 namespace marrow::editor::shell {
 
@@ -231,19 +232,124 @@ void store_mesh_weight_attachment_edit(
     }
 }
 
+WeightPaintSelectionContext resolve_weight_paint_selection_context(
+    const ShellState& state) {
+    WeightPaintSelectionContext context;
+    if (!state.load_result) {
+        return context;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    const ResolvedSelection active = resolve_shell_selection(state);
+    if (active.active_attachment.has_value()) {
+        context.target_slot_index = active.active_attachment->slot_index;
+        context.target_attachment = active.active_attachment;
+    } else if (active.active_slot_index.has_value()) {
+        context.target_slot_index = active.active_slot_index;
+    } else {
+        for (auto iterator = state.selection.items().rbegin();
+             iterator != state.selection.items().rend();
+             ++iterator) {
+            const auto* attachment =
+                std::get_if<marrow::editor::AttachmentSelection>(&*iterator);
+            if (attachment == nullptr) {
+                continue;
+            }
+            const auto slot_index = skeleton.find_slot_index(attachment->slot_name);
+            const auto skin_index = skeleton.find_skin_index(attachment->skin_name);
+            if (!slot_index.has_value() || !skin_index.has_value() ||
+                skeleton.find_attachment(
+                    *skin_index,
+                    *slot_index,
+                    attachment->attachment_name) == nullptr) {
+                continue;
+            }
+            context.target_slot_index = slot_index;
+            context.target_attachment = PreviewAttachmentSelection{
+                *slot_index,
+                *skin_index,
+                attachment->attachment_name};
+            break;
+        }
+        if (!context.target_slot_index.has_value()) {
+            for (auto iterator = state.selection.items().rbegin();
+                 iterator != state.selection.items().rend();
+                 ++iterator) {
+                const auto* slot = std::get_if<marrow::editor::SlotSelection>(&*iterator);
+                if (slot == nullptr) {
+                    continue;
+                }
+                const auto slot_index = skeleton.find_slot_index(slot->slot_name);
+                if (slot_index.has_value()) {
+                    context.target_slot_index = slot_index;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (active.active_bone_index.has_value()) {
+        context.influence_bone_index = active.active_bone_index;
+    } else if (active.active_slot_index.has_value()) {
+        // Paint readiness must not depend on click order: a selected bone
+        // supplies the influence even while the slot/attachment is the
+        // active item. Only a sole slot/attachment selection falls back to
+        // its owning bone.
+        for (auto iterator = state.selection.items().rbegin();
+             iterator != state.selection.items().rend();
+             ++iterator) {
+            const auto* bone =
+                std::get_if<marrow::editor::BoneSelection>(&*iterator);
+            if (bone == nullptr) {
+                continue;
+            }
+            const auto bone_index = skeleton.find_bone_index(bone->bone_name);
+            if (bone_index.has_value()) {
+                context.influence_bone_index = bone_index;
+                break;
+            }
+        }
+        if (!context.influence_bone_index.has_value() &&
+            state.selection.items().size() == 1U) {
+            context.influence_bone_index = active.context_bone_index;
+        }
+    }
+    return context;
+}
+
 std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const ShellState& state) {
-    if (!state.load_result || !state.preview_skeleton || !selected_slot_index(state).has_value()) {
+    const WeightPaintSelectionContext context =
+        resolve_weight_paint_selection_context(state);
+    if (!state.load_result || !state.preview_skeleton ||
+        !context.target_slot_index.has_value()) {
         return std::nullopt;
     }
 
-    const std::size_t slot_index = *selected_slot_index(state);
+    const std::size_t slot_index = *context.target_slot_index;
     const auto& skeleton = *state.load_result.skeleton_data;
     if (slot_index >= skeleton.slots().size()) {
         return std::nullopt;
     }
 
-    const marrow::runtime::AttachmentData* display_attachment =
-        state.preview_skeleton->current_attachment(slot_index);
+    const marrow::runtime::AttachmentData* display_attachment = nullptr;
+    if (context.target_attachment.has_value()) {
+        if (!context.target_attachment->skin_index.has_value()) {
+            return std::nullopt;
+        }
+        const auto current_selection = current_attachment_selection(state, slot_index);
+        if (!current_selection.has_value() ||
+            current_selection->skin_index != context.target_attachment->skin_index ||
+            current_selection->attachment_name !=
+                context.target_attachment->attachment_name) {
+            return std::nullopt;
+        }
+        display_attachment = skeleton.find_attachment(
+            *context.target_attachment->skin_index,
+            slot_index,
+            context.target_attachment->attachment_name);
+    } else {
+        display_attachment = state.preview_skeleton->current_attachment(slot_index);
+    }
     if (display_attachment == nullptr || display_attachment->mesh_geometry == nullptr) {
         return std::nullopt;
     }
@@ -319,10 +425,14 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     }
 
     overlay.vertices.reserve(pose->vertices.size());
+    const WeightPaintSelectionContext context =
+        resolve_weight_paint_selection_context(state);
     for (std::size_t vertex_index = 0; vertex_index < pose->vertices.size(); ++vertex_index) {
         const double selected_weight =
-            selected_bone_index(state).has_value()
-                ? weight_for_bone(geometry.weights[vertex_index], *selected_bone_index(state))
+            context.influence_bone_index.has_value()
+                ? weight_for_bone(
+                      geometry.weights[vertex_index],
+                      *context.influence_bone_index)
                 : 0.0;
         overlay.vertices.push_back(MeshWeightOverlayVertex{
             screen_from_world(
@@ -342,17 +452,21 @@ bool apply_paint_weight_to_vertex(
     std::size_t vertex_index,
     double stamp_strength,
     marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (!state.load_result || !selected_bone_index(state).has_value() ||
+    const WeightPaintSelectionContext context =
+        resolve_weight_paint_selection_context(state);
+    if (!state.load_result || !context.influence_bone_index.has_value() ||
         vertex == nullptr ||
         vertex_index >= overlay.vertices.size() ||
-        *selected_bone_index(state) >= state.load_result.skeleton_data->bones().size() ||
-        *selected_bone_index(state) >= state.preview_skeleton->bone_world_transforms().size()) {
+        *context.influence_bone_index >= state.load_result.skeleton_data->bones().size() ||
+        *context.influence_bone_index >=
+            state.preview_skeleton->bone_world_transforms().size()) {
         return false;
     }
 
     marrow::editor::MeshWeightVertexEdit updated = *vertex;
     const auto& skeleton = *state.load_result.skeleton_data;
-    const std::string active_bone_name = skeleton.bones()[*selected_bone_index(state)].name;
+    const std::string active_bone_name =
+        skeleton.bones()[*context.influence_bone_index].name;
     auto influence_it = std::find_if(
         updated.influences.begin(),
         updated.influences.end(),
@@ -370,7 +484,8 @@ bool apply_paint_weight_to_vertex(
                 ? overlay.vertex_offsets[(vertex_index * 2U) + 1U]
                 : 0.0;
         const auto bind_position = inverse_transform_point_safe(
-            state.preview_skeleton->bone_world_transforms()[*selected_bone_index(state)],
+            state.preview_skeleton
+                ->bone_world_transforms()[*context.influence_bone_index],
             overlay.vertices[vertex_index].world_position.x,
             overlay.vertices[vertex_index].world_position.y);
         if (!bind_position.has_value()) {
@@ -399,12 +514,15 @@ bool apply_erase_weight_to_vertex(
     const ShellState& state,
     double stamp_strength,
     marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (!state.load_result || !selected_bone_index(state).has_value() || vertex == nullptr) {
+    const WeightPaintSelectionContext context =
+        resolve_weight_paint_selection_context(state);
+    if (!state.load_result || !context.influence_bone_index.has_value() ||
+        vertex == nullptr) {
         return false;
     }
 
     const auto& skeleton = *state.load_result.skeleton_data;
-    if (*selected_bone_index(state) >= skeleton.bones().size()) {
+    if (*context.influence_bone_index >= skeleton.bones().size()) {
         return false;
     }
 
@@ -413,7 +531,8 @@ bool apply_erase_weight_to_vertex(
     }
 
     marrow::editor::MeshWeightVertexEdit updated = *vertex;
-    const std::string active_bone_name = skeleton.bones()[*selected_bone_index(state)].name;
+    const std::string active_bone_name =
+        skeleton.bones()[*context.influence_bone_index].name;
     auto influence_it = std::find_if(
         updated.influences.begin(),
         updated.influences.end(),
@@ -566,10 +685,12 @@ std::string weight_paint_stroke_label(
     const ShellState& state,
     const MeshWeightPaintTarget& target) {
     std::string bone_name = "<bone>";
-    if (state.load_result &&
-        selected_bone_index(state).has_value() &&
-        *selected_bone_index(state) < state.load_result.skeleton_data->bones().size()) {
-        bone_name = state.load_result.skeleton_data->bones()[*selected_bone_index(state)].name;
+    const WeightPaintSelectionContext context =
+        resolve_weight_paint_selection_context(state);
+    if (state.load_result && context.influence_bone_index.has_value() &&
+        *context.influence_bone_index < state.load_result.skeleton_data->bones().size()) {
+        bone_name =
+            state.load_result.skeleton_data->bones()[*context.influence_bone_index].name;
     }
 
     switch (state.weight_paint.mode) {
@@ -644,15 +765,18 @@ bool finish_weight_paint_stroke(ShellState* state) {
 bool apply_weight_paint_sample(
     ShellState* state,
     const MeshWeightOverlay& overlay,
-    const ImVec2& screen_position) {
+    const WeightPaintSample& sample) {
     if (state == nullptr || !state->load_result || state->load_result.project == nullptr) {
         return false;
     }
 
+    const WeightPaintSelectionContext selection_context =
+        resolve_weight_paint_selection_context(*state);
     if ((state->weight_paint.mode == WeightPaintMode::Paint ||
          state->weight_paint.mode == WeightPaintMode::Erase) &&
-        (!selected_bone_index(*state).has_value() ||
-         *selected_bone_index(*state) >= state->load_result.skeleton_data->bones().size())) {
+        (!selection_context.influence_bone_index.has_value() ||
+         *selection_context.influence_bone_index >=
+             state->load_result.skeleton_data->bones().size())) {
         return false;
     }
 
@@ -672,8 +796,9 @@ bool apply_weight_paint_sample(
             break;
         }
 
-        const float distance = std::sqrt(
-            squared_distance(screen_position, overlay.vertices[vertex_index].screen_position));
+        const float distance = std::sqrt(squared_distance(
+            sample.screen_position,
+            overlay.vertices[vertex_index].screen_position));
         if (distance > state->weight_paint.radius_pixels) {
             continue;
         }
@@ -681,11 +806,10 @@ bool apply_weight_paint_sample(
         const double falloff = 1.0 -
             (static_cast<double>(distance) /
              std::max(static_cast<double>(state->weight_paint.radius_pixels), 1.0));
-        const double stamp_strength =
-            std::clamp(
-                static_cast<double>(state->weight_paint.strength) * falloff,
-                0.0,
-                1.0);
+        const double stamp_strength = pressure_scaled_strength(
+            static_cast<double>(state->weight_paint.strength),
+            static_cast<double>(sample.pressure),
+            falloff);
         if (stamp_strength <= 1e-6) {
             continue;
         }
@@ -739,6 +863,16 @@ bool apply_weight_paint_sample(
     update_project_dirty_state(state);
     state->weight_paint_stroke.changed = true;
     return true;
+}
+
+bool apply_weight_paint_sample(
+    ShellState* state,
+    const MeshWeightOverlay& overlay,
+    const ImVec2& screen_position) {
+    return apply_weight_paint_sample(
+        state,
+        overlay,
+        WeightPaintSample{screen_position, 1.0f});
 }
 
 

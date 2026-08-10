@@ -12,6 +12,7 @@
 
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/authoring.hpp"
+#include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "marrow/runtime/animation_compare.hpp"
 
@@ -1444,6 +1445,91 @@ bool validate_undo_redo_cycle(const marrow::editor::ProjectLoadResult& project_r
     return true;
 }
 
+bool validate_selection_reconciliation_transience(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::AttachmentSelection;
+    using marrow::editor::BoneSelection;
+    using marrow::editor::ConstraintKind;
+    using marrow::editor::ConstraintSelection;
+    using marrow::editor::SelectionSet;
+    using marrow::editor::SlotSelection;
+
+    if (project_result.project == nullptr) {
+        std::cerr << "Selection reconciliation requires a loaded editor project.\n";
+        return false;
+    }
+
+    marrow::editor::EditorSession session;
+    if (!session.open(project_result.project->source_path) ||
+        session.project() == nullptr || session.runtime_data() == nullptr) {
+        std::cerr << "Selection reconciliation session could not open the project.\n";
+        return false;
+    }
+
+    SelectionSet selection;
+    const BoneSelection arm{"arm_l"};
+    const SlotSelection body{"body"};
+    const AttachmentSelection mage_arm{"arm_l", "mage", "mage_arm_l"};
+    const ConstraintSelection ik{ConstraintKind::Ik, "editor_arm_reach"};
+    const AttachmentSelection missing{"arm_l", "warrior", "mage_arm_l"};
+    if (!selection.add_range({arm, body, mage_arm, ik, missing}, missing)) {
+        std::cerr << "Selection reconciliation could not prepare the external set.\n";
+        return false;
+    }
+
+    const auto preview_edit = session.set_preview_skins({"warrior"});
+    if (!preview_edit || !preview_edit.changed || !session.can_undo() ||
+        !session.undo() || !session.can_redo()) {
+        std::cerr << "Selection reconciliation could not prepare reload history semantics.\n";
+        return false;
+    }
+
+    const std::string bytes_before_reload =
+        marrow::editor::serialize_project(*session.project());
+    const std::uint64_t project_revision_before_reload = session.project_revision();
+    const std::uint64_t runtime_revision_before_reload = session.runtime_revision();
+    const std::uint64_t preview_revision_before_reload = session.preview_revision();
+    const auto reloaded = session.reload();
+    if (!reloaded || session.project() == nullptr || session.runtime_data() == nullptr ||
+        session.dirty() || session.undo_count() != 0U || session.redo_count() != 0U ||
+        marrow::editor::serialize_project(*session.project()) != bytes_before_reload ||
+        session.project_revision() != project_revision_before_reload + 1U ||
+        session.runtime_revision() != runtime_revision_before_reload + 1U ||
+        session.preview_revision() != preview_revision_before_reload + 1U) {
+        std::cerr << "EditorSession reload semantics changed during selection validation.\n";
+        return false;
+    }
+
+    const std::string bytes_before_reconcile =
+        marrow::editor::serialize_project(*session.project());
+    const bool dirty_before_reconcile = session.dirty();
+    const std::size_t undo_before_reconcile = session.undo_count();
+    const std::size_t redo_before_reconcile = session.redo_count();
+    const std::uint64_t project_revision_before_reconcile = session.project_revision();
+    const std::uint64_t runtime_revision_before_reconcile = session.runtime_revision();
+    const std::uint64_t preview_revision_before_reconcile = session.preview_revision();
+
+    if (!marrow::editor::reconcile_selection_to_runtime(
+            selection, *session.runtime_data()) ||
+        selection.items() != std::vector<marrow::editor::SelectionItem>{
+            arm, body, mage_arm, ik} ||
+        selection.active_constraint() == nullptr ||
+        *selection.active_constraint() != ik ||
+        marrow::editor::serialize_project(*session.project()) != bytes_before_reconcile ||
+        session.dirty() != dirty_before_reconcile ||
+        session.undo_count() != undo_before_reconcile ||
+        session.redo_count() != redo_before_reconcile ||
+        session.project_revision() != project_revision_before_reconcile ||
+        session.runtime_revision() != runtime_revision_before_reconcile ||
+        session.preview_revision() != preview_revision_before_reconcile) {
+        std::cerr << "Selection reconciliation changed project/session state or lost survivors.\n";
+        return false;
+    }
+
+    std::cout << "Transient selection reload reconciliation validated.\n";
+    return true;
+}
+
 bool validate_exported_atlas_bundle(
     const marrow::editor::ProjectLoadResult& project_result,
     const marrow::editor::ProjectExportResult& export_result) {
@@ -2135,6 +2221,31 @@ bool validate_editing_p0_end_to_end(
     }
     project.source_path = project_path;
 
+    constexpr double kMar162ScaleTime = 0.375;
+    constexpr double kMar162ScaleX = -1.25;
+    // Authored as negative zero: `!=` cannot tell -0.0 from 0.0 under
+    // IEEE-754, so every gate below must also compare the sign bit or the
+    // "signed zero survived" claim is untested.
+    constexpr double kMar162ScaleY = -0.0;
+    const auto mar162_signed_zero_matches = [](double value) {
+        return value == 0.0 &&
+            std::signbit(value) == std::signbit(kMar162ScaleY);
+    };
+    const auto interpolation_matches = [](const auto& left, const auto& right) {
+        if (left.kind() != right.kind()) {
+            return false;
+        }
+        if (left.kind() != marrow::runtime::InterpolationKind::CubicBezier) {
+            return true;
+        }
+        const auto& left_bezier = left.cubic_bezier();
+        const auto& right_bezier = right.cubic_bezier();
+        return std::abs(left_bezier.cx1 - right_bezier.cx1) <= 1e-6 &&
+            std::abs(left_bezier.cy1 - right_bezier.cy1) <= 1e-6 &&
+            std::abs(left_bezier.cx2 - right_bezier.cx2) <= 1e-6 &&
+            std::abs(left_bezier.cy2 - right_bezier.cy2) <= 1e-6;
+    };
+
     if (project.find_transform_timeline_edit(
             "idle",
             "spine",
@@ -2159,6 +2270,91 @@ bool validate_editing_p0_end_to_end(
         marrow::editor::TransformTimelineChannel::Translate);
     if (translate_edit == nullptr || translate_edit->keyframes.size() != 4U) {
         std::cerr << "First auto-key discarded imported transform keys.\n";
+        return false;
+    }
+
+    const auto source_spine_index =
+        project_result.skeleton_data->find_bone_index("spine");
+    const auto* source_idle =
+        project_result.skeleton_data->find_animation("idle");
+    const auto* source_scale =
+        source_spine_index.has_value() && source_idle != nullptr
+        ? source_idle->find_scale_timeline(*source_spine_index)
+        : nullptr;
+    if (!source_spine_index.has_value() || source_scale == nullptr ||
+        project.find_transform_timeline_edit(
+            "idle",
+            "spine",
+            marrow::editor::TransformTimelineChannel::Scale) != nullptr) {
+        std::cerr << "MAR-162 scale regression requires a base-only effective scale track.\n";
+        return false;
+    }
+    const auto source_scale_keys = source_scale->keyframes;
+    marrow::editor::upsert_transform_keyframe(
+        project,
+        *project_result.skeleton_data,
+        "idle",
+        "spine",
+        marrow::editor::TransformTimelineChannel::Scale,
+        kMar162ScaleTime,
+        marrow::editor::TransformKeyframePatch{
+            std::nullopt,
+            kMar162ScaleX,
+            kMar162ScaleY});
+    const auto* scale_edit = project.find_transform_timeline_edit(
+        "idle",
+        "spine",
+        marrow::editor::TransformTimelineChannel::Scale);
+    bool source_scale_preserved =
+        scale_edit != nullptr &&
+        scale_edit->keyframes.size() == source_scale_keys.size() + 1U;
+    for (const auto& source_key : source_scale_keys) {
+        const auto found = scale_edit != nullptr
+            ? std::find_if(
+                  scale_edit->keyframes.begin(),
+                  scale_edit->keyframes.end(),
+                  [&](const auto& key) {
+                      return std::abs(
+                                 key.time -
+                                 static_cast<double>(source_key.time)) <= 1e-6;
+                  })
+            : std::vector<marrow::editor::TransformKeyframeEdit>::const_iterator{};
+        if (scale_edit == nullptr || found == scale_edit->keyframes.end() ||
+            std::abs(found->x - static_cast<double>(source_key.x)) > 1e-6 ||
+            std::abs(found->y - static_cast<double>(source_key.y)) > 1e-6 ||
+            !interpolation_matches(found->interpolation, source_key.interpolation)) {
+            source_scale_preserved = false;
+            break;
+        }
+    }
+    const auto authored_scale_key = scale_edit != nullptr
+        ? std::find_if(
+              scale_edit->keyframes.begin(),
+              scale_edit->keyframes.end(),
+              [](const auto& key) {
+                  return std::abs(key.time - kMar162ScaleTime) <= 1e-6;
+              })
+        : std::vector<marrow::editor::TransformKeyframeEdit>::const_iterator{};
+    if (!source_scale_preserved || scale_edit == nullptr ||
+        authored_scale_key == scale_edit->keyframes.end() ||
+        std::abs(authored_scale_key->x - kMar162ScaleX) > 1e-9 ||
+        !mar162_signed_zero_matches(authored_scale_key->y)) {
+        std::cerr << "MAR-162 scale materialization lost effective keys, curves, or signed zero.\n";
+        return false;
+    }
+    const auto scale_runtime = marrow::editor::build_project_runtime(
+        project, *project_result.base_skeleton_document);
+    const auto* scale_animation = scale_runtime
+        ? scale_runtime.skeleton_data->find_animation("idle")
+        : nullptr;
+    const auto sampled_scale = scale_animation != nullptr
+        ? scale_animation->sample_bone_scale(
+              *source_spine_index, kMar162ScaleTime)
+        : std::nullopt;
+    if (!sampled_scale.has_value() ||
+        std::abs(sampled_scale->x - kMar162ScaleX) > 1e-6 ||
+        sampled_scale->y != 0.0) {
+        std::cerr << "MAR-162 absolute signed scale did not reach the effective runtime.\n";
         return false;
     }
 
@@ -2220,6 +2416,37 @@ bool validate_editing_p0_end_to_end(
         return false;
     }
 
+    constexpr double kMar161AbsoluteRotation = 769.0;
+    constexpr double kMar161RelativeRotation = 739.0;
+    constexpr double kMar161RotationTime = 0.75;
+    marrow::editor::upsert_transform_keyframe(
+        project,
+        *project_result.skeleton_data,
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate,
+        kMar161RotationTime,
+        marrow::editor::TransformKeyframePatch{
+            kMar161AbsoluteRotation, std::nullopt, std::nullopt});
+    setup_rotation_edit = project.find_transform_timeline_edit(
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate);
+    const auto multi_turn_project_key = setup_rotation_edit != nullptr
+        ? std::find_if(
+              setup_rotation_edit->keyframes.begin(),
+              setup_rotation_edit->keyframes.end(),
+              [](const auto& key) {
+                  return std::abs(key.time - kMar161RotationTime) <= 1e-6;
+              })
+        : std::vector<marrow::editor::TransformKeyframeEdit>::const_iterator{};
+    if (setup_rotation_edit == nullptr || setup_rotation_edit->keyframes.size() != 2U ||
+        multi_turn_project_key == setup_rotation_edit->keyframes.end() ||
+        std::abs(multi_turn_project_key->angle - kMar161RelativeRotation) > 1e-9) {
+        std::cerr << "MAR-161 multi-turn rotation was normalized in project authoring data.\n";
+        return false;
+    }
+
     auto* slot_color = marrow::editor::ensure_slot_color_timeline_edit(
         project, *project_result.skeleton_data, "idle", "body");
     if (slot_color == nullptr || slot_color->keyframes.size() != 3U) {
@@ -2274,6 +2501,41 @@ bool validate_editing_p0_end_to_end(
         return false;
     }
 
+    // Snap-to-frames must survive neighbour clamping: when the clamp binds,
+    // the key must still land on a frame boundary inside the bounds instead
+    // of on the raw 1 ms neighbour offset.
+    {
+        marrow::editor::ProjectData snap_project;
+        marrow::editor::TransformTimelineEdit snap_track;
+        snap_track.animation_name = "snap_probe";
+        snap_track.bone_name = "spine";
+        snap_track.channel = marrow::editor::TransformTimelineChannel::Rotate;
+        snap_track.keyframes.push_back({0.0, 0.0, 0.0, 0.0, {}});
+        snap_track.keyframes.push_back({0.5, 45.0, 0.0, 0.0, {}});
+        snap_project.transform_timeline_edits.push_back(snap_track);
+
+        marrow::editor::TimelineKeySelector snap_selector;
+        snap_selector.kind = marrow::editor::TimelineKeyKind::Transform;
+        snap_selector.animation_name = "snap_probe";
+        snap_selector.bone_name = "spine";
+        snap_selector.transform_channel =
+            marrow::editor::TransformTimelineChannel::Rotate;
+        snap_selector.time = 0.0;
+
+        const auto snapped = marrow::editor::retime_keyframes(
+            &snap_project, {snap_selector}, 0.6, true, 30.0);
+        const double frame_seconds = 1.0 / 30.0;
+        const double snapped_frames = snapped.applied_delta * 30.0;
+        if (!snapped || !snapped.changed ||
+            std::abs(snapped_frames - std::round(snapped_frames)) > 1e-9 ||
+            snapped.applied_delta > (0.5 - 0.001) + 1e-12 ||
+            snapped.applied_delta <= 0.0) {
+            std::cerr << "Clamped frame-snap retime left the key off the frame grid.\n";
+            return false;
+        }
+        (void)frame_seconds;
+    }
+
     const auto saved = marrow::editor::save_project(project, project_path);
     if (!saved) {
         std::cerr << saved.error->format() << '\n';
@@ -2285,12 +2547,94 @@ bool validate_editing_p0_end_to_end(
         return false;
     }
     const auto spine_index = reloaded.skeleton_data->find_bone_index("spine");
+    const auto reloaded_rotation_index =
+        reloaded.skeleton_data->find_bone_index("transform_source");
     const auto* idle = reloaded.skeleton_data->find_animation("idle");
     const auto* translated =
         spine_index.has_value() && idle != nullptr
         ? idle->find_translate_timeline(*spine_index)
         : nullptr;
+    const auto* reloaded_scale =
+        spine_index.has_value() && idle != nullptr
+        ? idle->find_scale_timeline(*spine_index)
+        : nullptr;
+    const auto reloaded_scale_sample =
+        spine_index.has_value() && idle != nullptr
+        ? idle->sample_bone_scale(*spine_index, kMar162ScaleTime)
+        : std::nullopt;
+    const auto* reloaded_scale_edit =
+        reloaded.project->find_transform_timeline_edit(
+            "idle",
+            "spine",
+            marrow::editor::TransformTimelineChannel::Scale);
+    const auto reloaded_scale_key = reloaded_scale_edit != nullptr
+        ? std::find_if(
+              reloaded_scale_edit->keyframes.begin(),
+              reloaded_scale_edit->keyframes.end(),
+              [](const auto& key) {
+                  return std::abs(key.time - kMar162ScaleTime) <= 1e-6;
+              })
+        : std::vector<marrow::editor::TransformKeyframeEdit>::const_iterator{};
+    bool reloaded_source_scale_preserved =
+        reloaded_scale != nullptr &&
+        reloaded_scale->keyframes.size() == source_scale_keys.size() + 1U;
+    for (const auto& source_key : source_scale_keys) {
+        const auto found = reloaded_scale != nullptr
+            ? std::find_if(
+                  reloaded_scale->keyframes.begin(),
+                  reloaded_scale->keyframes.end(),
+                  [&](const auto& key) {
+                      return std::abs(
+                                 static_cast<double>(key.time) -
+                                 static_cast<double>(source_key.time)) <= 1e-6;
+                  })
+            : std::vector<marrow::runtime::VectorKeyframe>::const_iterator{};
+        if (reloaded_scale == nullptr || found == reloaded_scale->keyframes.end() ||
+            std::abs(
+                static_cast<double>(found->x) -
+                static_cast<double>(source_key.x)) > 1e-6 ||
+            std::abs(
+                static_cast<double>(found->y) -
+                static_cast<double>(source_key.y)) > 1e-6 ||
+            !interpolation_matches(found->interpolation, source_key.interpolation)) {
+            reloaded_source_scale_preserved = false;
+            break;
+        }
+    }
+    const auto* reloaded_rotation =
+        reloaded_rotation_index.has_value() && idle != nullptr
+        ? idle->find_rotate_timeline(*reloaded_rotation_index)
+        : nullptr;
+    const auto reloaded_multi_turn_sample =
+        reloaded_rotation_index.has_value() && idle != nullptr
+        ? idle->sample_bone_rotation(
+              *reloaded_rotation_index, kMar161RotationTime)
+        : std::nullopt;
+    const auto* reloaded_rotation_edit = reloaded.project->find_transform_timeline_edit(
+        "idle",
+        "transform_source",
+        marrow::editor::TransformTimelineChannel::Rotate);
+    const bool reloaded_raw_multi_turn =
+        reloaded_rotation_edit != nullptr &&
+        std::any_of(
+            reloaded_rotation_edit->keyframes.begin(),
+            reloaded_rotation_edit->keyframes.end(),
+            [](const auto& key) {
+                return std::abs(key.time - kMar161RotationTime) <= 1e-6 &&
+                    std::abs(key.angle - kMar161RelativeRotation) <= 1e-9;
+            });
     if (translated == nullptr || translated->keyframes.size() != 4U ||
+        reloaded_scale_edit == nullptr ||
+        reloaded_scale_key == reloaded_scale_edit->keyframes.end() ||
+        std::abs(reloaded_scale_key->x - kMar162ScaleX) > 1e-9 ||
+        !mar162_signed_zero_matches(reloaded_scale_key->y) ||
+        !reloaded_source_scale_preserved ||
+        !reloaded_scale_sample.has_value() ||
+        std::abs(reloaded_scale_sample->x - kMar162ScaleX) > 1e-6 ||
+        reloaded_scale_sample->y != 0.0 ||
+        reloaded_rotation == nullptr || !reloaded_raw_multi_turn ||
+        !reloaded_multi_turn_sample.has_value() ||
+        std::abs(*reloaded_multi_turn_sample - kMar161AbsoluteRotation) > 1e-4 ||
         reloaded.skeleton_data->find_animation("editing_p0_copy") == nullptr ||
         std::none_of(
             translated->keyframes.begin(),
@@ -2353,6 +2697,100 @@ bool validate_editing_p0_end_to_end(
         std::cerr << exported.error->format() << '\n';
         return false;
     }
+    const auto exported_json_runtime = marrow::runtime::load_skeleton_data(json_path);
+    const auto exported_binary_runtime = marrow::runtime::load_skeleton_data(binary_path);
+    const auto exported_rotation_index = exported_json_runtime
+        ? exported_json_runtime.skeleton_data->find_bone_index("transform_source")
+        : std::nullopt;
+    const auto* exported_json_idle = exported_json_runtime
+        ? exported_json_runtime.skeleton_data->find_animation("idle")
+        : nullptr;
+    const auto* exported_binary_idle = exported_binary_runtime
+        ? exported_binary_runtime.skeleton_data->find_animation("idle")
+        : nullptr;
+    const auto exported_json_scale_index = exported_json_runtime
+        ? exported_json_runtime.skeleton_data->find_bone_index("spine")
+        : std::nullopt;
+    const auto exported_binary_scale_index = exported_binary_runtime
+        ? exported_binary_runtime.skeleton_data->find_bone_index("spine")
+        : std::nullopt;
+    const auto exported_json_scale =
+        exported_json_scale_index.has_value() && exported_json_idle != nullptr
+        ? exported_json_idle->sample_bone_scale(
+              *exported_json_scale_index, kMar162ScaleTime)
+        : std::nullopt;
+    const auto exported_binary_scale =
+        exported_binary_scale_index.has_value() && exported_binary_idle != nullptr
+        ? exported_binary_idle->sample_bone_scale(
+              *exported_binary_scale_index, kMar162ScaleTime)
+        : std::nullopt;
+    const auto* exported_json_rotation =
+        exported_rotation_index.has_value() && exported_json_idle != nullptr
+        ? exported_json_idle->find_rotate_timeline(*exported_rotation_index)
+        : nullptr;
+    const auto exported_json_key = exported_json_rotation != nullptr
+        ? std::find_if(
+              exported_json_rotation->keyframes.begin(),
+              exported_json_rotation->keyframes.end(),
+              [](const auto& key) {
+                  return std::abs(
+                             static_cast<double>(key.time) -
+                             kMar161RotationTime) <= 1e-5;
+              })
+        : std::vector<marrow::runtime::RotateKeyframe>::const_iterator{};
+    const auto exported_binary_sample =
+        exported_rotation_index.has_value() && exported_binary_idle != nullptr
+        ? exported_binary_idle->sample_bone_rotation(
+              *exported_rotation_index, kMar161RotationTime)
+        : std::nullopt;
+    // Sampling interpolates, and IEEE-754 addition normalizes -0.0 to +0.0,
+    // so sampled values are checked for zero VALUE while the sign bit is
+    // asserted on the stored keyframes the exports actually persist.
+    const auto exported_signed_zero_key_preserved =
+        [&](const marrow::runtime::AnimationData* animation,
+            const std::optional<std::size_t>& bone_index) {
+            if (animation == nullptr || !bone_index.has_value()) {
+                return false;
+            }
+            const auto* timeline = animation->find_scale_timeline(*bone_index);
+            if (timeline == nullptr) {
+                return false;
+            }
+            const auto key = std::find_if(
+                timeline->keyframes.begin(),
+                timeline->keyframes.end(),
+                [](const auto& candidate) {
+                    return std::abs(
+                               static_cast<double>(candidate.time) -
+                               kMar162ScaleTime) <= 1e-5;
+                });
+            return key != timeline->keyframes.end() &&
+                mar162_signed_zero_matches(static_cast<double>(key->y));
+        };
+    if (!exported_json_runtime || !exported_binary_runtime ||
+        !exported_json_scale.has_value() ||
+        std::abs(exported_json_scale->x - kMar162ScaleX) > 1e-6 ||
+        exported_json_scale->y != 0.0 ||
+        !exported_binary_scale.has_value() ||
+        std::abs(exported_binary_scale->x - kMar162ScaleX) > 1e-6 ||
+        exported_binary_scale->y != 0.0 ||
+        !exported_signed_zero_key_preserved(
+            exported_json_idle, exported_json_scale_index) ||
+        !exported_signed_zero_key_preserved(
+            exported_binary_idle, exported_binary_scale_index)) {
+        std::cerr << "MAR-162 signed zero scale did not survive JSON/MBIN export.\n";
+        return false;
+    }
+    if (exported_json_rotation == nullptr ||
+        exported_json_key == exported_json_rotation->keyframes.end() ||
+        std::abs(
+            static_cast<double>(exported_json_key->angle) -
+            kMar161RelativeRotation) > 1e-4 ||
+        !exported_binary_sample.has_value() ||
+        std::abs(*exported_binary_sample - kMar161AbsoluteRotation) > 1e-3) {
+        std::cerr << "MAR-161 multi-turn rotation did not survive JSON/MBIN export.\n";
+        return false;
+    }
     if (!validate_binary_export(json_path, binary_path)) {
         return false;
     }
@@ -2387,6 +2825,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!validate_undo_redo_cycle(result)) {
+        return 1;
+    }
+    if (!validate_selection_reconciliation_transience(result)) {
         return 1;
     }
     if (!validate_animation_catalog_edits(result)) {

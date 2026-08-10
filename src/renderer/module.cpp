@@ -3560,6 +3560,61 @@ PreparedSceneBatchSummary summarize_render_command_list(
     return summary;
 }
 
+namespace internal {
+
+std::optional<std::string> render_demo_frame(
+    const PreparedScene& scene,
+    bool hud_overlay_enabled,
+    Backend* backend,
+    const BackendFrameInfo& frame_info) {
+    if (backend == nullptr) {
+        return "Renderer backend was null.";
+    }
+
+    const SceneBounds framed_bounds = fit_bounds_to_aspect(
+        scene_bounds(scene),
+        frame_info.framebuffer_width,
+        frame_info.framebuffer_height);
+    runtime::ProfilerCapture profiler(hud_overlay_enabled);
+    if (hud_overlay_enabled) {
+        profiler.begin_frame();
+    }
+
+    const RenderCommandListResult command_list_result =
+        runtime::profile_phase(&profiler, runtime::ProfilerPhase::Render, [&]() {
+            return build_render_command_list_impl(
+                scene,
+                orthographic_projection(framed_bounds));
+        });
+    if (!command_list_result) {
+        return command_list_result.error_message;
+    }
+
+    RenderCommandList command_list = std::move(*command_list_result.command_list);
+    if (hud_overlay_enabled) {
+        const PreparedSceneBatchSummary batch_summary =
+            summarize_render_command_list(scene, command_list);
+        profiler.add_draw_stats(profiler_draw_stats(batch_summary));
+        profiler.end_frame();
+
+        if (const auto hud_command = build_profiler_hud_overlay_command(
+                runtime::marrow_profiler_frame(profiler),
+                framed_bounds,
+                frame_info.framebuffer_width,
+                frame_info.framebuffer_height,
+                scene.bone_palette.size())) {
+            const std::size_t draw_index = command_list.commands.size();
+            command_list.commands.push_back(*hud_command);
+            command_list.ordered_events.push_back(
+                {RenderCommandEventKind::Draw, draw_index});
+        }
+    }
+
+    return backend->submit_commands(command_list);
+}
+
+} // namespace internal
+
 DemoShell::DemoShell(
     SampleAppWindow window,
     PreparedScene scene,
@@ -3744,96 +3799,6 @@ std::string DemoShell::launch_report() const {
     }
 
     return stream.str();
-}
-
-std::optional<std::string> DemoShell::run(std::optional<int> auto_close_frames) const {
-    if (scene_.draw_commands.empty()) {
-        return "Prepared scene does not contain any attachments to render.";
-    }
-
-    const TextureImageLoadResult texture_image = load_png_texture_or_white(atlas_image_path_);
-    if (!texture_image.loaded_from_file && !texture_image.message.empty()) {
-        std::cerr << texture_image.message << '\n';
-    }
-
-    BackendCreateInfo create_info;
-    create_info.window = window_;
-    create_info.atlas_texture = texture_image.image;
-    create_info.atlas_filter_min = scene_.atlas_filter_min;
-    create_info.atlas_filter_mag = scene_.atlas_filter_mag;
-    create_info.atlas_wrap_x = scene_.atlas_wrap_x;
-    create_info.atlas_wrap_y = scene_.atlas_wrap_y;
-    create_info.hidden_window = auto_close_frames.has_value();
-
-    std::unique_ptr<Backend> backend = internal::make_sokol_backend();
-
-    const SceneBounds base_bounds = scene_bounds(scene_);
-    const auto render_frame = [&](const BackendFrameInfo& frame_info) -> std::optional<std::string> {
-        const SceneBounds framed_bounds = fit_bounds_to_aspect(
-            base_bounds,
-            frame_info.framebuffer_width,
-            frame_info.framebuffer_height);
-        runtime::ProfilerCapture profiler(hud_overlay_enabled_);
-        if (hud_overlay_enabled_) {
-            profiler.begin_frame();
-        }
-
-        const RenderCommandListResult command_list_result =
-            runtime::profile_phase(&profiler, runtime::ProfilerPhase::Render, [&]() {
-                return build_render_command_list(scene_, orthographic_projection(framed_bounds));
-            });
-        if (!command_list_result) {
-            return command_list_result.error_message;
-        }
-
-        RenderCommandList command_list = std::move(*command_list_result.command_list);
-        if (hud_overlay_enabled_) {
-            const PreparedSceneBatchSummary batch_summary =
-                summarize_render_command_list(scene_, command_list);
-            profiler.add_draw_stats(profiler_draw_stats(batch_summary));
-            profiler.end_frame();
-
-            if (const auto hud_command = build_profiler_hud_overlay_command(
-                    runtime::marrow_profiler_frame(profiler),
-                    framed_bounds,
-                    frame_info.framebuffer_width,
-                    frame_info.framebuffer_height,
-                    scene_.bone_palette.size())) {
-                const std::size_t draw_index = command_list.commands.size();
-                command_list.commands.push_back(*hud_command);
-                command_list.ordered_events.push_back({RenderCommandEventKind::Draw, draw_index});
-            }
-        }
-
-        return backend->submit_commands(command_list);
-    };
-
-#if defined(__APPLE__)
-    if (auto_close_frames.has_value()) {
-        if (const std::optional<std::string> error = backend->create(create_info)) {
-            backend->destroy();
-            return error;
-        }
-
-        for (int frame_index = 0; frame_index < *auto_close_frames; ++frame_index) {
-            BackendFrameInfo frame_info;
-            if (const std::optional<std::string> error = backend->begin_frame(&frame_info)) {
-                backend->destroy();
-                return error;
-            }
-            if (const std::optional<std::string> error = render_frame(frame_info)) {
-                backend->destroy();
-                return error;
-            }
-            backend->end_frame();
-        }
-
-        backend->destroy();
-        return std::nullopt;
-    }
-#endif
-
-    return internal::run_sokol_app(create_info, backend.get(), render_frame, auto_close_frames);
 }
 
 RenderCommandListResult build_render_command_list(

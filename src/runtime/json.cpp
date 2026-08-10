@@ -740,6 +740,9 @@ Value::Value(std::string string_value, SourceLocation location)
     : location_(location),
       storage_(std::move(string_value)) {}
 
+Value::Value(const char* string_value, SourceLocation location)
+    : Value(std::string(string_value), location) {}
+
 Value::Value(Array array_value, SourceLocation location)
     : location_(location),
       storage_(std::move(array_value)) {}

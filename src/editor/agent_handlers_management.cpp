@@ -43,8 +43,17 @@ AgentDispatchResult handle_management_operation(
     }
 
     if (op == "agent.resume") {
+        // Terminate is the user's kill switch: a terminated session must not
+        // be able to restore its own access. Only editor-side user action
+        // clears the terminated flag.
+        if (control.terminated) {
+            return make_error(
+                "Agent session was terminated; only the editor can restore access.",
+                op,
+                spec,
+                "terminated");
+        }
         control.paused = false;
-        control.terminated = false;
         return make_success("Agent resumed.", op, spec);
     }
 

@@ -11,12 +11,14 @@ namespace marrow::editor::detail {
 enum class PreferencePlatform {
     MacOS,
     Linux,
+    Windows,
 };
 
 struct PreferenceEnvironment {
     std::optional<std::string> marrow_config_home;
     std::optional<std::string> home;
     std::optional<std::string> xdg_config_home;
+    std::optional<std::filesystem::path> roaming_app_data;
 };
 
 struct PreferencePathResult {
@@ -38,7 +40,8 @@ using RenameCallback = std::function<std::error_code(
 /**
  * @brief Installs a process-local atomic-rename failure seam for focused tests.
  *
- * Passing an empty callback restores the production POSIX rename operation.
+ * Passing an empty callback restores the production platform replacement
+ * operation (`rename` on POSIX and `MoveFileExW` on Windows).
  * This hook intentionally lives in a private source header.
  */
 void set_preference_rename_callback_for_testing(RenameCallback callback);

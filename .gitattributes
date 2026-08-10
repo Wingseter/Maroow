@@ -3,3 +3,8 @@
 *.psd filter=lfs diff=lfs merge=lfs -text
 *.otf filter=lfs diff=lfs merge=lfs -text
 *.mbin filter=lfs diff=lfs merge=lfs -text
+
+# Preserve exact upstream vendor snapshots even when their established style
+# contains trailing spaces; project-owned source remains under diff --check.
+external/imgui/** -whitespace
+external/sdl3/** -whitespace

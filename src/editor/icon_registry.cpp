@@ -3,18 +3,16 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <OpenGL/gl3.h>
-#else
-#include <glad/glad.h>
-#endif
-
 #include "image_io.hpp"
+#include "sokol_gfx.h"
+#define SOKOL_IMGUI_NO_SOKOL_APP
+#include "sokol_imgui.h"
 
 namespace marrow::editor {
 
@@ -88,30 +86,36 @@ constexpr std::array<IconEntry, static_cast<std::size_t>(Icon::Count)> kIconTabl
     {Icon::StatusError, "status_error"},
 }};
 
-std::uint32_t upload_rgba_texture(
+std::optional<std::pair<sg_image, sg_view>> upload_rgba_texture(
     const std::vector<std::uint8_t>& rgba8,
     int width,
     int height) {
-    GLuint texture = 0;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGBA,
-        width,
-        height,
-        0,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        rgba8.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return static_cast<std::uint32_t>(texture);
+    sg_image_desc image_desc{};
+    image_desc.width = width;
+    image_desc.height = height;
+    image_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    image_desc.data.mip_levels[0] = {rgba8.data(), rgba8.size()};
+    image_desc.label = "marrow-editor-icon";
+    const sg_image image = sg_make_image(&image_desc);
+    if (sg_query_image_state(image) != SG_RESOURCESTATE_VALID) {
+        if (image.id != SG_INVALID_ID) {
+            sg_destroy_image(image);
+        }
+        return std::nullopt;
+    }
+
+    sg_view_desc view_desc{};
+    view_desc.texture.image = image;
+    view_desc.label = "marrow-editor-icon-view";
+    const sg_view view = sg_make_view(&view_desc);
+    if (sg_query_view_state(view) != SG_RESOURCESTATE_VALID) {
+        if (view.id != SG_INVALID_ID) {
+            sg_destroy_view(view);
+        }
+        sg_destroy_image(image);
+        return std::nullopt;
+    }
+    return std::pair<sg_image, sg_view>{image, view};
 }
 
 } // namespace
@@ -122,6 +126,22 @@ IconRegistry::~IconRegistry() {
 
 int IconRegistry::load_all(const std::filesystem::path& root) {
     unload_all();
+
+    if (!sg_isvalid()) {
+        std::fprintf(stderr, "[icon_registry] sokol_gfx is not initialized\n");
+        return 0;
+    }
+    sg_sampler_desc sampler_desc{};
+    sampler_desc.min_filter = SG_FILTER_LINEAR;
+    sampler_desc.mag_filter = SG_FILTER_LINEAR;
+    sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.label = "marrow-editor-icon-sampler";
+    sampler_ = sg_make_sampler(&sampler_desc);
+    if (sg_query_sampler_state(sampler_) != SG_RESOURCESTATE_VALID) {
+        sampler_ = {};
+        return 0;
+    }
 
     int loaded = 0;
     for (const auto& entry : kIconTable) {
@@ -138,7 +158,17 @@ int IconRegistry::load_all(const std::filesystem::path& root) {
             continue;
         }
         Slot& slot = slots_[static_cast<std::size_t>(entry.icon)];
-        slot.texture_id = upload_rgba_texture(rgba8, width, height);
+        const auto texture = upload_rgba_texture(rgba8, width, height);
+        if (!texture.has_value()) {
+            std::fprintf(
+                stderr,
+                "[icon_registry] failed to create Sokol resources for %s\n",
+                path.string().c_str());
+            continue;
+        }
+        slot.image = texture->first;
+        slot.view = texture->second;
+        slot.imgui_texture_id = simgui_imtextureid_with_sampler(slot.view, sampler_);
         slot.width = width;
         slot.height = height;
         ++loaded;
@@ -149,14 +179,20 @@ int IconRegistry::load_all(const std::filesystem::path& root) {
 
 void IconRegistry::unload_all() {
     for (Slot& slot : slots_) {
-        if (slot.texture_id != 0) {
-            GLuint texture = slot.texture_id;
-            glDeleteTextures(1, &texture);
-            slot.texture_id = 0;
-            slot.width = 0;
-            slot.height = 0;
+        if (sg_isvalid()) {
+            if (slot.view.id != SG_INVALID_ID) {
+                sg_destroy_view(slot.view);
+            }
+            if (slot.image.id != SG_INVALID_ID) {
+                sg_destroy_image(slot.image);
+            }
         }
+        slot = {};
     }
+    if (sg_isvalid() && sampler_.id != SG_INVALID_ID) {
+        sg_destroy_sampler(sampler_);
+    }
+    sampler_ = {};
     all_loaded_ = false;
 }
 
@@ -165,8 +201,7 @@ ImTextureID IconRegistry::get(Icon icon) const {
     if (index >= slots_.size()) {
         return 0;
     }
-    return static_cast<ImTextureID>(
-        static_cast<std::uintptr_t>(slots_[index].texture_id));
+    return static_cast<ImTextureID>(slots_[index].imgui_texture_id);
 }
 
 ImVec2 IconRegistry::size(Icon icon) const {

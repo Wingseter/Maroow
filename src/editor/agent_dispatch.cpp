@@ -1319,6 +1319,13 @@ AgentDispatchResult AgentCommandDispatcher::dispatch(
                 op,
                 spec,
                 "blocked");
+        } else if (!spec->dry_run_supported &&
+                   bool_arg(command_args(cmd), "dry_run", false)) {
+            result = make_error(
+                std::string(op) + " does not support dry_run.",
+                op,
+                spec,
+                "dry_run_unsupported");
         } else {
             if (spec->requires_project) {
                 context.control.current_operation = std::string(op);

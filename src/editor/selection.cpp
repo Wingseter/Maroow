@@ -1,7 +1,10 @@
 #include "marrow/editor/selection.hpp"
 
 #include <algorithm>
+#include <type_traits>
 #include <utility>
+
+#include "marrow/runtime/skeleton.hpp"
 
 namespace marrow::editor {
 namespace {
@@ -14,6 +17,16 @@ std::optional<std::size_t> find_item_index(
         return std::nullopt;
     }
     return static_cast<std::size_t>(std::distance(items.begin(), iterator));
+}
+
+template <typename Constraint>
+bool contains_named_constraint(
+    const std::vector<Constraint>& constraints,
+    const std::string& name) {
+    return std::any_of(
+        constraints.begin(),
+        constraints.end(),
+        [&](const Constraint& constraint) { return constraint.name == name; });
 }
 
 } // namespace
@@ -191,6 +204,71 @@ bool SelectionSet::remap(
     items_.swap(replacement);
     active_index_ = replacement_active;
     return true;
+}
+
+bool SelectionSet::remap_constraint(
+    const ConstraintSelection& from,
+    std::optional<ConstraintSelection> to) {
+    return remap(
+        SelectionItem(from),
+        to.has_value()
+            ? std::optional<SelectionItem>(SelectionItem(std::move(*to)))
+            : std::nullopt);
+}
+
+bool SelectionSet::prune_constraints(const ConstraintPredicate& predicate) {
+    return prune([&](const SelectionItem& item) {
+        const auto* constraint = std::get_if<ConstraintSelection>(&item);
+        return constraint == nullptr || predicate(*constraint);
+    });
+}
+
+bool selection_item_exists(
+    const SelectionItem& item,
+    const runtime::SkeletonData& skeleton) {
+    return std::visit(
+        [&](const auto& selection) {
+            using Selection = std::decay_t<decltype(selection)>;
+            if constexpr (std::is_same_v<Selection, BoneSelection>) {
+                return skeleton.find_bone_index(selection.bone_name).has_value();
+            } else if constexpr (std::is_same_v<Selection, SlotSelection>) {
+                return skeleton.find_slot_index(selection.slot_name).has_value();
+            } else if constexpr (std::is_same_v<Selection, AttachmentSelection>) {
+                const auto slot_index = skeleton.find_slot_index(selection.slot_name);
+                const auto skin_index = skeleton.find_skin_index(selection.skin_name);
+                return slot_index.has_value() && skin_index.has_value() &&
+                    skeleton.find_attachment(
+                        *skin_index,
+                        *slot_index,
+                        selection.attachment_name) != nullptr;
+            } else {
+                switch (selection.kind) {
+                case ConstraintKind::Ik:
+                    return contains_named_constraint(
+                        skeleton.ik_constraints(), selection.constraint_name);
+                case ConstraintKind::Path:
+                    return contains_named_constraint(
+                        skeleton.path_constraints(), selection.constraint_name);
+                case ConstraintKind::Transform:
+                    return contains_named_constraint(
+                        skeleton.transform_constraints(), selection.constraint_name);
+                case ConstraintKind::Physics:
+                    return contains_named_constraint(
+                        skeleton.physics_constraints(), selection.constraint_name);
+                }
+            }
+            return false;
+        },
+        item);
+}
+
+bool reconcile_selection_to_runtime(
+    SelectionSet& selection,
+    const runtime::SkeletonData& skeleton) {
+    return selection.prune(
+        [&](const SelectionItem& item) {
+            return selection_item_exists(item, skeleton);
+        });
 }
 
 } // namespace marrow::editor

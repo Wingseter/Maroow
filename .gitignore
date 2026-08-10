@@ -2,5 +2,8 @@
 build/
 build-bench/
 build-tsan/
+build-display/
+build-platform-release/
+build-msvc/
 .DS_Store
 .serena/memories/

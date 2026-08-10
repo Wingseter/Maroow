@@ -1294,24 +1294,6 @@ int main(int argc, char** argv) {
         false,
         "blocked");
     harness.invoke("agent.resume after pause", "{\"op\":\"agent.resume\"}");
-    harness.invoke("agent.terminate", "{\"op\":\"agent.terminate\"}");
-    const DispatchObservation terminated_permissions = harness.invoke(
-        "agent.permissions.describe terminated",
-        "{\"op\":\"agent.permissions.describe\"}");
-    harness.expect(
-        bool_member(terminated_permissions.scene_delta(), "paused") ==
-                std::optional<bool>(true) &&
-            bool_member(terminated_permissions.scene_delta(), "terminated") ==
-                std::optional<bool>(true),
-        "agent.terminate",
-        "terminate must set paused and terminated");
-    harness.invoke(
-        "terminated mutation blocked",
-        "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
-        "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.8,\"angle\":5}}",
-        false,
-        "blocked");
-    harness.invoke("agent.resume after terminate", "{\"op\":\"agent.resume\"}");
     const DispatchObservation resumed_permissions = harness.invoke(
         "agent.permissions.describe resumed",
         "{\"op\":\"agent.permissions.describe\"}");
@@ -1321,7 +1303,7 @@ int main(int argc, char** argv) {
             bool_member(resumed_permissions.scene_delta(), "terminated") ==
                 std::optional<bool>(false),
         "agent.resume",
-        "resume must clear paused and terminated");
+        "resume must clear paused");
 
     const DispatchObservation retimed = harness.invoke(
         "timeline.retime_keyframes",
@@ -1390,6 +1372,21 @@ int main(int argc, char** argv) {
             "redo grouping",
             "redo did not restore both merged transform edits");
     }
+    // Operations registered with dry_run_supported=false must reject an
+    // explicit dry_run request instead of silently executing the real
+    // mutation. The successful removals right below double as proof that the
+    // rejected attempts deleted nothing.
+    harness.invoke(
+        "remove_transform_keyframe rejects dry_run",
+        "{\"op\":\"remove_transform_keyframe\",\"args\":{\"animation\":\"idle\","
+        "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.625,\"dry_run\":true}}",
+        false,
+        "dry_run_unsupported");
+    harness.invoke(
+        "undo rejects dry_run",
+        "{\"op\":\"undo\",\"args\":{\"dry_run\":true}}",
+        false,
+        "dry_run_unsupported");
     harness.invoke(
         "remove_transform_keyframe first",
         "{\"op\":\"remove_transform_keyframe\",\"args\":{\"animation\":\"idle\","
@@ -1634,6 +1631,49 @@ int main(int argc, char** argv) {
         false,
         "unknown_operation",
         false);
+
+    // Terminate is the user's kill switch: the terminated agent must not be
+    // able to un-terminate itself through agent.resume. Only editor-side user
+    // action restores access, so this block runs last - nothing after it may
+    // require mutating dispatch.
+    harness.invoke("agent.terminate", "{\"op\":\"agent.terminate\"}");
+    const DispatchObservation terminated_permissions = harness.invoke(
+        "agent.permissions.describe terminated",
+        "{\"op\":\"agent.permissions.describe\"}");
+    harness.expect(
+        bool_member(terminated_permissions.scene_delta(), "paused") ==
+                std::optional<bool>(true) &&
+            bool_member(terminated_permissions.scene_delta(), "terminated") ==
+                std::optional<bool>(true),
+        "agent.terminate",
+        "terminate must set paused and terminated");
+    harness.invoke(
+        "terminated mutation blocked",
+        "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+        "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.8,\"angle\":5}}",
+        false,
+        "blocked");
+    harness.invoke(
+        "agent.resume rejected after terminate",
+        "{\"op\":\"agent.resume\"}",
+        false,
+        "terminated");
+    const DispatchObservation still_terminated_permissions = harness.invoke(
+        "agent.permissions.describe still terminated",
+        "{\"op\":\"agent.permissions.describe\"}");
+    harness.expect(
+        bool_member(still_terminated_permissions.scene_delta(), "paused") ==
+                std::optional<bool>(true) &&
+            bool_member(still_terminated_permissions.scene_delta(), "terminated") ==
+                std::optional<bool>(true),
+        "agent.resume rejected after terminate",
+        "a terminated session must stay terminated after agent.resume");
+    harness.invoke(
+        "terminated mutation still blocked",
+        "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+        "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.8,\"angle\":5}}",
+        false,
+        "blocked");
     harness.expect_complete_coverage();
 
     marrow_editor_project_destroy(project);

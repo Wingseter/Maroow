@@ -350,24 +350,10 @@ AgentDispatchResult handle_parameter_operation(
         const bool clamped = normalized != unclamped;
 
         if (dry_run) {
-            ProjectData candidate_project = *session.project();
-            if (session.base_skeleton_document() == nullptr) {
-                return make_error(
-                    "No base skeleton document is loaded.", op, spec, "validation_failed");
-            }
-            const ProjectRuntimeResult runtime_result = build_project_runtime(
-                candidate_project,
-                *session.base_skeleton_document());
-            if (!runtime_result) {
-                return make_error(
-                    "Candidate runtime validation failed: " +
-                        (runtime_result.error.has_value()
-                             ? runtime_result.error->format()
-                             : std::string("unknown runtime build failure")),
-                    op,
-                    spec,
-                    "validation_failed");
-            }
+            // parameter.set only mutates preview state; rebuilding a runtime
+            // from an unmodified project copy validated nothing about the
+            // requested value, so the preview evaluation below is the whole
+            // dry-run contract.
             const std::optional<double> applied =
                 session.evaluate_preview_parameter_value(*id, *requested);
             if (!applied.has_value()) {

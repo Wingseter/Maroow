@@ -94,6 +94,10 @@ void draw_agent_window(ShellState* state) {
                       "Start socket on :%d", port);
         if (ImGui::Button(start_label, ImVec2(-1.0f, 0.0f))) {
             if (state->agent_server->start(port, state->agent_token)) {
+                // Starting the socket is an explicit user re-grant; it is the
+                // only path that clears a terminated session.
+                state->agent_control.terminated = false;
+                state->agent_control.paused = false;
                 state->agent_listen_port = port;
                 state->status_message = "Agent socket listening";
             } else {
@@ -142,21 +146,33 @@ void draw_agent_window(ShellState* state) {
                         request.message.c_str());
                 }
                 if (request.allowed) {
-                    if (ImGui::Button("Approve")) {
-                        bool ok = false;
+                    // Import/pack v1 queues targets only; execution stays in
+                    // the CLI importers, so the button must not claim the
+                    // operation ran.
+                    const bool executes =
+                        request.kind == AgentReviewKind::SaveProject ||
+                        request.kind == AgentReviewKind::ExportRuntime;
+                    if (ImGui::Button(executes ? "Approve" : "Acknowledge")) {
                         if (request.kind == AgentReviewKind::SaveProject) {
-                            ok = save_project_file(state, true);
+                            if (save_project_file(state, true)) {
+                                state->status_message =
+                                    "Approved agent request #" +
+                                    std::to_string(request.id);
+                                remove_review_id = request.id;
+                            }
                         } else if (request.kind == AgentReviewKind::ExportRuntime) {
                             state->export_binary_output = request.binary_output;
-                            ok = export_runtime_assets_file(state, true);
+                            if (export_runtime_assets_file(state, true)) {
+                                state->status_message =
+                                    "Approved agent request #" +
+                                    std::to_string(request.id);
+                                remove_review_id = request.id;
+                            }
                         } else {
-                            ok = true;
-                            state->status_message = "Approved agent import/pack review #" +
-                                std::to_string(request.id);
-                        }
-                        if (ok) {
-                            state->status_message = "Approved agent request #" +
-                                std::to_string(request.id);
+                            state->status_message =
+                                "Acknowledged import/pack request #" +
+                                std::to_string(request.id) +
+                                " (not executed; run the CLI importer to apply it)";
                             remove_review_id = request.id;
                         }
                     }

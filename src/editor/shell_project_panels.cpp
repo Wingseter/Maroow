@@ -8,9 +8,6 @@
 #include <utility>
 #include <vector>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -601,22 +598,15 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
             const bool project_loaded =
                 state->load_result.project != nullptr;
             const bool gesture_active = authoring_gesture_active(*state);
-            auto dispatch_op = [&](const char* op) {
-                namespace json = marrow::runtime::json;
-                json::Value::Object cmd_obj;
-                cmd_obj.emplace("op", json::Value(std::string(op), {}));
-                dispatch_agent_command(
-                    state, json::Value(std::move(cmd_obj), {}));
-            };
 
             if (icon_button(state->icons, Icon::Save, "Save project", false,
                             !project_loaded || gesture_active)) {
-                dispatch_op("save");
+                save_project_file(state, true);
             }
             if (icon_button(state->icons, Icon::Export,
                             "Export runtime assets", false,
                             !project_loaded || gesture_active)) {
-                dispatch_op("export_runtime");
+                export_runtime_assets_file(state, true);
             }
             if (icon_button(state->icons, Icon::Reload, "Reload project",
                             false, !project_loaded || gesture_active)) {
@@ -677,10 +667,12 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
     ImGui::PopStyleColor();
 }
 
-void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state) {
+ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
     if (!ImGui::BeginMainMenuBar()) {
-        return;
+        return ProjectMenuAction::None;
     }
+
+    ProjectMenuAction action = ProjectMenuAction::None;
 
     if (g_font_semibold) ImGui::PushFont(g_font_semibold);
     ImGui::TextColored(marrow::editor::shell::theme::kPrimary, "marrow");
@@ -695,8 +687,8 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
                 !authoring_gesture_active(*state))) {
             *reload_requested = true;
         }
-        if (ImGui::MenuItem("Quit", nullptr, false, window != nullptr)) {
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        if (ImGui::MenuItem("Quit")) {
+            action = ProjectMenuAction::QuitRequested;
         }
         ImGui::EndMenu();
     }
@@ -875,6 +867,7 @@ void draw_menu_bar(GLFWwindow* window, bool* reload_requested, ShellState* state
     ImGui::EndMainMenuBar();
 
     draw_shell_toolbar(reload_requested, state);
+    return action;
 }
 
 void draw_project_window(bool* reload_requested, ShellState* state) {

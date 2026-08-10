@@ -150,6 +150,24 @@ ArtPaths are skeleton-local root overlays, distinct from constraint paths. Prepa
 
 This split lets you choose how far down the renderer stack you want to integrate. Tools and debug UIs may stop at `PreparedScene`; engine backends usually consume `RenderCommandList`.
 
+### GPU host ownership
+
+`RenderCommandList` does not own a window, main pass, or presentation. The
+pass-free Sokol scene renderer preflights all current/onion command lists,
+grows streaming buffers deterministically, and submits only inside an already
+open pass. `marrow_renderer_core` owns the one `sokol_gfx` implementation per
+executable.
+
+The standalone `DemoShell` adapter obtains its window, swapchain, pass, and
+commit from `sokol_app`/`sokol_glue`. The editor instead obtains a Metal or
+GLCORE swapchain from its private SDL3 host, renders its 1x offscreen viewport,
+then submits `sokol_imgui` to the main pass. Consequently `marrow_editor` stays
+UI-free, and the editor executable must contain no `sapp_*` or `sglue_*` symbols.
+
+Editor pointer coordinates are logical SDL coordinates. Offscreen attachments
+and swapchains use drawable pixels, and texture presentation uses the active
+backend's `origin_top_left` feature rather than a GL-specific UV assumption.
+
 ## Why `.marrow` is separate
 
 `.marrow` is the editor project format, not the runtime playback format.

@@ -1,5 +1,7 @@
 #include "shell_state.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_selection.hpp"
+#include "shell_weight_paint.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,20 +12,6 @@
 #include "marrow/editor/project.hpp"
 
 namespace marrow::editor::shell {
-
-// Shell Core Helpers
-std::optional<std::string_view> selected_bone_name(const ShellState& state) {
-    if (!state.load_result || !selected_bone_index(state).has_value()) {
-        return std::nullopt;
-    }
-
-    const auto& bones = state.load_result.skeleton_data->bones();
-    if (*selected_bone_index(state) >= bones.size()) {
-        return std::nullopt;
-    }
-
-    return bones[*selected_bone_index(state)].name;
-}
 
 std::vector<std::string> normalize_preview_skin_names(
     const marrow::runtime::SkeletonData& skeleton,
@@ -412,6 +400,69 @@ void finalize_orphaned_edit_action(ShellState* state) {
         pending.allow_merge);
 }
 
+void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
+    if (state == nullptr) {
+        return;
+    }
+
+    bool cancelled = false;
+    if (state->pending_edit_action.has_value()) {
+        const EditorHistorySnapshot before =
+            state->pending_edit_action->before_snapshot;
+        state->pending_edit_action.reset();
+        restore_history_snapshot(state, before);
+        cancelled = true;
+    }
+    if (state->weight_paint_stroke.active) {
+        const EditorHistorySnapshot before =
+            state->weight_paint_stroke.before_snapshot;
+        reset_weight_paint_stroke(state);
+        restore_history_snapshot(state, before);
+        cancelled = true;
+    }
+    if (state->animation_duration_gesture.has_value()) {
+        state->animation_duration_gesture->transaction.cancel();
+        state->animation_duration_gesture.reset();
+        cancelled = true;
+    }
+    if (state->inspector_transform_gesture.has_value()) {
+        state->inspector_transform_gesture->transaction.cancel();
+        state->inspector_transform_gesture.reset();
+        cancelled = true;
+    }
+    if (state->viewport_transform_gesture.has_value()) {
+        ViewportTransformGesture gesture =
+            std::move(*state->viewport_transform_gesture);
+        state->viewport_transform_gesture.reset();
+        gesture.transaction.cancel();
+        state->selection = gesture.selection_before;
+        state->hierarchy_selection_anchor = gesture.hierarchy_anchor_before;
+        state->selected_timeline_track_id = gesture.timeline_focus_before;
+        cancelled = true;
+    }
+    if (state->timeline_editor.retime_gesture.has_value()) {
+        state->timeline_editor.retime_gesture->transaction.cancel();
+        state->timeline_editor.retime_gesture.reset();
+        cancelled = true;
+    }
+    if (state->parameter_slider_gesture.has_value()) {
+        state->parameter_slider_gesture->transaction.cancel();
+        state->parameter_slider_gesture.reset();
+        cancelled = true;
+    }
+    if (state->parameter_geometry_gesture.has_value()) {
+        state->parameter_geometry_gesture->transaction.cancel();
+        state->parameter_geometry_gesture.reset();
+        cancelled = true;
+    }
+    state->viewport_box_selection.reset();
+    state->pointer_mediator.reset();
+    sync_shell_from_editor_session(state);
+    if (cancelled) {
+        state->status_message = "Cancelled active edit: " + std::string(reason);
+    }
+}
+
 bool rebuild_project_runtime(ShellState* state) {
     if (!state->load_result || state->load_result.project == nullptr ||
         state->load_result.base_skeleton_document == nullptr) {
@@ -478,9 +529,11 @@ bool reload_project(ShellState* state) {
         return false;
     }
 
+    // A source adoption invalidates the screen-space rectangle captured by an
+    // in-flight viewport box gesture, even when every selected identity survives.
+    state->viewport_box_selection.reset();
     state->preview_skeleton = nullptr;
     state->animation_state = nullptr;
-    state->selection.clear();
     state->selected_timeline_track_id.reset();
     state->timeline_editor = TimelineEditorState{};
     state->preview_skin_names.clear();
@@ -536,6 +589,12 @@ bool reload_project(ShellState* state) {
     }
     (void)initialize_viewport_camera_from_preview_pose(state);
     reset_runtime_asset_watch(state);
+    marrow::editor::reconcile_selection_to_runtime(
+        state->selection,
+        *state->load_result.skeleton_data);
+    reconcile_hierarchy_anchor_to_runtime(
+        state,
+        *state->load_result.skeleton_data);
 
     return true;
 }

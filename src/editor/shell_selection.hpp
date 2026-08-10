@@ -10,6 +10,56 @@
 
 namespace marrow::editor::shell {
 
+struct ResolvedSelection {
+    std::optional<std::size_t> active_bone_index;
+    std::optional<std::size_t> active_slot_index;
+    std::optional<std::size_t> context_bone_index;
+    std::optional<PreviewAttachmentSelection> active_attachment;
+    std::optional<PreviewAttachmentSelection> attachment_context;
+    std::optional<marrow::editor::ConstraintSelection> active_constraint;
+};
+
+struct HierarchySelectionModifiers {
+    bool command{false};
+    bool shift{false};
+};
+
+enum class HierarchyRowSelectionState {
+    Unselected,
+    Selected,
+    Active,
+};
+
+ResolvedSelection resolve_shell_selection(const ShellState& state);
+bool hierarchy_command_modifier(
+    bool config_macosx_behaviors,
+    bool key_ctrl,
+    bool key_super) noexcept;
+bool apply_hierarchy_selection_gesture(
+    ShellState* state,
+    const std::vector<marrow::editor::SelectionItem>& visible_items,
+    const marrow::editor::SelectionItem& clicked_item,
+    HierarchySelectionModifiers modifiers,
+    bool update_status_message = true);
+bool apply_viewport_point_selection_gesture(
+    ShellState* state,
+    const marrow::editor::SelectionItem& clicked_item,
+    bool command_modifier,
+    bool update_status_message = true);
+bool apply_viewport_box_selection_gesture(
+    ShellState* state,
+    const std::vector<marrow::editor::SelectionItem>& ordered_bones,
+    bool additive,
+    bool update_status_message = true);
+bool reconcile_hierarchy_anchor_visibility(
+    ShellState* state,
+    const std::vector<marrow::editor::SelectionItem>& visible_items);
+bool reconcile_hierarchy_anchor_to_runtime(
+    ShellState* state,
+    const marrow::runtime::SkeletonData& skeleton);
+HierarchyRowSelectionState hierarchy_row_selection_state(
+    const ShellState& state,
+    const marrow::editor::SelectionItem& item) noexcept;
 std::string join_strings(const std::vector<std::string>& values);
 void select_bone(
     ShellState* state,
@@ -26,9 +76,6 @@ void select_attachment(
     std::optional<PreviewAttachmentSelection> selection,
     std::string_view source,
     bool update_status_message);
-void sync_attachment_selection_for_slot(
-    ShellState* state,
-    std::size_t slot_index);
 bool apply_preview_skin_selection(
     ShellState* state,
     std::string_view source,

@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "imgui.h"
+#include "sokol_gfx.h"
 
 namespace marrow::editor {
 
@@ -108,12 +109,15 @@ public:
 
 private:
     struct Slot {
-        std::uint32_t texture_id{0};
+        sg_image image{};
+        sg_view view{};
+        std::uint64_t imgui_texture_id{0U};
         int width{0};
         int height{0};
     };
 
     std::array<Slot, static_cast<std::size_t>(Icon::Count)> slots_{};
+    sg_sampler sampler_{};
     bool all_loaded_{false};
 };
 

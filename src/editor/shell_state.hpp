@@ -6,17 +6,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
-struct GLFWwindow;
-
-#if defined(__APPLE__)
-#include <OpenGL/gl3.h>
-#else
-#include <GL/glcorearb.h>
-#endif
-
 #include "imgui.h"
+#include "sokol_gfx.h"
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
@@ -27,6 +21,7 @@ struct GLFWwindow;
 #include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "session_shell_binding.hpp"
+#include "windowing.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
 #include "marrow/runtime/profiler.hpp"
@@ -87,6 +82,56 @@ struct ViewportLayout {
     std::vector<BoneCanvasNode> bones;
 };
 
+// Narrow, screen-space targets win over broader rendered surfaces. The
+// viewport UI consumes an active edit/brush and the transform gizmos before
+// consulting this entity order. Within one category, the nearest screen-space
+// candidate wins, followed by stable authored order (or reverse draw order for
+// overlapping rendered attachments).
+enum class ViewportEntityHitPriority : std::uint8_t {
+    ConstraintTarget,
+    BoneJoint,
+    BoneBody,
+    SlotHandle,
+    AttachmentSurface,
+};
+
+struct ViewportEntityHitCandidate {
+    marrow::editor::SelectionItem item;
+    ViewportEntityHitPriority priority{ViewportEntityHitPriority::AttachmentSurface};
+    float distance_squared{0.0f};
+    std::size_t stable_order{0U};
+};
+
+enum class ViewportHitMarkerShape : std::uint8_t {
+    Circle,
+    Diamond,
+};
+
+struct ViewportHitCircle {
+    ViewportEntityHitCandidate candidate;
+    ImVec2 center{};
+    float radius{0.0f};
+    ViewportHitMarkerShape marker_shape{ViewportHitMarkerShape::Circle};
+};
+
+struct ViewportHitSegment {
+    ViewportEntityHitCandidate candidate;
+    ImVec2 start{};
+    ImVec2 end{};
+    float radius{0.0f};
+};
+
+struct ViewportHitTriangle {
+    ViewportEntityHitCandidate candidate;
+    std::array<ImVec2, 3> points{};
+};
+
+struct ViewportEntityHitGeometry {
+    std::vector<ViewportHitCircle> circles;
+    std::vector<ViewportHitSegment> segments;
+    std::vector<ViewportHitTriangle> triangles;
+};
+
 struct OnionSkinGhostPose {
     std::vector<BoneCanvasNode> bones;
     double time_seconds{0.0};
@@ -130,16 +175,19 @@ struct ViewportFramebufferSize {
 struct ViewportRenderResources {
     bool available{false};
     bool initialization_attempted{false};
-    GLuint framebuffer{0};
-    GLuint color_texture{0};
-    GLuint depth_stencil_renderbuffer{0};
-    GLuint program{0};
-    GLuint vertex_shader{0};
-    GLuint fragment_shader{0};
-    GLuint vao{0};
-    GLuint vbo{0};
+    sg_image color_image{};
+    sg_view color_attachment_view{};
+    sg_view color_texture_view{};
+    sg_image depth_stencil_image{};
+    sg_view depth_stencil_view{};
+    sg_sampler texture_sampler{};
+    std::uint64_t imgui_texture_id{0U};
+    sg_shader overlay_shader{};
+    sg_pipeline overlay_line_pipeline{};
+    sg_pipeline overlay_triangle_pipeline{};
+    sg_buffer overlay_vertex_buffer{};
+    std::size_t overlay_vertex_capacity_bytes{0U};
     marrow::editor::ViewportRenderer prepared_scene_renderer{};
-    GLint view_size_location{-1};
     int framebuffer_width{0};
     int framebuffer_height{0};
     std::string error_message;
@@ -330,14 +378,86 @@ enum class ViewportTranslateAxis {
     Y,
 };
 
-struct ViewportTranslateGesture {
-    std::size_t bone_index{0U};
-    std::string bone_name;
+struct ViewportTranslateGesturePayload {
     ViewportTranslateAxis axis{ViewportTranslateAxis::Free};
     ViewportWorldPoint pointer_start{};
     ViewportWorldPoint bone_world_start{};
+};
+
+struct ViewportRotationBasis {
+    ViewportWorldPoint pivot_world{};
+    double inverse_a{1.0};
+    double inverse_b{0.0};
+    double inverse_c{0.0};
+    double inverse_d{1.0};
+    marrow::runtime::BoneInherit inherit{marrow::runtime::BoneInherit::Normal};
+};
+
+struct ViewportRotateGesturePayload {
+    ViewportRotationBasis basis{};
+    double start_absolute_rotation{0.0};
+    std::optional<double> previous_wrapped_angle;
+    double accumulated_rotation{0.0};
+    bool angular_reference_suspended{false};
+    ImVec2 pointer_screen{};
+    double current_absolute_rotation{0.0};
+};
+
+enum class ViewportScaleHandle {
+    X,
+    Y,
+    Uniform,
+};
+
+struct ViewportScaleBasis {
+    ViewportWorldPoint pivot_world{};
+    ImVec2 positive_x_screen_direction{1.0f, 0.0f};
+    ImVec2 positive_y_screen_direction{0.0f, -1.0f};
+    ImVec2 uniform_screen_direction{
+        0.7071067811865475f,
+        -0.7071067811865475f};
+    marrow::runtime::BoneInherit inherit{marrow::runtime::BoneInherit::Normal};
+};
+
+struct ViewportScaleCandidate {
+    double scale_x{1.0};
+    double scale_y{1.0};
+};
+
+struct ViewportScaleGesturePayload {
+    ViewportScaleBasis basis{};
+    ViewportScaleHandle handle{ViewportScaleHandle::X};
+    double start_absolute_scale_x{1.0};
+    double start_absolute_scale_y{1.0};
+    double start_projection_pixels{0.0};
+    ImVec2 pointer_screen{};
+    double current_absolute_scale_x{1.0};
+    double current_absolute_scale_y{1.0};
+};
+
+using ViewportTransformGesturePayload = std::variant<
+    ViewportTranslateGesturePayload,
+    ViewportRotateGesturePayload,
+    ViewportScaleGesturePayload>;
+
+struct ViewportTransformGesture {
+    std::size_t bone_index{0U};
+    std::string bone_name;
+    std::string animation_name;
+    double time_seconds{0.0};
+    marrow::editor::SelectionSet selection_before;
+    std::optional<marrow::editor::SelectionItem> hierarchy_anchor_before;
+    std::optional<std::string> timeline_focus_before;
     bool changed{false};
     marrow::editor::EditorSession::EditTransaction transaction;
+    ViewportTransformGesturePayload payload{};
+};
+
+struct ViewportBoxSelectionGesture {
+    ImVec2 start{};
+    ImVec2 current{};
+    bool additive{false};
+    bool dragged{false};
 };
 
 struct TimelineKeyRef {
@@ -438,16 +558,19 @@ struct ShellState {
     std::optional<PendingEditAction> pending_edit_action;
     std::optional<AnimationDurationGesture> animation_duration_gesture;
     std::optional<InspectorTransformGesture> inspector_transform_gesture;
-    std::optional<ViewportTranslateGesture> viewport_translate_gesture;
+    std::optional<ViewportTransformGesture> viewport_transform_gesture;
+    std::optional<ViewportBoxSelectionGesture> viewport_box_selection;
     std::optional<ParameterSliderGesture> parameter_slider_gesture;
     std::optional<ParameterGeometryGesture> parameter_geometry_gesture;
     TimelineEditorState timeline_editor{};
     MeshWeightStrokeState weight_paint_stroke{};
+    PointerMediator pointer_mediator{};
     ViewportRenderResources viewport_renderer{};
     DockLayoutState dock_layout{};
     marrow::runtime::Skeleton* preview_skeleton{nullptr};
     marrow::runtime::AnimationState* animation_state{nullptr};
     marrow::editor::SelectionSet selection;
+    std::optional<marrow::editor::SelectionItem> hierarchy_selection_anchor;
     std::optional<std::string> selected_timeline_track_id;
     std::vector<std::string> preview_skin_names;
     std::vector<std::optional<PreviewAttachmentSelection>> preview_slot_overrides;
@@ -490,7 +613,7 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
     return state.pending_edit_action.has_value() ||
         state.animation_duration_gesture.has_value() ||
         state.inspector_transform_gesture.has_value() ||
-        state.viewport_translate_gesture.has_value() ||
+        state.viewport_transform_gesture.has_value() ||
         state.parameter_slider_gesture.has_value() ||
         state.parameter_geometry_gesture.has_value() ||
         state.timeline_editor.retime_gesture.has_value() ||
@@ -539,38 +662,9 @@ constexpr char kExpressionsWindowTitle[] = "Expressions";
 constexpr char kLipSyncWindowTitle[] = "Lip Sync";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
-constexpr ImVec2 kViewportImageUv0{0.0f, 1.0f};
-constexpr ImVec2 kViewportImageUv1{1.0f, 0.0f};
 constexpr float kPi = 3.14159265358979323846f;
 constexpr double kOnionSkinFrameRate = 60.0;
 constexpr double kOnionSkinFrameDuration = 1.0 / kOnionSkinFrameRate;
-constexpr const char* kViewportVertexShaderSource = R"(#version 150
-in vec2 a_position;
-in vec4 a_color;
-
-uniform vec2 u_view_size;
-
-out vec4 v_color;
-
-void main() {
-    vec2 normalized_position = vec2(
-        (a_position.x / u_view_size.x) * 2.0 - 1.0,
-        1.0 - ((a_position.y / u_view_size.y) * 2.0));
-    v_color = a_color;
-    gl_Position = vec4(normalized_position, 0.0, 1.0);
-}
-)";
-
-constexpr const char* kViewportFragmentShaderSource = R"(#version 150
-in vec4 v_color;
-
-out vec4 frag_color;
-
-void main() {
-    frag_color = v_color;
-}
-)";
-
 // Shared shell/session helpers.
 std::optional<std::size_t> selected_bone_index(const ShellState& state);
 std::optional<std::string_view> selected_bone_name(const ShellState& state);
@@ -605,6 +699,7 @@ bool record_action_from_snapshots(
     std::string group,
     bool allow_merge);
 void finalize_orphaned_edit_action(ShellState* state);
+void cancel_authoring_gestures(ShellState* state, std::string_view reason);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);
 bool save_project_file(ShellState* state, bool update_status_message);
@@ -636,6 +731,7 @@ std::optional<std::string> render_viewport_framebuffer(
     const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
     const MeshWeightOverlay* mesh_weight_overlay,
+    const marrow::renderer::PreparedScene* prepared_scene,
     ViewportRenderResources* resources);
 std::optional<ViewportLayout> build_viewport_layout(
     const ShellState& state,
@@ -705,7 +801,8 @@ void append_viewport_pose_geometry(
     const ViewportLayout& layout,
     const std::vector<BoneCanvasNode>& bones,
     float joint_radius,
-    std::optional<std::size_t> selected_bone,
+    const std::vector<bool>* selected_bones,
+    std::optional<std::size_t> active_bone,
     std::optional<std::size_t> hovered_bone,
     ImU32 line_color,
     ImU32 joint_fill_color,
@@ -730,6 +827,22 @@ void build_viewport_overlay_geometry(
 std::optional<std::size_t> pick_bone_at_position(
     const ViewportLayout& layout,
     const ImVec2& position);
+ViewportEntityHitGeometry build_viewport_entity_hit_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const marrow::renderer::PreparedScene* prepared_scene);
+std::optional<ViewportEntityHitCandidate> resolve_viewport_entity_hit_candidates(
+    const std::vector<ViewportEntityHitCandidate>& candidates);
+std::optional<ViewportEntityHitCandidate> pick_viewport_entity_at_position(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ViewportEntityHitGeometry& geometry,
+    const ImVec2& position);
+std::vector<marrow::editor::SelectionItem> collect_viewport_box_bones(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ImVec2& first_corner,
+    const ImVec2& second_corner);
 double onion_skin_alpha(int distance_rank, int total_count);
 
 void ensure_default_dock_layout(

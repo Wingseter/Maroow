@@ -14,6 +14,26 @@ cmake --build build
 
 That command loads `player_idle.mskl`, resolves `player_idle.matl`, applies the fixture animation coverage, prepares renderer commands, and opens the sample window.
 
+The standalone `DemoShell` uses the Sokol-app adapter. The editor has a separate
+SDL3 host and does not link `sokol_app` or `sokol_glue`:
+
+```sh
+./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow
+```
+
+On macOS this editor path is SDL Metal. Windows and Ubuntu X11 use an SDL OpenGL
+4.1 Core context behind `sokol_gfx`; an unavailable 4.1 context is a startup
+error rather than a GL 3.2 fallback.
+
+Display/device tests are deliberately absent from the default CTest registry.
+Enable them explicitly on a real supported host:
+
+```sh
+cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON
+cmake --build build-display
+ctest --test-dir build-display --output-on-failure -L display
+```
+
 ## Minimal C++ embedding example
 
 The example below shows the smallest public C++ flow:

@@ -5,13 +5,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
-#define SOKOL_NO_ENTRY
-#define SOKOL_IMPL
 #if defined(__APPLE__)
 #import <Metal/Metal.h>
 #define SOKOL_METAL
@@ -20,11 +19,20 @@
 #endif
 
 #include "sokol_gfx.h"
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
+#define SOKOL_NO_ENTRY
 #include "sokol_app.h"
 #include "sokol_glue.h"
+#endif
 #include "sokol_log.h"
 
-#include "marrow_renderer_shader.h"
+#if defined(SOKOL_METAL)
+#include "marrow_renderer_shader_metal.h"
+#elif defined(SOKOL_GLCORE)
+#include "marrow_renderer_shader_gl.h"
+#else
+#error "Marrow renderer shaders require Metal or GLCORE."
+#endif
 
 namespace marrow::renderer::internal {
 
@@ -39,6 +47,20 @@ constexpr int kFsUniformSlot = 1;
 constexpr int kAtlasTextureSlot = 0;
 constexpr int kAtlasSamplerSlot = 0;
 constexpr std::array<std::uint8_t, 4> kSolidWhiteRgba{{255, 255, 255, 255}};
+
+std::optional<std::size_t> next_power_of_two(std::size_t value) {
+    if (value <= 1U) {
+        return 1U;
+    }
+    std::size_t result = 1U;
+    while (result < value) {
+        if (result > (std::numeric_limits<std::size_t>::max() / 2U)) {
+            return std::nullopt;
+        }
+        result *= 2U;
+    }
+    return result;
+}
 
 std::optional<std::string> validate_atlas_texture(const TextureImage& texture) {
     if (texture.width <= 0 || texture.height <= 0) {
@@ -240,14 +262,25 @@ struct ActiveStencilClip {
     std::uint8_t invert_mask{0};
 };
 
-class SokolBackend final : public Backend {
+class SokolBackend final
+#if defined(MARROW_RENDERER_SCENE_ONLY)
+    : public SokolSceneRenderer {
+#else
+    : public Backend, public SokolSceneRenderer {
+#endif
 public:
     ~SokolBackend() override {
+#if defined(MARROW_RENDERER_SCENE_ONLY)
+        destroy_scene_resources();
+#else
         destroy();
+#endif
     }
 
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
     std::optional<std::string> create(const BackendCreateInfo& create_info) override {
         destroy();
+        owns_graphics_device_ = true;
 
         if (const std::optional<std::string> error =
                 validate_atlas_texture(create_info.atlas_texture)) {
@@ -266,7 +299,7 @@ public:
 #else
         if (sg_query_backend() != SG_BACKEND_GLCORE) {
             destroy();
-            return "sokol_gfx did not initialize the expected OpenGL backend on Linux.";
+            return "sokol_gfx did not initialize the expected GLCORE backend on this platform.";
         }
 #endif
 
@@ -290,70 +323,109 @@ public:
     }
 
     void destroy() override {
-        if (!sg_isvalid()) {
-            reset_handles();
-            return;
+        const bool shutdown_graphics_device = owns_graphics_device_;
+        destroy_scene_resources();
+        if (shutdown_graphics_device && sg_isvalid()) {
+            sg_shutdown();
         }
-
-        destroy_cached_pipelines();
-
-        if (two_color_shader_.id != SG_INVALID_ID) {
-            sg_destroy_shader(two_color_shader_);
-            two_color_shader_ = {};
-        }
-        if (single_color_shader_.id != SG_INVALID_ID) {
-            sg_destroy_shader(single_color_shader_);
-            single_color_shader_ = {};
-        }
-        if (atlas_sampler_.id != SG_INVALID_ID) {
-            sg_destroy_sampler(atlas_sampler_);
-            atlas_sampler_ = {};
-        }
-        if (white_view_.id != SG_INVALID_ID) {
-            sg_destroy_view(white_view_);
-            white_view_ = {};
-        }
-        if (white_image_.id != SG_INVALID_ID) {
-            sg_destroy_image(white_image_);
-            white_image_ = {};
-        }
-        if (atlas_view_.id != SG_INVALID_ID) {
-            sg_destroy_view(atlas_view_);
-            atlas_view_ = {};
-        }
-        if (atlas_image_.id != SG_INVALID_ID) {
-            sg_destroy_image(atlas_image_);
-            atlas_image_ = {};
-        }
-        if (offscreen_color_view_.id != SG_INVALID_ID) {
-            sg_destroy_view(offscreen_color_view_);
-            offscreen_color_view_ = {};
-        }
-        if (offscreen_color_image_.id != SG_INVALID_ID) {
-            sg_destroy_image(offscreen_color_image_);
-            offscreen_color_image_ = {};
-        }
-        if (offscreen_depth_stencil_view_.id != SG_INVALID_ID) {
-            sg_destroy_view(offscreen_depth_stencil_view_);
-            offscreen_depth_stencil_view_ = {};
-        }
-        if (offscreen_depth_stencil_image_.id != SG_INVALID_ID) {
-            sg_destroy_image(offscreen_depth_stencil_image_);
-            offscreen_depth_stencil_image_ = {};
-        }
-        if (stream_index_buffer_.id != SG_INVALID_ID) {
-            sg_destroy_buffer(stream_index_buffer_);
-            stream_index_buffer_ = {};
-        }
-        if (stream_vertex_buffer_.id != SG_INVALID_ID) {
-            sg_destroy_buffer(stream_vertex_buffer_);
-            stream_vertex_buffer_ = {};
-        }
-
-        sg_shutdown();
         reset_handles();
     }
+#endif
 
+    std::optional<std::string> create_scene_resources(
+        const BackendCreateInfo& create_info,
+        const SokolSceneTargetInfo& target_info) override {
+        if (!sg_isvalid()) {
+            return "Cannot create scene resources before sokol_gfx is initialized.";
+        }
+        if (const std::optional<std::string> error =
+                validate_atlas_texture(create_info.atlas_texture)) {
+            return error;
+        }
+
+        destroy_scene_resources();
+        owns_graphics_device_ = false;
+        headless_offscreen_ = false;
+        swapchain_color_format_ = static_cast<sg_pixel_format>(target_info.color_format);
+        swapchain_depth_format_ = static_cast<sg_pixel_format>(target_info.depth_format);
+        swapchain_sample_count_ = std::max(target_info.sample_count, 1);
+        if (swapchain_color_format_ == SG_PIXELFORMAT_NONE) {
+            return "Scene renderer requires an explicit color format.";
+        }
+        if (const std::optional<std::string> error = create_render_resources(create_info)) {
+            destroy_scene_resources();
+            return error;
+        }
+        created_ = true;
+        return std::nullopt;
+    }
+
+    void destroy_scene_resources() override {
+        if (sg_isvalid()) {
+            destroy_cached_pipelines();
+
+            if (two_color_shader_.id != SG_INVALID_ID) {
+                sg_destroy_shader(two_color_shader_);
+            }
+            if (single_color_shader_.id != SG_INVALID_ID) {
+                sg_destroy_shader(single_color_shader_);
+            }
+            if (atlas_sampler_.id != SG_INVALID_ID) {
+                sg_destroy_sampler(atlas_sampler_);
+            }
+            if (white_view_.id != SG_INVALID_ID) {
+                sg_destroy_view(white_view_);
+            }
+            if (white_image_.id != SG_INVALID_ID) {
+                sg_destroy_image(white_image_);
+            }
+            if (atlas_view_.id != SG_INVALID_ID) {
+                sg_destroy_view(atlas_view_);
+            }
+            if (atlas_image_.id != SG_INVALID_ID) {
+                sg_destroy_image(atlas_image_);
+            }
+            if (offscreen_color_view_.id != SG_INVALID_ID) {
+                sg_destroy_view(offscreen_color_view_);
+            }
+            if (offscreen_color_image_.id != SG_INVALID_ID) {
+                sg_destroy_image(offscreen_color_image_);
+            }
+            if (offscreen_depth_stencil_view_.id != SG_INVALID_ID) {
+                sg_destroy_view(offscreen_depth_stencil_view_);
+            }
+            if (offscreen_depth_stencil_image_.id != SG_INVALID_ID) {
+                sg_destroy_image(offscreen_depth_stencil_image_);
+            }
+            if (stream_index_buffer_.id != SG_INVALID_ID) {
+                sg_destroy_buffer(stream_index_buffer_);
+            }
+            if (stream_vertex_buffer_.id != SG_INVALID_ID) {
+                sg_destroy_buffer(stream_vertex_buffer_);
+            }
+        }
+
+        created_ = false;
+        stream_vertex_buffer_ = {};
+        stream_index_buffer_ = {};
+        stream_vertex_buffer_bytes_ = 0U;
+        stream_index_buffer_bytes_ = 0U;
+        offscreen_color_image_ = {};
+        offscreen_color_view_ = {};
+        offscreen_depth_stencil_image_ = {};
+        offscreen_depth_stencil_view_ = {};
+        atlas_image_ = {};
+        atlas_view_ = {};
+        atlas_sampler_ = {};
+        white_image_ = {};
+        white_view_ = {};
+        single_color_shader_ = {};
+        two_color_shader_ = {};
+        draw_pipelines_.clear();
+        clip_pipelines_.clear();
+    }
+
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
     std::optional<std::string> begin_frame(BackendFrameInfo* frame_info_out) override {
         if (frame_info_out == nullptr) {
             return "Backend frame info output was null.";
@@ -377,13 +449,64 @@ public:
         if (!created_) {
             return "Sokol backend was not created.";
         }
+        if (const std::optional<std::string> error =
+                prepare_command_lists({&command_list})) {
+            return error;
+        }
+
+        sg_pass pass{};
+        pass.action = pass_action_;
+        apply_pass_target(&pass);
+        pass.label = "marrow-frame";
+        sg_begin_pass(&pass);
+
+        const std::optional<std::string> result =
+            submit_commands_to_active_pass(command_list);
+        sg_end_pass();
+        return result;
+    }
+#endif
+
+    std::optional<std::string> prepare_command_lists(
+        const std::vector<const RenderCommandList*>& command_lists) override {
+        if (!created_) {
+            return "Sokol scene renderer was not created.";
+        }
+
+        std::size_t vertex_bytes = 0U;
+        std::size_t index_bytes = 0U;
+        for (const RenderCommandList* command_list : command_lists) {
+            if (command_list == nullptr) {
+                return "Sokol scene preflight received a null command list.";
+            }
+            for (const RenderCommandEventRef& event : command_list->ordered_events) {
+                if (event.kind == RenderCommandEventKind::Draw) {
+                    if (event.index >= command_list->commands.size()) {
+                        return "Render command preflight referenced a missing draw command.";
+                    }
+                    const RenderCommand& command = command_list->commands[event.index];
+                    vertex_bytes += command.vertices.size() * sizeof(RenderCommandVertex);
+                    index_bytes += command.indices.size() * sizeof(std::uint32_t);
+                } else {
+                    if (event.index >= command_list->clip_commands.size()) {
+                        return "Render command preflight referenced a missing clip command.";
+                    }
+                    const RenderClipCommand& command = command_list->clip_commands[event.index];
+                    vertex_bytes += command.vertices.size() * sizeof(RenderCommandVertex);
+                    index_bytes += command.indices.size() * sizeof(std::uint32_t);
+                }
+            }
+        }
+
+        return ensure_stream_capacity(vertex_bytes, index_bytes);
+    }
+
+    std::optional<std::string> submit_commands_to_active_pass(
+        const RenderCommandList& command_list) override {
+        if (!created_) {
+            return "Sokol scene renderer was not created.";
+        }
         if (command_list.commands.empty() && command_list.ordered_events.empty()) {
-            sg_pass pass{};
-            pass.action = pass_action_;
-            apply_pass_target(&pass);
-            pass.label = "marrow-frame";
-            sg_begin_pass(&pass);
-            sg_end_pass();
             return std::nullopt;
         }
         if (command_list.bone_palette.empty() ||
@@ -398,29 +521,20 @@ public:
         const marrow_renderer_fs_params_t fs_params =
             make_fs_params(command_list.premultiplied_alpha);
 
-        sg_pass pass{};
-        pass.action = pass_action_;
-        apply_pass_target(&pass);
-        pass.label = "marrow-frame";
-        sg_begin_pass(&pass);
-
         std::vector<ActiveStencilClip> active_clips;
         for (const RenderCommandEventRef& event : command_list.ordered_events) {
             switch (event.kind) {
             case RenderCommandEventKind::ClipStart: {
                 if (event.index >= command_list.clip_commands.size()) {
-                    sg_end_pass();
                     return "Render command list clip start event referenced a missing clip command.";
                 }
                 if (active_clips.size() >= 255U) {
-                    sg_end_pass();
                     return "Clip nesting exceeded the 8-bit stencil reference range.";
                 }
 
                 const std::optional<SoftwareStencilClipState> stencil_state =
                     stencil_clip_state_for_depth(active_clips.size() + 1U);
                 if (!stencil_state.has_value()) {
-                    sg_end_pass();
                     return "Failed to allocate a valid stencil reference for the clip stack.";
                 }
 
@@ -437,14 +551,12 @@ public:
                         false,
                         vs_params,
                         fs_params)) {
-                    sg_end_pass();
                     return error;
                 }
                 break;
             }
             case RenderCommandEventKind::Draw: {
                 if (event.index >= command_list.commands.size()) {
-                    sg_end_pass();
                     return "Render command list draw event referenced a missing draw batch.";
                 }
                 const std::optional<std::uint8_t> stencil_reference =
@@ -457,25 +569,21 @@ public:
                         stencil_reference,
                         vs_params,
                         fs_params)) {
-                    sg_end_pass();
                     return error;
                 }
                 break;
             }
             case RenderCommandEventKind::ClipEnd: {
                 if (event.index >= command_list.clip_commands.size()) {
-                    sg_end_pass();
                     return "Render command list clip end event referenced a missing clip command.";
                 }
                 if (active_clips.empty()) {
-                    sg_end_pass();
                     return "Render command list clip end event underflowed the clip stack.";
                 }
 
                 const ActiveStencilClip active_clip = active_clips.back();
                 active_clips.pop_back();
                 if (active_clip.clip_attachment_index != event.index) {
-                    sg_end_pass();
                     return "Render command list clip end event did not match the active clip stack.";
                 }
 
@@ -485,7 +593,6 @@ public:
                         true,
                         vs_params,
                         fs_params)) {
-                    sg_end_pass();
                     return error;
                 }
                 break;
@@ -494,21 +601,21 @@ public:
         }
 
         if (!active_clips.empty()) {
-            sg_end_pass();
             return "Render command list finished with an unterminated clip stack.";
         }
-
-        sg_end_pass();
         return std::nullopt;
     }
 
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
     void end_frame() override {
         if (created_) {
             sg_commit();
         }
     }
+#endif
 
 private:
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
     std::optional<std::string> setup_context(const BackendCreateInfo& create_info) {
 #if defined(__APPLE__)
         if (create_info.hidden_window) {
@@ -560,6 +667,7 @@ private:
         swapchain_sample_count_ = environment.defaults.sample_count;
         return std::nullopt;
     }
+#endif
 
     std::optional<std::string> create_render_resources(const BackendCreateInfo& create_info) {
         sg_image_desc image_desc{};
@@ -633,6 +741,7 @@ private:
                     sg_query_buffer_state(stream_vertex_buffer_))) {
             return error;
         }
+        stream_vertex_buffer_bytes_ = kStreamingVertexBufferBytes;
 
         sg_buffer_desc index_buffer_desc{};
         index_buffer_desc.size = kStreamingIndexBufferBytes;
@@ -648,6 +757,7 @@ private:
                     sg_query_buffer_state(stream_index_buffer_))) {
             return error;
         }
+        stream_index_buffer_bytes_ = kStreamingIndexBufferBytes;
 
         const sg_shader_desc* single_color_desc =
             marrow_renderer_single_color_shader_desc(sg_query_backend());
@@ -678,6 +788,7 @@ private:
         return std::nullopt;
     }
 
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
     std::optional<std::string> create_offscreen_target() {
         sg_image_desc color_image_desc{};
         color_image_desc.usage.color_attachment = true;
@@ -747,6 +858,7 @@ private:
 
     void reset_handles() {
         created_ = false;
+        owns_graphics_device_ = false;
         headless_offscreen_ = false;
         swapchain_color_format_ = SG_PIXELFORMAT_NONE;
         swapchain_depth_format_ = SG_PIXELFORMAT_NONE;
@@ -756,6 +868,8 @@ private:
         pass_action_ = {};
         stream_vertex_buffer_ = {};
         stream_index_buffer_ = {};
+        stream_vertex_buffer_bytes_ = 0U;
+        stream_index_buffer_bytes_ = 0U;
         offscreen_color_image_ = {};
         offscreen_color_view_ = {};
         offscreen_depth_stencil_image_ = {};
@@ -773,6 +887,7 @@ private:
         draw_pipelines_.clear();
         clip_pipelines_.clear();
     }
+#endif
 
     void destroy_cached_pipelines() {
         if (!sg_isvalid()) {
@@ -799,6 +914,72 @@ private:
         if (swapchain_depth_format_ != SG_PIXELFORMAT_NONE) {
             pipeline_desc->depth.pixel_format = swapchain_depth_format_;
         }
+    }
+
+    std::optional<std::string> ensure_stream_capacity(
+        std::size_t required_vertex_bytes,
+        std::size_t required_index_bytes) {
+        if (required_vertex_bytes <= stream_vertex_buffer_bytes_ &&
+            required_index_bytes <= stream_index_buffer_bytes_) {
+            return std::nullopt;
+        }
+
+        const auto vertex_capacity = next_power_of_two(std::max(
+            required_vertex_bytes,
+            std::max(stream_vertex_buffer_bytes_, kStreamingVertexBufferBytes)));
+        const auto index_capacity = next_power_of_two(std::max(
+            required_index_bytes,
+            std::max(stream_index_buffer_bytes_, kStreamingIndexBufferBytes)));
+        if (!vertex_capacity.has_value() || !index_capacity.has_value()) {
+            return "Sokol scene stream capacity overflowed addressable memory.";
+        }
+
+        sg_buffer_desc vertex_desc{};
+        vertex_desc.size = *vertex_capacity;
+        vertex_desc.usage.vertex_buffer = true;
+        vertex_desc.usage.immutable = false;
+        vertex_desc.usage.stream_update = true;
+        vertex_desc.label = "marrow-stream-vertices-grown";
+        const sg_buffer replacement_vertex = sg_make_buffer(&vertex_desc);
+        if (const std::optional<std::string> error = resource_state_error(
+                "grown stream vertex buffer",
+                sg_query_buffer_state(replacement_vertex))) {
+            if (replacement_vertex.id != SG_INVALID_ID) {
+                sg_destroy_buffer(replacement_vertex);
+            }
+            return error;
+        }
+
+        sg_buffer_desc index_desc{};
+        index_desc.size = *index_capacity;
+        index_desc.usage.index_buffer = true;
+        index_desc.usage.immutable = false;
+        index_desc.usage.stream_update = true;
+        index_desc.label = "marrow-stream-indices-grown";
+        const sg_buffer replacement_index = sg_make_buffer(&index_desc);
+        if (const std::optional<std::string> error = resource_state_error(
+                "grown stream index buffer",
+                sg_query_buffer_state(replacement_index))) {
+            if (replacement_index.id != SG_INVALID_ID) {
+                sg_destroy_buffer(replacement_index);
+            }
+            sg_destroy_buffer(replacement_vertex);
+            return error;
+        }
+
+        const sg_buffer previous_vertex = stream_vertex_buffer_;
+        const sg_buffer previous_index = stream_index_buffer_;
+        stream_vertex_buffer_ = replacement_vertex;
+        stream_index_buffer_ = replacement_index;
+        stream_vertex_buffer_bytes_ = *vertex_capacity;
+        stream_index_buffer_bytes_ = *index_capacity;
+        if (previous_vertex.id != SG_INVALID_ID) {
+            sg_destroy_buffer(previous_vertex);
+        }
+        if (previous_index.id != SG_INVALID_ID) {
+            sg_destroy_buffer(previous_index);
+        }
+        return std::nullopt;
     }
 
     std::optional<std::string> append_stream_data(
@@ -1043,6 +1224,7 @@ private:
     }
 
     bool created_{false};
+    bool owns_graphics_device_{false};
     bool headless_offscreen_{false};
     sg_pixel_format swapchain_color_format_{SG_PIXELFORMAT_NONE};
     sg_pixel_format swapchain_depth_format_{SG_PIXELFORMAT_NONE};
@@ -1052,6 +1234,8 @@ private:
     sg_pass_action pass_action_{};
     sg_buffer stream_vertex_buffer_{};
     sg_buffer stream_index_buffer_{};
+    std::size_t stream_vertex_buffer_bytes_{0U};
+    std::size_t stream_index_buffer_bytes_{0U};
     sg_image offscreen_color_image_{};
     sg_view offscreen_color_view_{};
     sg_image offscreen_depth_stencil_image_{};
@@ -1070,6 +1254,7 @@ private:
     std::vector<ClipPipelineCacheEntry> clip_pipelines_{};
 };
 
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
 struct SokolAppLoopState {
     const BackendCreateInfo* create_info{nullptr};
     Backend* backend{nullptr};
@@ -1135,9 +1320,11 @@ void sokol_app_cleanup(void* user_data) {
     state->backend->destroy();
     state->backend_created = false;
 }
+#endif
 
 } // namespace
 
+#if !defined(MARROW_RENDERER_SCENE_ONLY)
 std::unique_ptr<Backend> make_sokol_backend() {
     return std::make_unique<SokolBackend>();
 }
@@ -1177,5 +1364,10 @@ std::optional<std::string> run_sokol_app(
     sapp_run(&app_desc);
     return state.error_message;
 }
+#else
+std::unique_ptr<SokolSceneRenderer> make_sokol_scene_renderer() {
+    return std::make_unique<SokolBackend>();
+}
+#endif
 
 } // namespace marrow::renderer::internal

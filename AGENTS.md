@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 and MAR-154 through MAR-157 are complete; MAR-158 is the next open product milestone.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 and MAR-154 through MAR-162 are complete. The platform program MAR-192 through MAR-210 now runs before product work; MAR-192 is the next open milestone and MAR-163 depends on MAR-210.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -22,18 +22,36 @@
 - Runtime ownership and playback model: `docs/root1/concepts.md`
 - File format reference: `docs/root1/format-spec.md`
 - Fixture mapping and sample asset intent: `docs/root1/fixtures.md`
+- Platform qualification evidence: `docs/root1/platform-validation.md`
+- Vendored dependency provenance: `THIRD_PARTY.md`
 - Archived Ralph loop/operator record: `docs/root1/ralph-loop.md`
 
 ## Current Validation
 
 - Configure: `cmake -S . -B build`
 - Build: `cmake --build build`
-- Versioned user preference store: `./build/marrow_preference_tests`
+- Vendored dependency/hash/patch verification: `cmake --build build --target marrow_verify_third_party`
+- SDL/Sokol window seam unit tests: `./build/marrow_windowing_tests`
+- SDL pen/pressure unit tests: `./build/marrow_pen_input_tests`
+- Cross-platform preference path and atomic-write tests: `./build/marrow_preference_tests`
+- Agent loopback/partial-I/O/repeated-lifecycle transport tests: `./build/marrow_agent_socket_tests`
+- Sokol ImGui setup/frame/shutdown lifecycle probe: `./build/marrow_sokol_imgui_runtime_probe`
 - Typed transient entity selection model: `./build/marrow_selection_tests`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
 - Editor-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L editor`
+- Display qualification configure: `cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON`
+- Display qualification build: `cmake --build build-display`
+- Windowing display tests: `ctest --test-dir build-display --output-on-failure -L windowing`
+- Renderer/display tests: `ctest --test-dir build-display --output-on-failure -L display`
+- Release platform qualification configure: `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON`
+- Release platform qualification build: `cmake --build build-platform-release`
+- Release platform qualification suite: `ctest --test-dir build-platform-release --output-on-failure`
+- Windows VS2022 x64 configure: `cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMARROW_ENABLE_DISPLAY_TESTS=ON`
+- Windows Debug build/test: `cmake --build build-msvc --config Debug` then `ctest --test-dir build-msvc -C Debug --output-on-failure`
+- Windows Release build/test: `cmake --build build-msvc --config Release` then `ctest --test-dir build-msvc -C Release --output-on-failure`
+- Windows portable folder/ZIP staging: `cmake --build build-msvc --config Release --target marrow_portable_stage`
 - Constraint warning check: `cmake --build build --target marrow_constraint_warning_check`
 - Documentation build (requires Doxygen on `PATH`): `cmake --build build --target marrow_docs`
 - Release benchmark configure: `cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release`
@@ -140,7 +158,7 @@
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
 - Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
-- Native macOS launch-focus note: sandboxed GLFW startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
+- Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
 - MAR-119 E2E export round-trip: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin`
 - MAR-119 E2E exported runtime smoke: `./build/marrow_fixture_smoke /tmp/marrow_e2e_export.mskl /tmp/player_idle.matl`
@@ -168,6 +186,176 @@
 - Parameter deformer renderer preparation: `./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_deformer_grid.mskl assets/fixtures/parameter_face_basic.matl`
 - Atlas-free ArtPath renderer preparation: `./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl`
 - Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation, clipping-mask propagation, sequence frame selection, GPU-skinned weighted-mesh draw preparation, animated slot presentation, slot blend modes, straight-alpha/PMA two-color tint propagation, and the single-color shader fast path from the checked-in fixtures
+
+## MAR-192–210 Platform Program Local Implementation Checkpoint
+
+Validated locally on 2026-08-09 without closing any platform story. The source
+implements the SDL3/Sokol architecture and Windows compile-time/service/package
+paths, but Ubuntu X11, Win10/11, physical Windows Ink, fixed legacy/Sokol A/B,
+and clean portable-folder evidence remain required by MAR-210.
+
+- `cmake --build build -j4` -> all default targets built.
+- `cmake --build build --target marrow_verify_third_party` -> pinned SDL3,
+  ImGui, Sokol, patched sokol_imgui, three sokol-shdc binaries, generated
+  Metal/GL headers, and removed legacy backends verified.
+- `ctest --test-dir build --output-on-failure` -> 17/17 noninteractive tests passed.
+- `ctest --test-dir build-display --output-on-failure` -> 20/20 passed,
+  including three actual SDL/Metal display tests.
+- `ctest --test-dir build-platform-release --output-on-failure` -> Release
+  display-enabled suite 20/20 passed.
+- `marrow_window_host_smoke` -> 20 host lifecycles; logical `640x480`, drawable
+  `1280x960`, scale `2x2`, BGRA8 + depth-stencil, 4x MSAA.
+- `marrow_gpu_parity_smoke` -> top-left RGBA8 corner/center/bottom-right probes
+  within `2/255`, 20 device lifecycles, and 100 image/view lifecycles.
+- `marrow_editor_display_smoke` -> actual editor offscreen viewport, main
+  sokol_imgui pass, commit, and present completed for 20 frames.
+- `nm -gU build/marrow_editor_shell` -> zero `sapp_*`/`sglue_*` symbols;
+  standalone `marrow_renderer_sample` retains the adapter.
+- CMake link ownership -> `marrow_editor_shell` links `marrow_renderer_core`;
+  only the standalone compatibility renderer links `marrow_renderer_sapp_host`.
+- `otool -L build/marrow_editor_shell` -> no OpenGL framework or GLFW library.
+- `./build/marrow_editor_shell --verify-launch-focus` -> SDL high-DPI window
+  and both AppKit/process Regular activation policies verified.
+- Current qualification authority and explicit NOT RUN rows:
+  `docs/root1/platform-validation.md`.
+
+## MAR-162 Signed Local Scale Gizmo Validation Results
+
+Validated 2026-07-25. Animation mode now shows fixed 74px local X, local Y, and uniform
+scale handles outside the 58px rotation ring for the runtime-active active Bone. Each gesture
+freezes a positive scale-free local-axis basis and auto-keys absolute signed scale through the
+existing effective-track materialization and transaction path.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Handles and input | Local X/Y/uniform endpoints remain 74px from the pivot with a 6px hit radius independent of zoom; arbitration is active gesture/brush, translate Free/X/Y, rotation, scale, entity hit, then empty-space box; active non-Bone and weight-paint contexts hide the handles | PASS |
+| Local-axis basis | Root and `OnlyTranslation` use skeleton scale; `Normal` children use evaluated parent-world 2x2 with local rotation/shear and without local scale; the basis is frozen at gesture start and covers non-uniform scale, reflection, and negative determinant | PASS |
+| Supported inherit and signed mapping | `NoRotationOrReflection`, `NoScale`, and `NoScaleOrReflection` hide scale together with rotation and show a hint; X/Y ratio mapping crosses signs and preserves exact zero, zero-start axes recover at one scale unit per 74px, uniform preserves the starting signed X:Y ratio, and `(0,0)` hides uniform | PASS |
+| Transaction and rollback | Playback pauses; imported effective scale keys and curves materialize once; mixed selection, active identity, hierarchy anchor, and timeline focus stay unchanged; click/no-movement creates no history, commit creates one undo entry, and cancel/non-finite failures restore project/runtime/preview content | PASS |
+| Persistence and compatibility | `.marrow`, exported `.mskl`, and canonical MBIN v2 payloads preserve finite negative and exact-zero scale keys; public editor API, `SelectionSet`, `.marrow` schema, `.mskl` v1, `.mbin` v2, C ABI v1, and 56-operation Agent/MCP remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build` -> configured successfully
+- `cmake --build build -j4` -> all targets built
+- `./build/marrow_unit_tests` -> 31 named cases passed, including signed/exact-zero scale sampling
+- `./build/marrow_selection_tests` -> 10/10 focused cases passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar162.mskl --export-binary /tmp/marrow_mar162.mbin` -> effective scale materialization, save/reload, and JSON/MBIN export passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar162.mbin /tmp/marrow_mar162.mskl` -> match; `rotation_error=0.00274662deg`, `position_error=0.000811016px`
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> fixed handles, basis/mapping, active-only transaction, rollback, and transience smoke passed
+- `./build/marrow_agent_dispatch_smoke` -> all 56 registry operations passed without surface changes
+- `./build/marrow_c_smoke` -> C ABI v1 smoke passed without API changes
+- `ctest --test-dir build --output-on-failure -L editor` -> 7/7 passed
+- `ctest --test-dir build --output-on-failure` -> 13/13 passed
+- `git diff --check` -> passed
+
+## MAR-161 Parent-Space Rotation Gizmo Validation Results
+
+Validated 2026-07-21. Animation mode now shows one fixed 58px rotation ring for the
+runtime-active active Bone. The gesture freezes its parent-space basis, preserves raw multi-turn
+absolute rotation, and shares the existing effective-track materialization and transaction path.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Ring and input | 58px radius, 6px hit band, 42px translate gizmo inside it, translate Free/X/Y precedence, then rotation, entity hit, and empty-space box; active non-Bone and weight-paint contexts hide the ring | PASS |
+| Parent-space basis | Root and `OnlyTranslation` use skeleton scale; `Normal` children use the evaluated parent-world 2x2 frozen at gesture start; translation, rotation, shear, non-uniform scale, reflection, and negative determinant are covered | PASS |
+| Supported inherit range | `NoRotationOrReflection`, `NoScale`, and `NoScaleOrReflection` hide the ring and show an unsupported-inherit hint; singular and NaN/Inf math cancel safely | PASS |
+| Angular and transaction semantics | Per-sample `(-180, 180]` unwrap with +180 tie, positive and negative 450-degree accumulation, 2px pivot suspend/rebase, raw effective restart, playback pause, live preview, one undo, and no-movement no-op | PASS |
+| Persistence and compatibility | `.marrow` and exported `.mskl` preserve raw multi-turn keys; unrepresentable continuous rotate channels fall back from optional AKEY to canonical MBIN payload while representable neighbors stay packed; public editor API, `SelectionSet`, `.marrow` schema, `.mskl` v1, `.mbin` v2, C ABI v1, and 56-operation Agent/MCP remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build` -> configured successfully
+- `cmake --build build -j4` -> all targets built
+- `./build/marrow_unit_tests` -> 31 named cases passed, including `Binary Multi-Turn Rotate Fallback`
+- `./build/marrow_selection_tests` -> 10/10 focused cases passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar161.mskl --export-binary /tmp/marrow_mar161.mbin` -> raw multi-turn save/reload and JSON/MBIN export passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar161.mbin /tmp/marrow_mar161.mskl` -> match; `rotation_error=0.00274662deg`, `position_error=0.000811016px`
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> parent-space ring, unwrap, materialization, rollback, and transience smoke passed
+- `./build/marrow_agent_dispatch_smoke` -> all 56 registry operations passed without surface changes
+- `./build/marrow_c_smoke` -> C ABI v1 smoke passed without API changes
+- `ctest --test-dir build --output-on-failure -L editor` -> 7/7 passed
+- `ctest --test-dir build --output-on-failure` -> 13/13 passed
+- `git diff --check` -> passed
+
+## MAR-160 Viewport Multi-Selection Validation Results
+
+Validated 2026-07-21. Viewport clicks now resolve typed entities by stable category, distance,
+and authored/draw order, while empty-space drags select visible runtime-active Bone joints in
+skeleton order. All editing consumers remain scoped to the active item; no group transform was
+introduced.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Point precedence | Visible constraint target, Bone joint, Bone body, Slot centroid, then topmost rendered Attachment triangle; category wins before screen distance and stable order | PASS |
+| Point gestures | Plain click replaces and macOS Cmd/non-macOS Ctrl toggles the same exact typed identities used by hierarchy selection | PASS |
+| Box gestures | Normalized forward/reverse rectangles, 4px threshold, inclusive runtime-active Bone centers, plain replace/clear, additive mixed-prefix retention and stable append, empty additive no-op | PASS |
+| Geometry and source adoption | Region, GPU-skinned mesh, Slot, and visible constraint targets are pickable; hidden/inactive Bones are excluded; source adoption and orphaned viewport frames clear stale rectangles | PASS |
+| Transience and consumers | Hierarchy anchor/timeline focus synchronize on selection changes, project/runtime/preview/history/revisions remain unchanged, and inspector/gizmo/timeline/constraint/weight tools edit only the active item | PASS |
+
+Validated commands and outputs:
+
+- `cmake --build build -j4` -> all targets built
+- `./build/marrow_selection_tests` -> 10/10 focused cases passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> point, overlap, box, geometry, cleanup, and transience smoke passed
+- `./build/marrow_agent_dispatch_smoke` -> all 56 registry operations passed without surface changes
+- `ctest --test-dir build --output-on-failure -L editor` -> 7/7 passed
+- `ctest --test-dir build --output-on-failure` -> 13/13 passed
+- `git diff --check` -> passed
+
+## MAR-159 Hierarchy Multi-Selection Validation Results
+
+Validated 2026-07-21. Hierarchy clicks now apply platform-correct replace, toggle,
+visible-range, and additive-range gestures to `SelectionSet` in the actual rendered row order.
+The exact-identity anchor remains transient, and inspector, gizmo, timeline, constraint, and
+weight-paint editing continue to use only the active item.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Gesture semantics | Plain replace, macOS Cmd/non-macOS Ctrl toggle, forward/reverse Shift replacement, Cmd/Ctrl+Shift additive append, and deterministic invalid-anchor fallback | PASS |
+| Visible order and anchor | Expanded and filtered Bone/Slot/Attachment order, collapsed/filtered row exclusion, toggled-off visible anchor retention, hidden-anchor clearing, and fully scoped attachment row identity | PASS |
+| Source adoption | Reordered sources retain the exact anchor identity, deleted identities clear it, and malformed reload preserves selection, anchor, and the prior runtime bundle | PASS |
+| Presentation and consumers | Common selected background, active-only primary rail/text, active-path ancestry, timeline-focus reset, selection-count status, and active-only inspector/gizmo/timeline/weight behavior | PASS |
+| Transience and compatibility | Gestures leave project bytes, dirty/history, preview/runtime data, and revisions unchanged; `.marrow`, `.mskl` v1, `.mbin` v2, C ABI v1, and 56-operation Agent/MCP remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build` → configured successfully
+- `cmake --build build -j4` → all targets built
+- `./build/marrow_selection_tests` → 10/10 focused cases passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` → transient reload reconciliation passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` → MAR-159 hierarchy gesture, source-adoption, and transience smoke passed
+- `./build/marrow_agent_dispatch_smoke` → all 56 registry operations passed without surface changes
+- `ctest --test-dir build --output-on-failure -L editor` → 7/7 passed
+- `ctest --test-dir build --output-on-failure` → 13/13 passed
+- `git diff --check` → passed
+
+## MAR-158 Selection Migration Validation Results
+
+Validated 2026-07-18. `SelectionSet` is now the only entity-selection source used by
+hierarchy, inspector, viewport, timeline, constraints, and weight-paint consumers. Successful
+project/runtime source adoption re-resolves exact typed identities against the new runtime and
+prunes only missing items; failed adoption preserves the selection and prior runtime bundle.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Consumer resolution | Shell-private `ResolvedSelection`, active Bone-only transform editing, active Slot/Attachment timeline context, and active Constraint-only editing | PASS |
+| Weight paint | Active Attachment/Slot then last selected Attachment/Slot target priority, active Bone influence, single target owning-bone fallback, no group edit | PASS |
+| Source adoption | Name-based index re-resolution, fully scoped Attachment and kind-scoped Constraint pruning, stable survivor order/active fallback, malformed-reload atomicity | PASS |
+| Selection primitives | Constraint remap/delete/collision and constraint-only prune preserve unrelated types, stable order, and active invariants | PASS |
+| Transience and compatibility | Reconciliation adds no project bytes, dirty/history, or revision effects; `.marrow`, `.mskl` v1, `.mbin` v2, C ABI v1, and 56-operation Agent/MCP remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build` → configured successfully
+- `cmake --build build -j4` → all targets built
+- `./build/marrow_selection_tests` → 10/10 focused cases passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` → reload reconciliation and transient-state guardrails passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` → mixed consumer and atomic source-replacement shell smoke passed
+- `./build/marrow_agent_dispatch_smoke` → all 56 registry operations passed without surface changes
+- `ctest --test-dir build --output-on-failure -L editor` → 7/7 passed
+- `ctest --test-dir build --output-on-failure` → 13/13 passed
+- `git diff --check` → passed
 
 ## MAR-157 Typed SelectionSet Validation Results
 
@@ -331,7 +519,7 @@ Validated commands and outputs:
 
 ## Runtime and Renderer Unit Cases
 
-`./build/marrow_unit_tests` currently reports these 30 named cases (validated 2026-07-17):
+`./build/marrow_unit_tests` currently reports these 31 named cases (validated 2026-07-21):
 
 - `Interpolation Edge Cases`
 - `Constraint Fast Math Approximations`
@@ -362,6 +550,7 @@ Validated commands and outputs:
 - `Parameter Deformer And ArtPath Evaluation`
 - `Parameter Loader Validation`
 - `Binary Key Quantization And Reduction`
+- `Binary Multi-Turn Rotate Fallback`
 - `Runtime Profiler Frame`
 
 ## MAR-119 E2E Editor Validation Results
@@ -381,7 +570,7 @@ Validated 2026-04-11. All acceptance criteria pass through headless smoke tests 
 | AC9 | Documentation in AGENTS.md | This section | PASS |
 
 Validated test commands and outputs:
-- `./build/marrow_unit_tests` → 30 named cases passed (current executable; revalidated 2026-07-17)
+- `./build/marrow_unit_tests` → 31 named cases passed (current executable; revalidated 2026-07-21)
 - `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5` → 5 frames rendered
 - `./build/marrow_renderer_sample --auto-close 2` → all blend/clip/mesh/batch validations passed
 - `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin` → export + undo/redo validated

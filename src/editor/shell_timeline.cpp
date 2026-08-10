@@ -399,18 +399,24 @@ const TimelineTrackRow* selected_timeline_track(
 bool timeline_track_matches_selection(
     const ShellState& state,
     const TimelineTrackRow& track) {
+    const ResolvedSelection resolved = resolve_shell_selection(state);
     if (state.selected_timeline_track_id.has_value() &&
-        *state.selected_timeline_track_id == track.id) {
+        *state.selected_timeline_track_id == track.id &&
+        ((!track.slot_index.has_value() && !track.bone_index.has_value()) ||
+         (track.slot_index.has_value() &&
+          resolved.active_slot_index == track.slot_index) ||
+         (track.bone_index.has_value() &&
+          resolved.active_bone_index == track.bone_index))) {
         return true;
     }
 
     if (track.slot_index.has_value() &&
-        selected_slot_index(state) == track.slot_index) {
+        resolved.active_slot_index == track.slot_index) {
         return true;
     }
 
     return track.bone_index.has_value() &&
-        selected_bone_index(state) == track.bone_index;
+        resolved.active_bone_index == track.bone_index;
 }
 
 std::optional<double> adjacent_key_time(
@@ -1155,12 +1161,13 @@ bool focus_timeline_track(
     double time_seconds,
     std::string_view source,
     bool update_status_message) {
-    state->selected_timeline_track_id = track.id;
+    state->hierarchy_selection_anchor.reset();
     if (track.slot_index.has_value()) {
         select_slot(state, *track.slot_index, source, false);
     } else if (track.bone_index.has_value()) {
         select_bone(state, *track.bone_index, source, false);
     }
+    state->selected_timeline_track_id = track.id;
 
     if (!scrub_timeline_time(state, time_seconds, source, false)) {
         return false;

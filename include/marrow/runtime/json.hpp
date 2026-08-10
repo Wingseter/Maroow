@@ -64,6 +64,15 @@ public:
      */
     Value(std::string string_value, SourceLocation location);
     /**
+     * @brief Constructs a string JSON value from a C string.
+     *
+     * Without this overload a string literal binds to the boolean
+     * constructor via pointer-to-bool conversion.
+     * @param string_value Null-terminated string payload to copy.
+     * @param location Source location associated with the value.
+     */
+    Value(const char* string_value, SourceLocation location);
+    /**
      * @brief Constructs an array JSON value.
      * @param array_value Array payload to store.
      * @param location Source location associated with the value.

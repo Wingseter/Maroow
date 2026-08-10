@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, MAR-122–128 Maroow-native parameter-modeling checkpoint, MAR-154–155 duration checkpoints, MAR-156 versioned user-preference checkpoint, and MAR-157 typed-selection checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-158–191 form the remaining strictly linear editing-P1 dependency chain beginning at MAR-158. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, MAR-122–128 Maroow-native parameter-modeling checkpoint, MAR-154–155 duration checkpoints, MAR-156 versioned user-preference checkpoint, MAR-157 typed-selection checkpoint, MAR-158 selection-migration checkpoint, MAR-159 hierarchy-multi-selection checkpoint, MAR-160 viewport-multi-selection checkpoint, MAR-161 parent-space-rotation checkpoint, and MAR-162 signed-local-scale checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-163–191 form the remaining strictly linear editing-P1 dependency chain beginning at MAR-163. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
   "qualityGates": [
     "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each milestone small, vertical, and independently verifiable while preserving the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -2883,7 +2883,8 @@
       "dependsOn": [
         "MAR-157"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-18"
     },
     {
       "id": "MAR-159",
@@ -2899,7 +2900,8 @@
       "dependsOn": [
         "MAR-158"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-21"
     },
     {
       "id": "MAR-160",
@@ -2915,37 +2917,434 @@
       "dependsOn": [
         "MAR-159"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-21"
     },
     {
       "id": "MAR-161",
       "title": "Add a parent-space rotation gizmo",
       "description": "Rotate the active bone by solving absolute local rotation through the parent transform and auto-keying one transactional gesture.",
       "acceptanceCriteria": [
-        "The rotation ring uses the inverse parent coordinate system and remains correct with translated, rotated, non-uniformly scaled, and reflected parents.",
-        "Continuous angle unwrapping avoids discontinuities at plus or minus 180 degrees and supports deliberate turns beyond 360 degrees.",
-        "The gesture auto-keys absolute local rotation through effective-base-track materialization, with live preview and one undo entry.",
-        "Singular or non-finite mapping cancels safely and restores the exact pre-gesture state.",
-        "Shell and project smokes cover transformed/reflected parents, wrap crossing, active-only editing, cancel, undo/redo, save/reload, and export."
+        "Animation mode shows a fixed 58-pixel radius, 6-pixel hit-band rotation ring only for the runtime-active active Bone; input resolves active gesture or brush, translate Free/X/Y, rotation ring, viewport entity hit, then empty-space box.",
+        "Root and OnlyTranslation use the skeleton-scale basis, while Normal children freeze the evaluated parent-world 2-by-2 basis at gesture start; transformed, sheared, non-uniform, reflected, and negative-determinant parents are covered.",
+        "NoRotationOrReflection, NoScale, and NoScaleOrReflection hide the ring and show an unsupported-inherit viewport hint instead of applying a raw-parent inverse.",
+        "Per-sample deltas unwrap into (-180, 180] with the exact tie at positive 180; absolute local rotation remains unnormalized across deliberate multi-turn gestures, while samples within 2 pixels of the pivot suspend and rebase the angular reference.",
+        "The gesture pauses playback, auto-keys through full effective rotate-track materialization, previews live, preserves mixed selection context, commits one undo entry, and leaves click/no-movement unchanged; Escape, context loss, invalid math, and refresh failure roll back project/runtime/preview content, dirty/history, and selection context.",
+        "Project and exported JSON preserve finite raw multi-turn keys; MBIN v2 omits only an unrepresentable packed rotate channel and uses its canonical generic payload, with runtime acceptance defined by 360-degree-equivalent orientation rather than winding playback.",
+        "Public editor API, SelectionSet, .marrow schema, .mskl v1, .mbin v2, C ABI v1, and the 56-operation Agent/MCP surface remain unchanged."
       ],
       "dependsOn": [
         "MAR-160"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-07-21"
     },
     {
       "id": "MAR-162",
       "title": "Add signed local scale gizmos",
       "description": "Scale the active bone with local X, local Y, and uniform handles while preserving signed values, exact zero, and transactional auto-key semantics.",
       "acceptanceCriteria": [
-        "Local X and Y handles auto-key absolute scale components through the common effective-base-track path.",
-        "The uniform handle preserves the gesture-start X-to-Y ratio and signs rather than forcing positive or equal axes.",
-        "Negative scale and exactly zero are valid; non-finite values are rejected.",
-        "A singular parent or unsolvable pointer mapping cancels the whole gesture without partial project, preview, or history changes.",
-        "Shell and project smokes cover reflected/non-uniform parents, sign crossing, zero, ratio preservation, active-only editing, undo/redo, and JSON/MBIN export."
+        "Animation mode shows fixed local X, local Y, and uniform handles 74 pixels from the pivot with a 6-pixel hit radius only for the runtime-active active Bone; input resolves active gesture or brush, translate Free/X/Y, rotation, scale, viewport entity hit, then empty-space box.",
+        "Root and OnlyTranslation use the skeleton-scale basis, while Normal children freeze positive scale-free local axes from the evaluated parent-world 2-by-2 and local rotation/shear at gesture start; non-uniform, reflected, and negative-determinant parents are covered.",
+        "NoRotationOrReflection, NoScale, and NoScaleOrReflection hide scale with rotation and show an unsupported-inherit viewport hint; singular, degenerate, non-finite, and unsolvable mappings cancel instead of applying a raw-parent basis.",
+        "A nonzero X or Y start value follows the signed pointer projection ratio, while an exactly-zero start axis uses (projection - start projection) / 74 so it can recover through zero without division.",
+        "The uniform handle multiplies both starting axes by one signed ratio, preserving their X-to-Y ratio and signs through a joint sign flip; one zero remains zero, while a (0,0) start hides uniform.",
+        "The gesture pauses playback, auto-keys both absolute scale components through full effective-track materialization, previews live, preserves mixed selection context, commits one undo entry, and leaves click/no-movement unchanged; Escape, context loss, invalid math, and refresh failure roll back project/runtime/preview content, dirty/history, and selection context.",
+        "Project save/reload and exported JSON/MBIN preserve finite negative and exact-zero scale keys; public editor API, SelectionSet, .marrow schema, .mskl v1, .mbin v2, C ABI v1, and the 56-operation Agent/MCP surface remain unchanged."
       ],
       "dependsOn": [
         "MAR-161"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-25"
+    },
+    {
+      "id": "MAR-192",
+      "title": "Characterize the editor platform baseline and add the host seam",
+      "description": "Freeze the existing GLFW/raw-GL behavior and introduce shell-private window, quit, event, and pen seams without changing the default backend.",
+      "acceptanceCriteria": [
+        "Record the 13-test baseline, runtime/editor labels, C ABI, 56-operation Agent registry, project/export, renderer pixel smoke, launch focus, Retina metrics, Release frame time, and resource counts.",
+        "Add WindowMetrics, WindowHostConfig, FrameSurface, neutral QuitRequested, and event/pen translation seams while native window handles remain private to the shell.",
+        "Preserve public APIs, schemas, CLI flags, selection, undo, dirty, export, and hot-reload semantics.",
+        "Existing tests and fixtures remain identical and focused seam unit tests pass."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build",
+        "cmake --build build",
+        "ctest --test-dir build --output-on-failure",
+        "./build/marrow_windowing_tests"
+      ],
+      "dependsOn": [
+        "MAR-162"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-193",
+      "title": "Freeze SDL3, ImGui, sokol_imgui, and shader-tool dependencies",
+      "description": "Vendor the exact platform stack with complete provenance and no configure-time network fetch while GLFW remains the active host.",
+      "acceptanceCriteria": [
+        "Vendor SDL 3.4.14 at 147a8ee, ImGui v1.92.6-docking at 2a1b69f, matching Sokol util at 31d8a3f with only the 59f0433 shutdown patch, and sokol-shdc at 03138cef for macOS, Linux, and Windows x64.",
+        "THIRD_PARTY.md records source URLs, revisions, hashes, licenses, and the local patch; ImGui core and transition backends are verified as one revision.",
+        "SDL is static, configure performs no fetch, and SDL does not enter the UI-free marrow_editor link closure.",
+        "C++17 simgui compile plus validation-enabled setup/frame/shutdown probes pass and shader regeneration is a clean diff."
+      ],
+      "validationCommands": [
+        "cmake --build build --target marrow_verify_third_party",
+        "cmake --build build --target marrow_sokol_imgui_compile_probe",
+        "./build/marrow_sokol_imgui_runtime_probe",
+        "cmake --build build --target marrow_renderer_shaders"
+      ],
+      "dependsOn": [
+        "MAR-192"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-194",
+      "title": "Add the parallel SDL OpenGL window host",
+      "description": "Implement the private SDL host alongside the GLFW host for one compile-time comparison checkpoint, initially retaining the legacy raw-GL renderer.",
+      "acceptanceCriteria": [
+        "MARROW_EDITOR_WINDOW_BACKEND=GLFW|SDL selects separate build-time hosts and defaults to GLFW for this checkpoint only.",
+        "SdlWindowHost owns SDL initialization, a real window/context, events, swap, close, and failure cleanup without leaking native handles.",
+        "Both build directories preserve fixture, CLI, and editor business-smoke output.",
+        "The display-enabled marrow_window_host_smoke creates a real SDL surface and validates repeated failure-safe lifecycle behavior."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-glfw -DMARROW_EDITOR_WINDOW_BACKEND=GLFW",
+        "cmake -S . -B build-sdl -DMARROW_EDITOR_WINDOW_BACKEND=SDL -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "ctest --test-dir build-sdl --output-on-failure -L windowing"
+      ],
+      "dependsOn": [
+        "MAR-193"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-195",
+      "title": "Reach SDL input, DPI, focus, and IME parity",
+      "description": "Move keyboard, mouse, clipboard, cursor, text input, IME, focus, and pixel metrics to the SDL3 ImGui platform backend while retaining legacy GPU rendering.",
+      "acceptanceCriteria": [
+        "Every SDL event reaches ImGui_ImplSDL3_ProcessEvent exactly once and SDL alone owns keyboard, mouse, clipboard, cursor, and IME platform behavior.",
+        "Logical coordinates remain distinct from drawable pixels; Retina scaling and picking stay aligned and targets resize only on pixel-size changes.",
+        "Cmd/Ctrl selection gestures, shortcut suppression, launch focus, --verify-launch-focus, and focus-loss gesture cancellation retain their meanings.",
+        "Synthetic events, Korean preedit/commit, and recorded macOS Cmd-Tab and Windows Alt-Tab evidence pass on real displays."
+      ],
+      "validationCommands": [
+        "./build/marrow_windowing_tests",
+        "ctest --test-dir build-display --output-on-failure -L windowing",
+        "./build/marrow_editor_shell --verify-launch-focus"
+      ],
+      "dependsOn": [
+        "MAR-194"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-196",
+      "title": "Add pressure-aware weight painting",
+      "description": "Introduce transient SDL pen metadata and apply normalized pressure to all existing weight-paint modes without changing radius, spacing, formats, or transaction semantics.",
+      "acceptanceCriteria": [
+        "ViewportPointerState tracks source, active pen/window IDs, logical position, proximity/down, finite clamped pressure, tilt, eraser, and timestamp without persistence.",
+        "Synthetic pen mouse drives ImGui position/buttons once while raw pen events update metadata only; first-down ownership lasts until up, proximity-out, or focus loss.",
+        "Paint, Erase, and Smooth use configured_strength times pressure times radial_falloff; missing pressure and ordinary mouse use 1.0.",
+        "Zero/no-change strokes add no mutation or history; one changed stroke adds exactly one undo entry and mouse fixtures remain byte-equivalent.",
+        "Unit tests cover 0/0.5/1, clamp, NaN/Inf, missing axis, multiple IDs, proximity, focus loss, and synthetic-event de-duplication."
+      ],
+      "validationCommands": [
+        "./build/marrow_pen_input_tests",
+        "./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2",
+        "ctest --test-dir build --output-on-failure -L editor"
+      ],
+      "dependsOn": [
+        "MAR-195"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-197",
+      "title": "Make SDL the default window and input host",
+      "description": "Cut the production default to SDL while retaining GLFW for this checkpoint only as a compile-time rollback comparison.",
+      "acceptanceCriteria": [
+        "SDL is the default host; the historical macOS --auto-close business smoke remains headless and is not counted as SDL display evidence.",
+        "Real display smokes cover initialization, resize, minimize/restore, focus, and repeated lifecycle on macOS and Ubuntu 24.04 X11.",
+        "Same-revision Release GLFW/SDL A/B runs at 1440x900 meet the recorded median and p95 regression gate.",
+        "The GLFW rollback build remains reproducible until this story passes."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "cmake --build build-display",
+        "ctest --test-dir build-display --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-196"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-198",
+      "title": "Remove GLFW completely",
+      "description": "Delete the GLFW vendor tree, ImGui GLFW backend, build option, callbacks, includes, and native window-pointer coupling after SDL qualification.",
+      "acceptanceCriteria": [
+        "Production and build sources contain no GLFW references or linked GLFW artifacts.",
+        "The project configures and builds from a clean SDL-only tree and all noninteractive plus display tests pass.",
+        "Launch focus and project-menu QuitRequested behavior remain equivalent.",
+        "Completed historical stories remain unchanged except for a supersession note pointing to MAR-198."
+      ],
+      "validationCommands": [
+        "rg -n 'GLFW|glfw' CMakeLists.txt src include external/imgui/backends",
+        "cmake -S . -B build-clean",
+        "ctest --test-dir build-clean --output-on-failure"
+      ],
+      "dependsOn": [
+        "MAR-197"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-199",
+      "title": "Split Sokol device, scene core, and standalone app ownership",
+      "description": "Separate the process-root sokol_gfx singleton and pass-free scene renderer from the Sokol-app standalone sample adapter without changing the public Backend surface.",
+      "acceptanceCriteria": [
+        "marrow_renderer_core owns the single SOKOL_GFX_IMPL and pass-free scene resources; marrow_renderer_sapp_host alone owns SOKOL_APP_IMPL and SOKOL_GLUE_IMPL.",
+        "The editor binary contains no sapp or sglue symbols, while standalone samples retain the compatibility umbrella target.",
+        "SokolGraphicsDevice rejects nested sg_setup and owns the only editor sg_setup/sg_shutdown pair.",
+        "Renderer sample, validator, C ABI, and editor link closures all pass."
+      ],
+      "validationCommands": [
+        "cmake --build build --target marrow_renderer_sample marrow_validator marrow_c_smoke marrow_editor_shell",
+        "nm -gU build/marrow_editor_shell | rg 'sapp_|sglue_'",
+        "./build/marrow_c_smoke"
+      ],
+      "dependsOn": [
+        "MAR-198"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-200",
+      "title": "Make the scene renderer pass-free and capacity-safe",
+      "description": "Move atlas, white fallback, samplers, shaders, streams, and format-keyed pipelines into a renderer that submits only to an already-open pass.",
+      "acceptanceCriteria": [
+        "The scene renderer never creates a window, begins the main pass, commits, or calls Sokol app/glue APIs.",
+        "Onion background, current scene, and foreground command lists are preflighted together before the pass.",
+        "Insufficient streams grow to the next power of two; allocation failure retains prior buffers and rejects the frame explicitly without truncation.",
+        "Setup pose, clip/stencil, sequence, weighted mesh, FFD, tint/PMA/blend, white fallback, batching, and atlas hot reload retain parity."
+      ],
+      "validationCommands": [
+        "./build/marrow_renderer_sample --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl",
+        "./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl",
+        "./build/marrow_unit_tests"
+      ],
+      "dependsOn": [
+        "MAR-199"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-201",
+      "title": "Add Sokol editor viewport and texture resources",
+      "description": "Implement Sokol offscreen viewport, overlays, icons, texture views, camera UV orientation, and atlas cache behind one temporary OPENGL|SOKOL build switch.",
+      "acceptanceCriteria": [
+        "Viewport targets remain RGBA8 plus DEPTH_STENCIL at sample_count 1 and preserve background/onion/current/foreground ordering in one pass.",
+        "Icons and viewport textures use sg_image, sg_view, sg_sampler, and simgui_imtextureid_with_sampler rather than GLuint.",
+        "UV orientation follows sg_query_features().origin_top_left and picking/overlay alignment differs by at most one physical pixel.",
+        "Resize and hot reload publish new handles at a frame boundary and retire old handles only after the last referencing commit.",
+        "Native GL/Metal readback is isolated to the test-only GpuReadback target."
+      ],
+      "validationCommands": [
+        "./build/marrow_windowing_tests",
+        "./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2",
+        "rg -n 'gl[A-Z]|GLuint' src/editor"
+      ],
+      "dependsOn": [
+        "MAR-200"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-202",
+      "title": "Implement SDL Metal and GLCORE Sokol surfaces",
+      "description": "Supply Sokol environments and swapchains from SDL Metal on macOS and SDL OpenGL 4.1 Core on Linux, with exact formats and lifecycle handling.",
+      "acceptanceCriteria": [
+        "macOS uses SDL_WINDOW_METAL, one MTLDevice, BGRA8 drawable, depth/stencil, optional 4x MSAA, and strong drawable lifetime through sg_commit.",
+        "Linux X11 uses an SDL GL 4.1 Core context and framebuffer 0; GL 4.1 failure is fatal and MSAA retries once at 1x.",
+        "Nil drawable, minimize, zero pixels, resize, format/sample changes, and context/device failure skip or fail explicitly without invalid submission.",
+        "Real macOS Metal and Ubuntu X11 windows repeatedly render offscreen scene, main simgui pass, commit, and present."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "ctest --test-dir build-display --output-on-failure -L windowing",
+        "ctest --test-dir build-display --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-201"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-203",
+      "title": "Make full Sokol and sokol_imgui the editor default",
+      "description": "Switch the SDL production frame loop to Sokol resources and official sokol_imgui while retaining raw OpenGL for this comparison checkpoint only.",
+      "acceptanceCriteria": [
+        "Frame order is SDL events, raw pen metadata, one ImGui SDL event dispatch, SDL NewFrame, simgui_new_frame, offscreen viewport, main swapchain pass, simgui_render, commit, then GL-only SDL swap.",
+        "sokol_imgui owns ImGui context/frame/render lifecycle; the SDL3 backend alone owns platform input and OS multi-viewports remain disabled.",
+        "Same-revision raw-GL/Sokol feature, pixel, picking, median/p95 performance, and 100-resize/reload resource A/B gates pass.",
+        "Selection, undo, dirty, export, hot reload, C ABI, CLI, and all 56 Agent operations remain unchanged."
+      ],
+      "validationCommands": [
+        "cmake --build build-display --target marrow_gpu_parity_smoke",
+        "ctest --test-dir build-display --output-on-failure -L display",
+        "./build/marrow_agent_dispatch_smoke",
+        "./build/marrow_c_smoke"
+      ],
+      "dependsOn": [
+        "MAR-202"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-204",
+      "title": "Remove production raw OpenGL and CGL rendering",
+      "description": "Delete the raw FBO, overlay, GLuint icon, ImGui OpenGL3, CGL, and temporary GPU-backend paths after Sokol parity passes.",
+      "acceptanceCriteria": [
+        "The macOS editor uses Metal only; production src/editor contains no direct GL/CGL calls or ImGui OpenGL backend.",
+        "Windows and Linux retain GL only behind sokol_gfx; production glad is absent.",
+        "Test-only GpuReadback is the sole declared native backend-query/readback exception.",
+        "Twenty complete editor init/frame/shutdown cycles destroy viewport, icon, atlas, simgui, sg, native surface, window, and SDL in the required order."
+      ],
+      "validationCommands": [
+        "rg -n 'gl[A-Z]|GLuint|CGL|imgui_impl_opengl' src/editor CMakeLists.txt",
+        "otool -L build/marrow_editor_shell",
+        "ctest --test-dir build-display --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-203"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-205",
+      "title": "Add the VS2022 x64 and split-shader foundation",
+      "description": "Make all runtime, CLI, renderer, editor, and test targets compile and link under VS2022 x64 without production glad.",
+      "acceptanceCriteria": [
+        "CMake selects the pinned Windows sokol-shdc.exe and glsl410 while committed Metal and GL headers are generated separately.",
+        "Windows and Linux produce identical GL header hashes from identical input and arguments; non-Mac hosts cannot overwrite Metal output.",
+        "WIN32/MSVC libraries, resource paths, and multi-config Debug/Release behavior are explicit.",
+        "VS2022 x64 clean Debug and Release all-target builds link without glad, D3D, Vulkan, or unsupported backend claims."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-msvc -G \"Visual Studio 17 2022\" -A x64 -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "cmake --build build-msvc --config Debug",
+        "ctest --test-dir build-msvc -C Debug --output-on-failure",
+        "cmake --build build-msvc --config Release"
+      ],
+      "dependsOn": [
+        "MAR-204"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-206",
+      "title": "Port PreferenceStore and AgentSocket to Windows",
+      "description": "Implement UTF-16 AppData atomic preferences and a Winsock 2.2 native socket layer without changing UTF-8 JSON, CLI, auth, framing, or operation semantics.",
+      "acceptanceCriteria": [
+        "MARROW_CONFIG_HOME remains first; otherwise SHGetKnownFolderPath(FOLDERID_RoamingAppData) resolves %APPDATA%/Marrow/editor-settings.json.",
+        "Windows writes a same-directory UTF-16 path with WriteFile and FlushFileBuffers, then replaces with MoveFileExW REPLACE_EXISTING|WRITE_THROUGH while preserving old valid bytes on failure.",
+        "Process-level Winsock RAII and NativeSocket normalize SOCKET, INVALID_SOCKET, closesocket, shutdown, partial I/O, interrupted/would-block errors, and orderly close.",
+        "Loopback-only bind, token authentication, line-delimited JSON, ports, CLI flags, and 56 operations are unchanged.",
+        "Injected preference roots/failures and repeated partial socket transport/start-stop tests pass on POSIX and Windows."
+      ],
+      "validationCommands": [
+        "./build/marrow_preference_tests",
+        "./build/marrow_agent_socket_tests",
+        "./build/marrow_agent_dispatch_smoke",
+        "tools/mcp/venv/bin/python tools/mcp/test_client.py"
+      ],
+      "dependsOn": [
+        "MAR-205"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-207",
+      "title": "Qualify the integrated Windows editor",
+      "description": "Run the complete SDL3/Sokol GLCORE editor and all default targets on physical Windows 10 and Windows 11 systems.",
+      "acceptanceCriteria": [
+        "Windows 10 22H2 and Windows 11 create an OpenGL 4.1 Core context and pass resize, minimize, focus, close, clipboard, cursor, Korean IME, and launch tests.",
+        "100 percent and at least one 150 or 200 percent DPI setting preserve logical/pixel metrics and picking alignment.",
+        "All default runtime, CLI, sample, editor, C ABI, project/export, and Agent tests execute on both systems.",
+        "Command logs include OS, CPU, GPU, driver, compiler, CMake, display scale, exit status, and artifact locations."
+      ],
+      "validationCommands": [
+        "ctest --test-dir build-msvc -C Debug --output-on-failure",
+        "ctest --test-dir build-msvc -C Release --output-on-failure",
+        "ctest --test-dir build-msvc -C Release --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-206"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-208",
+      "title": "Qualify physical Windows Ink pressure input",
+      "description": "Validate real SDL pen events and pressure-aware weight painting on Windows 11 with a pressure-capable pen or tablet.",
+      "acceptanceCriteria": [
+        "Evidence records device and driver, SDL pen IDs, raw events, and at least three distinguishable pressure levels.",
+        "Real paint output varies monotonically with pressure while ordinary mouse output remains unchanged.",
+        "Tilt and eraser metadata are observed without automatically changing mode, shape, or radius.",
+        "Proximity/focus cancellation, no-axis fallback, zero-pressure no-op, and one changed stroke/one undo pass on hardware.",
+        "The story remains open if physical pressure evidence is absent."
+      ],
+      "validationCommands": [
+        "./build-msvc/Release/marrow_pen_input_tests.exe",
+        "./build-msvc/Release/marrow_editor_shell.exe --project assets/fixtures/player_idle.marrow"
+      ],
+      "dependsOn": [
+        "MAR-207"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-209",
+      "title": "Stage the Windows x64 portable folder",
+      "description": "Produce a canonical self-contained Marrow folder plus transport ZIP and hashes, without an installer.",
+      "acceptanceCriteria": [
+        "marrow_portable_stage creates Marrow/marrow_editor_shell.exe, runtime DLLs, fonts, icons, fixtures, licenses, THIRD_PARTY.md, README.txt, and MANIFEST.sha256.",
+        "SDL is static and only TARGET_RUNTIME_DLLS are copied; no source or build tree is required at runtime.",
+        "The canonical artifact is the folder; the matching ZIP and SHA-256 are transport artifacts only.",
+        "Clean extraction and launch with a bundled project pass on Windows 10 and Windows 11, with explicit missing-resource diagnostics."
+      ],
+      "validationCommands": [
+        "cmake --build build-msvc --config Release --target marrow_portable_stage",
+        "Get-FileHash build-msvc/portable/Release/Marrow-Release-x64.zip -Algorithm SHA256"
+      ],
+      "dependsOn": [
+        "MAR-208"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-210",
+      "title": "Complete local platform qualification",
+      "description": "Qualify the exact source revision across macOS Metal, Ubuntu 24.04 X11, Windows 10, and Windows 11 and synchronize all platform authority documents.",
+      "acceptanceCriteria": [
+        "The same source revision passes the complete automated, display, pixel, performance, resource-lifetime, package, API/schema, and source-scan matrix on all four declared hosts.",
+        "Windows 11 physical pen evidence and clean Win10/Win11 portable-folder runs are included.",
+        "platform-validation.md records dirty state, OS/build, hardware/driver, display server/scale, compiler/CMake, dependency hashes, commands, exit codes, logs, pen, and artifact hashes.",
+        "discription.md, PRD, AGENTS.md, quick-start, concepts, editing-gap-analysis, and the research decision match the final implementation.",
+        "Ubuntu Wayland, Windows ARM64, D3D/Vulkan, installer, multi-viewport, and untested backends are not described as supported.",
+        "MAR-210 remains open and MAR-163 remains blocked until every physical evidence gate passes."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "cmake --build build-platform-release",
+        "ctest --test-dir build-platform-release --output-on-failure",
+        "git diff --check"
+      ],
+      "dependsOn": [
+        "MAR-209"
       ],
       "status": "open"
     },
@@ -2961,7 +3360,7 @@
         "Shell and project smokes cover weighted, unweighted, linked, and sparse-deform cases plus one-transaction auto-key, undo/redo, and JSON/MBIN export."
       ],
       "dependsOn": [
-        "MAR-162"
+        "MAR-210"
       ],
       "status": "open"
     },

@@ -7,18 +7,17 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <OpenGL/gl3.h>
-#else
-#include <GL/glcorearb.h>
-#endif
-
 #include "imgui.h"
+#include "sokol_gfx.h"
+#define SOKOL_IMGUI_NO_SOKOL_APP
+#include "sokol_imgui.h"
 
 #include "shell_state.hpp"
 #include "shell_preview.hpp"
+#include "shell_selection.hpp"
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
 #include "viewport_renderer.hpp"
@@ -26,115 +25,54 @@
 #include "marrow/editor/project.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
+#if defined(SOKOL_METAL)
+#include "marrow_renderer_shader_metal.h"
+#elif defined(SOKOL_GLCORE)
+#include "marrow_renderer_shader_gl.h"
+#else
+#error "Marrow viewport shaders require Metal or GLCORE."
+#endif
 
 namespace marrow::editor::shell {
 
-std::optional<std::string> shader_log(GLuint shader) {
-    GLint log_length = 0;
-    glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
-    if (log_length <= 1) {
+std::optional<std::string> viewport_resource_error(
+    std::string_view label,
+    sg_resource_state state) {
+    if (state == SG_RESOURCESTATE_VALID) {
         return std::nullopt;
     }
-
-    std::string log(static_cast<std::size_t>(log_length), '\0');
-    glGetShaderInfoLog(shader, log_length, nullptr, log.data());
-    if (!log.empty() && log.back() == '\0') {
-        log.pop_back();
-    }
-    return log;
-}
-
-std::optional<std::string> program_log(GLuint program) {
-    GLint log_length = 0;
-    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_length);
-    if (log_length <= 1) {
-        return std::nullopt;
-    }
-
-    std::string log(static_cast<std::size_t>(log_length), '\0');
-    glGetProgramInfoLog(program, log_length, nullptr, log.data());
-    if (!log.empty() && log.back() == '\0') {
-        log.pop_back();
-    }
-    return log;
+    return std::string("Failed to create viewport ") + std::string(label) + ".";
 }
 
 void destroy_viewport_framebuffer(ViewportRenderResources* resources) {
-    if (resources->depth_stencil_renderbuffer != 0) {
-        glDeleteRenderbuffers(1, &resources->depth_stencil_renderbuffer);
-        resources->depth_stencil_renderbuffer = 0;
+    if (resources == nullptr) {
+        return;
     }
-    if (resources->color_texture != 0) {
-        glDeleteTextures(1, &resources->color_texture);
-        resources->color_texture = 0;
+    if (sg_isvalid()) {
+        if (resources->color_attachment_view.id != SG_INVALID_ID) {
+            sg_destroy_view(resources->color_attachment_view);
+        }
+        if (resources->color_texture_view.id != SG_INVALID_ID) {
+            sg_destroy_view(resources->color_texture_view);
+        }
+        if (resources->depth_stencil_view.id != SG_INVALID_ID) {
+            sg_destroy_view(resources->depth_stencil_view);
+        }
+        if (resources->color_image.id != SG_INVALID_ID) {
+            sg_destroy_image(resources->color_image);
+        }
+        if (resources->depth_stencil_image.id != SG_INVALID_ID) {
+            sg_destroy_image(resources->depth_stencil_image);
+        }
     }
-    if (resources->framebuffer != 0) {
-        glDeleteFramebuffers(1, &resources->framebuffer);
-        resources->framebuffer = 0;
-    }
+    resources->color_image = {};
+    resources->color_attachment_view = {};
+    resources->color_texture_view = {};
+    resources->depth_stencil_image = {};
+    resources->depth_stencil_view = {};
+    resources->imgui_texture_id = 0U;
     resources->framebuffer_width = 0;
     resources->framebuffer_height = 0;
-}
-
-std::optional<std::string> compile_viewport_shader(
-    GLenum shader_type,
-    const char* source,
-    GLuint* shader_out) {
-    GLuint shader = glCreateShader(shader_type);
-    if (shader == 0) {
-        return "Failed to allocate a viewport shader object.";
-    }
-
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint compile_status = GL_FALSE;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &compile_status);
-    if (compile_status == GL_TRUE) {
-        *shader_out = shader;
-        return std::nullopt;
-    }
-
-    std::string error = "Viewport shader compilation failed.";
-    if (const auto log = shader_log(shader)) {
-        error += " ";
-        error += *log;
-    }
-    glDeleteShader(shader);
-    return error;
-}
-
-std::optional<std::string> link_viewport_program(ViewportRenderResources* resources) {
-    resources->program = glCreateProgram();
-    if (resources->program == 0) {
-        return "Failed to allocate the viewport shader program.";
-    }
-
-    glAttachShader(resources->program, resources->vertex_shader);
-    glAttachShader(resources->program, resources->fragment_shader);
-    glBindAttribLocation(resources->program, 0, "a_position");
-    glBindAttribLocation(resources->program, 1, "a_color");
-    glBindFragDataLocation(resources->program, 0, "frag_color");
-    glLinkProgram(resources->program);
-
-    GLint link_status = GL_FALSE;
-    glGetProgramiv(resources->program, GL_LINK_STATUS, &link_status);
-    if (link_status != GL_TRUE) {
-        std::string error = "Viewport shader program link failed.";
-        if (const auto log = program_log(resources->program)) {
-            error += " ";
-            error += *log;
-        }
-        return error;
-    }
-
-    resources->view_size_location =
-        glGetUniformLocation(resources->program, "u_view_size");
-    if (resources->view_size_location < 0) {
-        return "Viewport shader program did not expose u_view_size.";
-    }
-
-    return std::nullopt;
 }
 
 std::optional<std::string> initialize_viewport_renderer(
@@ -148,59 +86,95 @@ std::optional<std::string> initialize_viewport_renderer(
     if (resources->available) {
         return std::nullopt;
     }
-
-    if (const auto error = compile_viewport_shader(
-            GL_VERTEX_SHADER,
-            kViewportVertexShaderSource,
-            &resources->vertex_shader)) {
-        resources->error_message = *error;
-        destroy_viewport_renderer(resources);
-        return error;
-    }
-    if (const auto error = compile_viewport_shader(
-            GL_FRAGMENT_SHADER,
-            kViewportFragmentShaderSource,
-            &resources->fragment_shader)) {
-        resources->error_message = *error;
-        destroy_viewport_renderer(resources);
-        return error;
-    }
-    if (const auto error = link_viewport_program(resources)) {
-        resources->error_message = *error;
-        destroy_viewport_renderer(resources);
-        return error;
-    }
-
-    glGenVertexArrays(1, &resources->vao);
-    glGenBuffers(1, &resources->vbo);
-    if (resources->vao == 0 || resources->vbo == 0) {
-        resources->error_message = "Failed to allocate viewport mesh buffers.";
-        destroy_viewport_renderer(resources);
+    if (!sg_isvalid()) {
+        resources->error_message = "Viewport renderer requires an initialized Sokol device.";
         return resources->error_message;
     }
 
-    glBindVertexArray(resources->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(
-        0,
-        2,
-        GL_FLOAT,
-        GL_FALSE,
-        sizeof(ViewportRenderVertex),
-        reinterpret_cast<const void*>(offsetof(ViewportRenderVertex, position_x)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(
-        1,
-        4,
-        GL_FLOAT,
-        GL_FALSE,
-        sizeof(ViewportRenderVertex),
-        reinterpret_cast<const void*>(offsetof(ViewportRenderVertex, color_r)));
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
+    const sg_shader_desc* shader_desc =
+        marrow_renderer_viewport_overlay_shader_desc(sg_query_backend());
+    resources->overlay_shader = sg_make_shader(shader_desc);
+    if (const auto error = viewport_resource_error(
+            "overlay shader", sg_query_shader_state(resources->overlay_shader))) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
 
-    if (const auto error = resources->prepared_scene_renderer.initialize()) {
+    const auto make_pipeline = [&](sg_primitive_type primitive_type, const char* label) {
+        sg_pipeline_desc descriptor{};
+        descriptor.shader = resources->overlay_shader;
+        descriptor.layout.buffers[0].stride = sizeof(ViewportRenderVertex);
+        descriptor.layout.attrs[0].format = SG_VERTEXFORMAT_FLOAT2;
+        descriptor.layout.attrs[0].offset = offsetof(ViewportRenderVertex, position_x);
+        descriptor.layout.attrs[1].format = SG_VERTEXFORMAT_FLOAT4;
+        descriptor.layout.attrs[1].offset = offsetof(ViewportRenderVertex, color_r);
+        descriptor.primitive_type = primitive_type;
+        descriptor.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        descriptor.colors[0].blend.enabled = true;
+        descriptor.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
+        descriptor.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        descriptor.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+        descriptor.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        descriptor.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+        descriptor.sample_count = 1;
+        descriptor.label = label;
+        return sg_make_pipeline(&descriptor);
+    };
+    resources->overlay_line_pipeline =
+        make_pipeline(SG_PRIMITIVETYPE_LINES, "marrow-viewport-overlay-lines");
+    resources->overlay_triangle_pipeline =
+        make_pipeline(SG_PRIMITIVETYPE_TRIANGLES, "marrow-viewport-overlay-triangles");
+    if (const auto error = viewport_resource_error(
+            "overlay line pipeline",
+            sg_query_pipeline_state(resources->overlay_line_pipeline))) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+    if (const auto error = viewport_resource_error(
+            "overlay triangle pipeline",
+            sg_query_pipeline_state(resources->overlay_triangle_pipeline))) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+
+    constexpr std::size_t kInitialOverlayCapacity = 256U * 1024U;
+    sg_buffer_desc buffer_desc{};
+    buffer_desc.size = kInitialOverlayCapacity;
+    buffer_desc.usage.vertex_buffer = true;
+    buffer_desc.usage.immutable = false;
+    buffer_desc.usage.stream_update = true;
+    buffer_desc.label = "marrow-viewport-overlay-stream";
+    resources->overlay_vertex_buffer = sg_make_buffer(&buffer_desc);
+    if (const auto error = viewport_resource_error(
+            "overlay stream buffer",
+            sg_query_buffer_state(resources->overlay_vertex_buffer))) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+    resources->overlay_vertex_capacity_bytes = kInitialOverlayCapacity;
+
+    sg_sampler_desc sampler_desc{};
+    sampler_desc.min_filter = SG_FILTER_LINEAR;
+    sampler_desc.mag_filter = SG_FILTER_LINEAR;
+    sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.label = "marrow-viewport-imgui-sampler";
+    resources->texture_sampler = sg_make_sampler(&sampler_desc);
+    if (const auto error = viewport_resource_error(
+            "texture sampler", sg_query_sampler_state(resources->texture_sampler))) {
+        resources->error_message = *error;
+        destroy_viewport_renderer(resources);
+        return error;
+    }
+
+    if (const auto error = resources->prepared_scene_renderer.initialize(
+            SG_PIXELFORMAT_RGBA8,
+            SG_PIXELFORMAT_DEPTH_STENCIL,
+            1)) {
         resources->error_message = *error;
         destroy_viewport_renderer(resources);
         return error;
@@ -217,27 +191,29 @@ void destroy_viewport_renderer(ViewportRenderResources* resources) {
 
     destroy_viewport_framebuffer(resources);
     resources->prepared_scene_renderer.destroy();
-    if (resources->vbo != 0) {
-        glDeleteBuffers(1, &resources->vbo);
-        resources->vbo = 0;
+    if (sg_isvalid()) {
+        if (resources->texture_sampler.id != SG_INVALID_ID) {
+            sg_destroy_sampler(resources->texture_sampler);
+        }
+        if (resources->overlay_vertex_buffer.id != SG_INVALID_ID) {
+            sg_destroy_buffer(resources->overlay_vertex_buffer);
+        }
+        if (resources->overlay_triangle_pipeline.id != SG_INVALID_ID) {
+            sg_destroy_pipeline(resources->overlay_triangle_pipeline);
+        }
+        if (resources->overlay_line_pipeline.id != SG_INVALID_ID) {
+            sg_destroy_pipeline(resources->overlay_line_pipeline);
+        }
+        if (resources->overlay_shader.id != SG_INVALID_ID) {
+            sg_destroy_shader(resources->overlay_shader);
+        }
     }
-    if (resources->vao != 0) {
-        glDeleteVertexArrays(1, &resources->vao);
-        resources->vao = 0;
-    }
-    if (resources->program != 0) {
-        glDeleteProgram(resources->program);
-        resources->program = 0;
-    }
-    if (resources->vertex_shader != 0) {
-        glDeleteShader(resources->vertex_shader);
-        resources->vertex_shader = 0;
-    }
-    if (resources->fragment_shader != 0) {
-        glDeleteShader(resources->fragment_shader);
-        resources->fragment_shader = 0;
-    }
-    resources->view_size_location = -1;
+    resources->texture_sampler = {};
+    resources->overlay_vertex_buffer = {};
+    resources->overlay_vertex_capacity_bytes = 0U;
+    resources->overlay_triangle_pipeline = {};
+    resources->overlay_line_pipeline = {};
+    resources->overlay_shader = {};
     resources->available = false;
 }
 
@@ -267,7 +243,7 @@ std::optional<std::string> ensure_viewport_framebuffer(
     if (width <= 0 || height <= 0) {
         return "Viewport framebuffer dimensions must be greater than zero.";
     }
-    if (resources->framebuffer != 0 &&
+    if (resources->color_image.id != SG_INVALID_ID &&
         resources->framebuffer_width == width &&
         resources->framebuffer_height == height) {
         return std::nullopt;
@@ -275,63 +251,75 @@ std::optional<std::string> ensure_viewport_framebuffer(
 
     destroy_viewport_framebuffer(resources);
 
-    glGenFramebuffers(1, &resources->framebuffer);
-    glGenTextures(1, &resources->color_texture);
-    if (resources->framebuffer == 0 || resources->color_texture == 0) {
-        resources->error_message = "Failed to allocate viewport framebuffer resources.";
+    sg_image_desc color_desc{};
+    color_desc.width = width;
+    color_desc.height = height;
+    color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    color_desc.sample_count = 1;
+    color_desc.usage.color_attachment = true;
+    color_desc.label = "marrow-editor-viewport-color";
+    resources->color_image = sg_make_image(&color_desc);
+    if (const auto error = viewport_resource_error(
+            "color image", sg_query_image_state(resources->color_image))) {
+        resources->error_message = *error;
         destroy_viewport_framebuffer(resources);
-        return resources->error_message;
+        return error;
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, resources->framebuffer);
-    glBindTexture(GL_TEXTURE_2D, resources->color_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGBA8,
-        width,
-        height,
-        0,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        nullptr);
-    glFramebufferTexture2D(
-        GL_FRAMEBUFFER,
-        GL_COLOR_ATTACHMENT0,
-        GL_TEXTURE_2D,
-        resources->color_texture,
-        0);
-    glGenRenderbuffers(1, &resources->depth_stencil_renderbuffer);
-    if (resources->depth_stencil_renderbuffer == 0) {
-        resources->error_message = "Failed to allocate viewport depth-stencil storage.";
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sg_view_desc color_attachment_desc{};
+    color_attachment_desc.color_attachment.image = resources->color_image;
+    color_attachment_desc.label = "marrow-editor-viewport-color-attachment";
+    resources->color_attachment_view = sg_make_view(&color_attachment_desc);
+    if (const auto error = viewport_resource_error(
+            "color attachment view",
+            sg_query_view_state(resources->color_attachment_view))) {
+        resources->error_message = *error;
         destroy_viewport_framebuffer(resources);
-        return resources->error_message;
+        return error;
     }
-    glBindRenderbuffer(GL_RENDERBUFFER, resources->depth_stencil_renderbuffer);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
-    glFramebufferRenderbuffer(
-        GL_FRAMEBUFFER,
-        GL_DEPTH_STENCIL_ATTACHMENT,
-        GL_RENDERBUFFER,
-        resources->depth_stencil_renderbuffer);
 
-    const GLenum framebuffer_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE) {
-        resources->error_message =
-            "Viewport framebuffer is incomplete (status " +
-            std::to_string(static_cast<unsigned int>(framebuffer_status)) + ").";
+    sg_view_desc texture_desc{};
+    texture_desc.texture.image = resources->color_image;
+    texture_desc.label = "marrow-editor-viewport-texture";
+    resources->color_texture_view = sg_make_view(&texture_desc);
+    if (const auto error = viewport_resource_error(
+            "texture view", sg_query_view_state(resources->color_texture_view))) {
+        resources->error_message = *error;
         destroy_viewport_framebuffer(resources);
-        return resources->error_message;
+        return error;
     }
+
+    sg_image_desc depth_desc{};
+    depth_desc.width = width;
+    depth_desc.height = height;
+    depth_desc.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    depth_desc.sample_count = 1;
+    depth_desc.usage.depth_stencil_attachment = true;
+    depth_desc.label = "marrow-editor-viewport-depth-stencil";
+    resources->depth_stencil_image = sg_make_image(&depth_desc);
+    if (const auto error = viewport_resource_error(
+            "depth-stencil image",
+            sg_query_image_state(resources->depth_stencil_image))) {
+        resources->error_message = *error;
+        destroy_viewport_framebuffer(resources);
+        return error;
+    }
+
+    sg_view_desc depth_view_desc{};
+    depth_view_desc.depth_stencil_attachment.image = resources->depth_stencil_image;
+    depth_view_desc.label = "marrow-editor-viewport-depth-stencil-view";
+    resources->depth_stencil_view = sg_make_view(&depth_view_desc);
+    if (const auto error = viewport_resource_error(
+            "depth-stencil view",
+            sg_query_view_state(resources->depth_stencil_view))) {
+        resources->error_message = *error;
+        destroy_viewport_framebuffer(resources);
+        return error;
+    }
+
+    resources->imgui_texture_id = simgui_imtextureid_with_sampler(
+        resources->color_texture_view,
+        resources->texture_sampler);
 
     resources->framebuffer_width = width;
     resources->framebuffer_height = height;
@@ -1281,6 +1269,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
     }
 
     const auto& skeleton = *state.load_result.skeleton_data;
+    const ResolvedSelection resolved = resolve_shell_selection(state);
     const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
     if (world_transforms.size() != skeleton.bones().size()) {
         return overlay;
@@ -1288,14 +1277,13 @@ DebugOverlayGeometry build_debug_overlay_geometry(
 
     const auto slot_selected =
         [&](std::size_t slot_index) {
-            return selected_slot_index(state).has_value() &&
-                *selected_slot_index(state) == slot_index;
+            return resolved.active_slot_index == slot_index;
         };
     const auto constraint_selected =
         [&](ConstraintKind kind, std::string_view name) {
-            return selected_constraint(state).has_value() &&
-                selected_constraint(state)->kind == kind &&
-                selected_constraint(state)->constraint_name == name;
+            return resolved.active_constraint.has_value() &&
+                resolved.active_constraint->kind == kind &&
+                resolved.active_constraint->constraint_name == name;
         };
 
     if (state.viewport.debug_overlay.ik_constraints) {
@@ -1652,7 +1640,8 @@ void append_viewport_pose_geometry(
     const ViewportLayout& layout,
     const std::vector<BoneCanvasNode>& bones,
     float joint_radius,
-    std::optional<std::size_t> selected_bone,
+    const std::vector<bool>* selected_bones,
+    std::optional<std::size_t> active_bone,
     std::optional<std::size_t> hovered_bone,
     ImU32 active_line_color,
     ImU32 inactive_line_color,
@@ -1669,8 +1658,10 @@ void append_viewport_pose_geometry(
         }
 
         const BoneCanvasNode& parent = bones[*node.parent_index];
-        const bool selected =
-            selected_bone.has_value() && *selected_bone == node.bone_index;
+        const bool selected = selected_bones != nullptr &&
+            node.bone_index < selected_bones->size() &&
+            (*selected_bones)[node.bone_index];
+        const bool active = active_bone == node.bone_index;
         const ImU32 line_color = selected
             ? selected_line_color
             : node.active ? active_line_color : inactive_line_color;
@@ -1682,11 +1673,13 @@ void append_viewport_pose_geometry(
     }
 
     for (const BoneCanvasNode& node : bones) {
-        const bool selected =
-            selected_bone.has_value() && *selected_bone == node.bone_index;
+        const bool selected = selected_bones != nullptr &&
+            node.bone_index < selected_bones->size() &&
+            (*selected_bones)[node.bone_index];
+        const bool active = active_bone == node.bone_index;
         const bool hovered_selection =
             hovered_bone.has_value() && *hovered_bone == node.bone_index;
-        const float radius = joint_radius + (selected ? 2.0f : 0.0f);
+        const float radius = joint_radius + (active ? 2.5f : selected ? 1.25f : 0.0f);
         const ImU32 fill_color = selected
             ? selected_fill_color
             : hovered_selection ? hovered_fill_color
@@ -1746,6 +1739,7 @@ void build_viewport_background_geometry(
             layout,
             ghost_pose.bones,
             layout.render_joint_radius * 0.9f,
+            nullptr,
             std::nullopt,
             std::nullopt,
             ghost_pose.line_color,
@@ -1784,11 +1778,25 @@ void build_viewport_overlay_geometry(
     append_debug_overlay_geometry(layout, debug_overlay, &line_vertices, &triangle_vertices);
 
     if (state.viewport.debug_overlay.bones) {
+        const ResolvedSelection resolved = resolve_shell_selection(state);
+        std::vector<bool> selected_bones(
+            state.load_result.skeleton_data->bones().size(), false);
+        for (const marrow::editor::SelectionItem& item : state.selection.items()) {
+            const auto* bone = std::get_if<marrow::editor::BoneSelection>(&item);
+            if (bone == nullptr) {
+                continue;
+            }
+            if (const auto index =
+                    state.load_result.skeleton_data->find_bone_index(bone->bone_name)) {
+                selected_bones[*index] = true;
+            }
+        }
         append_viewport_pose_geometry(
             layout,
             layout.bones,
             layout.render_joint_radius,
-            selected_bone_index(state),
+            &selected_bones,
+            resolved.active_bone_index,
             hovered_bone,
             IM_COL32(214, 163, 76, 220),
             IM_COL32(111, 117, 125, 180),
@@ -1858,91 +1866,148 @@ std::optional<std::string> render_prepared_scene_framebuffer(
     if (resources == nullptr || !resources->available) {
         return "Viewport renderer is unavailable.";
     }
-    if (resources->framebuffer == 0 || resources->color_texture == 0) {
+    if (resources->color_attachment_view.id == SG_INVALID_ID ||
+        resources->depth_stencil_view.id == SG_INVALID_ID) {
         return "Viewport framebuffer has not been created.";
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, resources->framebuffer);
-    glViewport(0, 0, resources->framebuffer_width, resources->framebuffer_height);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glClearColor(0.07f, 0.08f, 0.10f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
-    glUseProgram(resources->program);
-    glUniform2f(
-        resources->view_size_location,
-        std::max(layout.canvas_size.x, 1.0f),
-        std::max(layout.canvas_size.y, 1.0f));
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBindVertexArray(resources->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
-
-    const auto draw_vertices = [&](const std::vector<ViewportRenderVertex>& vertices, GLenum mode) {
-        if (vertices.empty()) {
-            return;
-        }
-
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            static_cast<GLsizeiptr>(vertices.size() * sizeof(ViewportRenderVertex)),
-            vertices.data(),
-            GL_STREAM_DRAW);
-        glDrawArrays(mode, 0, static_cast<GLsizei>(vertices.size()));
-    };
-    draw_vertices(background_geometry.line_vertices, GL_LINES);
-    draw_vertices(background_geometry.triangle_vertices, GL_TRIANGLES);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glUseProgram(0);
-
     const std::array<float, 16> projection = viewport_projection_matrix(layout);
+    std::vector<marrow::editor::ViewportRenderer::Submission> submissions;
+    submissions.reserve(textured_ghosts.size() + 1U);
     for (const OnionSkinTexturedGhost& ghost : textured_ghosts) {
-        if (const auto error = resources->prepared_scene_renderer.render_tinted(
+        submissions.emplace_back();
+        if (const auto error = resources->prepared_scene_renderer.prepare(
                 ghost.scene,
                 atlas_image_path,
                 projection,
-                ghost.tint_color)) {
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                ghost.tint_color,
+                &submissions.back())) {
             return error;
         }
     }
 
-    if (const auto error = resources->prepared_scene_renderer.render(
+    submissions.emplace_back();
+    if (const auto error = resources->prepared_scene_renderer.prepare(
             scene,
             atlas_image_path,
-            projection)) {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            projection,
+            {{1.0f, 1.0f, 1.0f, 1.0f}},
+            &submissions.back())) {
+        return error;
+    }
+    std::vector<const marrow::editor::ViewportRenderer::Submission*> submission_refs;
+    submission_refs.reserve(submissions.size());
+    for (const auto& submission : submissions) {
+        submission_refs.push_back(&submission);
+    }
+    if (const auto error = resources->prepared_scene_renderer.preflight(submission_refs)) {
         return error;
     }
 
-    glUseProgram(resources->program);
-    glUniform2f(
-        resources->view_size_location,
-        std::max(layout.canvas_size.x, 1.0f),
-        std::max(layout.canvas_size.y, 1.0f));
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glBindVertexArray(resources->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, resources->vbo);
-    draw_vertices(overlay_geometry.line_vertices, GL_LINES);
-    draw_vertices(overlay_geometry.triangle_vertices, GL_TRIANGLES);
+    const std::size_t overlay_bytes =
+        (background_geometry.line_vertices.size() +
+         background_geometry.triangle_vertices.size() +
+         overlay_geometry.line_vertices.size() +
+         overlay_geometry.triangle_vertices.size()) * sizeof(ViewportRenderVertex);
+    if (overlay_bytes > resources->overlay_vertex_capacity_bytes) {
+        std::size_t new_capacity = std::max<std::size_t>(
+            resources->overlay_vertex_capacity_bytes,
+            256U * 1024U);
+        while (new_capacity < overlay_bytes) {
+            if (new_capacity > std::numeric_limits<std::size_t>::max() / 2U) {
+                return "Viewport overlay stream capacity overflowed addressable memory.";
+            }
+            new_capacity *= 2U;
+        }
+        sg_buffer_desc replacement_desc{};
+        replacement_desc.size = new_capacity;
+        replacement_desc.usage.vertex_buffer = true;
+        replacement_desc.usage.immutable = false;
+        replacement_desc.usage.stream_update = true;
+        replacement_desc.label = "marrow-viewport-overlay-stream-grown";
+        const sg_buffer replacement = sg_make_buffer(&replacement_desc);
+        if (const auto error = viewport_resource_error(
+                "grown overlay stream buffer", sg_query_buffer_state(replacement))) {
+            if (replacement.id != SG_INVALID_ID) {
+                sg_destroy_buffer(replacement);
+            }
+            return error;
+        }
+        const sg_buffer previous = resources->overlay_vertex_buffer;
+        resources->overlay_vertex_buffer = replacement;
+        resources->overlay_vertex_capacity_bytes = new_capacity;
+        if (previous.id != SG_INVALID_ID) {
+            sg_destroy_buffer(previous);
+        }
+    }
 
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-    glUseProgram(0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    return std::nullopt;
+    sg_pass pass{};
+    pass.attachments.colors[0] = resources->color_attachment_view;
+    pass.attachments.depth_stencil = resources->depth_stencil_view;
+    pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+    pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+    pass.action.colors[0].clear_value = {0.07f, 0.08f, 0.10f, 1.0f};
+    pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+    pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
+    pass.action.depth.clear_value = 1.0f;
+    pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
+    pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
+    pass.action.stencil.clear_value = 0U;
+    pass.label = "marrow-editor-viewport-pass";
+    sg_begin_pass(&pass);
+
+    marrow_renderer_viewport_overlay_vs_params_t overlay_params{};
+    overlay_params.view_size[0] = std::max(layout.canvas_size.x, 1.0f);
+    overlay_params.view_size[1] = std::max(layout.canvas_size.y, 1.0f);
+    const auto draw_vertices = [&](const std::vector<ViewportRenderVertex>& vertices,
+                                   sg_pipeline pipeline) -> std::optional<std::string> {
+        if (vertices.empty()) {
+            return std::nullopt;
+        }
+        const sg_range range{vertices.data(), vertices.size() * sizeof(ViewportRenderVertex)};
+        const int offset = sg_append_buffer(resources->overlay_vertex_buffer, &range);
+        if (sg_query_buffer_overflow(resources->overlay_vertex_buffer)) {
+            return "Viewport overlay stream overflowed after successful preflight.";
+        }
+        sg_bindings bindings{};
+        bindings.vertex_buffers[0] = resources->overlay_vertex_buffer;
+        bindings.vertex_buffer_offsets[0] = offset;
+        sg_apply_pipeline(pipeline);
+        sg_apply_bindings(&bindings);
+        sg_apply_uniforms(
+            UB_marrow_renderer_viewport_overlay_vs_params,
+            SG_RANGE(overlay_params));
+        sg_draw(0, static_cast<int>(vertices.size()), 1);
+        return std::nullopt;
+    };
+
+    std::optional<std::string> render_error;
+    render_error = draw_vertices(
+        background_geometry.line_vertices,
+        resources->overlay_line_pipeline);
+    if (!render_error) {
+        render_error = draw_vertices(
+            background_geometry.triangle_vertices,
+            resources->overlay_triangle_pipeline);
+    }
+    for (const auto& submission : submissions) {
+        if (render_error) {
+            break;
+        }
+        render_error = resources->prepared_scene_renderer.submit(submission);
+    }
+    if (!render_error) {
+        render_error = draw_vertices(
+            overlay_geometry.line_vertices,
+            resources->overlay_line_pipeline);
+    }
+    if (!render_error) {
+        render_error = draw_vertices(
+            overlay_geometry.triangle_vertices,
+            resources->overlay_triangle_pipeline);
+    }
+    sg_end_pass();
+    return render_error;
 }
 
 std::optional<std::string> render_viewport_framebuffer(
@@ -1951,6 +2016,7 @@ std::optional<std::string> render_viewport_framebuffer(
     const std::vector<OnionSkinGhostPose>& ghost_poses,
     std::optional<std::size_t> hovered_bone,
     const MeshWeightOverlay* mesh_weight_overlay,
+    const marrow::renderer::PreparedScene* prepared_scene,
     ViewportRenderResources* resources) {
     if (!state.load_result || !state.preview_skeleton || state.load_result.atlas_data.empty()) {
         return "Viewport preview scene is unavailable.";
@@ -2001,12 +2067,17 @@ std::optional<std::string> render_viewport_framebuffer(
         }
     }
 
-    const marrow::renderer::PreparedSceneResult scene_result =
-        marrow::renderer::prepare_setup_pose_scene(
-            *state.preview_skeleton,
-            *state.load_result.atlas_data.front());
-    if (!scene_result) {
-        return scene_result.error_message;
+    std::optional<marrow::renderer::PreparedScene> owned_scene;
+    if (prepared_scene == nullptr) {
+        marrow::renderer::PreparedSceneResult scene_result =
+            marrow::renderer::prepare_setup_pose_scene(
+                *state.preview_skeleton,
+                *state.load_result.atlas_data.front());
+        if (!scene_result) {
+            return scene_result.error_message;
+        }
+        owned_scene = std::move(*scene_result.scene);
+        prepared_scene = &*owned_scene;
     }
 
     return render_prepared_scene_framebuffer(
@@ -2014,8 +2085,8 @@ std::optional<std::string> render_viewport_framebuffer(
         background_geometry,
         overlay_geometry,
         textured_ghosts,
-        *scene_result.scene,
-        resolve_viewport_atlas_image_path(state, *scene_result.scene),
+        *prepared_scene,
+        resolve_viewport_atlas_image_path(state, *prepared_scene),
         resources);
 }
 
@@ -2058,6 +2129,480 @@ std::optional<std::size_t> pick_bone_at_position(
     }
 
     return best_bone;
+}
+
+namespace {
+
+std::optional<marrow::editor::AttachmentSelection> viewport_attachment_identity(
+    const ShellState& state,
+    std::size_t slot_index,
+    std::string_view attachment_name) {
+    if (!state.load_result || slot_index >= state.load_result.skeleton_data->slots().size()) {
+        return std::nullopt;
+    }
+    const auto current = current_attachment_selection(state, slot_index);
+    if (!current.has_value() || current->attachment_name != attachment_name) {
+        return std::nullopt;
+    }
+    const auto reference = resolve_attachment_reference(
+        *state.load_result.skeleton_data, *current);
+    if (!reference.has_value() || !reference->skin_index.has_value() ||
+        *reference->skin_index >= state.load_result.skeleton_data->skins().size()) {
+        return std::nullopt;
+    }
+    return marrow::editor::AttachmentSelection{
+        state.load_result.skeleton_data->slots()[slot_index].name,
+        state.load_result.skeleton_data->skins()[*reference->skin_index].name,
+        std::string(attachment_name)};
+}
+
+bool point_in_triangle_inclusive(
+    const ImVec2& point,
+    const std::array<ImVec2, 3>& triangle) {
+    const auto cross = [](const ImVec2& a, const ImVec2& b, const ImVec2& c) {
+        return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
+    };
+    constexpr float kEdgeEpsilon = 1e-4f;
+    // A degenerate triangle keeps every cross product inside the epsilon
+    // band, which would otherwise report a hit for any point.
+    if (std::abs(cross(triangle[0], triangle[1], triangle[2])) <= kEdgeEpsilon) {
+        return false;
+    }
+    const float c0 = cross(triangle[0], triangle[1], point);
+    const float c1 = cross(triangle[1], triangle[2], point);
+    const float c2 = cross(triangle[2], triangle[0], point);
+    const bool has_negative = c0 < -kEdgeEpsilon || c1 < -kEdgeEpsilon || c2 < -kEdgeEpsilon;
+    const bool has_positive = c0 > kEdgeEpsilon || c1 > kEdgeEpsilon || c2 > kEdgeEpsilon;
+    return !(has_negative && has_positive);
+}
+
+void append_attachment_triangles(
+    ViewportEntityHitGeometry* geometry,
+    const ViewportLayout& layout,
+    const marrow::editor::AttachmentSelection& selection,
+    const std::vector<marrow::renderer::RenderPoint>& vertices,
+    const std::vector<std::size_t>& indices,
+    std::size_t stable_order,
+    ImVec2* centroid_sum,
+    std::size_t* centroid_count) {
+    if (geometry == nullptr || centroid_sum == nullptr || centroid_count == nullptr) {
+        return;
+    }
+    std::vector<ImVec2> screen_vertices;
+    screen_vertices.reserve(vertices.size());
+    for (const auto& vertex : vertices) {
+        const ImVec2 screen = screen_from_world(layout, vertex.x, vertex.y);
+        screen_vertices.push_back(screen);
+        centroid_sum->x += screen.x;
+        centroid_sum->y += screen.y;
+        ++(*centroid_count);
+    }
+    for (std::size_t index = 0; index + 2U < indices.size(); index += 3U) {
+        const std::size_t a = indices[index];
+        const std::size_t b = indices[index + 1U];
+        const std::size_t c = indices[index + 2U];
+        if (a >= screen_vertices.size() || b >= screen_vertices.size() ||
+            c >= screen_vertices.size()) {
+            continue;
+        }
+        geometry->triangles.push_back(ViewportHitTriangle{
+            ViewportEntityHitCandidate{
+                selection,
+                ViewportEntityHitPriority::AttachmentSurface,
+                0.0f,
+                stable_order},
+            {screen_vertices[a], screen_vertices[b], screen_vertices[c]}});
+    }
+}
+
+} // namespace
+
+ViewportEntityHitGeometry build_viewport_entity_hit_geometry(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const marrow::renderer::PreparedScene* prepared_scene) {
+    ViewportEntityHitGeometry geometry;
+    if (!state.load_result || !state.preview_skeleton) {
+        return geometry;
+    }
+
+    const auto& skeleton = *state.load_result.skeleton_data;
+    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
+    std::size_t constraint_order = 0U;
+    constexpr float kConstraintHitRadius = 8.0f;
+
+    if (state.viewport.debug_overlay.ik_constraints) {
+        for (const auto& constraint : skeleton.ik_constraints()) {
+            if (constraint.target_bone_index >= world_transforms.size()) {
+                ++constraint_order;
+                continue;
+            }
+            geometry.circles.push_back(ViewportHitCircle{
+                ViewportEntityHitCandidate{
+                    marrow::editor::ConstraintSelection{
+                        ConstraintKind::Ik, constraint.name},
+                    ViewportEntityHitPriority::ConstraintTarget,
+                    0.0f,
+                    constraint_order++},
+                screen_from_world(
+                    layout,
+                    world_transforms[constraint.target_bone_index].world_x,
+                    world_transforms[constraint.target_bone_index].world_y),
+                kConstraintHitRadius,
+                ViewportHitMarkerShape::Circle});
+        }
+    } else {
+        constraint_order += skeleton.ik_constraints().size();
+    }
+
+    if (state.viewport.debug_overlay.path_constraints) {
+        for (const auto& constraint : skeleton.path_constraints()) {
+            const std::size_t stable_order = constraint_order++;
+            if (constraint.slot_index >= skeleton.slots().size() ||
+                constraint.slot_index >= state.preview_skeleton->slot_states().size()) {
+                continue;
+            }
+            const auto* attachment =
+                state.preview_skeleton->current_attachment(constraint.slot_index);
+            if (attachment == nullptr || !attachment->path_attachment.has_value()) {
+                continue;
+            }
+            const std::size_t bone_index = skeleton.slots()[constraint.slot_index].bone_index;
+            if (bone_index >= world_transforms.size()) {
+                continue;
+            }
+            std::vector<marrow::runtime::AttachmentVertex> world_points;
+            world_points.reserve(attachment->path_attachment->control_points.size());
+            for (const auto& point : attachment->path_attachment->control_points) {
+                world_points.push_back(transform_attachment_vertex_local(
+                    world_transforms[bone_index], point.x, point.y));
+            }
+            const auto sampled = sample_path_curve_points(world_points);
+            for (std::size_t index = 1U; index < sampled.size(); ++index) {
+                geometry.segments.push_back(ViewportHitSegment{
+                    ViewportEntityHitCandidate{
+                        marrow::editor::ConstraintSelection{
+                            ConstraintKind::Path, constraint.name},
+                        ViewportEntityHitPriority::ConstraintTarget,
+                        0.0f,
+                        stable_order},
+                    screen_from_world(layout, sampled[index - 1U].x, sampled[index - 1U].y),
+                    screen_from_world(layout, sampled[index].x, sampled[index].y),
+                    7.0f});
+            }
+        }
+    } else {
+        constraint_order += skeleton.path_constraints().size();
+    }
+
+    // Transform constraints have no persisted debug-overlay preference. A
+    // transient diamond beside their source target keeps them pickable only
+    // while the common bone overlay is visible.
+    if (state.viewport.debug_overlay.bones) {
+        for (const auto& constraint : skeleton.transform_constraints()) {
+            const std::size_t stable_order = constraint_order++;
+            if (constraint.source_bone_index >= world_transforms.size()) {
+                continue;
+            }
+            ImVec2 center = screen_from_world(
+                layout,
+                world_transforms[constraint.source_bone_index].world_x,
+                world_transforms[constraint.source_bone_index].world_y);
+            center.x += 12.0f;
+            center.y -= 12.0f;
+            geometry.circles.push_back(ViewportHitCircle{
+                ViewportEntityHitCandidate{
+                    marrow::editor::ConstraintSelection{
+                        ConstraintKind::Transform, constraint.name},
+                    ViewportEntityHitPriority::ConstraintTarget,
+                    0.0f,
+                    stable_order},
+                center,
+                6.0f,
+                ViewportHitMarkerShape::Diamond});
+        }
+    } else {
+        constraint_order += skeleton.transform_constraints().size();
+    }
+
+    if (state.viewport.debug_overlay.physics_constraints) {
+        for (const auto& constraint : skeleton.physics_constraints()) {
+            const std::size_t stable_order = constraint_order++;
+            for (const std::size_t bone_index : constraint.bone_indices) {
+                if (bone_index >= world_transforms.size()) {
+                    continue;
+                }
+                const auto tip = bone_tip_world_position(
+                    *state.preview_skeleton, skeleton, bone_index);
+                if (!tip.has_value()) {
+                    continue;
+                }
+                geometry.segments.push_back(ViewportHitSegment{
+                    ViewportEntityHitCandidate{
+                        marrow::editor::ConstraintSelection{
+                            ConstraintKind::Physics, constraint.name},
+                        ViewportEntityHitPriority::ConstraintTarget,
+                        0.0f,
+                        stable_order},
+                    screen_from_world(
+                        layout,
+                        world_transforms[bone_index].world_x,
+                        world_transforms[bone_index].world_y),
+                    screen_from_world(layout, tip->x, tip->y),
+                    7.0f});
+            }
+        }
+    }
+
+    if (prepared_scene == nullptr) {
+        return geometry;
+    }
+
+    struct SlotCentroid {
+        marrow::editor::SlotSelection selection;
+        ImVec2 sum{};
+        std::size_t count{0U};
+        std::size_t stable_order{0U};
+    };
+    std::vector<std::optional<SlotCentroid>> slot_centroids(skeleton.slots().size());
+    const std::vector<std::size_t> quad_indices{0U, 1U, 2U, 0U, 2U, 3U};
+
+    for (std::size_t command_index = 0U;
+         command_index < prepared_scene->draw_commands.size();
+         ++command_index) {
+        const std::size_t stable_order =
+            prepared_scene->draw_commands.size() - 1U - command_index;
+        std::visit(
+            [&](const auto& command) {
+                using Command = std::decay_t<decltype(command)>;
+                if constexpr (std::is_same_v<Command, marrow::renderer::PreparedStrokeCommand>) {
+                    return;
+                } else {
+                    if (command.slot_index >= skeleton.slots().size()) {
+                        return;
+                    }
+                    const auto identity = viewport_attachment_identity(
+                        state, command.slot_index, command.attachment_name);
+                    if (!identity.has_value()) {
+                        return;
+                    }
+
+                    ImVec2 centroid_sum{};
+                    std::size_t centroid_count = 0U;
+                    if constexpr (
+                        std::is_same_v<Command, marrow::renderer::RegionAttachmentDrawCommand>) {
+                        std::vector<marrow::renderer::RenderPoint> vertices;
+                        std::vector<std::size_t> indices;
+                        if (!command.masked_vertices.empty() && !command.masked_indices.empty()) {
+                            vertices.reserve(command.masked_vertices.size());
+                            for (const auto& vertex : command.masked_vertices) {
+                                vertices.push_back(vertex.position);
+                            }
+                            indices = command.masked_indices;
+                        } else {
+                            vertices.reserve(command.vertices.size());
+                            for (const auto& vertex : command.vertices) {
+                                vertices.push_back(vertex.position);
+                            }
+                            indices = quad_indices;
+                        }
+                        append_attachment_triangles(
+                            &geometry,
+                            layout,
+                            *identity,
+                            vertices,
+                            indices,
+                            stable_order,
+                            &centroid_sum,
+                            &centroid_count);
+                    } else {
+                        std::vector<marrow::renderer::RenderPoint> vertices;
+                        std::vector<std::size_t> indices;
+                        if (!command.masked_vertices.empty() && !command.masked_indices.empty()) {
+                            vertices.reserve(command.masked_vertices.size());
+                            for (const auto& vertex : command.masked_vertices) {
+                                vertices.push_back(vertex.position);
+                            }
+                            indices = command.masked_indices;
+                        } else {
+                            const auto evaluated =
+                                marrow::renderer::evaluate_gpu_skinned_vertices(
+                                    command, prepared_scene->bone_palette);
+                            if (evaluated) {
+                                vertices.reserve(evaluated.vertices.size());
+                                for (const auto& vertex : evaluated.vertices) {
+                                    vertices.push_back(vertex.position);
+                                }
+                                indices = command.indices;
+                            }
+                        }
+                        append_attachment_triangles(
+                            &geometry,
+                            layout,
+                            *identity,
+                            vertices,
+                            indices,
+                            stable_order,
+                            &centroid_sum,
+                            &centroid_count);
+                    }
+
+                    if (centroid_count > 0U) {
+                        slot_centroids[command.slot_index] = SlotCentroid{
+                            marrow::editor::SlotSelection{
+                                skeleton.slots()[command.slot_index].name},
+                            centroid_sum,
+                            centroid_count,
+                            stable_order};
+                    }
+                }
+            },
+            prepared_scene->draw_commands[command_index]);
+    }
+
+    for (const auto& centroid : slot_centroids) {
+        if (!centroid.has_value() || centroid->count == 0U) {
+            continue;
+        }
+        geometry.circles.push_back(ViewportHitCircle{
+            ViewportEntityHitCandidate{
+                centroid->selection,
+                ViewportEntityHitPriority::SlotHandle,
+                0.0f,
+                centroid->stable_order},
+            ImVec2(
+                centroid->sum.x / static_cast<float>(centroid->count),
+                centroid->sum.y / static_cast<float>(centroid->count)),
+            7.0f,
+            ViewportHitMarkerShape::Diamond});
+    }
+    return geometry;
+}
+
+std::optional<ViewportEntityHitCandidate> resolve_viewport_entity_hit_candidates(
+    const std::vector<ViewportEntityHitCandidate>& candidates) {
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+    const auto best = std::min_element(
+        candidates.begin(),
+        candidates.end(),
+        [](const ViewportEntityHitCandidate& left,
+           const ViewportEntityHitCandidate& right) {
+            if (left.priority != right.priority) {
+                return left.priority < right.priority;
+            }
+            if (left.distance_squared != right.distance_squared) {
+                return left.distance_squared < right.distance_squared;
+            }
+            return left.stable_order < right.stable_order;
+        });
+    return *best;
+}
+
+std::optional<ViewportEntityHitCandidate> pick_viewport_entity_at_position(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ViewportEntityHitGeometry& geometry,
+    const ImVec2& position) {
+    std::vector<ViewportEntityHitCandidate> candidates;
+    if (state.load_result && state.viewport.debug_overlay.bones) {
+        const auto& skeleton = *state.load_result.skeleton_data;
+        for (const BoneCanvasNode& node : layout.bones) {
+            if (!node.active || node.bone_index >= skeleton.bones().size()) {
+                continue;
+            }
+            const float distance = squared_distance(position, node.screen_position);
+            if (distance <= kBoneJointHitRadiusPixels * kBoneJointHitRadiusPixels) {
+                candidates.push_back(ViewportEntityHitCandidate{
+                    marrow::editor::BoneSelection{skeleton.bones()[node.bone_index].name},
+                    ViewportEntityHitPriority::BoneJoint,
+                    distance,
+                    node.bone_index});
+            }
+            if (!node.parent_index.has_value() || *node.parent_index >= layout.bones.size()) {
+                continue;
+            }
+            const float body_distance = point_segment_distance_squared(
+                position,
+                layout.bones[*node.parent_index].screen_position,
+                node.screen_position);
+            if (body_distance <=
+                kBoneBodyHitThresholdPixels * kBoneBodyHitThresholdPixels) {
+                candidates.push_back(ViewportEntityHitCandidate{
+                    marrow::editor::BoneSelection{skeleton.bones()[node.bone_index].name},
+                    ViewportEntityHitPriority::BoneBody,
+                    body_distance,
+                    node.bone_index});
+            }
+        }
+    }
+
+    for (const ViewportHitCircle& circle : geometry.circles) {
+        const float dx = position.x - circle.center.x;
+        const float dy = position.y - circle.center.y;
+        const float distance = squared_distance(position, circle.center);
+        const bool hit = circle.marker_shape == ViewportHitMarkerShape::Diamond
+            ? std::abs(dx) + std::abs(dy) <= circle.radius
+            : distance <= circle.radius * circle.radius;
+        if (hit) {
+            ViewportEntityHitCandidate candidate = circle.candidate;
+            candidate.distance_squared = distance;
+            candidates.push_back(std::move(candidate));
+        }
+    }
+    for (const ViewportHitSegment& segment : geometry.segments) {
+        const float distance = point_segment_distance_squared(
+            position, segment.start, segment.end);
+        if (distance <= segment.radius * segment.radius) {
+            ViewportEntityHitCandidate candidate = segment.candidate;
+            candidate.distance_squared = distance;
+            candidates.push_back(std::move(candidate));
+        }
+    }
+    for (const ViewportHitTriangle& triangle : geometry.triangles) {
+        if (point_in_triangle_inclusive(position, triangle.points)) {
+            candidates.push_back(triangle.candidate);
+        }
+    }
+    return resolve_viewport_entity_hit_candidates(candidates);
+}
+
+std::vector<marrow::editor::SelectionItem> collect_viewport_box_bones(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    const ImVec2& first_corner,
+    const ImVec2& second_corner) {
+    std::vector<std::pair<std::size_t, marrow::editor::SelectionItem>> indexed_bones;
+    if (!state.load_result || !state.viewport.debug_overlay.bones) {
+        return {};
+    }
+    const float minimum_x = std::min(first_corner.x, second_corner.x);
+    const float maximum_x = std::max(first_corner.x, second_corner.x);
+    const float minimum_y = std::min(first_corner.y, second_corner.y);
+    const float maximum_y = std::max(first_corner.y, second_corner.y);
+    const auto& bones = state.load_result.skeleton_data->bones();
+    for (const BoneCanvasNode& node : layout.bones) {
+        if (!node.active || node.bone_index >= bones.size() ||
+            node.screen_position.x < minimum_x || node.screen_position.x > maximum_x ||
+            node.screen_position.y < minimum_y || node.screen_position.y > maximum_y) {
+            continue;
+        }
+        indexed_bones.emplace_back(
+            node.bone_index,
+            marrow::editor::BoneSelection{bones[node.bone_index].name});
+    }
+    std::sort(
+        indexed_bones.begin(),
+        indexed_bones.end(),
+        [](const auto& left, const auto& right) { return left.first < right.first; });
+    std::vector<marrow::editor::SelectionItem> result;
+    result.reserve(indexed_bones.size());
+    for (auto& [index, item] : indexed_bones) {
+        (void)index;
+        result.push_back(std::move(item));
+    }
+    return result;
 }
 
 } // namespace marrow::editor::shell

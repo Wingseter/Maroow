@@ -1613,16 +1613,16 @@ TimelineRetimeResult retime_keyframes(
     }
 
     double applied_delta = requested_delta;
+    const double earliest_original_time = std::min_element(
+        resolved.begin(), resolved.end(), [](const auto& left, const auto& right) {
+            return left.original_time < right.original_time;
+        })->original_time;
     if (snap_to_frames) {
-        const auto earliest = std::min_element(
-            resolved.begin(), resolved.end(), [](const auto& left, const auto& right) {
-                return left.original_time < right.original_time;
-            });
         const double frame_seconds = 1.0 / frames_per_second;
         applied_delta =
-            std::round((earliest->original_time + applied_delta) / frame_seconds) *
+            std::round((earliest_original_time + applied_delta) / frame_seconds) *
                 frame_seconds -
-            earliest->original_time;
+            earliest_original_time;
     }
 
     double minimum_delta = -std::numeric_limits<double>::infinity();
@@ -1634,7 +1634,22 @@ TimelineRetimeResult retime_keyframes(
     if (minimum_delta > maximum_delta) {
         return {{false, "Selected timeline keys have inconsistent retime bounds."}, 0.0, 0U};
     }
+    const double snapped_delta = applied_delta;
     applied_delta = std::clamp(applied_delta, minimum_delta, maximum_delta);
+    if (snap_to_frames && applied_delta != snapped_delta) {
+        // The clamp landed on a raw neighbour bound; re-snap inward so the
+        // snap_to_frames contract still holds for the written keys. When no
+        // frame boundary exists inside the bounds, apply nothing.
+        const double frame_seconds = 1.0 / frames_per_second;
+        const double clamped_time = earliest_original_time + applied_delta;
+        const double inward_time = applied_delta < snapped_delta
+            ? std::floor(clamped_time / frame_seconds) * frame_seconds
+            : std::ceil(clamped_time / frame_seconds) * frame_seconds;
+        applied_delta = inward_time - earliest_original_time;
+        if (applied_delta < minimum_delta || applied_delta > maximum_delta) {
+            return {{false, {}}, 0.0, resolved.size()};
+        }
+    }
     if (std::abs(applied_delta) <= 1e-12) {
         return {{false, {}}, 0.0, resolved.size()};
     }

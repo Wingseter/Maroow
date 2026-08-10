@@ -1,8 +1,11 @@
 # Maroow 편집 기능 갭 분석 (vs Spine 4.2/4.3, Live2D Cubism 5.x)
 
-최종 갱신: 2026-07-18. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
+최종 갱신: 2026-08-09. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
-Preference Store, MAR-157 Typed SelectionSet 완료 checkpoint 및 `.agents/tasks/prd-marrow-runtime.json`.
+Preference Store, MAR-157 Typed SelectionSet, MAR-158 Selection Migration, MAR-159 Hierarchy
+Multi-Selection, MAR-160 Viewport Multi-Selection, MAR-161 Parent-Space Rotation Gizmo 및
+MAR-162 Signed Local Scale Gizmo 완료 checkpoint, MAR-192~210 platform program 결정과
+`.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
 
 ---
@@ -17,7 +20,7 @@ ArtPath, expression/lip-sync, Parameter Modeling mode와 56개 에이전트 오�
 
 현재 Spine/Live2D 대비 가장 큰 **미해결** 격차는 세 가지다:
 
-1. **뷰포트 직접 조작의 P1 범위** — P0 이동 기즈모는 구현됐지만 회전·스케일, FFD 버텍스 직접 편집, grid/angle/vertex snap은 아직 없다.
+1. **뷰포트 직접 조작의 P1 범위** — 이동, parent-space 회전, signed local scale 기즈모는 구현됐지만 FFD 버텍스 직접 편집과 grid/angle/vertex snap은 아직 없다.
 2. **리그/메시 저작 불가** — 본·슬롯·스킨·어태치먼트·메시 지오메트리를 에디터에서 생성/삭제/편집할 수 없다(임포트 전용). 이는 오버레이 아키텍처의 의도된 결과지만, "에디터"로서는 결정적 제약.
 3. **고급 타임라인 UX 미구현** — P0 도프시트는 완성됐지만 그래프 에디터, 그래픽 베지어 핸들, 리타임 스케일, 커브 프리셋/자동 핸들/루프 동기화는 P1이다.
 
@@ -27,7 +30,14 @@ MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoi
 `.marrow` editor authoring·undo·Agent/MCP·key auto-grow를 2026-07-17에 완료했다.
 MAR-156은 project history와 분리된 versioned user preference store를 2026-07-18에 완료했다.
 MAR-157은 같은 날 transient typed selection domain과 legacy active accessor 경계를 완료했다.
-다음 open milestone은 panel consumer와 runtime-source replacement migration을 담당하는 MAR-158이다.
+MAR-158은 모든 panel consumer의 직접 selection 해석과 성공한 runtime-source replacement의 exact
+identity reconciliation을 같은 날 완료했다. MAR-159는 실제 visible hierarchy row 순서의
+platform-correct replace/toggle/range/additive-range gesture와 transient anchor를 2026-07-21에 완료했다.
+같은 날 MAR-160은 viewport point/box multi-selection을, MAR-161은 frozen parent-space rotation과 raw
+multi-turn auto-key를 완료했다. MAR-162는 frozen scale-free local axis와 signed/exact-zero scale
+auto-key를 2026-07-25에 완료했다. 다음 제품 milestone은 single-vertex FFD를 담당하는
+MAR-163이지만, 플랫폼 프로그램이 선행하도록 dependency가 MAR-210으로 바뀌었다. 현재 실행
+milestone은 MAR-192이며 MAR-210 qualification 전에는 MAR-163을 시작하지 않는다.
 
 ---
 
@@ -52,9 +62,10 @@ MAR-157은 같은 날 transient typed selection domain과 legacy active accessor
 | 보간 | 키별 Linear/Stepped/Bezier + 베지어 제어점 4개 숫자 입력 | `shell_timeline.cpp` |
 | 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `shell_timeline.cpp` |
 | Clip duration | runtime authored/inferred/effective 경계, ordered `.marrow set_duration`, live UI·undo, key auto-grow, tail/queue/playhead 재구성, JSON↔MBIN 보존 | `authoring.cpp`, `session.cpp`, `shell_project_panels.cpp` |
-| User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, cross-platform/env resolver, unknown-field 보존, same-directory atomic rename, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
-| Entity selection | 이름 기반 typed Bone/Slot/Attachment/Constraint 집합, 단일 active invariant, stable-order replace/toggle/range/prune/remap, active-only legacy shell 해석 | `selection.cpp`, `selection.hpp`, `selection_set_tests.cpp` |
-| 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동 auto-key | `shell_viewport.cpp`, `shell_viewport_ui.cpp` |
+| User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, macOS/Linux/Windows resolver, Windows UTF-16 AppData와 durable atomic replace, unknown-field 보존, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
+| Platform/GPU shell | SDL3 window/input/IME/pen, macOS Metal 및 Windows/Linux GLCORE 4.1 Sokol surface, pass-free scene renderer, official sokol_imgui; 물리 플랫폼 qualification은 MAR-210까지 open | `sdl_window_host.cpp`, `sokol_graphics_device.cpp`, `viewport_renderer.cpp` |
+| Entity selection | 이름 기반 typed Bone/Slot/Attachment/Constraint 집합, 단일 active invariant, stable-order primitives, hierarchy replace/toggle/range/additive-range와 viewport typed point/bone-only box gesture, transient anchor, selected/active 구분 | `selection.cpp`, `shell_selection.cpp`, `selection_set_tests.cpp` |
+| 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale auto-key | `shell_viewport.cpp`, `shell_viewport_ui.cpp` |
 | 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `shell_timeline.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
 | 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두 | `shell_constraints.cpp` |
@@ -69,11 +80,11 @@ MAR-157은 같은 날 transient typed selection domain과 legacy active accessor
 
 - **Setup Pose/슬롯 setup 색상은 의도적으로 read-only** — Animation 모드 본 포즈는 항상 playhead auto-key이고, 슬롯 light/attachment는 timeline editor에서 저작한다. 저장되지 않는 preview-only 포즈/색상 입력은 없다.
 - **inherit timeline은 read-only** — project overlay는 MAR-184, 편집 parity는 MAR-185로 미뤘다.
-- **뷰포트는 이동까지만 직접 저작** — rotate/scale은 MAR-161~162, single/multi-vertex FFD는 MAR-163~164, 공용/vertex snap은 MAR-165~166이다. 경로 제어점 직접 조작과 선택 항목의 group transform은 P1 범위 밖이다.
+- **뷰포트는 이동·회전·signed scale까지 직접 저작** — single/multi-vertex FFD는 MAR-163~164, 공용/vertex snap은 MAR-165~166이다. 경로 제어점 직접 조작과 선택 항목의 group transform은 P1 범위 밖이다.
 - **그래프 에디터 없음** — 숫자 Bezier 입력은 가능하지만 graph view/point/handle, preset/auto handle/loop 동기화는 MAR-167~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
 - **제약 파라미터 일부 위젯 없음** — IK softness/compress/stretch, Physics step/x/y/rotate/scaleX/shearX/limit/massInverse (라운드트립은 됨).
 - **제약 삭제/이름변경 불가** — lifecycle schema는 MAR-177, UI·agent surface는 MAR-178, 누락 위젯은 MAR-179 범위다.
-- **SelectionSet은 domain 기반만 완료** — MAR-157은 transient ownership과 active compatibility facade를 제공한다. 패널별 직접 소비, source replacement remap/prune는 MAR-158, hierarchy/viewport gesture는 MAR-159~160이며 group transform은 범위 밖이다.
+- **Hierarchy와 viewport entity gesture 완료** — MAR-159는 visible row range와 transient anchor를, MAR-160은 typed point hit와 visible active-Bone box selection을 완료했다. 모든 도구는 active item 하나만 편집하며 group transform은 범위 밖이다.
 
 ---
 
@@ -89,8 +100,8 @@ Spine 편집의 본질은 "뷰포트에서 본을 잡아 끄는 것"이고, Live
 |---|---|---|
 | 본/IK 타깃 X/Y/free 이동 | 구현. 부모 2x2 inverse, singular rollback, 한 drag 한 undo, auto-key | P0 유지 |
 | 안정적 카메라/`world_from_screen`/cursor zoom/Fit | 구현. 포즈 변화가 카메라를 재프레이밍하지 않음 | P0 유지 |
-| rotation 기즈모 | 미구현 | MAR-161 |
-| scale X/Y/uniform 기즈모 | 미구현 | MAR-162 |
+| rotation 기즈모 | 구현. 58px fixed ring, frozen parent-space inverse, supported-inherit hint, continuous unwrap, raw multi-turn absolute auto-key, one transaction/undo | MAR-161 완료 |
+| scale X/Y/uniform 기즈모 | 구현. 74px fixed handles, frozen scale-free local axes, signed ratio와 exact-zero fallback, active-only auto-key, one transaction/undo | MAR-162 완료 |
 | single/multi-vertex FFD 직접 편집 | 미구현; 숫자/도프시트 저작은 가능 | MAR-163~164 |
 | translate/rotate/scale 공용 snap | 미구현 | MAR-165 |
 | FFD grid/magnetic vertex snap | 미구현 | MAR-166 |
@@ -101,8 +112,9 @@ Spine 편집의 본질은 "뷰포트에서 본을 잡아 끄는 것"이고, Live
 ### 2.2 포즈 편집의 신뢰성 — P0에서 해결
 
 - Setup 모드는 임포트 setup data를 읽기 전용으로 표시한다.
-- Animation 모드의 inspector R/T/S/shear와 viewport 이동은 현재 playhead의 절대 local key를 upsert한다.
+- Animation 모드의 inspector R/T/S/shear와 viewport 이동·회전·scale은 현재 playhead의 절대 local key를 upsert한다.
 - 첫 편집 전에 effective/base timeline 전체를 project overlay로 materialize하므로 임포트 키를 단일 신규 키로 덮어쓰지 않는다.
+- Viewport 회전과 scale도 같은 materialization 경로를 사용한다. Non-zero setup transform은 absolute local 값에서 정확히 한 번만 차감되며 imported key와 curve는 보존된다.
 - live `EditTransaction`이 반복 preview refresh, 한 gesture 한 history entry, Escape/실패의 정확한 rollback을 담당한다.
 - GUI와 agent setter는 같은 UI-free project-domain authoring primitive를 사용한다.
 
@@ -199,12 +211,16 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 
 - 단기 제품은 **임포트 리그 기반 애니메이션/후처리 에디터**다.
 - Setup Pose와 슬롯 dark tint는 P0에서 읽기 전용이다. Animation 모드의 R/T/S/shear 변경은 항상 현재 playhead의 키로 영속화한다.
-- P0 뷰포트는 안정적 카메라와 본/IK 타깃 **이동** 기즈모까지다. 회전·스케일·FFD 직접 조작과 snap은 P1이다.
+- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale을 추가했다. FFD 직접 조작과 snap은 후속 P1이다.
 - MAR-154에서 호환 가능한 runtime explicit/inferred/effective duration 경계를, MAR-155에서 editor
   authoring·undo·Agent/MCP를 완료했다. 키 생성·오른쪽 이동은 같은 transaction에서 duration을 자동 연장하되
   키 삭제·왼쪽 이동은 자동 축소하지 않으며 마지막 키보다 짧은 수동 축소를 원자적으로 거부한다. Duration이 없는 기존
   프로젝트와 runtime asset은 계속 마지막 키를 경계로 사용한다.
 - MAR-157의 `SelectionSet`은 exact typed name identity, stable insertion order, 단일 active item을 보장한다. 선택은 `ShellState`의 transient 상태이며 project/preview/history/preferences/runtime/C ABI/Agent·MCP에 포함하지 않는다.
+- MAR-158은 shell-private `ResolvedSelection`으로 각 consumer가 active typed item을 직접 해석하게 하고, 성공한 project/runtime source adoption 뒤에만 exact identity reconciliation을 수행한다. 누락 identity만 prune하며 실패한 adoption, preview refresh, 일반 authoring rebuild는 selection을 바꾸지 않는다.
+- MAR-161 rotation authoring inverse는 root와 `onlyTranslation`의 skeleton-scale basis, `normal` child의 evaluated parent-world 2x2만 지원한다. `noRotationOrReflection`, `noScale`, `noScaleOrReflection`은 runtime에서는 계속 지원하지만 rotation ring은 숨기고 viewport hint를 표시한다.
+- Multi-turn rotation은 project와 exported JSON에 raw degree로 보존한다. MBIN v2 optional AKEY가 continuous winding을 표현하지 못하면 해당 rotate channel만 canonical generic payload로 fallback하며 runtime acceptance는 winding 횟수가 아닌 360도 동치 orientation이다.
+- MAR-162 scale은 같은 inherit 지원 범위에서 evaluated local rotation/shear의 positive scale-free X/Y axis를 gesture 시작 시 freeze한다. Nonzero 축은 signed pivot ratio를, exact-zero 축은 74px당 scale 1 delta를 사용한다. Uniform은 시작 X:Y ratio와 signs를 보존하고 `(0,0)`에서는 숨긴다. Finite signed/exact-zero key는 기존 project overlay와 JSON/MBIN canonical payload에 그대로 저장한다.
 - P1은 기존 imported-rig/name-overlay 구조와 `.mskl` v1, `.mbin` v2, C ABI v1을 유지한다. `.marrow` 변경은 optional additive metadata/operation으로 제한한다.
 - 본·슬롯·스킨·어태치먼트와 메시 topology 저작, 경로 제어점 편집, selection group transform, partial/degraded project open은 P1 범위 밖이다.
 - MAR-129~140 리팩터링은 HEAD `4c93ca1`에서 완료됐다. MAR-137은 constraint 모듈 추출만 완료한 것이며 rename/delete는 MAR-178이다.
@@ -246,9 +262,18 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 
 이 순서는 기능 선행관계다. 각 checkpoint는 focused 구현·검증 경계다.
 
+### Platform program — MAR-192~210 (MAR-163 선행 gate)
+
+플랫폼 전환은 P1 제품 기능의 병렬 roadmap이 아니라 활성 PRD에 물리적으로 삽입된 선행
+dependency chain이다. 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
+raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
+revision 최종 로컬 매트릭스(MAR-210)다. 코드·단위 테스트가 구현돼도 macOS, Ubuntu X11,
+Win10, Win11, 실물 pen, pixel/performance/resource/package 증거가 모두 없으면 story를 done으로
+표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는 `platform-validation.md`가 authority다.
+
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection checkpoint는 통과했다. 다음 open milestone은 MAR-158이며, **MAR-157부터 MAR-191까지 각 스토리는 바로 앞 번호의 스토리에 의존**한다. 이 선형 dependency chain도 기능 milestone과 focused validation checkpoint로 관리한다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation 및 MAR-162 signed local scale checkpoint는 통과했다. 제품 chain은 MAR-163~191 순서를 유지하지만 MAR-163의 dependency는 MAR-210이다. 따라서 현재 next open execution milestone은 MAR-192이고, 플랫폼 qualification 뒤에만 기존 P1 제품 chain이 재개된다.
 
 #### 기반·선택
 
@@ -258,9 +283,9 @@ P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoi
 | MAR-155 | Editor duration authoring (완료, 2026-07-17) | ordered `.marrow.animation_edits set_duration`과 unknown/additive 보존, UI-free mutation, live UI·단일 undo, key auto-grow/no-shrink, 원자적 reject, 56번째 Agent/MCP operation, save/reload·JSON/MBIN export를 project/shell/agent smoke로 검증했다. |
 | MAR-156 | User preference store (완료, 2026-07-18) | versioned user-local JSON, macOS/Linux pure path resolver와 `MARROW_CONFIG_HOME`, six-token curve default, raw Recent Projects 배열, field별 fallback, unknown additive 보존, same-directory temp+atomic rename을 UI-free service와 전용 CTest로 검증했다. Project/session/runtime/C ABI/Agent/MCP와 분리된다. |
 | MAR-157 | Typed SelectionSet (완료, 2026-07-18) | exact typed Bone/Slot/Attachment/Constraint identity, 중복 없는 stable insertion order, 단일 active invariant와 replace/toggle/range/clear/prune/remap을 UI-free public model로 구현했다. `ShellState`는 이 set 하나만 소유하고 legacy accessor가 active 이름을 현재 runtime/preview index로 해석한다. 선택은 project/preview/history/revision/Agent·MCP와 분리된다. |
-| MAR-158 | Selection migration | shell 소비자를 `SelectionSet`으로 이전하고 reload remap/prune 및 재사용 가능한 constraint identity remap/prune primitive를 검증한다. 실제 constraint rename/delete transaction 연결은 MAR-178이 담당하며 selection은 project dirty/history에 포함하지 않는다. |
-| MAR-159 | Hierarchy multi-select | plain replace, Cmd/Ctrl toggle, Shift visible-range, Cmd/Ctrl+Shift additive-range gesture를 구현한다. |
-| MAR-160 | Viewport multi-select | hit precedence와 bone-only box select를 추가한다. Inspector/gizmo는 active item만 편집하고 group transform은 하지 않는다. |
+| MAR-158 | Selection migration (완료, 2026-07-18) | shell-private `ResolvedSelection`으로 hierarchy, inspector, viewport, timeline, constraint, weight-paint를 `SelectionSet`에 직접 연결했다. 성공한 project/runtime source adoption은 exact Bone/Slot/Attachment/Constraint identity를 새 runtime에 재해석하고 누락 항목만 prune하며, 실패는 selection/runtime을 보존한다. Constraint remap/prune primitive는 검증했지만 실제 rename/delete transaction 연결은 MAR-178이 담당한다. |
+| MAR-159 | Hierarchy multi-select (완료, 2026-07-21) | 실제 렌더된 Bone/Slot/Attachment row의 exact identity 순서와 transient anchor로 plain replace, macOS Cmd/기타 Ctrl toggle, Shift visible-range replace, Cmd/Ctrl+Shift additive-range를 구현했다. Filter/collapse/source adoption에서 anchor를 검증하고 selected/active 표시와 active-only consumer를 유지한다. |
+| MAR-160 | Viewport multi-select (완료, 2026-07-21) | Constraint target, Bone joint/body, Slot centroid, topmost Attachment triangle의 category/distance/stable-order precedence와 platform point replace/toggle을 구현했다. Empty-space drag는 4px threshold 뒤 visible runtime-active Bone center만 skeleton order로 replace/additive selection하며 active-only consumer와 transient project/runtime/history 불변을 유지한다. |
 
 MAR-154 checkpoint는 runtime/renderer unit 30개, runtime-labeled CTest 4/4, 전체 CTest 11/11,
 JSON·MBIN fixture smoke와 roundtrip comparison, C ABI smoke 및 `git diff --check`를 통과했다.
@@ -273,13 +298,42 @@ MAR-157 checkpoint는 7개 `SelectionSet` case로 typed scope, stable order, act
 prune/remap collision, invalid range 원자성을 검증했다. Shell smoke는 Bone/Slot/Attachment/Constraint
 legacy 해석과 mixed active-only 동작, project bytes·preview/runtime data·dirty·undo/redo·세 revision 불변을
 검증했으며 editor CTest 7/7과 전체 CTest 13/13을 통과했다.
+MAR-158 checkpoint는 10개 `SelectionSet` case로 constraint remap/delete/collision, 다른 kind/type 보존,
+constraint-only prune와 runtime exact reconciliation을 검증했다. Project/shell smoke는 이름 기반 index
+재해석, fully scoped attachment와 constraint prune, deterministic active fallback, mixed consumer 규칙,
+malformed reload의 selection/runtime 원자성 및 reconciliation의 transient 불변을 검증했다. Agent registry
+56개, editor CTest 7/7, 전체 CTest 13/13과 `git diff --check`도 통과했다.
+MAR-159 checkpoint는 forward/reverse visible order의 plain/toggle/range/additive-range, deterministic
+active fallback, filter/collapse의 hidden row 제외와 anchor invalidation, toggled-off visible anchor,
+source reorder/delete 및 malformed reload 보존을 검증했다. Selected/active 표현과 active-only consumer,
+project bytes·preview/runtime data·dirty·undo/redo·revision 불변도 project/shell smoke로 확인했다.
+`marrow_selection_tests` 10/10, 56-operation Agent registry, editor CTest 7/7, 전체 CTest 13/13과
+`git diff --check`를 통과했다.
+MAR-160 checkpoint는 synthetic overlap tie, region/GPU-skinned mesh/Slot/Constraint point hit,
+forward/reverse box, additive mixed prefix, empty/no-movement semantics, inactive/hidden Bone 제외,
+source-adoption/orphan cleanup과 hierarchy synchronization을 기존 shell smoke로 검증했다.
+MAR-161 checkpoint는 root/reflected skeleton scale, translated·rotated·sheared·non-uniform parent,
+negative determinant, `normal`/`onlyTranslation`, unsupported inherit, singular/NaN/Inf rejection,
+정확한 180도 tie와 positive/negative 450도 unwrap, 2px pivot suspend/rebase를 검증했다. Gesture smoke는
+raw effective restart, live preview, imported key/curve materialization, non-zero setup rotation, no-op,
+one undo/redo와 cancel/non-finite rollback을 확인했다. Runtime unit 31개, SelectionSet 10개,
+56-operation Agent registry, C ABI v1, editor CTest 7/7, 전체 CTest 13/13 및 JSON-MBIN orientation
+comparison을 통과했다.
+MAR-162 checkpoint는 74px X/Y/uniform handle과 6px hit, zoom 불변, translate·rotation보다 낮고
+entity·box보다 높은 input precedence를 확인했다. Root/reflected skeleton scale, non-uniform·negative
+determinant `normal` parent, `onlyTranslation`, unsupported inherit, singular/degenerate/NaN basis를
+검증했고 signed ratio sign crossing, exact-zero 74px fallback, uniform 양축 sign flip, 한 축 zero 보존,
+`(0,0)` uniform 숨김을 다뤘다. Gesture smoke는 mixed-selection active Bone 하나의 effective scale
+materialization, imported key/curve 보존, playback pause, live preview, no-op, one undo/redo와 cancel/
+non-finite rollback을 확인했다. Runtime unit 31개, SelectionSet 10개, 56-operation Agent registry,
+C ABI v1, editor CTest 7/7, 전체 CTest 13/13 및 JSON-MBIN comparison을 통과했다.
 
 #### 뷰포트 직접 조작
 
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
-| MAR-161 | Rotation gizmo | 부모 좌표계 inverse와 연속 angle unwrap으로 transformed/reflected parent에서도 절대 local rotation을 auto-key한다. |
-| MAR-162 | Scale gizmo | local X/Y/uniform handle, signed scale와 정확한 0을 지원하고 non-finite를 거부한다. Uniform은 초기 비율을 보존하고 singular parent에서는 취소한다. |
+| MAR-161 | Rotation gizmo (완료, 2026-07-21) | 58px screen-space ring이 root/`onlyTranslation` skeleton-scale 또는 `normal` evaluated-parent basis를 gesture 시작 시 freeze한다. Per-sample `(-180, 180]` unwrap, 2px pivot rebase, raw multi-turn absolute key, live transaction/one undo를 제공하고 나머지 inherit mode는 숨김+hint로 처리한다. |
+| MAR-162 | Scale gizmo (완료, 2026-07-25) | 74px screen-space local X/Y/uniform handle이 frozen positive scale-free rotation/shear axis에서 signed ratio와 exact-zero 74px fallback을 계산한다. Uniform은 시작 X:Y ratio/sign을 보존하고 `(0,0)`에서는 숨긴다. Active Bone 하나만 effective scale track transaction으로 auto-key하며 unsupported inherit·singular·non-finite는 전체 rollback한다. |
 | MAR-163 | Single-vertex FFD | effective deform 전체를 materialize한 뒤 한 vertex를 auto-key한다. Weighted vertex는 가중 bone 2×2 행렬 합의 inverse를 사용한다. |
 | MAR-164 | Multi-vertex FFD | attachment-local click/toggle/box selection과 한 gesture·한 transaction group move를 추가한다. 하나라도 singular면 전체 gesture를 취소한다. |
 | MAR-165 | Shared transform snapping | 프로젝트별 snap metadata와 world grid 10 units, local angle 15°, absolute scale 0.1 snap을 translate/rotate/scale에 공통 적용한다. 기존 프로젝트 기본은 OFF, Alt는 우회, Ctrl/Cmd는 gesture 동안 임시 활성화한다. |

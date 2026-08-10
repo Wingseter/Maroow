@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -53,7 +55,15 @@ private:
 
     std::thread thread_;
     std::atomic<bool> running_{false};
-    std::atomic<int> server_fd_{-1};
+    static constexpr std::uintptr_t kInvalidSocketValue =
+        std::numeric_limits<std::uintptr_t>::max();
+    std::atomic<std::uintptr_t> server_socket_{kInvalidSocketValue};
+    std::atomic<std::uintptr_t> client_socket_{kInvalidSocketValue};
+    /**
+     * Serializes stop()'s shutdown against the listener thread's close so a
+     * descriptor can never be shut down after its number was recycled.
+     */
+    std::mutex socket_lifecycle_mutex_;
     std::string token_;
 
     std::mutex request_mutex_;

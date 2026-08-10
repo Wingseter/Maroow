@@ -7,6 +7,10 @@
 #include <variant>
 #include <vector>
 
+namespace marrow::runtime {
+class SkeletonData;
+}
+
 namespace marrow::editor {
 
 /** @brief Imported-rig constraint family used as part of a selection identity. */
@@ -95,6 +99,7 @@ using SelectionItem = std::variant<
 class SelectionSet {
 public:
     using Predicate = std::function<bool(const SelectionItem&)>;
+    using ConstraintPredicate = std::function<bool(const ConstraintSelection&)>;
 
     /** @brief Replaces all members with one active item. */
     bool replace(SelectionItem item);
@@ -129,10 +134,26 @@ public:
     bool remap(
         const SelectionItem& from,
         std::optional<SelectionItem> to);
+    /** @brief Remaps one exact constraint identity without touching other types. */
+    bool remap_constraint(
+        const ConstraintSelection& from,
+        std::optional<ConstraintSelection> to);
+    /** @brief Prunes only constraints rejected by `predicate`. */
+    bool prune_constraints(const ConstraintPredicate& predicate);
 
 private:
     std::vector<SelectionItem> items_;
     std::optional<std::size_t> active_index_;
 };
+
+/** @brief Tests one exact typed identity against immutable runtime data. */
+bool selection_item_exists(
+    const SelectionItem& item,
+    const runtime::SkeletonData& skeleton);
+
+/** @brief Drops only identities absent from an adopted runtime source. */
+bool reconcile_selection_to_runtime(
+    SelectionSet& selection,
+    const runtime::SkeletonData& skeleton);
 
 } // namespace marrow::editor

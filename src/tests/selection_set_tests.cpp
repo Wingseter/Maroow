@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "marrow/editor/project.hpp"
 #include "marrow/editor/selection.hpp"
 
 namespace {
@@ -15,6 +16,8 @@ using marrow::editor::ConstraintSelection;
 using marrow::editor::SelectionItem;
 using marrow::editor::SelectionSet;
 using marrow::editor::SlotSelection;
+using marrow::editor::reconcile_selection_to_runtime;
+using marrow::editor::selection_item_exists;
 
 class TestSuite {
 public:
@@ -317,6 +320,132 @@ void test_atomic_invalid_and_no_ops(TestSuite& suite) {
     expect_items(suite, selections, before_items, "remap no-ops should preserve state");
 }
 
+void test_constraint_remap_delete_and_collision(TestSuite& suite) {
+    const ConstraintSelection old_ik{ConstraintKind::Ik, "old_follow"};
+    const ConstraintSelection new_ik{ConstraintKind::Ik, "new_follow"};
+    const SelectionItem body = slot("body");
+
+    SelectionSet selections;
+    selections.add_range({old_ik, body}, old_ik);
+    suite.expect(
+        selections.remap_constraint(old_ik, new_ik),
+        "constraint remap should rename the exact source in place");
+    expect_items(
+        suite,
+        selections,
+        {new_ik, body},
+        "constraint remap should preserve unrelated types and order");
+    suite.expect(
+        selections.active_constraint() != nullptr &&
+            *selections.active_constraint() == new_ik,
+        "active constraint should follow its renamed identity");
+
+    SelectionSet collision;
+    collision.add_range({new_ik, body, old_ik}, old_ik);
+    suite.expect(
+        collision.remap_constraint(old_ik, new_ik),
+        "constraint remap should collapse an exact target collision");
+    expect_items(
+        suite,
+        collision,
+        {new_ik, body},
+        "the first original constraint identity should survive a collision");
+    suite.expect(
+        collision.active_constraint() != nullptr &&
+            *collision.active_constraint() == new_ik,
+        "an active colliding source should follow the survivor");
+    suite.expect(
+        collision.remap_constraint(new_ik, std::nullopt),
+        "null constraint remap should delete only that constraint");
+    expect_items(
+        suite,
+        collision,
+        {body},
+        "constraint deletion should preserve unrelated selections");
+}
+
+void test_constraint_only_prune(TestSuite& suite) {
+    const SelectionItem root = bone("shared");
+    const SelectionItem shared_slot = slot("shared");
+    const ConstraintSelection ik{ConstraintKind::Ik, "shared"};
+    const ConstraintSelection path{ConstraintKind::Path, "shared"};
+    const ConstraintSelection physics{ConstraintKind::Physics, "keep"};
+
+    SelectionSet selections;
+    selections.add_range({root, ik, shared_slot, path, physics}, path);
+    suite.expect(
+        selections.prune_constraints([](const ConstraintSelection& selection) {
+            return selection.kind != ConstraintKind::Path;
+        }),
+        "constraint-only prune should remove a rejected kind and name pair");
+    expect_items(
+        suite,
+        selections,
+        {root, ik, shared_slot, physics},
+        "constraint-only prune should preserve other types and constraint kinds");
+    suite.expect(
+        selections.active_constraint() != nullptr &&
+            *selections.active_constraint() == physics,
+        "removing the active constraint should use the last survivor fallback");
+    suite.expect(
+        !selections.prune_constraints([](const ConstraintSelection&) { return true; }),
+        "an all-retained constraint prune should be a no-op");
+}
+
+void test_runtime_exact_identity_reconciliation(TestSuite& suite) {
+    const auto project = marrow::editor::load_project("assets/fixtures/player_idle.marrow");
+    suite.expect(
+        static_cast<bool>(project) && project.skeleton_data != nullptr,
+        "runtime reconciliation fixture should load");
+    if (!project || project.skeleton_data == nullptr) {
+        return;
+    }
+    const auto& skeleton = *project.skeleton_data;
+    const SelectionItem arm = bone("arm_l");
+    const SelectionItem wrong_case_arm = bone("Arm_l");
+    const SelectionItem body = slot("body");
+    const SelectionItem mage_arm = attachment("arm_l", "mage", "mage_arm_l");
+    const SelectionItem wrong_skin_arm =
+        attachment("arm_l", "warrior", "mage_arm_l");
+    const SelectionItem ik = constraint(ConstraintKind::Ik, "editor_arm_reach");
+    const SelectionItem same_name_path =
+        constraint(ConstraintKind::Path, "editor_arm_reach");
+
+    suite.expect(selection_item_exists(arm, skeleton), "exact bone name should resolve");
+    suite.expect(!selection_item_exists(wrong_case_arm, skeleton), "bone case must be exact");
+    suite.expect(selection_item_exists(body, skeleton), "exact slot name should resolve");
+    suite.expect(
+        selection_item_exists(mage_arm, skeleton),
+        "fully scoped attachment should resolve");
+    suite.expect(
+        !selection_item_exists(wrong_skin_arm, skeleton),
+        "another skin must not substitute for an attachment identity");
+    suite.expect(selection_item_exists(ik, skeleton), "exact constraint kind and name should resolve");
+    suite.expect(
+        !selection_item_exists(same_name_path, skeleton),
+        "another constraint kind must not substitute for the same name");
+
+    SelectionSet selections;
+    selections.add_range(
+        {arm, wrong_case_arm, body, mage_arm, wrong_skin_arm, ik, same_name_path},
+        same_name_path);
+    suite.expect(
+        reconcile_selection_to_runtime(selections, skeleton),
+        "runtime reconciliation should prune missing exact identities");
+    expect_items(
+        suite,
+        selections,
+        {arm, body, mage_arm, ik},
+        "runtime reconciliation should preserve survivor insertion order");
+    suite.expect(
+        selections.active_constraint() != nullptr &&
+            selections.active_constraint()->kind == ConstraintKind::Ik,
+        "a removed active identity should fall back to the last survivor");
+    suite.expect(
+        !reconcile_selection_to_runtime(selections, skeleton),
+        "a reconciled selection should be stable on repeat");
+}
+
 } // namespace
 
 int main() {
@@ -328,5 +457,12 @@ int main() {
     suite.run("Prune", [&] { test_prune(suite); });
     suite.run("Remap and collisions", [&] { test_remap_and_collisions(suite); });
     suite.run("Atomic invalid and no-ops", [&] { test_atomic_invalid_and_no_ops(suite); });
+    suite.run("Constraint remap delete and collision", [&] {
+        test_constraint_remap_delete_and_collision(suite);
+    });
+    suite.run("Constraint-only prune", [&] { test_constraint_only_prune(suite); });
+    suite.run("Runtime exact identity reconciliation", [&] {
+        test_runtime_exact_identity_reconciliation(suite);
+    });
     return suite.finish();
 }

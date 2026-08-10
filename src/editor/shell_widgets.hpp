@@ -31,12 +31,14 @@ bool icon_tree_node(
     Icon icon,
     const char* label,
     ImGuiTreeNodeFlags flags,
-    bool* out_clicked = nullptr);
+    bool* out_clicked = nullptr,
+    bool active = false);
 bool icon_selectable(
     const IconRegistry& icons,
     Icon icon,
     const char* label,
-    bool selected);
+    bool selected,
+    bool active = false);
 
 } // namespace marrow::editor::shell
 

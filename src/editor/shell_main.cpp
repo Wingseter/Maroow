@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -7,20 +10,14 @@
 #include <string_view>
 #include <system_error>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-
-#if defined(__APPLE__)
-#include <OpenGL/OpenGL.h>
-#include <OpenGL/gl3.h>
-#else
-#include <GL/glcorearb.h>
-#endif
+#include <SDL3/SDL.h>
 
 #include "imgui.h"
-#include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
+#include "imgui_impl_sdl3.h"
 #include "imgui_internal.h"
+#include "sokol_gfx.h"
+#define SOKOL_IMGUI_NO_SOKOL_APP
+#include "sokol_imgui.h"
 
 #include "macos_app_focus.hpp"
 #include "shell_asset_watch.hpp"
@@ -37,6 +34,9 @@
 #include "shell_theme.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
+#include "sdl_input.hpp"
+#include "sokol_graphics_device.hpp"
+#include "window_host.hpp"
 #include "agent_socket.hpp"
 #include "marrow/editor/module.hpp"
 
@@ -57,7 +57,7 @@ void print_usage(std::string_view executable_name) {
               << " --project <project.marrow> [--auto-close <frames>] "
                  "[--agent-port <port>] [--agent-token <secret>] "
                  "[--verify-launch-focus]\n"
-                 "Launch the Marrow Dear ImGui editor shell using GLFW and OpenGL.\n";
+                 "Launch the Marrow Dear ImGui editor shell using SDL3.\n";
 }
 
 std::optional<int> parse_positive_integer(const char* text) {
@@ -175,36 +175,23 @@ ParseResult parse_arguments(int argc, char** argv) {
     return result;
 }
 
-void glfw_error_callback(int error_code, const char* description) {
-    std::cerr << "GLFW error " << error_code << ": " << description << '\n';
-}
-
-void configure_glfw_for_editor() {
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 #if defined(__APPLE__)
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#endif
-    glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_TRUE);
-    glfwWindowHint(GLFW_SAMPLES, 4);
-}
-
-#if defined(__APPLE__)
-void activate_editor_window_on_launch(GLFWwindow* window) {
+void activate_editor_window_on_launch(SDL_Window* window) {
     if (!marrow::editor::platform::activate_editor_application()) {
         std::cerr << "Warning: failed to promote the Marrow editor app to a regular "
                      "foreground macOS application.\n";
     }
-    glfwFocusWindow(window);
+    if (!SDL_RaiseWindow(window)) {
+        std::cerr << "Warning: failed to raise the Marrow SDL window: "
+                  << SDL_GetError() << '\n';
+    }
 }
 
-bool verify_editor_launch_focus_configuration(GLFWwindow* window) {
+bool verify_editor_launch_focus_configuration(SDL_Window* window) {
     bool success = true;
 
-    if (glfwGetWindowAttrib(window, GLFW_FOCUS_ON_SHOW) != GLFW_TRUE) {
-        std::cerr << "Expected GLFW_FOCUS_ON_SHOW to be enabled for the editor "
-                     "window.\n";
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_HIGH_PIXEL_DENSITY) == 0) {
+        std::cerr << "Expected the SDL editor window to request high pixel density.\n";
         success = false;
     }
 
@@ -224,27 +211,23 @@ bool verify_editor_launch_focus_configuration(GLFWwindow* window) {
 }
 
 int run_launch_focus_verification() {
-    glfwSetErrorCallback(glfw_error_callback);
-    glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
-    glfwInitHint(GLFW_COCOA_MENUBAR, GLFW_FALSE);
-    if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW for launch-focus verification.\n";
+    auto host = create_sdl_window_host();
+    WindowHostConfig config;
+    config.logical_width = 640;
+    config.logical_height = 480;
+    config.title = "Marrow Launch Focus Verification";
+    config.visible = false;
+    config.vsync = false;
+    config.renderer_surface = RendererSurface::Metal;
+    if (const auto error = host->initialize(config)) {
+        std::cerr << "Failed to create the Marrow launch-focus verification window: "
+                  << *error << '\n';
         return 1;
     }
 
-    configure_glfw_for_editor();
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-
-    GLFWwindow* window = glfwCreateWindow(640, 480, "Marrow Launch Focus Verification", nullptr, nullptr);
-    if (window == nullptr) {
-        std::cerr << "Failed to create the Marrow launch-focus verification window.\n";
-        glfwTerminate();
-        return 1;
-    }
-
-    const bool success = verify_editor_launch_focus_configuration(window);
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    const bool success =
+        verify_editor_launch_focus_configuration(host->sdl_window());
+    host->shutdown();
 
     if (!success) {
         return 1;
@@ -254,15 +237,6 @@ int run_launch_focus_verification() {
     return 0;
 }
 #endif
-
-float monitor_content_scale() {
-    GLFWmonitor* primary_monitor = glfwGetPrimaryMonitor();
-    if (primary_monitor == nullptr) {
-        return 1.0f;
-    }
-
-    return ImGui_ImplGlfw_GetContentScaleForMonitor(primary_monitor);
-}
 
 void apply_editor_theme() {
     ImGui::StyleColorsDark();
@@ -537,11 +511,28 @@ void ensure_default_dock_layout(
     state->default_dock_layout_initialized = true;
 }
 
-void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
+std::optional<std::string> render_shell_frame(
+    EditorWindowHost* window_host,
+    ShellState* shell_state,
+    double delta_time) {
+    const WindowMetrics metrics = window_host->metrics();
+    if (metrics.minimized || metrics.drawable_width <= 0 ||
+        metrics.drawable_height <= 0) {
+        return std::nullopt;
+    }
+    const FrameSurface surface = window_host->acquire_frame_surface();
+    if (!surface.acquired) {
+        return std::nullopt;
+    }
+
     sync_shell_from_editor_session_if_revised(shell_state);
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    simgui_frame_desc_t frame_desc{};
+    frame_desc.width = metrics.drawable_width;
+    frame_desc.height = metrics.drawable_height;
+    frame_desc.delta_time = std::max(delta_time, 0.000001);
+    frame_desc.dpi_scale = std::max(metrics.framebuffer_scale_x, 1.0f);
+    simgui_new_frame(&frame_desc);
     if (!authoring_gesture_active(*shell_state)) {
         (void)poll_runtime_asset_changes(shell_state);
     }
@@ -553,7 +544,10 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     handle_project_history_shortcuts(shell_state);
 
     bool reload_requested = false;
-    draw_menu_bar(window, &reload_requested, shell_state);
+    if (draw_menu_bar(&reload_requested, shell_state) ==
+        ProjectMenuAction::QuitRequested) {
+        window_host->request_close();
+    }
     const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
     const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
     ensure_default_dock_layout(shell_state, dockspace_id, main_viewport);
@@ -598,21 +592,31 @@ void render_shell_frame(GLFWwindow* window, ShellState* shell_state) {
     }
 
     finalize_orphaned_inspector_transform_gesture(shell_state);
-    finalize_orphaned_viewport_translate_gesture(shell_state);
+    finalize_orphaned_viewport_transform_gesture(shell_state);
     finalize_orphaned_edit_action(shell_state);
 
     if (reload_requested) {
         reload_project(shell_state);
     }
 
-    ImGui::Render();
-    int framebuffer_width = 0;
-    int framebuffer_height = 0;
-    glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
-    glViewport(0, 0, framebuffer_width, framebuffer_height);
-    glClearColor(0.063f, 0.075f, 0.098f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    sg_pass main_pass{};
+    main_pass.swapchain = surface.swapchain;
+    main_pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+    main_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+    main_pass.action.colors[0].clear_value = {0.063f, 0.075f, 0.098f, 1.0f};
+    main_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+    main_pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
+    main_pass.action.depth.clear_value = 1.0f;
+    main_pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
+    main_pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
+    main_pass.action.stencil.clear_value = 0U;
+    main_pass.label = "marrow-editor-main-pass";
+    sg_begin_pass(&main_pass);
+    simgui_render();
+    sg_end_pass();
+    sg_commit();
+    window_host->present();
+    return std::nullopt;
 }
 
 
@@ -629,11 +633,14 @@ int main(int argc, char** argv) {
     }
 
     const bool smoke_mode = parse_result.options.auto_close_frames.has_value();
+    const char* display_smoke_value = std::getenv("MARROW_DISPLAY_SMOKE");
+    const bool display_smoke = display_smoke_value != nullptr &&
+        std::string_view(display_smoke_value) == "1";
 #if defined(__APPLE__)
     if (parse_result.options.verify_launch_focus) {
         return run_launch_focus_verification();
     }
-    if (smoke_mode) {
+    if (smoke_mode && !display_smoke) {
         return run_headless_smoke(parse_result.options);
     }
 #elif !defined(__APPLE__)
@@ -643,41 +650,47 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    glfwSetErrorCallback(glfw_error_callback);
-    glfwInitHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
-    glfwInitHint(GLFW_COCOA_MENUBAR, GLFW_FALSE);
-    if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW.\n";
+    auto window_host = create_sdl_window_host();
+    WindowHostConfig window_config;
+    window_config.title = std::string(marrow::editor::component_name());
+    window_config.visible = display_smoke || !smoke_mode;
+    window_config.vsync = !smoke_mode;
+#if defined(__APPLE__)
+    window_config.renderer_surface = RendererSurface::Metal;
+#else
+    window_config.renderer_surface = RendererSurface::OpenGL;
+#endif
+    if (const auto error = window_host->initialize(window_config)) {
+        std::cerr << "Failed to create the Marrow SDL editor shell: "
+                  << *error << '\n';
         return 1;
     }
-    configure_glfw_for_editor();
-    if (smoke_mode) {
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    }
 
-    const char* glsl_version = "#version 150";
-    const float scale = monitor_content_scale();
-    GLFWwindow* window = glfwCreateWindow(
-        static_cast<int>(1440.0f * scale),
-        static_cast<int>(900.0f * scale),
-        std::string(marrow::editor::component_name()).c_str(),
-        nullptr,
-        nullptr);
-    if (window == nullptr) {
-        std::cerr << "Failed to create the Marrow editor shell window.\n";
-        glfwTerminate();
+    SokolGraphicsDevice graphics_device;
+    const sg_environment graphics_environment =
+        window_host->graphics_environment();
+    if (const auto error = graphics_device.initialize(graphics_environment)) {
+        std::cerr << *error << '\n';
+        window_host->shutdown();
         return 1;
     }
 
 #if defined(__APPLE__)
-    activate_editor_window_on_launch(window);
+    activate_editor_window_on_launch(window_host->sdl_window());
 #endif
 
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(smoke_mode ? 0 : 1);
-
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    simgui_desc_t simgui_desc{};
+    simgui_desc.max_vertices = 1024 * 1024;
+    simgui_desc.color_format = graphics_environment.defaults.color_format;
+    simgui_desc.depth_format = graphics_environment.defaults.depth_format;
+    simgui_desc.sample_count = graphics_environment.defaults.sample_count;
+    simgui_desc.ini_filename = nullptr;
+    simgui_desc.no_default_font = true;
+    simgui_desc.disable_set_mouse_cursor = true;
+    simgui_desc.write_alpha_channel = true;
+    simgui_setup(&simgui_desc);
+
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -686,8 +699,21 @@ int main(int argc, char** argv) {
 
     apply_editor_theme();
     load_editor_fonts();
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init(glsl_version);
+#if defined(__APPLE__)
+    const bool imgui_platform_initialized =
+        ImGui_ImplSDL3_InitForMetal(window_host->sdl_window());
+#else
+    const bool imgui_platform_initialized = ImGui_ImplSDL3_InitForOpenGL(
+        window_host->sdl_window(),
+        window_host->gl_context());
+#endif
+    if (!imgui_platform_initialized) {
+        std::cerr << "Failed to initialize the Dear ImGui SDL3 platform backend.\n";
+        simgui_shutdown();
+        graphics_device.shutdown();
+        window_host->shutdown();
+        return 1;
+    }
 
     ShellState shell_state;
     shell_state.project_path = parse_result.options.project_path;
@@ -729,8 +755,18 @@ int main(int argc, char** argv) {
     }
 
     int rendered_frames = 0;
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+    std::uint64_t previous_frame_ticks = SDL_GetTicksNS();
+    while (!window_host->should_close()) {
+        window_host->poll_events([&](const SDL_Event& event) {
+            const auto pointer_event = translate_sdl_pointer_event(event);
+            if (pointer_event.has_value()) {
+                (void)shell_state.pointer_mediator.process(*pointer_event);
+            }
+            (void)ImGui_ImplSDL3_ProcessEvent(&event);
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                cancel_authoring_gestures(&shell_state, "window focus lost");
+            }
+        });
 
         marrow::editor::AgentCommandContext agent_context{
             shell_state.session,
@@ -740,8 +776,16 @@ int main(int argc, char** argv) {
             sync_shell_from_editor_session(&shell_state);
         }
 
-        render_shell_frame(window, &shell_state);
-        glfwSwapBuffers(window);
+        const std::uint64_t frame_ticks = SDL_GetTicksNS();
+        const double delta_time = previous_frame_ticks == 0U
+            ? (1.0 / 60.0)
+            : static_cast<double>(frame_ticks - previous_frame_ticks) / 1'000'000'000.0;
+        previous_frame_ticks = frame_ticks;
+        if (const auto error =
+                render_shell_frame(window_host.get(), &shell_state, delta_time)) {
+            std::cerr << *error << '\n';
+            break;
+        }
 
         ++rendered_frames;
         if (parse_result.options.auto_close_frames.has_value() &&
@@ -750,12 +794,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    cancel_authoring_gestures(&shell_state, "editor shutdown");
+    agent_server.stop();
     destroy_viewport_renderer(&shell_state.viewport_renderer);
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    shell_state.icons.unload_all();
+    ImGui_ImplSDL3_Shutdown();
+    simgui_shutdown();
+    graphics_device.shutdown();
+    window_host->shutdown();
 
     return 0;
 }

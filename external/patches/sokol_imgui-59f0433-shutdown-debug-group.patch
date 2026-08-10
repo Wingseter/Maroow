@@ -1,0 +1,18 @@
+From 59f0433236d483444d0f313cda6702fd47ea323e Mon Sep 17 00:00:00 2001
+Subject: [PATCH] fix sokol_imgui shutdown debug-group ordering
+
+Applied to util/sokol_imgui.h from sokol commit
+31d8a3fce5f85db03b66a8db7c4bd73fce55b8e4. This intentionally carries only
+the shutdown debug-group fix from the later commit, not the later generated
+shader or API changes.
+
+--- a/util/sokol_imgui.h
++++ b/util/sokol_imgui.h
+@@
+-    // NOTE: it's valid to call the destroy funcs with SG_INVALID_ID
++    // NOTE: it's valid to call the destroy funcs with SG_INVALID_ID
++    sg_push_debug_group("sokol-imgui");
+@@
+-    sg_pop_debug_group();
+-    sg_push_debug_group("sokol-imgui");
++    sg_pop_debug_group();

@@ -1,0 +1,69 @@
+Test project /Users/kwon/Workspace/C/Maroow/build-platform-release
+      Start  1: marrow.sokol_imgui_lifecycle
+ 1/20 Test  #1: marrow.sokol_imgui_lifecycle ..........   Passed    0.00 sec
+      Start  2: marrow.windowing_unit
+ 2/20 Test  #2: marrow.windowing_unit .................   Passed    0.00 sec
+      Start  3: marrow.pen_input_unit
+ 3/20 Test  #3: marrow.pen_input_unit .................   Passed    0.00 sec
+      Start  4: marrow.agent_socket_transport
+ 4/20 Test  #4: marrow.agent_socket_transport .........   Passed    0.54 sec
+      Start  5: marrow.window_host_smoke
+ 5/20 Test  #5: marrow.window_host_smoke ..............   Passed    1.03 sec
+      Start  6: marrow.gpu_parity_smoke
+ 6/20 Test  #6: marrow.gpu_parity_smoke ...............   Passed    0.90 sec
+      Start  7: marrow.editor_display_smoke
+ 7/20 Test  #7: marrow.editor_display_smoke ...........   Passed    1.09 sec
+      Start  8: marrow.runtime_unit
+ 8/20 Test  #8: marrow.runtime_unit ...................   Passed    0.04 sec
+      Start  9: marrow.preference_store
+ 9/20 Test  #9: marrow.preference_store ...............   Passed    0.46 sec
+      Start 10: marrow.selection_set
+10/20 Test #10: marrow.selection_set ..................   Passed    0.42 sec
+      Start 11: marrow.runtime_fixture_smoke
+11/20 Test #11: marrow.runtime_fixture_smoke ..........   Passed    0.02 sec
+      Start 12: marrow.renderer_skip_render_smoke
+12/20 Test #12: marrow.renderer_skip_render_smoke .....   Passed    0.01 sec
+      Start 13: marrow.project_smoke
+13/20 Test #13: marrow.project_smoke ..................   Passed    0.58 sec
+      Start 14: marrow.parameter_project_smoke
+14/20 Test #14: marrow.parameter_project_smoke ........   Passed    0.47 sec
+      Start 15: marrow.parameter_editor_shell_smoke
+15/20 Test #15: marrow.parameter_editor_shell_smoke ...   Passed    0.03 sec
+      Start 16: marrow.art_path_renderer_smoke
+16/20 Test #16: marrow.art_path_renderer_smoke ........   Passed    0.01 sec
+      Start 17: marrow.renderer_missing_atlas_guard
+17/20 Test #17: marrow.renderer_missing_atlas_guard ...   Passed    0.01 sec
+      Start 18: marrow.agent_dispatch_smoke
+18/20 Test #18: marrow.agent_dispatch_smoke ...........   Passed    0.51 sec
+      Start 19: marrow.c_abi_smoke
+19/20 Test #19: marrow.c_abi_smoke ....................   Passed    0.43 sec
+      Start 20: marrow.editor_shell_smoke
+20/20 Test #20: marrow.editor_shell_smoke .............   Passed    0.13 sec
+
+100% tests passed, 0 tests failed out of 20
+
+Label Time Summary:
+agent             =   1.05 sec*proc (2 tests)
+art-path          =   0.01 sec*proc (1 test)
+c-abi             =   0.43 sec*proc (1 test)
+dependency        =   0.00 sec*proc (1 test)
+display           =   3.02 sec*proc (3 tests)
+editor            =   4.22 sec*proc (9 tests)
+fixture           =   0.02 sec*proc (1 test)
+guardrail         =   0.01 sec*proc (1 test)
+integration       =   3.02 sec*proc (3 tests)
+noninteractive    =   3.66 sec*proc (17 tests)
+parameter         =   0.50 sec*proc (4 tests)
+pen               =   0.00 sec*proc (1 test)
+preferences       =   0.46 sec*proc (1 test)
+project           =   1.05 sec*proc (2 tests)
+renderer          =   0.93 sec*proc (5 tests)
+runtime           =   0.53 sec*proc (4 tests)
+selection         =   0.42 sec*proc (1 test)
+shell             =   0.16 sec*proc (2 tests)
+smoke             =   2.18 sec*proc (9 tests)
+socket            =   0.54 sec*proc (1 test)
+unit              =   1.47 sec*proc (6 tests)
+windowing         =   1.03 sec*proc (3 tests)
+
+Total Test time (real) =   6.68 sec
