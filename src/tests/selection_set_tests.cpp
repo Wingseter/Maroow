@@ -320,78 +320,6 @@ void test_atomic_invalid_and_no_ops(TestSuite& suite) {
     expect_items(suite, selections, before_items, "remap no-ops should preserve state");
 }
 
-void test_constraint_remap_delete_and_collision(TestSuite& suite) {
-    const ConstraintSelection old_ik{ConstraintKind::Ik, "old_follow"};
-    const ConstraintSelection new_ik{ConstraintKind::Ik, "new_follow"};
-    const SelectionItem body = slot("body");
-
-    SelectionSet selections;
-    selections.add_range({old_ik, body}, old_ik);
-    suite.expect(
-        selections.remap_constraint(old_ik, new_ik),
-        "constraint remap should rename the exact source in place");
-    expect_items(
-        suite,
-        selections,
-        {new_ik, body},
-        "constraint remap should preserve unrelated types and order");
-    suite.expect(
-        selections.active_constraint() != nullptr &&
-            *selections.active_constraint() == new_ik,
-        "active constraint should follow its renamed identity");
-
-    SelectionSet collision;
-    collision.add_range({new_ik, body, old_ik}, old_ik);
-    suite.expect(
-        collision.remap_constraint(old_ik, new_ik),
-        "constraint remap should collapse an exact target collision");
-    expect_items(
-        suite,
-        collision,
-        {new_ik, body},
-        "the first original constraint identity should survive a collision");
-    suite.expect(
-        collision.active_constraint() != nullptr &&
-            *collision.active_constraint() == new_ik,
-        "an active colliding source should follow the survivor");
-    suite.expect(
-        collision.remap_constraint(new_ik, std::nullopt),
-        "null constraint remap should delete only that constraint");
-    expect_items(
-        suite,
-        collision,
-        {body},
-        "constraint deletion should preserve unrelated selections");
-}
-
-void test_constraint_only_prune(TestSuite& suite) {
-    const SelectionItem root = bone("shared");
-    const SelectionItem shared_slot = slot("shared");
-    const ConstraintSelection ik{ConstraintKind::Ik, "shared"};
-    const ConstraintSelection path{ConstraintKind::Path, "shared"};
-    const ConstraintSelection physics{ConstraintKind::Physics, "keep"};
-
-    SelectionSet selections;
-    selections.add_range({root, ik, shared_slot, path, physics}, path);
-    suite.expect(
-        selections.prune_constraints([](const ConstraintSelection& selection) {
-            return selection.kind != ConstraintKind::Path;
-        }),
-        "constraint-only prune should remove a rejected kind and name pair");
-    expect_items(
-        suite,
-        selections,
-        {root, ik, shared_slot, physics},
-        "constraint-only prune should preserve other types and constraint kinds");
-    suite.expect(
-        selections.active_constraint() != nullptr &&
-            *selections.active_constraint() == physics,
-        "removing the active constraint should use the last survivor fallback");
-    suite.expect(
-        !selections.prune_constraints([](const ConstraintSelection&) { return true; }),
-        "an all-retained constraint prune should be a no-op");
-}
-
 void test_runtime_exact_identity_reconciliation(TestSuite& suite) {
     const auto project = marrow::editor::load_project("assets/fixtures/player_idle.marrow");
     suite.expect(
@@ -457,10 +385,6 @@ int main() {
     suite.run("Prune", [&] { test_prune(suite); });
     suite.run("Remap and collisions", [&] { test_remap_and_collisions(suite); });
     suite.run("Atomic invalid and no-ops", [&] { test_atomic_invalid_and_no_ops(suite); });
-    suite.run("Constraint remap delete and collision", [&] {
-        test_constraint_remap_delete_and_collision(suite);
-    });
-    suite.run("Constraint-only prune", [&] { test_constraint_only_prune(suite); });
     suite.run("Runtime exact identity reconciliation", [&] {
         test_runtime_exact_identity_reconciliation(suite);
     });

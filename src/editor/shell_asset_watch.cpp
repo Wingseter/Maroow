@@ -65,8 +65,7 @@ bool runtime_asset_watch_entry_equal(
 }
 
 std::vector<RuntimeAssetWatchEntry> capture_runtime_asset_watch_entries(
-    const ShellState& state) {
-    const std::vector<std::filesystem::path> paths = current_runtime_asset_paths(state);
+    const std::vector<std::filesystem::path>& paths) {
     std::vector<RuntimeAssetWatchEntry> entries;
     entries.reserve(paths.size());
     for (const auto& path : paths) {
@@ -109,7 +108,8 @@ void reset_runtime_asset_watch(ShellState* state) {
     if (state == nullptr) {
         return;
     }
-    state->runtime_asset_watch_entries = capture_runtime_asset_watch_entries(*state);
+    state->runtime_asset_watch_entries =
+        capture_runtime_asset_watch_entries(current_runtime_asset_paths(*state));
 }
 
 void materialize_temp_project_runtime_assets(
@@ -210,7 +210,7 @@ RuntimeAssetPollOutcome poll_runtime_asset_changes(ShellState* state) {
     }
 
     const std::vector<RuntimeAssetWatchEntry> current_entries =
-        capture_runtime_asset_watch_entries(*state);
+        capture_runtime_asset_watch_entries(current_paths);
     bool changed = false;
     for (std::size_t index = 0; index < current_entries.size(); ++index) {
         if (!runtime_asset_watch_entry_equal(

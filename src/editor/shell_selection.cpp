@@ -864,20 +864,6 @@ std::optional<PreviewAttachmentSelection> current_attachment_selection(
 }
 
 
-std::optional<PreviewAttachmentSelection> first_attachment_selection_for_slot(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::size_t slot_index) {
-    const auto attachments = collect_slot_attachments(skeleton, slot_index);
-    if (attachments.empty()) {
-        return std::nullopt;
-    }
-
-    return PreviewAttachmentSelection{
-        slot_index,
-        attachments.front().skin_index,
-        attachments.front().attachment->name};
-}
-
 std::vector<std::size_t> build_active_preview_skin_indices(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names) {

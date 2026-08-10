@@ -420,16 +420,18 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
         restore_history_snapshot(state, before);
         cancelled = true;
     }
-    if (state->animation_duration_gesture.has_value()) {
-        state->animation_duration_gesture->transaction.cancel();
-        state->animation_duration_gesture.reset();
-        cancelled = true;
-    }
-    if (state->inspector_transform_gesture.has_value()) {
-        state->inspector_transform_gesture->transaction.cancel();
-        state->inspector_transform_gesture.reset();
-        cancelled = true;
-    }
+    // This list must stay in step with authoring_gesture_active
+    // (shell_state.hpp); a gesture missing here leaks a live transaction
+    // that blocks every future begin_edit.
+    const auto cancel_transaction_gesture = [&](auto& gesture_slot) {
+        if (gesture_slot.has_value()) {
+            gesture_slot->transaction.cancel();
+            gesture_slot.reset();
+            cancelled = true;
+        }
+    };
+    cancel_transaction_gesture(state->animation_duration_gesture);
+    cancel_transaction_gesture(state->inspector_transform_gesture);
     if (state->viewport_transform_gesture.has_value()) {
         ViewportTransformGesture gesture =
             std::move(*state->viewport_transform_gesture);
@@ -440,21 +442,9 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
         state->selected_timeline_track_id = gesture.timeline_focus_before;
         cancelled = true;
     }
-    if (state->timeline_editor.retime_gesture.has_value()) {
-        state->timeline_editor.retime_gesture->transaction.cancel();
-        state->timeline_editor.retime_gesture.reset();
-        cancelled = true;
-    }
-    if (state->parameter_slider_gesture.has_value()) {
-        state->parameter_slider_gesture->transaction.cancel();
-        state->parameter_slider_gesture.reset();
-        cancelled = true;
-    }
-    if (state->parameter_geometry_gesture.has_value()) {
-        state->parameter_geometry_gesture->transaction.cancel();
-        state->parameter_geometry_gesture.reset();
-        cancelled = true;
-    }
+    cancel_transaction_gesture(state->timeline_editor.retime_gesture);
+    cancel_transaction_gesture(state->parameter_slider_gesture);
+    cancel_transaction_gesture(state->parameter_geometry_gesture);
     state->viewport_box_selection.reset();
     state->pointer_mediator.reset();
     sync_shell_from_editor_session(state);

@@ -1896,7 +1896,7 @@ void draw_viewport_fallback_scene(
     const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
     draw_debug_overlay_fallback(debug_overlay, draw_list);
 
-    if (state.viewport.debug_overlay.bones) {
+    if (state.viewport.debug_overlay.bones && state.load_result) {
         const ResolvedSelection resolved = resolve_shell_selection(state);
         std::vector<bool> selected_bones(
             state.load_result.skeleton_data->bones().size(), false);

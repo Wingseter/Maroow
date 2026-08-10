@@ -415,6 +415,10 @@ void AgentSocketServer::listen_loop(int port) {
                     continue;
                 }
                 std::cerr << "Agent socket accept failed." << std::endl;
+                // Persistent failures such as EMFILE keep the listening
+                // socket readable; without a backoff this loop spins a full
+                // core while flooding stderr.
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             continue;
         }

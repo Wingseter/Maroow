@@ -594,6 +594,9 @@ struct ShellState {
     std::string status_message;
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
+    /** Accumulates frame time so hot-reload stat() polling runs at ~4 Hz
+        instead of every frame. */
+    double runtime_asset_watch_accumulator_seconds{0.0};
     std::optional<marrow::runtime::ProfilerFrame> hud_overlay_frame;
     marrow::editor::IconRegistry icons{};
     std::array<char, 128> hierarchy_filter{};
@@ -609,6 +612,9 @@ struct ShellState {
     marrow::editor::AgentControlState agent_control{};
 };
 
+// This member list must stay in step with cancel_authoring_gestures
+// (shell_core.cpp): the predicate gates every begin-gesture path, and the
+// cancel list releases the matching live transactions.
 inline bool authoring_gesture_active(const ShellState& state) noexcept {
     return state.pending_edit_action.has_value() ||
         state.animation_duration_gesture.has_value() ||
@@ -666,6 +672,10 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr double kOnionSkinFrameRate = 60.0;
 constexpr double kOnionSkinFrameDuration = 1.0 / kOnionSkinFrameRate;
 // Shared shell/session helpers.
+// selected_bone_index/selected_bone_name/selected_attachment resolve the
+// CONTEXT entity (slot/attachment selections fall back to owners); production
+// consumers migrated to ResolvedSelection's active-item fields (MAR-158) and
+// only shell_smoke still observes the context contract through these.
 std::optional<std::size_t> selected_bone_index(const ShellState& state);
 std::optional<std::string_view> selected_bone_name(const ShellState& state);
 std::optional<std::size_t> selected_slot_index(const ShellState& state);

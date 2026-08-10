@@ -511,18 +511,23 @@ void ensure_default_dock_layout(
     state->default_dock_layout_initialized = true;
 }
 
-std::optional<std::string> render_shell_frame(
+struct ShellFrameOutcome {
+    bool rendered{false};
+    std::optional<std::string> error;
+};
+
+ShellFrameOutcome render_shell_frame(
     EditorWindowHost* window_host,
     ShellState* shell_state,
     double delta_time) {
     const WindowMetrics metrics = window_host->metrics();
     if (metrics.minimized || metrics.drawable_width <= 0 ||
         metrics.drawable_height <= 0) {
-        return std::nullopt;
+        return {};
     }
     const FrameSurface surface = window_host->acquire_frame_surface();
     if (!surface.acquired) {
-        return std::nullopt;
+        return {};
     }
 
     sync_shell_from_editor_session_if_revised(shell_state);
@@ -533,7 +538,11 @@ std::optional<std::string> render_shell_frame(
     frame_desc.delta_time = std::max(delta_time, 0.000001);
     frame_desc.dpi_scale = std::max(metrics.framebuffer_scale_x, 1.0f);
     simgui_new_frame(&frame_desc);
-    if (!authoring_gesture_active(*shell_state)) {
+    // Hot-reload detection needs ~4 Hz, not one stat() sweep per frame.
+    shell_state->runtime_asset_watch_accumulator_seconds += delta_time;
+    if (!authoring_gesture_active(*shell_state) &&
+        shell_state->runtime_asset_watch_accumulator_seconds >= 0.25) {
+        shell_state->runtime_asset_watch_accumulator_seconds = 0.0;
         (void)poll_runtime_asset_changes(shell_state);
     }
     advance_timeline_playback(shell_state, ImGui::GetIO().DeltaTime);
@@ -616,7 +625,7 @@ std::optional<std::string> render_shell_frame(
     sg_end_pass();
     sg_commit();
     window_host->present();
-    return std::nullopt;
+    return {true, std::nullopt};
 }
 
 
@@ -755,6 +764,8 @@ int main(int argc, char** argv) {
     }
 
     int rendered_frames = 0;
+    int consecutive_skipped_frames = 0;
+    bool surface_starved = false;
     std::uint64_t previous_frame_ticks = SDL_GetTicksNS();
     while (!window_host->should_close()) {
         window_host->poll_events([&](const SDL_Event& event) {
@@ -781,13 +792,26 @@ int main(int argc, char** argv) {
             ? (1.0 / 60.0)
             : static_cast<double>(frame_ticks - previous_frame_ticks) / 1'000'000'000.0;
         previous_frame_ticks = frame_ticks;
-        if (const auto error =
-                render_shell_frame(window_host.get(), &shell_state, delta_time)) {
-            std::cerr << *error << '\n';
+        const ShellFrameOutcome frame_outcome =
+            render_shell_frame(window_host.get(), &shell_state, delta_time);
+        if (frame_outcome.error.has_value()) {
+            std::cerr << *frame_outcome.error << '\n';
             break;
         }
 
-        ++rendered_frames;
+        // Skipped frames (minimized window, unacquired surface) must not
+        // count toward --auto-close, or a display smoke could exit 0 having
+        // rendered nothing.
+        if (frame_outcome.rendered) {
+            rendered_frames += 1;
+            consecutive_skipped_frames = 0;
+        } else if (parse_result.options.auto_close_frames.has_value() &&
+                   ++consecutive_skipped_frames >= 1000) {
+            std::cerr << "Editor shell could not acquire a drawable surface "
+                         "after 1000 consecutive attempts.\n";
+            surface_starved = true;
+            break;
+        }
         if (parse_result.options.auto_close_frames.has_value() &&
             rendered_frames >= *parse_result.options.auto_close_frames) {
             break;
@@ -803,5 +827,5 @@ int main(int argc, char** argv) {
     graphics_device.shutdown();
     window_host->shutdown();
 
-    return 0;
+    return surface_starved ? 1 : 0;
 }

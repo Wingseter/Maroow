@@ -60,7 +60,6 @@ private:
     std::string atlas_filter_mag_;
     std::string atlas_wrap_x_;
     std::string atlas_wrap_y_;
-    bool atlas_premultiplied_alpha_{false};
     std::uint32_t color_format_{0};
     std::uint32_t depth_format_{0};
     int sample_count_{1};

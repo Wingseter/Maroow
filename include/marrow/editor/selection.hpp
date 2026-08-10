@@ -99,7 +99,6 @@ using SelectionItem = std::variant<
 class SelectionSet {
 public:
     using Predicate = std::function<bool(const SelectionItem&)>;
-    using ConstraintPredicate = std::function<bool(const ConstraintSelection&)>;
 
     /** @brief Replaces all members with one active item. */
     bool replace(SelectionItem item);
@@ -134,12 +133,6 @@ public:
     bool remap(
         const SelectionItem& from,
         std::optional<SelectionItem> to);
-    /** @brief Remaps one exact constraint identity without touching other types. */
-    bool remap_constraint(
-        const ConstraintSelection& from,
-        std::optional<ConstraintSelection> to);
-    /** @brief Prunes only constraints rejected by `predicate`. */
-    bool prune_constraints(const ConstraintPredicate& predicate);
 
 private:
     std::vector<SelectionItem> items_;

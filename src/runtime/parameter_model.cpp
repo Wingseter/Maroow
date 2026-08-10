@@ -10,12 +10,10 @@
 namespace marrow::runtime {
 namespace {
 
-constexpr double kCoordinateEpsilon = 1e-9;
 constexpr double kPi = 3.14159265358979323846;
 
 bool nearly_equal(double lhs, double rhs) {
-    return std::abs(lhs - rhs) <=
-        kCoordinateEpsilon * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+    return detail::parameter_nearly_equal(lhs, rhs);
 }
 
 bool finite_vertex(const AttachmentVertex& vertex) {
@@ -29,36 +27,6 @@ bool valid_color(const SlotColor& color) {
         color.b >= 0.0 && color.b <= 1.0 && color.a >= 0.0 && color.a <= 1.0;
 }
 
-bool shape_targets_overlap(
-    const std::vector<SkinData>& skins,
-    std::size_t slot_index,
-    std::string_view lhs,
-    std::string_view rhs) {
-    for (const SkinData& skin : skins) {
-        for (const SkinSlotData& candidate : skin.slot_attachments) {
-            if (candidate.slot_index == slot_index &&
-                detail::attachment_matches_mesh_deform_source(candidate.attachment, lhs) &&
-                detail::attachment_matches_mesh_deform_source(candidate.attachment, rhs)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool slot_has_mesh_attachment(
-    const std::vector<SkinData>& skins,
-    std::size_t slot_index) {
-    for (const SkinData& skin : skins) {
-        for (const SkinSlotData& candidate : skin.slot_attachments) {
-            if (candidate.slot_index == slot_index &&
-                candidate.attachment.mesh_geometry != nullptr) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
 
 void require_non_empty_id(std::string_view id, std::string_view label) {
     if (id.empty()) {
@@ -168,38 +136,59 @@ AttachmentVertex lerp_vertex(
     };
 }
 
-AttachmentVertex evaluated_warp_control_point(
+/**
+ * Corner keyforms and interpolation weights for one (x, y) parameter pair.
+ * Independent of the control-point index, so callers evaluating many control
+ * points against the same parameters compute this once.
+ */
+struct WarpKeyformBasis {
+    const WarpDeformerKeyform* lower_lower{nullptr};
+    const WarpDeformerKeyform* upper_lower{nullptr};
+    const WarpDeformerKeyform* lower_upper{nullptr};
+    const WarpDeformerKeyform* upper_upper{nullptr};
+    double x_alpha{0.0};
+    double y_alpha{0.0};
+
+    bool valid() const {
+        return lower_lower != nullptr && upper_lower != nullptr &&
+            lower_upper != nullptr && upper_upper != nullptr;
+    }
+};
+
+WarpKeyformBasis evaluate_warp_keyform_basis(
     const ParameterDeformerDefinition& deformer,
-    std::size_t control_point_index,
     double x,
     double y) {
     const std::vector<double> x_coordinates = sorted_unique_coordinates(deformer.warp_keyforms, true);
     const std::vector<double> y_coordinates = sorted_unique_coordinates(deformer.warp_keyforms, false);
     const CoordinateBracket x_bracket = bracket_coordinate(x_coordinates, x);
     const CoordinateBracket y_bracket = bracket_coordinate(y_coordinates, y);
+    return {
+        find_warp_keyform(deformer, x_bracket.lower, y_bracket.lower),
+        find_warp_keyform(deformer, x_bracket.upper, y_bracket.lower),
+        find_warp_keyform(deformer, x_bracket.lower, y_bracket.upper),
+        find_warp_keyform(deformer, x_bracket.upper, y_bracket.upper),
+        x_bracket.alpha,
+        y_bracket.alpha};
+}
 
-    const WarpDeformerKeyform* lower_lower =
-        find_warp_keyform(deformer, x_bracket.lower, y_bracket.lower);
-    const WarpDeformerKeyform* upper_lower =
-        find_warp_keyform(deformer, x_bracket.upper, y_bracket.lower);
-    const WarpDeformerKeyform* lower_upper =
-        find_warp_keyform(deformer, x_bracket.lower, y_bracket.upper);
-    const WarpDeformerKeyform* upper_upper =
-        find_warp_keyform(deformer, x_bracket.upper, y_bracket.upper);
-    if (lower_lower == nullptr || upper_lower == nullptr || lower_upper == nullptr ||
-        upper_upper == nullptr) {
+AttachmentVertex evaluated_warp_control_point(
+    const ParameterDeformerDefinition& deformer,
+    const WarpKeyformBasis& basis,
+    std::size_t control_point_index) {
+    if (!basis.valid()) {
         return deformer.control_points[control_point_index];
     }
 
     const AttachmentVertex bottom = lerp_vertex(
-        lower_lower->control_points[control_point_index],
-        upper_lower->control_points[control_point_index],
-        x_bracket.alpha);
+        basis.lower_lower->control_points[control_point_index],
+        basis.upper_lower->control_points[control_point_index],
+        basis.x_alpha);
     const AttachmentVertex top = lerp_vertex(
-        lower_upper->control_points[control_point_index],
-        upper_upper->control_points[control_point_index],
-        x_bracket.alpha);
-    return lerp_vertex(bottom, top, y_bracket.alpha);
+        basis.lower_upper->control_points[control_point_index],
+        basis.upper_upper->control_points[control_point_index],
+        basis.x_alpha);
+    return lerp_vertex(bottom, top, basis.y_alpha);
 }
 
 bool coordinate_between(double value, double first, double second) {
@@ -265,14 +254,16 @@ AttachmentVertex apply_warp_deformer(
 
     const double parameter_x = parameter_values[x_parameter];
     const double parameter_y = parameter_values[y_parameter];
-    const AttachmentVertex lower_left = evaluated_warp_control_point(
-        deformer, lower_left_index, parameter_x, parameter_y);
-    const AttachmentVertex lower_right = evaluated_warp_control_point(
-        deformer, lower_right_index, parameter_x, parameter_y);
-    const AttachmentVertex upper_left = evaluated_warp_control_point(
-        deformer, upper_left_index, parameter_x, parameter_y);
-    const AttachmentVertex upper_right = evaluated_warp_control_point(
-        deformer, upper_right_index, parameter_x, parameter_y);
+    const WarpKeyformBasis basis =
+        evaluate_warp_keyform_basis(deformer, parameter_x, parameter_y);
+    const AttachmentVertex lower_left =
+        evaluated_warp_control_point(deformer, basis, lower_left_index);
+    const AttachmentVertex lower_right =
+        evaluated_warp_control_point(deformer, basis, lower_right_index);
+    const AttachmentVertex upper_left =
+        evaluated_warp_control_point(deformer, basis, upper_left_index);
+    const AttachmentVertex upper_right =
+        evaluated_warp_control_point(deformer, basis, upper_right_index);
     return lerp_vertex(
         lerp_vertex(lower_left, lower_right, u),
         lerp_vertex(upper_left, upper_right, u),
@@ -606,7 +597,7 @@ void SkeletonData::initialize_parameter_model() {
                     parameter_model_.parameter_shapes[previous_index];
                 if (existing.blend_mode == ParameterShapeBlendMode::NormalizedOverride &&
                     existing.target_slot_index == shape.target_slot_index &&
-                    shape_targets_overlap(
+                    detail::shape_targets_overlap(
                         skins_,
                         *slot_index,
                         existing.target_attachment,
@@ -645,7 +636,7 @@ void SkeletonData::initialize_parameter_model() {
                     "parameter deformer '" + deformer.id + "' repeats target slot '" +
                     target_slot + "'");
             }
-            if (!slot_has_mesh_attachment(skins_, *slot_index)) {
+            if (!detail::slot_has_mesh_attachment(skins_, *slot_index)) {
                 throw std::invalid_argument(
                     "parameter deformer '" + deformer.id + "' target slot '" +
                     target_slot + "' must contain a mesh attachment");

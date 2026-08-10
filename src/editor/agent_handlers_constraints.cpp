@@ -1,4 +1,5 @@
 #include "agent_dispatch_internal.hpp"
+#include "shell_constraints.hpp"
 
 #include <string>
 #include <utility>
@@ -28,13 +29,8 @@ AgentDispatchResult handle_constraint_operation(
 
         if (bool_arg(args, "dry_run")) {
             const IkConstraintEdit* project_edit = project.find_ik_constraint_edit(*name);
-            const marrow::runtime::IkConstraintData* runtime_constraint = nullptr;
-            for (const auto& constraint : skeleton.ik_constraints()) {
-                if (constraint.name == *name) {
-                    runtime_constraint = &constraint;
-                    break;
-                }
-            }
+            const marrow::runtime::IkConstraintData* runtime_constraint =
+                shell::find_named_constraint(skeleton.ik_constraints(), *name);
             if (project_edit == nullptr && runtime_constraint == nullptr) {
                 return make_error(
                     "IK constraint not found in runtime skeleton.",
@@ -71,13 +67,8 @@ AgentDispatchResult handle_constraint_operation(
         ProjectData& editable_project = *transaction.project();
         IkConstraintEdit* edit = editable_project.find_ik_constraint_edit(*name);
         if (edit == nullptr) {
-            const marrow::runtime::IkConstraintData* runtime_constraint = nullptr;
-            for (const auto& constraint : skeleton.ik_constraints()) {
-                if (constraint.name == *name) {
-                    runtime_constraint = &constraint;
-                    break;
-                }
-            }
+            const marrow::runtime::IkConstraintData* runtime_constraint =
+                shell::find_named_constraint(skeleton.ik_constraints(), *name);
             if (runtime_constraint == nullptr) {
                 return make_error(
                     "IK constraint not found in runtime skeleton.",

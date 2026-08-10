@@ -10,27 +10,12 @@
 #include <vector>
 
 namespace marrow::runtime::detail {
-namespace {
-
-using json::Document;
-using json::LoadError;
-using json::Value;
 
 constexpr double kParameterCoordinateEpsilon = 1e-9;
 
 bool parameter_nearly_equal(double lhs, double rhs) {
     return std::abs(lhs - rhs) <=
         kParameterCoordinateEpsilon * std::max({1.0, std::abs(lhs), std::abs(rhs)});
-}
-
-bool has_effective_path_segment(const std::vector<AttachmentVertex>& points) {
-    for (std::size_t index = 1; index < points.size(); ++index) {
-        if (!parameter_nearly_equal(points[index - 1U].x, points[index].x) ||
-            !parameter_nearly_equal(points[index - 1U].y, points[index].y)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 bool shape_targets_overlap(
@@ -63,6 +48,24 @@ bool slot_has_mesh_attachment(
     }
     return false;
 }
+
+namespace {
+
+using json::Document;
+using json::LoadError;
+using json::Value;
+
+
+bool has_effective_path_segment(const std::vector<AttachmentVertex>& points) {
+    for (std::size_t index = 1; index < points.size(); ++index) {
+        if (!parameter_nearly_equal(points[index - 1U].x, points[index].x) ||
+            !parameter_nearly_equal(points[index - 1U].y, points[index].y)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 LoadError parameter_error(
     const Document& document,

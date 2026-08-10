@@ -847,15 +847,42 @@ bool apply_weight_paint_sample(
         return false;
     }
 
-    const marrow::editor::ProjectData previous_project = *state->load_result.project;
-    store_mesh_weight_attachment_edit(state->load_result.project.get(), std::move(next_edit));
+    // store_mesh_weight_attachment_edit touches exactly one attachment edit,
+    // so snapshot that entry (or its absence) as the rollback buffer instead
+    // of deep-copying the whole ProjectData at brush-sample rate.
+    marrow::editor::ProjectData* project = state->load_result.project.get();
+    marrow::editor::MeshWeightAttachmentEdit* existing_edit =
+        project->find_mesh_weight_attachment_edit(
+            next_edit.skin_name,
+            next_edit.slot_name,
+            next_edit.attachment_name);
+    const bool had_edit = existing_edit != nullptr;
+    marrow::editor::MeshWeightAttachmentEdit previous_edit;
+    if (had_edit) {
+        previous_edit = *existing_edit;
+    }
+    const auto restore_previous_edit = [&]() {
+        if (had_edit) {
+            marrow::editor::MeshWeightAttachmentEdit* stored =
+                project->find_mesh_weight_attachment_edit(
+                    previous_edit.skin_name,
+                    previous_edit.slot_name,
+                    previous_edit.attachment_name);
+            if (stored != nullptr) {
+                *stored = previous_edit;
+            }
+        } else {
+            project->mesh_weight_attachment_edits.pop_back();
+        }
+    };
+    store_mesh_weight_attachment_edit(project, std::move(next_edit));
     if (!rebuild_project_runtime(state)) {
-        *state->load_result.project = previous_project;
+        restore_previous_edit();
         state->status_message = "Weight paint stroke failed";
         return false;
     }
     if (!apply_current_animation_state_to_preview(state)) {
-        *state->load_result.project = previous_project;
+        restore_previous_edit();
         state->status_message = "Weight paint stroke failed";
         return false;
     }

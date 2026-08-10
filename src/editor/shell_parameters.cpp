@@ -1165,10 +1165,11 @@ void draw_shapes_deformers_window(ShellState* state) {
         if (selected_definition != nullptr) {
             ImGui::SeparatorText("Definition");
             if (selected_shape != nullptr) {
-                auto edited = *selected_shape;
-                bool normalized = edited.blend_mode ==
+                bool normalized = selected_shape->blend_mode ==
                     marrow::runtime::ParameterShapeBlendMode::NormalizedOverride;
                 if (ImGui::Checkbox("Normalized Override", &normalized)) {
+                    // Deep-copy the definition only once an edit happened.
+                    auto edited = *selected_shape;
                     edited.blend_mode = normalized
                         ? marrow::runtime::ParameterShapeBlendMode::NormalizedOverride
                         : marrow::runtime::ParameterShapeBlendMode::AdditiveClamped;
@@ -1186,43 +1187,58 @@ void draw_shapes_deformers_window(ShellState* state) {
                     return;
                 }
             } else if (selected_deformer != nullptr) {
-                auto edited = *selected_deformer;
-                bool definition_changed = input_string_field("Name", &edited.name);
+                // Widgets read from the const selection; the definition (warp
+                // grids, keyforms, preserved source) is deep-copied only once
+                // an edit actually happened.
+                std::string edited_name = selected_deformer->name;
+                std::optional<std::string> edited_parent = selected_deformer->parent;
+                double edited_influence = selected_deformer->influence;
+                int columns = static_cast<int>(selected_deformer->grid_cols);
+                int rows = static_cast<int>(selected_deformer->grid_rows);
+                bool grid_changed = false;
+                bool definition_changed = input_string_field("Name", &edited_name);
                 if (ImGui::BeginCombo(
                         "Parent",
-                        edited.parent.has_value() ? edited.parent->c_str() : "<none>")) {
-                    if (ImGui::Selectable("<none>", !edited.parent.has_value())) {
-                        edited.parent.reset();
+                        edited_parent.has_value() ? edited_parent->c_str() : "<none>")) {
+                    if (ImGui::Selectable("<none>", !edited_parent.has_value())) {
+                        edited_parent.reset();
                         definition_changed = true;
                     }
                     for (const auto& candidate : model->deformers) {
-                        if (candidate.id == edited.id) continue;
-                        const bool is_selected = edited.parent ==
+                        if (candidate.id == selected_deformer->id) continue;
+                        const bool is_selected = edited_parent ==
                             std::optional<std::string>(candidate.id);
                         if (ImGui::Selectable(candidate.id.c_str(), is_selected)) {
-                            edited.parent = candidate.id;
+                            edited_parent = candidate.id;
                             definition_changed = true;
                         }
                     }
                     ImGui::EndCombo();
                 }
-                if (edited.kind == marrow::runtime::ParameterDeformerKind::Rotation) {
+                if (selected_deformer->kind ==
+                    marrow::runtime::ParameterDeformerKind::Rotation) {
                     definition_changed |= ImGui::InputDouble(
-                        "Influence", &edited.influence, 0.01, 0.1);
+                        "Influence", &edited_influence, 0.01, 0.1);
                 } else {
-                    int columns = static_cast<int>(edited.grid_cols);
-                    int rows = static_cast<int>(edited.grid_rows);
-                    bool grid_changed = ImGui::InputInt("Grid Columns", &columns);
+                    grid_changed = ImGui::InputInt("Grid Columns", &columns);
                     grid_changed |= ImGui::InputInt("Grid Rows", &rows);
                     if (grid_changed && columns >= 2 && rows >= 2) {
+                        definition_changed = true;
+                    } else {
+                        grid_changed = false;
+                    }
+                }
+                if (definition_changed) {
+                    auto edited = *selected_deformer;
+                    edited.name = std::move(edited_name);
+                    edited.parent = std::move(edited_parent);
+                    edited.influence = edited_influence;
+                    if (grid_changed) {
                         resize_warp_grid(
                             &edited,
                             static_cast<std::size_t>(columns),
                             static_cast<std::size_t>(rows));
-                        definition_changed = true;
                     }
-                }
-                if (definition_changed) {
                     Value edited_value =
                         marrow::editor::build_parameter_deformer_authoring_value(edited);
                     (void)apply_persistent_parameter_edit(

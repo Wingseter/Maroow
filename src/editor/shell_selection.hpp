@@ -119,9 +119,6 @@ std::optional<SlotAttachmentReference> resolve_attachment_reference(
 std::optional<PreviewAttachmentSelection> current_attachment_selection(
     const ShellState& state,
     std::size_t slot_index);
-std::optional<PreviewAttachmentSelection> first_attachment_selection_for_slot(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::size_t slot_index);
 std::vector<std::size_t> build_active_preview_skin_indices(
     const marrow::runtime::SkeletonData& skeleton,
     const std::vector<std::string>& preview_skin_names);

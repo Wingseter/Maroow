@@ -179,6 +179,19 @@ bool attachment_matches_mesh_deform_source(
     const AttachmentData& attachment,
     std::string_view source_attachment_name);
 
+/** Shared relative-epsilon comparison for parameter coordinates; parse-time
+    and model-time validation must agree on it. */
+bool parameter_nearly_equal(double lhs, double rhs);
+/** True when both attachments deform the same mesh source in `slot_index`. */
+bool shape_targets_overlap(
+    const std::vector<SkinData>& skins,
+    std::size_t slot_index,
+    std::string_view lhs,
+    std::string_view rhs);
+bool slot_has_mesh_attachment(
+    const std::vector<SkinData>& skins,
+    std::size_t slot_index);
+
 void build_path_distance_samples(
     const std::vector<AttachmentVertex>& control_points,
     std::vector<PathDistanceSample>* samples_out);

@@ -206,23 +206,6 @@ bool SelectionSet::remap(
     return true;
 }
 
-bool SelectionSet::remap_constraint(
-    const ConstraintSelection& from,
-    std::optional<ConstraintSelection> to) {
-    return remap(
-        SelectionItem(from),
-        to.has_value()
-            ? std::optional<SelectionItem>(SelectionItem(std::move(*to)))
-            : std::nullopt);
-}
-
-bool SelectionSet::prune_constraints(const ConstraintPredicate& predicate) {
-    return prune([&](const SelectionItem& item) {
-        const auto* constraint = std::get_if<ConstraintSelection>(&item);
-        return constraint == nullptr || predicate(*constraint);
-    });
-}
-
 bool selection_item_exists(
     const SelectionItem& item,
     const runtime::SkeletonData& skeleton) {

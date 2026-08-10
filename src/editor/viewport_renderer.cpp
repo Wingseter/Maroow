@@ -42,7 +42,6 @@ void ViewportRenderer::destroy() {
     atlas_filter_mag_.clear();
     atlas_wrap_x_.clear();
     atlas_wrap_y_.clear();
-    atlas_premultiplied_alpha_ = false;
     color_format_ = 0U;
     depth_format_ = 0U;
     sample_count_ = 1;
@@ -132,8 +131,10 @@ std::optional<std::string> ViewportRenderer::ensure_atlas_resources(
         atlas_filter_min_ == scene.atlas_filter_min &&
         atlas_filter_mag_ == scene.atlas_filter_mag &&
         atlas_wrap_x_ == scene.atlas_wrap_x &&
-        atlas_wrap_y_ == scene.atlas_wrap_y &&
-        atlas_premultiplied_alpha_ == scene.premultiplied_alpha) {
+        atlas_wrap_y_ == scene.atlas_wrap_y) {
+        // premultiplied_alpha is deliberately absent: it is consumed
+        // per-command-list at submit time, so the cached GPU resources do
+        // not depend on it and mixed-PMA scenes must not thrash rebuilds.
         return std::nullopt;
     }
 
@@ -166,7 +167,6 @@ std::optional<std::string> ViewportRenderer::ensure_atlas_resources(
     atlas_filter_mag_ = scene.atlas_filter_mag;
     atlas_wrap_x_ = scene.atlas_wrap_x;
     atlas_wrap_y_ = scene.atlas_wrap_y;
-    atlas_premultiplied_alpha_ = scene.premultiplied_alpha;
     return std::nullopt;
 }
 

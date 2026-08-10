@@ -352,6 +352,12 @@ public:
         if (swapchain_color_format_ == SG_PIXELFORMAT_NONE) {
             return "Scene renderer requires an explicit color format.";
         }
+        if (swapchain_depth_format_ == SG_PIXELFORMAT_NONE) {
+            // Stencil-based clipping builds pipelines against this format;
+            // silently accepting NONE surfaces as a pipeline/pass mismatch
+            // (or clips that stop clipping) far from the actual mistake.
+            return "Scene renderer requires an explicit depth-stencil format.";
+        }
         if (const std::optional<std::string> error = create_render_resources(create_info)) {
             destroy_scene_resources();
             return error;

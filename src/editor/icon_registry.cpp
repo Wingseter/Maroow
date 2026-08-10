@@ -219,11 +219,15 @@ bool IconRegistry::all_loaded() const {
 }
 
 std::string_view icon_filename_stem(Icon icon) {
-    const std::size_t index = static_cast<std::size_t>(icon);
-    if (index >= kIconTable.size()) {
-        return {};
+    // Look up by the row's declared icon rather than by position, so an
+    // out-of-order kIconTable row cannot silently return the wrong stem
+    // (and collide ImGui button IDs derived from it).
+    for (const auto& entry : kIconTable) {
+        if (entry.icon == icon) {
+            return entry.stem;
+        }
     }
-    return kIconTable[index].stem;
+    return {};
 }
 
 } // namespace marrow::editor

@@ -1,5 +1,7 @@
 #include "marrow/editor/agent_dispatch.hpp"
 
+#include "shell_constraints.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -849,34 +851,19 @@ marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
 const marrow::runtime::PathConstraintData* find_runtime_path_constraint(
     const marrow::runtime::SkeletonData& skeleton,
     std::string_view name) {
-    for (const auto& constraint : skeleton.path_constraints()) {
-        if (constraint.name == name) {
-            return &constraint;
-        }
-    }
-    return nullptr;
+    return shell::find_named_constraint(skeleton.path_constraints(), name);
 }
 
 const marrow::runtime::TransformConstraintData* find_runtime_transform_constraint(
     const marrow::runtime::SkeletonData& skeleton,
     std::string_view name) {
-    for (const auto& constraint : skeleton.transform_constraints()) {
-        if (constraint.name == name) {
-            return &constraint;
-        }
-    }
-    return nullptr;
+    return shell::find_named_constraint(skeleton.transform_constraints(), name);
 }
 
 const marrow::runtime::PhysicsConstraintData* find_runtime_physics_constraint(
     const marrow::runtime::SkeletonData& skeleton,
     std::string_view name) {
-    for (const auto& constraint : skeleton.physics_constraints()) {
-        if (constraint.name == name) {
-            return &constraint;
-        }
-    }
-    return nullptr;
+    return shell::find_named_constraint(skeleton.physics_constraints(), name);
 }
 
 PathConstraintEdit path_constraint_edit_from_runtime(

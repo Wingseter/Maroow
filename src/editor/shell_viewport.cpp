@@ -1777,7 +1777,9 @@ void build_viewport_overlay_geometry(
     const DebugOverlayGeometry debug_overlay = build_debug_overlay_geometry(state, layout);
     append_debug_overlay_geometry(layout, debug_overlay, &line_vertices, &triangle_vertices);
 
-    if (state.viewport.debug_overlay.bones) {
+    // Public entry point (shell_state.hpp): must self-guard against a failed
+    // project load before dereferencing skeleton_data.
+    if (state.viewport.debug_overlay.bones && state.load_result) {
         const ResolvedSelection resolved = resolve_shell_selection(state);
         std::vector<bool> selected_bones(
             state.load_result.skeleton_data->bones().size(), false);
