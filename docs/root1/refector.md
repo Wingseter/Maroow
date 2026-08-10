@@ -138,3 +138,57 @@ The direct compatibility commands remain required:
 ```
 
 Interactive Metal rendering and macOS launch focus remain manual host checks where sandboxed window or Metal-device creation is unavailable.
+
+## Task #27 maintenance checkpoint (2026-08-10)
+
+Task #27 is a behavior-preserving maintenance checkpoint based on the clean
+`53b2285` tree. It does not create or close a MAR story, change the existing
+story dependency order, or alter any platform-qualification decision.
+
+The work was integrated as five dependency-ordered, independently validated
+commits:
+
+| Checkpoint | Commit | Result |
+| --- | --- | --- |
+| Remove smoke wrapper layers | `c163d97` | Removed the `*_for_smoke` and viewport `*_impl` indirection; production UI and smoke coverage now use the same shell-private interaction entry points. |
+| Deduplicate Agent constraint edits and commit policy | `e7f7123` | Added the shared Path/Transform/Physics typed edit flow and commit policy while preserving operation-specific deltas, error codes, messages, no-op behavior, rollback, and `Agent` undo grouping; IK remains independent. |
+| Share coalesced-edit and viewport-transform lifecycle | `686fcfc` | Centralized activation, sampling, finalization, orphan handling, cancellation, rollback, and common transform snapshots without normalizing feature-specific mutation semantics. |
+| Use typed parameter-panel fields | `070cce5` | Removed per-frame definition JSON round trips from shape/deformer/expression/lip panels; edits clone only on input and preserve additive unknown source fields. |
+| Add revision-keyed derived caches | `ccb53b0` | Added shell-private timeline and slot caches keyed by runtime revision and runtime identity, including pinned slot identity references, sorted-unique timeline names, and generation-based smoke coverage. |
+
+The checkpoint preserves public `include/marrow/**` interfaces, `.marrow`,
+`.mskl` v1, `.mbin` v2, `.matl` v1, C ABI v1, all 56 Agent/MCP operations,
+wire responses, undo grouping, and selection behavior. The new interaction,
+coalesced-edit, and cache helpers remain private to `marrow_editor_shell`; the
+UI-free `marrow_editor` target boundary is unchanged. Production source has no
+remaining `*_for_smoke` symbols. The two direct production timeline rebuilds
+after add-key and retime remain intentionally uncached so the current frame
+does not retain invalid row references.
+
+### Task #27 validation record
+
+The final gate completed on this macOS host:
+
+- Default configure/build completed, and `marrow_verify_third_party` verified
+  the pinned SDL3, Dear ImGui, Sokol, patched sokol_imgui, sokol-shdc, and
+  generated shader artifacts.
+- Default CTest passed 17/17.
+- The display-enabled build passed 20/20 on the host, including the three
+  actual SDL/Metal display tests.
+- The Release display-enabled build passed 20/20 on the host.
+- `marrow_agent_dispatch_smoke`, `marrow_c_smoke`, and
+  `marrow_parameter_project_smoke` passed.
+- Project export, exported-runtime loading, and JSON/MBIN v2 comparison passed;
+  the comparison matched with `rotation_error=0.00274662deg` and
+  `position_error=0.000811016px`.
+- MCP Python sources passed syntax compilation, and the live editor/socket MCP
+  client completed with `mcp test_client: PASSED` on `127.0.0.1:9877`.
+- Source guards found zero production `*_for_smoke` symbols, and
+  `git diff --check` passed.
+
+The display/socket suites were run in the actual host environment because the
+restricted sandbox does not expose a display or loopback bind authority. These
+results are macOS-local evidence only. Ubuntu X11, Windows 10/11, physical
+Windows Ink, fixed legacy/Sokol A/B, and clean portable-folder qualification
+remain open exactly as recorded elsewhere; Task #27 grants none of that
+qualification credit.
