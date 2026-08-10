@@ -17,6 +17,7 @@
 #include "imgui.h"
 
 #include "shell_coalesced_edit.hpp"
+#include "shell_derived_cache.hpp"
 #include "shell_selection.hpp"
 #include "shell_preview.hpp"
 #include "shell_state.hpp"
@@ -3208,18 +3209,8 @@ void draw_slot_attachment_timeline_editor(
     const marrow::editor::SlotAttachmentTimelineEdit display_edit =
         existing != nullptr ? *existing : *runtime_edit;
     const double duration_seconds = selected_animation_duration(*state);
-    std::vector<std::string> attachment_names;
-    for (const SlotAttachmentReference& reference :
-         collect_slot_attachments(skeleton, *track.slot_index)) {
-        if (reference.attachment != nullptr &&
-            std::find(
-                attachment_names.begin(),
-                attachment_names.end(),
-                reference.attachment->name) == attachment_names.end()) {
-            attachment_names.push_back(reference.attachment->name);
-        }
-    }
-    std::sort(attachment_names.begin(), attachment_names.end());
+    const std::vector<std::string>& attachment_names =
+        cached_timeline_attachment_names(state, *track.slot_index);
 
     ImGui::TextUnformatted("Slot Attachment Key Editor");
     ImGui::Text("%s / %s / Attachment", track.animation_name.c_str(), slot_name.c_str());
@@ -4182,9 +4173,7 @@ void draw_timeline_window(ShellState* state) {
 
     const marrow::runtime::AnimationData* animation = selected_animation(*state);
     const double duration_seconds = timeline_preview_duration(*state);
-    const std::vector<TimelineTrackRow> tracks =
-        animation != nullptr ? build_timeline_tracks(skeleton, *animation)
-                             : std::vector<TimelineTrackRow>{};
+    const std::vector<TimelineTrackRow>& tracks = cached_timeline_tracks(state);
     reconcile_timeline_key_selection(state, tracks);
 
     if (icon_button(

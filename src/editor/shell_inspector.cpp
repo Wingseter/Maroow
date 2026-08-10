@@ -1,5 +1,7 @@
 #include "shell_inspector.hpp"
 
+#include "shell_derived_cache.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <iomanip>
@@ -839,7 +841,7 @@ void draw_inspector_window(ShellState* state) {
         if (resolved.active_slot_index.has_value() &&
             *resolved.active_slot_index < skeleton.slots().size()) {
             const std::size_t slot_index = *resolved.active_slot_index;
-            const auto attachments = collect_slot_attachments(skeleton, slot_index);
+            const auto& attachments = cached_slot_attachments(state, slot_index);
 
             ImGui::BeginChild("inspector_attachments", ImVec2(0.0f, 130.0f), true);
             if (attachments.empty()) {

@@ -748,6 +748,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_core.cpp
     src/editor/shell_preview.cpp
     src/editor/shell_asset_watch.cpp
+    src/editor/shell_derived_cache.cpp
     src/editor/shell_timeline.cpp
     src/editor/shell_constraints.cpp
     src/editor/shell_selection.cpp

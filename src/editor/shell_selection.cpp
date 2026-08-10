@@ -12,6 +12,7 @@
 
 #include "imgui.h"
 
+#include "shell_derived_cache.hpp"
 #include "shell_theme.hpp"
 #include "shell_preview.hpp"
 #include "shell_widgets.hpp"
@@ -988,8 +989,8 @@ void draw_slot_hierarchy_node(
     HierarchyFrameRows* frame_rows,
     std::size_t slot_index) {
     const auto& slot = skeleton.slots()[slot_index];
-    const std::vector<SlotAttachmentReference> attachments =
-        collect_slot_attachments(skeleton, slot_index);
+    const std::vector<SlotAttachmentReference>& attachments =
+        cached_slot_attachments(state, slot_index);
     const marrow::editor::SelectionItem slot_item =
         marrow::editor::SlotSelection{slot.name};
     const HierarchyRowSelectionState slot_state =

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -319,6 +320,28 @@ struct TimelineTrackRow {
     std::optional<std::string> deform_attachment_name;
 };
 
+struct TimelineTrackCache {
+    std::uint64_t runtime_revision{0U};
+    const marrow::runtime::SkeletonData* skeleton_identity{nullptr};
+    std::string animation_name;
+    std::vector<TimelineTrackRow> tracks;
+    std::uint64_t generation{0U};
+    bool valid{false};
+};
+
+struct SlotDerivedCacheEntry {
+    std::vector<SlotAttachmentReference> authored_attachments;
+    std::vector<std::string> timeline_attachment_names;
+};
+
+struct SlotDerivedCache {
+    std::uint64_t runtime_revision{0U};
+    std::shared_ptr<const marrow::runtime::SkeletonData> runtime;
+    std::vector<SlotDerivedCacheEntry> slots;
+    std::uint64_t generation{0U};
+    bool valid{false};
+};
+
 struct ShellState;
 
 struct EditorHistorySnapshot {
@@ -563,6 +586,8 @@ struct ShellState {
     std::optional<ParameterSliderGesture> parameter_slider_gesture;
     std::optional<ParameterGeometryGesture> parameter_geometry_gesture;
     TimelineEditorState timeline_editor{};
+    TimelineTrackCache timeline_track_cache{};
+    SlotDerivedCache slot_derived_cache{};
     MeshWeightStrokeState weight_paint_stroke{};
     PointerMediator pointer_mediator{};
     ViewportRenderResources viewport_renderer{};

@@ -21,6 +21,7 @@
 #include "shell_asset_watch.hpp"
 #include "shell_agent_panel.hpp"
 #include "shell_coalesced_edit.hpp"
+#include "shell_derived_cache.hpp"
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
@@ -337,6 +338,12 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         std::cerr << "Hot-reload smoke requires MAR-158 selection source identities.\n";
         return false;
     }
+    (void)cached_timeline_tracks(&hot_reload_state);
+    (void)cached_slot_attachments(&hot_reload_state, *initial_arm_slot_index);
+    const std::uint64_t initial_timeline_cache_generation =
+        hot_reload_state.timeline_track_cache.generation;
+    const std::uint64_t initial_slot_cache_generation =
+        hot_reload_state.slot_derived_cache.generation;
 
     const marrow::editor::BoneSelection selected_arm{"arm_l"};
     const marrow::editor::AttachmentSelection selected_mage_arm{
@@ -421,6 +428,14 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     const auto remapped_body_slot_index =
         hot_reload_state.load_result.skeleton_data->find_slot_index("body");
     const auto reordered_active = hot_reload_state.selection.active();
+    (void)cached_timeline_tracks(&hot_reload_state);
+    if (remapped_arm_index.has_value()) {
+        const auto remapped_arm_slot =
+            hot_reload_state.load_result.skeleton_data->find_slot_index("arm_l");
+        if (remapped_arm_slot.has_value()) {
+            (void)cached_slot_attachments(&hot_reload_state, *remapped_arm_slot);
+        }
+    }
     if (!remapped_arm_index.has_value() || !remapped_body_slot_index.has_value() ||
         *remapped_arm_index == *arm_index ||
         *remapped_body_slot_index == *body_slot_index ||
@@ -444,7 +459,13 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
             *hot_reload_state.load_result.skeleton_data) ||
         !marrow::editor::selection_item_exists(
             selected_temp_ik,
-            *hot_reload_state.load_result.skeleton_data)) {
+            *hot_reload_state.load_result.skeleton_data) ||
+        hot_reload_state.timeline_track_cache.generation !=
+            initial_timeline_cache_generation + 1U ||
+        hot_reload_state.slot_derived_cache.generation !=
+            initial_slot_cache_generation + 1U ||
+        hot_reload_state.slot_derived_cache.runtime.get() !=
+            hot_reload_state.load_result.skeleton_data.get()) {
         std::cerr << "Hot reload did not preserve exact selection and anchor identities across reorder.\n";
         return false;
     }
@@ -507,6 +528,10 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         hot_reload_state.load_result.skeleton_data->find_skin_index("mage_arm");
     const auto arm_slot_index =
         hot_reload_state.load_result.skeleton_data->find_slot_index("arm_l");
+    (void)cached_timeline_tracks(&hot_reload_state);
+    if (arm_slot_index.has_value()) {
+        (void)cached_slot_attachments(&hot_reload_state, *arm_slot_index);
+    }
     if (!final_arm_index.has_value() || !final_body_slot_index.has_value() ||
         hot_reload_state.selection.items() !=
             std::vector<marrow::editor::SelectionItem>{selected_arm, selected_body} ||
@@ -526,7 +551,11 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         hot_reload_state.load_result.skeleton_data->find_attachment(
             *alternate_mage_arm_skin,
             *arm_slot_index,
-            "mage_arm_l") == nullptr) {
+            "mage_arm_l") == nullptr ||
+        hot_reload_state.timeline_track_cache.generation !=
+            initial_timeline_cache_generation + 2U ||
+        hot_reload_state.slot_derived_cache.generation !=
+            initial_slot_cache_generation + 2U) {
         std::cerr << "Hot reload did not prune exact missing selection and anchor identities.\n";
         return false;
     }
@@ -550,13 +579,27 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     hot_reload_state.hierarchy_selection_anchor = selected_arm;
     hot_reload_state.viewport_box_selection = ViewportBoxSelectionGesture{
         ImVec2(30.0f, 40.0f), ImVec2(130.0f, 140.0f), true, true};
-    if (!reload_project(&hot_reload_state) ||
-        hot_reload_state.selection.items() != selection_before_project_reload ||
+    if (!reload_project(&hot_reload_state)) {
+        std::cerr << "Project reload failed during derived-cache smoke.\n";
+        return false;
+    }
+    (void)cached_timeline_tracks(&hot_reload_state);
+    const auto reloaded_arm_slot =
+        hot_reload_state.load_result.skeleton_data->find_slot_index("arm_l");
+    if (reloaded_arm_slot.has_value()) {
+        (void)cached_slot_attachments(&hot_reload_state, *reloaded_arm_slot);
+    }
+    if (hot_reload_state.selection.items() != selection_before_project_reload ||
         hot_reload_state.selection.active() == nullptr ||
         *hot_reload_state.selection.active() != active_before_project_reload ||
         hot_reload_state.viewport_box_selection.has_value() ||
         hot_reload_state.hierarchy_selection_anchor !=
-            std::optional<marrow::editor::SelectionItem>(selected_arm)) {
+            std::optional<marrow::editor::SelectionItem>(selected_arm) ||
+        !reloaded_arm_slot.has_value() ||
+        hot_reload_state.timeline_track_cache.generation !=
+            initial_timeline_cache_generation + 3U ||
+        hot_reload_state.slot_derived_cache.generation !=
+            initial_slot_cache_generation + 3U) {
         std::cerr << "Project reload did not preserve surviving exact selection and anchor identities.\n";
         return false;
     }
@@ -570,11 +613,19 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         *hot_reload_state.selection.active();
     const std::optional<marrow::editor::SelectionItem> stable_hierarchy_anchor =
         hot_reload_state.hierarchy_selection_anchor;
+    const std::uint64_t stable_timeline_cache_generation =
+        hot_reload_state.timeline_track_cache.generation;
+    const std::uint64_t stable_slot_cache_generation =
+        hot_reload_state.slot_derived_cache.generation;
     if (!write_text_file(temp_skeleton, "{}\n", &rewrite_error)) {
         std::cerr << rewrite_error << '\n';
         return false;
     }
-    if (poll_runtime_asset_changes(&hot_reload_state) != RuntimeAssetPollOutcome::Failed ||
+    const RuntimeAssetPollOutcome failed_poll =
+        poll_runtime_asset_changes(&hot_reload_state);
+    (void)cached_timeline_tracks(&hot_reload_state);
+    (void)cached_slot_attachments(&hot_reload_state, *reloaded_arm_slot);
+    if (failed_poll != RuntimeAssetPollOutcome::Failed ||
         hot_reload_state.load_result.base_skeleton_document.get() != stable_document.get() ||
         hot_reload_state.load_result.skeleton_data.get() != stable_runtime.get() ||
         hot_reload_state.load_result.atlas_data.size() != stable_atlases.size() ||
@@ -582,7 +633,12 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         hot_reload_state.selection.active() == nullptr ||
         *hot_reload_state.selection.active() != stable_active_selection ||
         hot_reload_state.hierarchy_selection_anchor != stable_hierarchy_anchor ||
-        hot_reload_state.error_message.empty()) {
+        hot_reload_state.error_message.empty() ||
+        hot_reload_state.timeline_track_cache.generation !=
+            stable_timeline_cache_generation ||
+        hot_reload_state.slot_derived_cache.generation !=
+            stable_slot_cache_generation ||
+        hot_reload_state.slot_derived_cache.runtime.get() != stable_runtime.get()) {
         std::cerr << "Failed hot reload did not retain the previous source/runtime bundle.\n";
         return false;
     }
@@ -3149,6 +3205,227 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     return true;
 }
 
+bool validate_derived_cache_smoke(ShellState* state) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.project == nullptr ||
+        state->load_result.skeleton_data == nullptr ||
+        state->session.runtime_data() == nullptr) {
+        std::cerr << "Derived cache smoke requires a loaded runtime project.\n";
+        return false;
+    }
+
+    if (state->selected_animation_name.empty() ||
+        state->session.runtime_data()->find_animation(
+            state->selected_animation_name) == nullptr) {
+        if (state->session.runtime_data()->animations().empty() ||
+            !state->session.select_animation(
+                state->session.runtime_data()->animations().front().name)) {
+            std::cerr << "Derived cache smoke requires one selectable animation.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(state);
+    }
+
+    const auto arm_slot_index =
+        state->load_result.skeleton_data->find_slot_index("arm_l");
+    if (!arm_slot_index.has_value()) {
+        std::cerr << "Derived cache smoke requires the arm_l slot.\n";
+        return false;
+    }
+
+    (void)cached_timeline_tracks(state);
+    const auto& attachment_refs =
+        cached_slot_attachments(state, *arm_slot_index);
+    const auto& attachment_names =
+        cached_timeline_attachment_names(state, *arm_slot_index);
+    const std::uint64_t initial_timeline_generation =
+        state->timeline_track_cache.generation;
+    const std::uint64_t initial_slot_generation =
+        state->slot_derived_cache.generation;
+
+    std::vector<std::size_t> duplicate_skin_indices;
+    std::vector<const marrow::runtime::AttachmentData*> duplicate_attachments;
+    for (const SlotAttachmentReference& reference : attachment_refs) {
+        if (reference.attachment != nullptr &&
+            reference.attachment->name == "mage_arm_l" &&
+            reference.skin_index.has_value()) {
+            duplicate_skin_indices.push_back(*reference.skin_index);
+            duplicate_attachments.push_back(reference.attachment);
+        }
+    }
+    if (duplicate_skin_indices.size() != 2U ||
+        duplicate_skin_indices[0] == duplicate_skin_indices[1] ||
+        duplicate_attachments[0] == duplicate_attachments[1] ||
+        !std::is_sorted(attachment_names.begin(), attachment_names.end()) ||
+        std::adjacent_find(attachment_names.begin(), attachment_names.end()) !=
+            attachment_names.end() ||
+        std::count(
+            attachment_names.begin(), attachment_names.end(), "mage_arm_l") != 1 ||
+        state->slot_derived_cache.runtime.get() !=
+            state->load_result.skeleton_data.get()) {
+        std::cerr <<
+            "Slot cache did not preserve authored skin identity and sorted-unique names.\n";
+        return false;
+    }
+
+    (void)cached_timeline_tracks(state);
+    (void)cached_slot_attachments(state, *arm_slot_index);
+    (void)cached_timeline_attachment_names(state, *arm_slot_index);
+    if (state->timeline_track_cache.generation != initial_timeline_generation ||
+        state->slot_derived_cache.generation != initial_slot_generation) {
+        std::cerr << "Repeated derived-cache lookup rebuilt an unchanged key.\n";
+        return false;
+    }
+
+    const bool loop_before = state->session.preview_state().loop;
+    const std::uint64_t runtime_revision_before_preview =
+        state->session.runtime_revision();
+    const std::uint64_t preview_revision_before = state->session.preview_revision();
+    if (!state->session.set_loop(!loop_before)) {
+        std::cerr << "Derived cache smoke could not stage a preview-only revision.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    (void)cached_timeline_tracks(state);
+    (void)cached_slot_attachments(state, *arm_slot_index);
+    if (state->session.preview_revision() <= preview_revision_before ||
+        state->session.runtime_revision() != runtime_revision_before_preview ||
+        state->timeline_track_cache.generation != initial_timeline_generation ||
+        state->slot_derived_cache.generation != initial_slot_generation ||
+        !state->session.set_loop(loop_before)) {
+        std::cerr << "Preview-only state invalidated a runtime-derived cache.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+
+    std::uint64_t timeline_generation_before_runtime =
+        initial_timeline_generation;
+    const std::string original_animation_name = state->selected_animation_name;
+    const double original_time = state->timeline_time_seconds;
+    const auto alternate_animation = std::find_if(
+        state->session.runtime_data()->animations().begin(),
+        state->session.runtime_data()->animations().end(),
+        [&](const auto& candidate) {
+            return candidate.name != original_animation_name;
+        });
+    if (alternate_animation != state->session.runtime_data()->animations().end()) {
+        if (!state->session.select_animation(alternate_animation->name)) {
+            std::cerr << "Derived cache smoke could not select an alternate animation.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(state);
+        (void)cached_timeline_tracks(state);
+        if (state->timeline_track_cache.generation !=
+                initial_timeline_generation + 1U ||
+            state->slot_derived_cache.generation != initial_slot_generation ||
+            !state->session.select_animation(original_animation_name) ||
+            !state->session.seek(original_time)) {
+            std::cerr << "Animation-name cache key did not refresh independently.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(state);
+        (void)cached_timeline_tracks(state);
+        if (state->timeline_track_cache.generation !=
+                initial_timeline_generation + 2U ||
+            state->slot_derived_cache.generation != initial_slot_generation) {
+            std::cerr << "Restored animation cache key did not rebuild exactly once.\n";
+            return false;
+        }
+        timeline_generation_before_runtime = initial_timeline_generation + 2U;
+    }
+
+    const std::string project_before =
+        marrow::editor::serialize_project(*state->session.project());
+    const auto* animation = state->session.runtime_data()->find_animation(
+        state->selected_animation_name);
+    const std::size_t bone_index = state->session.runtime_data()
+        ->find_bone_index("spine")
+        .value_or(0U);
+    if (animation == nullptr || bone_index >= state->session.runtime_data()->bones().size()) {
+        std::cerr << "Derived cache smoke could not resolve an editable track.\n";
+        return false;
+    }
+    const std::string bone_name = state->session.runtime_data()->bones()[bone_index].name;
+    const double edit_time = animation->duration() > 0.002
+        ? std::min(animation->duration() - 0.001, animation->duration() * 0.371)
+        : 0.0;
+    const double edit_rotation =
+        state->session.runtime_data()->bones()[bone_index].setup_pose.rotation + 17.25;
+    state->session.clear_history();
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::AddKeyframe,
+        "Derived cache runtime edit smoke",
+        {},
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        std::cerr << transaction.error()->format() << '\n';
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        *transaction.project(),
+        *state->session.runtime_data(),
+        state->selected_animation_name,
+        bone_name,
+        marrow::editor::TransformTimelineChannel::Rotate,
+        edit_time,
+        marrow::editor::TransformKeyframePatch{
+            edit_rotation,
+            std::nullopt,
+            std::nullopt});
+    const marrow::editor::SessionResult committed = transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!committed || !committed.changed) {
+        std::cerr << "Derived cache smoke runtime edit did not commit.\n";
+        return false;
+    }
+
+    const auto refresh_and_check_generation = [&](std::uint64_t timeline_generation,
+                                                   std::uint64_t slot_generation) {
+        (void)cached_timeline_tracks(state);
+        (void)cached_slot_attachments(state, *arm_slot_index);
+        return state->timeline_track_cache.generation == timeline_generation &&
+            state->slot_derived_cache.generation == slot_generation &&
+            state->slot_derived_cache.runtime.get() ==
+                state->load_result.skeleton_data.get();
+    };
+    if (!refresh_and_check_generation(
+            timeline_generation_before_runtime + 1U,
+            initial_slot_generation + 1U) ||
+        !state->session.undo()) {
+        std::cerr << "Runtime edit did not refresh both derived caches.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    if (!refresh_and_check_generation(
+            timeline_generation_before_runtime + 2U,
+            initial_slot_generation + 2U) ||
+        !state->session.redo()) {
+        std::cerr << "Runtime undo did not refresh both derived caches.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    if (!refresh_and_check_generation(
+            timeline_generation_before_runtime + 3U,
+            initial_slot_generation + 3U) ||
+        !state->session.undo()) {
+        std::cerr << "Runtime redo did not refresh both derived caches.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    if (!refresh_and_check_generation(
+            timeline_generation_before_runtime + 4U,
+            initial_slot_generation + 4U) ||
+        marrow::editor::serialize_project(*state->session.project()) != project_before) {
+        std::cerr << "Final cache smoke rollback did not restore the source project.\n";
+        return false;
+    }
+    state->session.clear_history();
+    return true;
+}
+
 bool validate_selection_set_shell_smoke(ShellState* state) {
     if (state == nullptr || !state->load_result || state->load_result.project == nullptr ||
         state->preview_skeleton == nullptr || state->session.runtime_data() == nullptr) {
@@ -4429,6 +4706,11 @@ int run_headless_smoke(const Options& options) {
         return 1;
     }
     shell_state.session.clear_history();
+
+    if (!validate_derived_cache_smoke(&shell_state)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
 
     if (!validate_animation_catalog_smoke(options.project_path) ||
         !validate_animation_duration_shell_smoke(options.project_path) ||
