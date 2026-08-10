@@ -376,6 +376,38 @@ std::string compact_scene_delta(const DispatchObservation& response) {
     return delta != nullptr ? json::serialize_compact(*delta) : std::string();
 }
 
+void expect_exact_scene_delta(
+    Harness& harness,
+    std::string_view label,
+    const DispatchObservation& response,
+    std::string_view expected_json) {
+    const json::LoadResult expected = json::parse_document(expected_json);
+    harness.expect(
+        expected && expected.document->root.is_object(),
+        label,
+        "characterization expectation is not a JSON object");
+    if (!expected || !expected.document->root.is_object()) {
+        return;
+    }
+    harness.expect(
+        compact_scene_delta(response) ==
+            json::serialize_compact(expected.document->root),
+        label,
+        "scene_delta wire shape changed: " + compact_scene_delta(response));
+}
+
+void expect_no_change(
+    Harness& harness,
+    std::string_view label,
+    const DispatchObservation& response) {
+    harness.expect(
+        string_member(&response.root, "message") ==
+                std::optional<std::string_view>("No changes made.") &&
+            response.scene_delta() != nullptr && response.scene_delta()->is_null(),
+        label,
+        "no-op message or null scene_delta changed");
+}
+
 std::optional<std::uint64_t> expect_review(
     Harness& harness,
     std::string_view label,
@@ -1136,20 +1168,53 @@ int main(int argc, char** argv) {
         "edit_ik_constraint dry-run",
         "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
         "\"mix\":0.5,\"dry_run\":true}}");
-    harness.invoke(
+    const DispatchObservation path_constraint_dry_run = harness.invoke(
         "edit_path_constraint dry-run",
         "{\"op\":\"edit_path_constraint\",\"args\":{\"name\":\"editor_guide_follow\","
         "\"position\":0.2,\"dry_run\":true}}");
-    harness.invoke(
+    expect_exact_scene_delta(
+        harness,
+        "edit_path_constraint dry-run",
+        path_constraint_dry_run,
+        R"json({
+          "dry_run":true,"name":"editor_guide_follow","slot":"guide",
+          "bones":["path_a","path_b","path_c"],"position":0.2,
+          "spacing":0.3,"spacing_mode":"percent","rotate_mix":1,
+          "translate_mix":1
+        })json");
+    const DispatchObservation transform_constraint_dry_run = harness.invoke(
         "edit_transform_constraint dry-run",
         "{\"op\":\"edit_transform_constraint\",\"args\":{"
         "\"name\":\"editor_transform_follow\",\"translate_mix\":0.5,"
         "\"offset\":{\"x\":-8},\"dry_run\":true}}");
-    harness.invoke(
+    expect_exact_scene_delta(
+        harness,
+        "edit_transform_constraint dry-run",
+        transform_constraint_dry_run,
+        R"json({
+          "dry_run":true,"name":"editor_transform_follow",
+          "source":"transform_source","bones":["transform_target"],
+          "rotate_mix":0.5,"translate_mix":0.5,"scale_mix":1,
+          "shear_mix":0.75,"offset":{"rotation":15,"x":-8,"y":20,
+          "scale_x":0.2,"scale_y":-0.1,"shear_x":5,"shear_y":-2}
+        })json");
+    const DispatchObservation physics_constraint_dry_run = harness.invoke(
         "edit_physics_constraint dry-run",
         "{\"op\":\"edit_physics_constraint\",\"args\":{"
         "\"name\":\"editor_ribbon_secondary\",\"mix\":0.8,"
         "\"wind\":{\"x\":10},\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_physics_constraint dry-run",
+        physics_constraint_dry_run,
+        R"json({
+          "dry_run":true,"name":"editor_ribbon_secondary",
+          "bones":["ribbon_01","ribbon_02"],"step":0.0166666667,
+          "x":1,"y":1,"rotate":1,"scale_x":0.35,"shear_x":0,
+          "limit":30,"inertia":0.85,"damping":4,"strength":18,
+          "mass_inverse":1,"gravity":{"x":0,"y":-24},
+          "wind":{"x":10,"y":0},"mix":0.8
+        })json");
     harness.invoke(
         "set_slot_color_keyframe dry-run",
         "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
@@ -1399,23 +1464,169 @@ int main(int argc, char** argv) {
     // Remaining edit operations use deterministic fixture targets. Set/remove
     // pairs leave their timeline slice clean while constraints and mesh weights
     // prove persistent session mutations still export equivalently.
+    const DispatchObservation invalid_ik_target = harness.invoke(
+        "edit_ik_constraint invalid target rollback",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"target\":\"missing_agent_target\"}}",
+        false,
+        "invalid_request");
+    harness.expect(
+        string_member(&invalid_ik_target.root, "message")
+                .value_or(std::string_view{})
+                .find("Failed to apply IK constraint edit: ") == 0U,
+        "edit_ik_constraint invalid target rollback",
+        "commit-time failure prefix changed");
+    const DispatchObservation ik_after_failed_commit = harness.invoke(
+        "edit_ik_constraint after failed commit",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_ik_constraint failed commit rollback",
+        ik_after_failed_commit,
+        R"json({"dry_run":true,"name":"editor_arm_reach","mix":0.75})json");
+
     harness.invoke(
         "edit_ik_constraint",
         "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
         "\"mix\":0.5}}");
-    harness.invoke(
+
+    const DispatchObservation path_constraint_live = harness.invoke(
         "edit_path_constraint",
         "{\"op\":\"edit_path_constraint\",\"args\":{\"name\":\"editor_guide_follow\","
-        "\"position\":0.25,\"rotate_mix\":0.75}}");
-    harness.invoke(
+        "\"position\":0.25,\"rotate_mix\":0.75,\"merge\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_path_constraint live delta",
+        path_constraint_live,
+        R"json({
+          "dry_run":false,"name":"editor_guide_follow","slot":"guide",
+          "bones":["path_a","path_b","path_c"],"position":0.25,
+          "spacing":0.3,"spacing_mode":"percent","rotate_mix":0.75,
+          "translate_mix":1
+        })json");
+    const DispatchObservation path_constraint_no_change = harness.invoke(
+        "edit_path_constraint no change",
+        "{\"op\":\"edit_path_constraint\",\"args\":{\"name\":\"editor_guide_follow\","
+        "\"position\":0.25,\"rotate_mix\":0.75,\"merge\":true}}",
+        false,
+        "no_change");
+    expect_no_change(
+        harness, "edit_path_constraint no change", path_constraint_no_change);
+
+    const DispatchObservation transform_constraint_live = harness.invoke(
         "edit_transform_constraint",
         "{\"op\":\"edit_transform_constraint\",\"args\":{"
         "\"name\":\"editor_transform_follow\",\"translate_mix\":0.5,"
-        "\"offset\":{\"x\":-8}}}");
-    harness.invoke(
+        "\"offset\":{\"x\":-8},\"merge\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_transform_constraint live delta",
+        transform_constraint_live,
+        R"json({
+          "dry_run":false,"name":"editor_transform_follow",
+          "source":"transform_source","bones":["transform_target"],
+          "rotate_mix":0.5,"translate_mix":0.5,"scale_mix":1,
+          "shear_mix":0.75,"offset":{"rotation":15,"x":-8,"y":20,
+          "scale_x":0.2,"scale_y":-0.1,"shear_x":5,"shear_y":-2}
+        })json");
+    const DispatchObservation transform_constraint_no_change = harness.invoke(
+        "edit_transform_constraint no change",
+        "{\"op\":\"edit_transform_constraint\",\"args\":{"
+        "\"name\":\"editor_transform_follow\",\"translate_mix\":0.5,"
+        "\"offset\":{\"x\":-8},\"merge\":true}}",
+        false,
+        "no_change");
+    expect_no_change(
+        harness,
+        "edit_transform_constraint no change",
+        transform_constraint_no_change);
+
+    const DispatchObservation physics_constraint_live = harness.invoke(
         "edit_physics_constraint",
         "{\"op\":\"edit_physics_constraint\",\"args\":{"
-        "\"name\":\"editor_ribbon_secondary\",\"mix\":0.8,\"wind\":{\"x\":10}}}");
+        "\"name\":\"editor_ribbon_secondary\",\"mix\":0.8,"
+        "\"wind\":{\"x\":10},\"merge\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_physics_constraint live delta",
+        physics_constraint_live,
+        R"json({
+          "dry_run":false,"name":"editor_ribbon_secondary",
+          "bones":["ribbon_01","ribbon_02"],"step":0.0166666667,
+          "x":1,"y":1,"rotate":1,"scale_x":0.35,"shear_x":0,
+          "limit":30,"inertia":0.85,"damping":4,"strength":18,
+          "mass_inverse":1,"gravity":{"x":0,"y":-24},
+          "wind":{"x":10,"y":0},"mix":0.8
+        })json");
+    const DispatchObservation physics_constraint_no_change = harness.invoke(
+        "edit_physics_constraint no change",
+        "{\"op\":\"edit_physics_constraint\",\"args\":{"
+        "\"name\":\"editor_ribbon_secondary\",\"mix\":0.8,"
+        "\"wind\":{\"x\":10},\"merge\":true}}",
+        false,
+        "no_change");
+    expect_no_change(
+        harness, "edit_physics_constraint no change", physics_constraint_no_change);
+
+    harness.invoke("undo merged constraint edits", "{\"op\":\"undo\"}");
+    const DispatchObservation path_after_constraint_undo = harness.invoke(
+        "path constraint after merged undo",
+        "{\"op\":\"edit_path_constraint\",\"args\":{"
+        "\"name\":\"editor_guide_follow\",\"dry_run\":true}}");
+    const DispatchObservation transform_after_constraint_undo = harness.invoke(
+        "transform constraint after merged undo",
+        "{\"op\":\"edit_transform_constraint\",\"args\":{"
+        "\"name\":\"editor_transform_follow\",\"dry_run\":true}}");
+    const DispatchObservation physics_after_constraint_undo = harness.invoke(
+        "physics constraint after merged undo",
+        "{\"op\":\"edit_physics_constraint\",\"args\":{"
+        "\"name\":\"editor_ribbon_secondary\",\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "path constraint merged undo",
+        path_after_constraint_undo,
+        R"json({
+          "dry_run":true,"name":"editor_guide_follow","slot":"guide",
+          "bones":["path_a","path_b","path_c"],"position":0.1,
+          "spacing":0.3,"spacing_mode":"percent","rotate_mix":1,
+          "translate_mix":1
+        })json");
+    expect_exact_scene_delta(
+        harness,
+        "transform constraint merged undo",
+        transform_after_constraint_undo,
+        R"json({
+          "dry_run":true,"name":"editor_transform_follow",
+          "source":"transform_source","bones":["transform_target"],
+          "rotate_mix":0.5,"translate_mix":0.25,"scale_mix":1,
+          "shear_mix":0.75,"offset":{"rotation":15,"x":-10,"y":20,
+          "scale_x":0.2,"scale_y":-0.1,"shear_x":5,"shear_y":-2}
+        })json");
+    expect_exact_scene_delta(
+        harness,
+        "physics constraint merged undo",
+        physics_after_constraint_undo,
+        R"json({
+          "dry_run":true,"name":"editor_ribbon_secondary",
+          "bones":["ribbon_01","ribbon_02"],"step":0.0166666667,
+          "x":1,"y":1,"rotate":1,"scale_x":0.35,"shear_x":0,
+          "limit":30,"inertia":0.85,"damping":4,"strength":18,
+          "mass_inverse":1,"gravity":{"x":0,"y":-24},
+          "wind":{"x":12,"y":0},"mix":1
+        })json");
+    harness.invoke("redo merged constraint edits", "{\"op\":\"redo\"}");
+    const DispatchObservation path_after_constraint_redo = harness.invoke(
+        "path constraint after merged redo",
+        "{\"op\":\"edit_path_constraint\",\"args\":{"
+        "\"name\":\"editor_guide_follow\",\"dry_run\":true}}");
+    harness.expect(
+        number_member(path_after_constraint_redo.scene_delta(), "position") ==
+                std::optional<double>(0.25) &&
+            number_member(path_after_constraint_redo.scene_delta(), "rotate_mix") ==
+                std::optional<double>(0.75),
+        "redo merged constraint edits",
+        "one redo did not restore the shared Agent constraint group");
     harness.invoke(
         "set_event_keyframe",
         "{\"op\":\"set_event_keyframe\",\"args\":{\"animation\":\"idle\","
@@ -1445,6 +1656,17 @@ int main(int argc, char** argv) {
         "normalize_weights",
         "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
         "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+    const DispatchObservation normalize_weights_idempotent = harness.invoke(
+        "normalize_weights idempotent",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+    harness.expect(
+        string_member(&normalize_weights_idempotent.root, "message") ==
+                std::optional<std::string_view>("Mesh weights already normalized.") &&
+            normalize_weights_idempotent.scene_delta() != nullptr &&
+            normalize_weights_idempotent.scene_delta()->is_null(),
+        "normalize_weights idempotent",
+        "idempotent normalize success contract changed");
     harness.invoke(
         "set_slot_color_keyframe",
         "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","

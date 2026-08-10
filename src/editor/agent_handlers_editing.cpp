@@ -287,17 +287,14 @@ AgentDispatchResult handle_editing_operation(
             transaction.cancel();
             return make_error("No changes made.", op, spec, "no_change");
         }
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to set animation duration: " +
-                    commit_result.error->format(),
+        if (auto result = commit_or_error(
+                transaction,
                 op,
                 spec,
-                "validation_failed");
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+                CommitPolicy{
+                    "Failed to set animation duration: ",
+                    "validation_failed"})) {
+            return std::move(*result);
         }
 
         const runtime::AnimationData* updated_animation =
@@ -427,15 +424,12 @@ AgentDispatchResult handle_editing_operation(
             *time,
             patch);
 
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply transform: " + commit_result.error->format(),
+        if (auto result = commit_or_error(
+                transaction,
                 op,
-                spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+                spec,
+                CommitPolicy{"Failed to apply transform: "})) {
+            return std::move(*result);
         }
         return make_success("Set transform keyframe successfully.", op, spec);
     }
@@ -496,15 +490,12 @@ AgentDispatchResult handle_editing_operation(
         }
         edit->keyframes.erase(key_it);
 
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to rebuild runtime: " + commit_result.error->format(),
+        if (auto result = commit_or_error(
+                transaction,
                 op,
-                spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+                spec,
+                CommitPolicy{"Failed to rebuild runtime: "})) {
+            return std::move(*result);
         }
         return make_success("Removed transform keyframe successfully.", op, spec);
     }
@@ -724,15 +715,12 @@ AgentDispatchResult handle_timeline_editing_operation(
             transaction.cancel();
             return make_error("No changes made.", op, spec, "no_change");
         }
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to retime timeline keys: " + commit_result.error->format(),
+        if (auto commit = commit_or_error(
+                transaction,
                 op,
-                spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+                spec,
+                CommitPolicy{"Failed to retime timeline keys: "})) {
+            return std::move(*commit);
         }
         return make_success(
             "Retimed timeline keys successfully.",
@@ -824,13 +812,12 @@ AgentDispatchResult handle_timeline_editing_operation(
                 return left.time < right.time;
             });
 
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply event keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to apply event keyframe: "})) {
+            return std::move(*result);
         }
         return make_success("Set event keyframe successfully.", op, spec, object_value(std::move(preview)));
     }
@@ -884,13 +871,12 @@ AgentDispatchResult handle_timeline_editing_operation(
                 "unsupported");
         }
         edit_it->keyframes.erase(key_it);
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to remove event keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to remove event keyframe: "})) {
+            return std::move(*result);
         }
         return make_success("Removed event keyframe successfully.", op, spec);
     }
@@ -969,13 +955,12 @@ AgentDispatchResult handle_timeline_editing_operation(
         key_it->time = *time;
         key_it->vertex_offsets = std::move(offsets);
         key_it->interpolation = *interpolation;
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply deform keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to apply deform keyframe: "})) {
+            return std::move(*result);
         }
         return make_success("Set deform keyframe successfully.", op, spec, object_value(std::move(preview)));
     }
@@ -1030,13 +1015,12 @@ AgentDispatchResult handle_timeline_editing_operation(
                 "unsupported");
         }
         edit_it->keyframes.erase(key_it);
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to remove deform keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to remove deform keyframe: "})) {
+            return std::move(*result);
         }
         return make_success("Removed deform keyframe successfully.", op, spec);
     }
@@ -1129,16 +1113,17 @@ AgentDispatchResult handle_timeline_editing_operation(
             }
         }
 
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply mesh weights: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            if (op == "normalize_weights") {
-                return make_success("Mesh weights already normalized.", op, spec);
-            }
-            return make_error("No changes made.", op, spec, "no_change");
+        const CommitPolicy commit_policy = op == "normalize_weights"
+            ? CommitPolicy{
+                  "Failed to apply mesh weights: ",
+                  "invalid_request",
+                  NoChangeResult::Success,
+                  "Mesh weights already normalized.",
+                  {}}
+            : CommitPolicy{"Failed to apply mesh weights: "};
+        if (auto result = commit_or_error(
+                transaction, op, spec, commit_policy)) {
+            return std::move(*result);
         }
         return make_success("Edited mesh weights successfully.", op, spec);
     }
@@ -1205,13 +1190,12 @@ AgentDispatchResult handle_timeline_editing_operation(
         key_it->time = *time;
         key_it->color = *color;
         key_it->interpolation = *interpolation;
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply slot color: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to apply slot color: "})) {
+            return std::move(*result);
         }
         return make_success("Set slot color keyframe successfully.", op, spec, object_value(std::move(preview)));
     }
@@ -1282,13 +1266,12 @@ AgentDispatchResult handle_timeline_editing_operation(
             transaction.cancel();
             return make_error("Slot keyframe not found.", op, spec, "not_found");
         }
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to remove slot keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to remove slot keyframe: "})) {
+            return std::move(*result);
         }
         return make_success("Removed slot keyframe successfully.", op, spec);
     }
@@ -1359,13 +1342,12 @@ AgentDispatchResult handle_timeline_editing_operation(
         }
         key_it->time = *time;
         key_it->attachment_name = std::move(attachment_name);
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply attachment keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to apply attachment keyframe: "})) {
+            return std::move(*result);
         }
         return make_success("Set attachment keyframe successfully.", op, spec, object_value(std::move(preview)));
     }
@@ -1441,13 +1423,12 @@ AgentDispatchResult handle_timeline_editing_operation(
             edit->keyframes.insert(insertion, std::move(keyframe));
         }
 
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to apply draw-order keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to apply draw-order keyframe: "})) {
+            return std::move(*result);
         }
 
         return make_success(
@@ -1513,13 +1494,12 @@ AgentDispatchResult handle_timeline_editing_operation(
 
         edit_it->keyframes.erase(key_it);
 
-        const SessionResult commit_result = transaction.commit();
-        if (!commit_result) {
-            return make_error(
-                "Failed to remove draw-order keyframe: " + commit_result.error->format(), op, spec);
-        }
-        if (!commit_result.changed) {
-            return make_error("No changes made.", op, spec, "no_change");
+        if (auto result = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to remove draw-order keyframe: "})) {
+            return std::move(*result);
         }
 
         return make_success("Removed draw-order keyframe successfully.", op, spec);

@@ -1,7 +1,5 @@
 #include "marrow/editor/agent_dispatch.hpp"
 
-#include "shell_constraints.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -168,6 +166,32 @@ AgentDispatchResult make_success(
     return make_result(true, std::move(message), op, spec, std::move(delta));
 }
 
+std::optional<AgentDispatchResult> commit_or_error(
+    EditorSession::EditTransaction& transaction,
+    std::string_view op,
+    const OperationSpec* spec,
+    const CommitPolicy& policy) {
+    const SessionResult commit_result = transaction.commit();
+    if (!commit_result) {
+        return make_error(
+            std::string(policy.failure_prefix) + commit_result.error->format(),
+            op,
+            spec,
+            std::string(policy.failure_error_code));
+    }
+    if (commit_result.changed) {
+        return std::nullopt;
+    }
+    if (policy.no_change_result == NoChangeResult::Success) {
+        return make_success(std::string(policy.no_change_message), op, spec);
+    }
+    return make_error(
+        std::string(policy.no_change_message),
+        op,
+        spec,
+        std::string(policy.no_change_error_code));
+}
+
 const json::Value* command_args(const json::Value& cmd) {
     const json::Value* args = json::find_member(cmd, "args");
     return args != nullptr && args->is_object() ? args : nullptr;
@@ -187,16 +211,6 @@ std::optional<std::string_view> string_arg(const json::Value& args, std::string_
         return std::nullopt;
     }
     return std::string_view(value->as_string());
-}
-
-const json::Value* find_member_any(
-    const json::Value& args,
-    std::string_view primary,
-    std::string_view fallback) {
-    if (const json::Value* value = json::find_member(args, primary)) {
-        return value;
-    }
-    return fallback.empty() ? nullptr : json::find_member(args, fallback);
 }
 
 std::optional<std::string_view> string_arg_any(
@@ -225,24 +239,6 @@ std::optional<double> number_arg(const json::Value& args, std::string_view name)
         return std::nullopt;
     }
     return value->as_number();
-}
-
-bool apply_number_if_present(
-    const json::Value& args,
-    std::string_view primary,
-    std::string_view fallback,
-    double* target,
-    std::string* error_out) {
-    const json::Value* value = find_member_any(args, primary, fallback);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_number()) {
-        *error_out = std::string(primary) + " must be a number.";
-        return false;
-    }
-    *target = value->as_number();
-    return true;
 }
 
 std::optional<int> integer_arg(const json::Value& args, std::string_view name) {
@@ -846,391 +842,6 @@ marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
     project.mesh_weight_attachment_edits.push_back(
         mesh_weight_edit_from_runtime(skeleton, skin_name, slot_name, attachment_name, attachment));
     return &project.mesh_weight_attachment_edits.back();
-}
-
-const marrow::runtime::PathConstraintData* find_runtime_path_constraint(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view name) {
-    return shell::find_named_constraint(skeleton.path_constraints(), name);
-}
-
-const marrow::runtime::TransformConstraintData* find_runtime_transform_constraint(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view name) {
-    return shell::find_named_constraint(skeleton.transform_constraints(), name);
-}
-
-const marrow::runtime::PhysicsConstraintData* find_runtime_physics_constraint(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view name) {
-    return shell::find_named_constraint(skeleton.physics_constraints(), name);
-}
-
-PathConstraintEdit path_constraint_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    const marrow::runtime::PathConstraintData& constraint) {
-    PathConstraintEdit edit;
-    edit.name = constraint.name;
-    if (constraint.slot_index < skeleton.slots().size()) {
-        edit.slot_name = skeleton.slots()[constraint.slot_index].name;
-    }
-    edit.bone_names = names_from_indices(skeleton.bones(), constraint.bone_indices);
-    edit.position = constraint.position;
-    edit.spacing = constraint.spacing;
-    edit.spacing_mode = constraint.spacing_mode;
-    edit.rotate_mix = constraint.rotate_mix;
-    edit.translate_mix = constraint.translate_mix;
-    return edit;
-}
-
-TransformConstraintEdit transform_constraint_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    const marrow::runtime::TransformConstraintData& constraint) {
-    TransformConstraintEdit edit;
-    edit.name = constraint.name;
-    if (constraint.source_bone_index < skeleton.bones().size()) {
-        edit.source_bone_name = skeleton.bones()[constraint.source_bone_index].name;
-    }
-    edit.bone_names = names_from_indices(skeleton.bones(), constraint.target_bone_indices);
-    edit.rotate_mix = constraint.rotate_mix;
-    edit.translate_mix = constraint.translate_mix;
-    edit.scale_mix = constraint.scale_mix;
-    edit.shear_mix = constraint.shear_mix;
-    edit.offsets = constraint.offsets;
-    return edit;
-}
-
-PhysicsConstraintEdit physics_constraint_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    const marrow::runtime::PhysicsConstraintData& constraint) {
-    PhysicsConstraintEdit edit;
-    edit.name = constraint.name;
-    edit.bone_names = names_from_indices(skeleton.bones(), constraint.bone_indices);
-    edit.step = constraint.step;
-    edit.x = constraint.x;
-    edit.y = constraint.y;
-    edit.rotate = constraint.rotate;
-    edit.scale_x = constraint.scale_x;
-    edit.shear_x = constraint.shear_x;
-    edit.limit = constraint.limit;
-    edit.inertia = constraint.inertia;
-    edit.damping = constraint.damping;
-    edit.strength = constraint.strength;
-    edit.mass_inverse = constraint.mass_inverse;
-    edit.gravity = constraint.gravity;
-    edit.wind = constraint.wind;
-    edit.mix = constraint.mix;
-    return edit;
-}
-
-std::string path_spacing_mode_name(marrow::runtime::PathConstraintSpacingMode mode) {
-    switch (mode) {
-    case marrow::runtime::PathConstraintSpacingMode::Length:
-        return "length";
-    case marrow::runtime::PathConstraintSpacingMode::Percent:
-        return "percent";
-    }
-    return "length";
-}
-
-bool read_string_array_if_present(
-    const json::Value& args,
-    std::string_view primary,
-    std::string_view fallback,
-    std::vector<std::string>* values_out,
-    std::string* error_out) {
-    const json::Value* value = find_member_any(args, primary, fallback);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_array()) {
-        *error_out = std::string(primary) + " must be an array of strings.";
-        return false;
-    }
-    std::vector<std::string> values;
-    values.reserve(value->as_array().size());
-    std::set<std::string> seen;
-    for (const json::Value& entry : value->as_array()) {
-        if (!entry.is_string()) {
-            *error_out = std::string(primary) + " must be an array of strings.";
-            return false;
-        }
-        if (!seen.insert(entry.as_string()).second) {
-            *error_out = std::string(primary) + " must not contain duplicate names.";
-            return false;
-        }
-        values.push_back(entry.as_string());
-    }
-    *values_out = std::move(values);
-    return true;
-}
-
-bool validate_bone_names(
-    const marrow::runtime::SkeletonData& skeleton,
-    const std::vector<std::string>& names,
-    std::string_view field_name,
-    std::string* error_out) {
-    if (names.empty()) {
-        *error_out = std::string(field_name) + " must target at least one bone.";
-        return false;
-    }
-    std::set<std::string> seen;
-    for (const std::string& name : names) {
-        if (!seen.insert(name).second) {
-            *error_out = std::string(field_name) + " must not contain duplicate bones.";
-            return false;
-        }
-        if (!skeleton.find_bone_index(name).has_value()) {
-            *error_out = "Bone not found: " + name;
-            return false;
-        }
-    }
-    return true;
-}
-
-bool apply_xy_if_present(
-    const json::Value& args,
-    std::string_view field_name,
-    marrow::runtime::AttachmentVertex* target,
-    std::string* error_out) {
-    const json::Value* value = json::find_member(args, field_name);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_object()) {
-        *error_out = std::string(field_name) + " must be an object with x/y numbers.";
-        return false;
-    }
-    double x = target->x;
-    double y = target->y;
-    if (!apply_number_if_present(*value, "x", {}, &x, error_out) ||
-        !apply_number_if_present(*value, "y", {}, &y, error_out)) {
-        return false;
-    }
-    target->x = static_cast<float>(x);
-    target->y = static_cast<float>(y);
-    return true;
-}
-
-bool apply_transform_offsets_if_present(
-    const json::Value& args,
-    marrow::runtime::TransformConstraintOffsets* offsets,
-    std::string* error_out) {
-    const json::Value* value = json::find_member(args, "offset");
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_object()) {
-        *error_out = "offset must be an object.";
-        return false;
-    }
-    return apply_number_if_present(*value, "rotation", {}, &offsets->rotation, error_out) &&
-        apply_number_if_present(*value, "x", {}, &offsets->x, error_out) &&
-        apply_number_if_present(*value, "y", {}, &offsets->y, error_out) &&
-        apply_number_if_present(*value, "scale_x", "scaleX", &offsets->scale_x, error_out) &&
-        apply_number_if_present(*value, "scale_y", "scaleY", &offsets->scale_y, error_out) &&
-        apply_number_if_present(*value, "shear_x", "shearX", &offsets->shear_x, error_out) &&
-        apply_number_if_present(*value, "shear_y", "shearY", &offsets->shear_y, error_out);
-}
-
-bool merge_path_constraint_args(
-    const json::Value& args,
-    const marrow::runtime::SkeletonData& skeleton,
-    PathConstraintEdit* edit,
-    std::string* error_out) {
-    if (const auto slot = string_arg(args, "slot")) {
-        if (!skeleton.find_slot_index(*slot).has_value()) {
-            *error_out = "Slot not found: " + std::string(*slot);
-            return false;
-        }
-        edit->slot_name = std::string(*slot);
-    } else if (json::find_member(args, "slot") != nullptr) {
-        *error_out = "slot must be a string.";
-        return false;
-    }
-    if (!read_string_array_if_present(args, "bone_names", "bones", &edit->bone_names, error_out) ||
-        !validate_bone_names(skeleton, edit->bone_names, "bone_names", error_out)) {
-        return false;
-    }
-
-    if (const auto* spacing_mode_value = find_member_any(args, "spacing_mode", "spacingMode")) {
-        if (!spacing_mode_value->is_string()) {
-            *error_out = "spacing_mode must be 'length' or 'percent'.";
-            return false;
-        }
-        if (spacing_mode_value->as_string() == "length") {
-            edit->spacing_mode = marrow::runtime::PathConstraintSpacingMode::Length;
-        } else if (spacing_mode_value->as_string() == "percent") {
-            edit->spacing_mode = marrow::runtime::PathConstraintSpacingMode::Percent;
-        } else {
-            *error_out = "spacing_mode must be 'length' or 'percent'.";
-            return false;
-        }
-    }
-
-    if (!apply_number_if_present(args, "position", {}, &edit->position, error_out) ||
-        !apply_number_if_present(args, "spacing", {}, &edit->spacing, error_out) ||
-        !apply_number_if_present(args, "rotate_mix", "rotateMix", &edit->rotate_mix, error_out) ||
-        !apply_number_if_present(args, "translate_mix", "translateMix", &edit->translate_mix, error_out)) {
-        return false;
-    }
-    if (edit->position < 0.0 || edit->position > 1.0 ||
-        edit->spacing < 0.0 ||
-        edit->rotate_mix < 0.0 || edit->rotate_mix > 1.0 ||
-        edit->translate_mix < 0.0 || edit->translate_mix > 1.0) {
-        *error_out = "path constraint values are outside their valid ranges.";
-        return false;
-    }
-    return true;
-}
-
-bool merge_transform_constraint_args(
-    const json::Value& args,
-    const marrow::runtime::SkeletonData& skeleton,
-    TransformConstraintEdit* edit,
-    std::string* error_out) {
-    if (const auto source = string_arg(args, "source")) {
-        if (!skeleton.find_bone_index(*source).has_value()) {
-            *error_out = "Bone not found: " + std::string(*source);
-            return false;
-        }
-        edit->source_bone_name = std::string(*source);
-    } else if (json::find_member(args, "source") != nullptr) {
-        *error_out = "source must be a string.";
-        return false;
-    }
-    if (!read_string_array_if_present(args, "bone_names", "bones", &edit->bone_names, error_out) ||
-        !validate_bone_names(skeleton, edit->bone_names, "bone_names", error_out)) {
-        return false;
-    }
-    if (std::find(edit->bone_names.begin(), edit->bone_names.end(), edit->source_bone_name) !=
-        edit->bone_names.end()) {
-        *error_out = "transform constraint source bone must not also be a target.";
-        return false;
-    }
-    if (!apply_number_if_present(args, "rotate_mix", "rotateMix", &edit->rotate_mix, error_out) ||
-        !apply_number_if_present(args, "translate_mix", "translateMix", &edit->translate_mix, error_out) ||
-        !apply_number_if_present(args, "scale_mix", "scaleMix", &edit->scale_mix, error_out) ||
-        !apply_number_if_present(args, "shear_mix", "shearMix", &edit->shear_mix, error_out) ||
-        !apply_transform_offsets_if_present(args, &edit->offsets, error_out)) {
-        return false;
-    }
-    if (edit->rotate_mix < 0.0 || edit->rotate_mix > 1.0 ||
-        edit->translate_mix < 0.0 || edit->translate_mix > 1.0 ||
-        edit->scale_mix < 0.0 || edit->scale_mix > 1.0 ||
-        edit->shear_mix < 0.0 || edit->shear_mix > 1.0) {
-        *error_out = "transform constraint mix values must stay within [0, 1].";
-        return false;
-    }
-    return true;
-}
-
-bool merge_physics_constraint_args(
-    const json::Value& args,
-    const marrow::runtime::SkeletonData& skeleton,
-    PhysicsConstraintEdit* edit,
-    std::string* error_out) {
-    if (!read_string_array_if_present(args, "bone_names", "bones", &edit->bone_names, error_out) ||
-        !validate_bone_names(skeleton, edit->bone_names, "bone_names", error_out)) {
-        return false;
-    }
-    if (!apply_number_if_present(args, "step", {}, &edit->step, error_out) ||
-        !apply_number_if_present(args, "x", {}, &edit->x, error_out) ||
-        !apply_number_if_present(args, "y", {}, &edit->y, error_out) ||
-        !apply_number_if_present(args, "rotate", {}, &edit->rotate, error_out) ||
-        !apply_number_if_present(args, "scale_x", "scaleX", &edit->scale_x, error_out) ||
-        !apply_number_if_present(args, "shear_x", "shearX", &edit->shear_x, error_out) ||
-        !apply_number_if_present(args, "limit", {}, &edit->limit, error_out) ||
-        !apply_number_if_present(args, "inertia", {}, &edit->inertia, error_out) ||
-        !apply_number_if_present(args, "damping", {}, &edit->damping, error_out) ||
-        !apply_number_if_present(args, "strength", {}, &edit->strength, error_out) ||
-        !apply_number_if_present(args, "mass_inverse", "massInverse", &edit->mass_inverse, error_out) ||
-        !apply_number_if_present(args, "mix", {}, &edit->mix, error_out) ||
-        !apply_xy_if_present(args, "gravity", &edit->gravity, error_out) ||
-        !apply_xy_if_present(args, "wind", &edit->wind, error_out)) {
-        return false;
-    }
-    if (edit->step <= 0.0 ||
-        edit->x < 0.0 || edit->y < 0.0 ||
-        edit->rotate < 0.0 || edit->scale_x < 0.0 ||
-        edit->shear_x < 0.0 || edit->limit < 0.0 ||
-        edit->inertia < 0.0 || edit->inertia > 1.0 ||
-        edit->damping < 0.0 || edit->strength < 0.0 ||
-        edit->mass_inverse < 0.0 ||
-        edit->mix < 0.0 || edit->mix > 1.0) {
-        *error_out = "physics constraint values are outside their valid ranges.";
-        return false;
-    }
-    return true;
-}
-
-json::Value xy_value(const marrow::runtime::AttachmentVertex& value) {
-    json::Value::Object object;
-    object.emplace("x", number_value(value.x));
-    object.emplace("y", number_value(value.y));
-    return object_value(std::move(object));
-}
-
-json::Value transform_offset_value(const marrow::runtime::TransformConstraintOffsets& offsets) {
-    json::Value::Object object;
-    object.emplace("rotation", number_value(offsets.rotation));
-    object.emplace("x", number_value(offsets.x));
-    object.emplace("y", number_value(offsets.y));
-    object.emplace("scale_x", number_value(offsets.scale_x));
-    object.emplace("scale_y", number_value(offsets.scale_y));
-    object.emplace("shear_x", number_value(offsets.shear_x));
-    object.emplace("shear_y", number_value(offsets.shear_y));
-    return object_value(std::move(object));
-}
-
-json::Value path_constraint_preview_value(const PathConstraintEdit& edit, bool dry_run) {
-    json::Value::Object object;
-    object.emplace("dry_run", bool_value(dry_run));
-    object.emplace("name", string_value(edit.name));
-    object.emplace("slot", string_value(edit.slot_name));
-    object.emplace("bones", string_array_value(edit.bone_names));
-    object.emplace("position", number_value(edit.position));
-    object.emplace("spacing", number_value(edit.spacing));
-    object.emplace("spacing_mode", string_value(path_spacing_mode_name(edit.spacing_mode)));
-    object.emplace("rotate_mix", number_value(edit.rotate_mix));
-    object.emplace("translate_mix", number_value(edit.translate_mix));
-    return object_value(std::move(object));
-}
-
-json::Value transform_constraint_preview_value(const TransformConstraintEdit& edit, bool dry_run) {
-    json::Value::Object object;
-    object.emplace("dry_run", bool_value(dry_run));
-    object.emplace("name", string_value(edit.name));
-    object.emplace("source", string_value(edit.source_bone_name));
-    object.emplace("bones", string_array_value(edit.bone_names));
-    object.emplace("rotate_mix", number_value(edit.rotate_mix));
-    object.emplace("translate_mix", number_value(edit.translate_mix));
-    object.emplace("scale_mix", number_value(edit.scale_mix));
-    object.emplace("shear_mix", number_value(edit.shear_mix));
-    object.emplace("offset", transform_offset_value(edit.offsets));
-    return object_value(std::move(object));
-}
-
-json::Value physics_constraint_preview_value(const PhysicsConstraintEdit& edit, bool dry_run) {
-    json::Value::Object object;
-    object.emplace("dry_run", bool_value(dry_run));
-    object.emplace("name", string_value(edit.name));
-    object.emplace("bones", string_array_value(edit.bone_names));
-    object.emplace("step", number_value(edit.step));
-    object.emplace("x", number_value(edit.x));
-    object.emplace("y", number_value(edit.y));
-    object.emplace("rotate", number_value(edit.rotate));
-    object.emplace("scale_x", number_value(edit.scale_x));
-    object.emplace("shear_x", number_value(edit.shear_x));
-    object.emplace("limit", number_value(edit.limit));
-    object.emplace("inertia", number_value(edit.inertia));
-    object.emplace("damping", number_value(edit.damping));
-    object.emplace("strength", number_value(edit.strength));
-    object.emplace("mass_inverse", number_value(edit.mass_inverse));
-    object.emplace("gravity", xy_value(edit.gravity));
-    object.emplace("wind", xy_value(edit.wind));
-    object.emplace("mix", number_value(edit.mix));
-    return object_value(std::move(object));
 }
 
 json::Value timeline_description_value(

@@ -33,6 +33,19 @@ struct OperationSpec {
     OperationHandler handler{nullptr};
 };
 
+enum class NoChangeResult {
+    Error,
+    Success,
+};
+
+struct CommitPolicy {
+    std::string_view failure_prefix;
+    std::string_view failure_error_code{"invalid_request"};
+    NoChangeResult no_change_result{NoChangeResult::Error};
+    std::string_view no_change_message{"No changes made."};
+    std::string_view no_change_error_code{"no_change"};
+};
+
 json::Value object_value(json::Value::Object object);
 json::Value array_value(json::Value::Array array);
 json::Value string_value(std::string value);
@@ -56,6 +69,11 @@ AgentDispatchResult make_success(
     std::string_view op,
     const OperationSpec* spec,
     json::Value delta = json::Value());
+std::optional<AgentDispatchResult> commit_or_error(
+    EditorSession::EditTransaction& transaction,
+    std::string_view op,
+    const OperationSpec* spec,
+    const CommitPolicy& policy);
 
 const json::Value* command_args(const json::Value& cmd);
 bool bool_arg(
@@ -65,10 +83,6 @@ bool bool_arg(
 std::optional<std::string_view> string_arg(
     const json::Value& args,
     std::string_view name);
-const json::Value* find_member_any(
-    const json::Value& args,
-    std::string_view primary,
-    std::string_view fallback = {});
 std::optional<std::string_view> string_arg_any(
     const json::Value& args,
     std::initializer_list<std::string_view> names);
@@ -76,12 +90,6 @@ std::optional<std::filesystem::path> path_arg_any(
     const json::Value& args,
     std::initializer_list<std::string_view> names);
 std::optional<double> number_arg(const json::Value& args, std::string_view name);
-bool apply_number_if_present(
-    const json::Value& args,
-    std::string_view primary,
-    std::string_view fallback,
-    double* target,
-    std::string* error_out);
 std::optional<int> integer_arg(const json::Value& args, std::string_view name);
 std::optional<marrow::runtime::Interpolation> interpolation_arg(
     const json::Value& args,
@@ -157,46 +165,6 @@ MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
     std::string_view attachment_name,
     const marrow::runtime::AttachmentData& attachment);
 
-const marrow::runtime::PathConstraintData* find_runtime_path_constraint(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view name);
-const marrow::runtime::TransformConstraintData* find_runtime_transform_constraint(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view name);
-const marrow::runtime::PhysicsConstraintData* find_runtime_physics_constraint(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view name);
-PathConstraintEdit path_constraint_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    const marrow::runtime::PathConstraintData& constraint);
-TransformConstraintEdit transform_constraint_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    const marrow::runtime::TransformConstraintData& constraint);
-PhysicsConstraintEdit physics_constraint_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    const marrow::runtime::PhysicsConstraintData& constraint);
-bool merge_path_constraint_args(
-    const json::Value& args,
-    const marrow::runtime::SkeletonData& skeleton,
-    PathConstraintEdit* edit,
-    std::string* error_out);
-bool merge_transform_constraint_args(
-    const json::Value& args,
-    const marrow::runtime::SkeletonData& skeleton,
-    TransformConstraintEdit* edit,
-    std::string* error_out);
-bool merge_physics_constraint_args(
-    const json::Value& args,
-    const marrow::runtime::SkeletonData& skeleton,
-    PhysicsConstraintEdit* edit,
-    std::string* error_out);
-json::Value path_constraint_preview_value(const PathConstraintEdit& edit, bool dry_run);
-json::Value transform_constraint_preview_value(
-    const TransformConstraintEdit& edit,
-    bool dry_run);
-json::Value physics_constraint_preview_value(
-    const PhysicsConstraintEdit& edit,
-    bool dry_run);
 json::Value timeline_description_value(
     const marrow::runtime::SkeletonData& skeleton,
     const ProjectData& project,
