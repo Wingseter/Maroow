@@ -2302,7 +2302,7 @@ void test_topological_bone_reorder(TestContext& context) {
     animation.bone_rotate_timelines.push_back(BoneRotateTimeline{
         0,
         0.0,
-        {RotateKeyframe{0.0, 0.0, Interpolation::linear()}}});
+        {RotateKeyframe{0.0, 10.0, Interpolation::linear()}}});
 
     std::vector<BoneData> bones;
     bones.push_back(make_bone("hand", 2, BoneTransform{5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
@@ -2379,6 +2379,12 @@ void test_topological_bone_reorder(TestContext& context) {
         return;
     }
 
+    context.expect(
+        reordered_animation->bone_rotate_timelines.size() == 1U,
+        "non-constant animation timeline should survive topological reorder");
+    if (reordered_animation->bone_rotate_timelines.empty()) {
+        return;
+    }
     context.expect(
         reordered_animation->bone_rotate_timelines[0].bone_index == 2,
         "animation bone indices should remap to the reordered skeleton");
