@@ -13,6 +13,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#include <shlobj.h>
+#endif
+
 #include "marrow/editor/preferences.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/session.hpp"
@@ -689,8 +695,23 @@ void test_process_environment_resolution_and_restoration(TestSuite& suite) {
             "editor-settings.json";
 #elif defined(__linux__)
         const fs::path expected = xdg / "marrow" / "editor-settings.json";
+#elif defined(_WIN32)
+        PWSTR roaming_path = nullptr;
+        const HRESULT roaming_result = SHGetKnownFolderPath(
+            FOLDERID_RoamingAppData,
+            KF_FLAG_DEFAULT,
+            nullptr,
+            &roaming_path);
+        const fs::path expected = SUCCEEDED(roaming_result) && roaming_path != nullptr
+            ? fs::path(roaming_path) / "Marrow" / "editor-settings.json"
+            : fs::path{};
+        if (roaming_path != nullptr) {
+            CoTaskMemFree(roaming_path);
+        }
+        suite.expect(!expected.empty(),
+                     "Windows should expose the production Roaming AppData path");
 #else
-#error "PreferenceStore environment tests support macOS and Linux only."
+#error "PreferenceStore environment tests do not support this platform."
 #endif
         suite.expect(unset_override.settings_path() == expected,
                      "default construction should use the platform production path");

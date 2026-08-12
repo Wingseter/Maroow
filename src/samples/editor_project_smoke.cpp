@@ -18,6 +18,13 @@
 
 namespace {
 
+constexpr double kMar162ScaleTime = 0.375;
+constexpr double kMar162ScaleX = -1.25;
+constexpr double kMar162ScaleY = -0.0;
+constexpr double kMar161AbsoluteRotation = 769.0;
+constexpr double kMar161RelativeRotation = 739.0;
+constexpr double kMar161RotationTime = 0.75;
+
 struct Options {
     std::filesystem::path project_path{"assets/fixtures/player_idle.marrow"};
     bool create_project{false};
@@ -2221,12 +2228,9 @@ bool validate_editing_p0_end_to_end(
     }
     project.source_path = project_path;
 
-    constexpr double kMar162ScaleTime = 0.375;
-    constexpr double kMar162ScaleX = -1.25;
     // Authored as negative zero: `!=` cannot tell -0.0 from 0.0 under
     // IEEE-754, so every gate below must also compare the sign bit or the
     // "signed zero survived" claim is untested.
-    constexpr double kMar162ScaleY = -0.0;
     const auto mar162_signed_zero_matches = [](double value) {
         return value == 0.0 &&
             std::signbit(value) == std::signbit(kMar162ScaleY);
@@ -2416,9 +2420,6 @@ bool validate_editing_p0_end_to_end(
         return false;
     }
 
-    constexpr double kMar161AbsoluteRotation = 769.0;
-    constexpr double kMar161RelativeRotation = 739.0;
-    constexpr double kMar161RotationTime = 0.75;
     marrow::editor::upsert_transform_keyframe(
         project,
         *project_result.skeleton_data,

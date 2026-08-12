@@ -13,6 +13,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    # Source files and fixtures are UTF-8. Make the compiler interpretation
+    # independent of the active Windows system code page.
+    add_compile_options(/utf-8)
+endif()
+
 option(
     MARROW_ENABLE_THREAD_SANITIZER
     "Build the dedicated runtime concurrency stress target with ThreadSanitizer instrumentation"
