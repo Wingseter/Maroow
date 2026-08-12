@@ -6,8 +6,31 @@
 
 # Preserve pinned third-party source bytes exactly; do not apply project whitespace rules.
 external/zlib/** -whitespace
+external/zlib/** text eol=lf
 
 # Preserve exact upstream vendor snapshots even when their established style
 # contains trailing spaces; project-owned source remains under diff --check.
 external/imgui/** -whitespace
 external/sdl3/** -whitespace
+
+# Hash-verified vendored text must have stable checkout bytes even when a
+# Windows Git installation enables core.autocrlf.
+external/sdl3/CMakeLists.txt text eol=lf
+external/sdl3/LICENSE.txt text eol=lf
+external/sdl3/include/SDL3/SDL_version.h text eol=lf
+external/imgui/imgui.cpp text eol=lf
+external/imgui/imgui_draw.cpp text eol=lf
+external/imgui/imgui_tables.cpp text eol=lf
+external/imgui/imgui_widgets.cpp text eol=lf
+external/imgui/imgui_internal.h text eol=lf
+external/imgui/imgui.h text eol=lf
+external/imgui/backends/imgui_impl_sdl3.cpp text eol=lf
+external/imgui/backends/imgui_impl_sdl3.h text eol=lf
+external/sokol_gfx.h text eol=lf
+external/sokol_app.h text eol=lf
+external/sokol_glue.h text eol=lf
+external/sokol_log.h text eol=lf
+external/sokol_imgui.h text eol=lf
+external/patches/*.patch text eol=lf
+licenses/*.txt text eol=lf
+src/renderer/generated/*.h text eol=lf
