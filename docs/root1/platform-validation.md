@@ -12,7 +12,7 @@ PASS and do not satisfy a dependency.
 | macOS arm64 | SDL3 Metal + Sokol + sokol_imgui | Build, 17 noninteractive tests, three real-display tests, Metal RGBA8 readback, 20 device and 100 resource lifecycles | PARTIAL — manual focus/IME, fixed A/B performance, and physical pen not yet recorded |
 | Ubuntu 24.04 x64 X11, GCC 13 | SDL3 GLCORE 4.1 | No physical/VM host run in this checkout | NOT RUN |
 | Windows 10 22H2 x64, VS2022, 100% DPI | SDL3 GLCORE 4.1 | Source/CMake path implemented; no Windows build or display run | NOT RUN |
-| Windows 11 x64, VS2022, 150% or 200% DPI | SDL3 GLCORE 4.1 + Windows Ink | Source/CMake path implemented; no Windows build, display, physical pen, or portable run | NOT RUN |
+| Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Debug and Release build plus 20/20 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop, physical Ink, and second-host portable evidence remain open |
 
 MAR-192 through MAR-210 therefore remain `open`, and MAR-163 remains blocked by
 MAR-210. This checkout does not claim Wayland, Windows ARM64, D3D/Vulkan,
@@ -33,6 +33,8 @@ Recorded 2026-08-09 in Asia/Seoul.
   `dcd6f1b718016467941b8f5fab62991d2ad128cebec4f60635dcd742109cac41`
 - SDL3: `release-3.4.14`, commit
   `147a8ee32dbf9ac02f3794964490687b6bbda1bc`
+- zlib: `1.3.2`, archive SHA-256
+  `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16`
 - Dear ImGui: `v1.92.6-docking`, commit
   `2a1b69f05748ad909f03acf4533447cac1331611`
 - Sokol core: `31d8a3fce5f85db03b66a8db7c4bd73fce55b8e4`
@@ -127,22 +129,102 @@ Additional checked boundaries:
 - Picking/overlay one-physical-pixel oracle beyond the deterministic clear
   probe and a measured live-resource counter baseline after 100 resizes/reloads.
 
-## Ubuntu, Windows, pen, and package evidence
+## Windows 11 x64 evidence — 2026-08-12
 
-No claims below have been executed in this checkout:
+This is one Windows 11 host run at 100% reported display scale. It advances the
+Windows build, automated display, and same-host package slices, but it is not a
+Windows 10 run, high-DPI/manual desktop qualification, physical Windows Ink
+qualification, or a clean second-machine portable qualification.
+
+### Host
+
+| Field | Value |
+|---|---|
+| OS | Microsoft Windows 11 Pro x64, `10.0.22621.4317` |
+| Host/CPU | `KWON`; AMD Ryzen 9 3900X, 12 cores / 24 logical processors |
+| GPU inventory | NVIDIA GeForce RTX 5090, driver `32.0.15.9186`; SudoMaker Virtual Display Adapter `1.10.9.289` also installed |
+| Memory | 34,305,380,352 bytes reported physical memory |
+| Visual Studio | VS2022 Community `17.14.36811.4`; MSVC `19.44.35222`, toolset `14.44.35207` |
+| CMake | `3.31.6-msvc6` from the VS2022 installation |
+| Git | Git for Windows `2.45.1.windows.1`; Git LFS `3.5.1` |
+| Source | `agent-control-remaining` at `db104a3` |
+| Build root | `E:\Workspace\2026\Maroow\build-msvc` |
+| Display session | SSH service session; SDL reported logical/drawable `640x480`, framebuffer/content scale `1x1` / `1` |
+| GL surface | SDL OpenGL 4.1 core request; RGBA8 (`sg` format 23), depth-stencil (`sg` format 44), 4x MSAA |
+
+The adapter inventory is recorded, but the current smoke does not name which
+adapter serviced the GL context. No inference assigns this run specifically to
+the RTX 5090 or the virtual display adapter.
+
+### Commands and results
+
+| Command | Exit/result | Evidence |
+|---|---|---|
+| `set GIT_CLONE_PROTECTION_ACTIVE=false&& git clone --branch agent-control-remaining --single-branch https://github.com/Wingseter/Maroow.git E:\Workspace\2026\Maroow-fresh-db104a3` | 0; compatibility flag rationale described below | Fresh clone at `db104a3`, clean status, `git lfs fsck OK` |
+| `cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMARROW_ENABLE_DISPLAY_TESTS=ON` | 0 | VS2022 x64 multi-config tree generated |
+| `cmake --build build-msvc --config Debug --parallel 4` | 0 | All Debug default targets, including `marrow_editor_shell.exe`, built |
+| `ctest --test-dir build-msvc -C Debug --output-on-failure` | 0, 20/20 | `build-msvc\validation\2026-08-12\ctest-debug.log` |
+| `cmake --build build-msvc --config Release --parallel 4` | 0 | All Release default targets built |
+| `ctest --test-dir build-msvc -C Release --output-on-failure` | 0, 20/20 | `build-msvc\validation\2026-08-12\ctest-release.log` |
+| `cmake --build build-msvc --config Debug --target marrow_verify_third_party` | 0 | Pinned SDL3, zlib, Dear ImGui, Sokol, patched sokol_imgui, shader, and tool hashes verified on Windows |
+| `cmake --build build-msvc --config Release --target marrow_portable_stage` | 0 | Portable folder, canonical manifest, ZIP, and ZIP SHA-256 generated |
+| `marrow_editor_shell.exe --project assets\fixtures\player_idle.marrow --auto-close 2` from the staged folder | 0 | Same-host staged-folder run |
+| The same command from `E:\Workspace\2026\Maroow-portable-check-8666edd\Marrow` after ZIP extraction | 0 | Same-host new-directory extraction/run; not a second clean host |
+
+Durable CTest log SHA-256 values:
+
+- Debug: `4d05a1d13df60db3415f991f97312343e4439b1bd999768a545b980449233f1d`
+- Release: `0fd3b30b7415c6f2ff5f4d70cc00b97215e75278b6aa97ca688debba11d90afa`
+
+The three display tests passed in both configurations:
+
+- `marrow.window_host_smoke`: 20 SDL/OpenGL host lifecycles; logical and
+  drawable `640x480`, scale `1`, RGBA8 + depth-stencil, 4x MSAA.
+- `marrow.gpu_parity_smoke`: top-left, center, and bottom-right RGBA8 probes
+  within `2/255`, plus 20 device and 100 resource lifecycles.
+- `marrow.editor_display_smoke`: the actual editor completed 20 offscreen
+  viewport/main-pass/commit/present frames.
+
+The Release portable folder contains 119 hash-manifest entries; an independent
+PowerShell pass reported zero mismatches. `Marrow-Release-x64.zip` is 5,112,709
+bytes and its generated plus independently checked SHA-256 is
+`bca86a87185e6a3c909a43e51e3382aed39b7980c394f375462717bee881c77f`.
+
+Git for Windows 2.45.1 rejected the standard Git LFS `post-checkout` hook while
+clone protection was active. The hook was inspected as the normal
+`git lfs post-checkout` shim, so protection was disabled only for the fresh
+clone command. The repository now stores the 28 affected PNG/PSD fixtures as
+real LFS pointers; both the existing checkout and fresh clone pass
+`git lfs fsck`, and the smudged `player_fixture.png` SHA-256 remains
+`6056c2fa515cdcd7fd39c447532901e5a775d697aa9ace292ecf8e22f7c25455`.
+
+### Debugging readiness
+
+The generated `Marrow.sln` is present. Debug output includes a 20,665,344-byte
+`marrow_editor_shell.exe` and a 56,995,840-byte
+`marrow_editor_shell.pdb`; the generated project uses
+`ProgramDatabase` compile information and `GenerateDebugInformation=true`.
+VS2022 `devenv.exe` and the x64 `msvsmon.exe` remote debugger are installed.
+This establishes source-level debug-capable artifacts, but no interactive
+breakpoint/attach session was performed through the noninteractive SSH run.
+
+## Ubuntu, Windows, pen, and package evidence still required
 
 - Ubuntu 24.04 X11 GCC 13 clean build, OpenGL 4.1 context, display/pixel/
   lifecycle/performance matrix.
-- Windows 10 22H2 and Windows 11 VS2022 x64 Debug/Release build and complete
-  test matrix.
-- Windows DPI 100% plus 150% or 200%, Korean IME, focus, clipboard, cursor,
-  picking, minimize/restore, and driver evidence.
+- Windows 10 22H2 VS2022 x64 Debug/Release build, display matrix, and portable
+  extraction/run.
+- Windows 11 at 150% or 200% DPI plus manual Korean IME, focus, clipboard,
+  cursor, picking, minimize/restore, and driver evidence. The automated run
+  above reported 100% scale only.
 - Windows Ink device name/driver/SDL pen IDs, three pressure levels,
   tilt/eraser metadata, focus/proximity cancellation, mouse parity, and one
   changed stroke/one undo.
-- `marrow_portable_stage`, canonical folder manifest, transport ZIP SHA-256,
-  and clean Win10/Win11 extraction/run.
+- Portable ZIP extraction/run on a separate clean Win10/Win11 machine; the
+  recorded extraction used a new directory on the same validated host.
+- Fixed legacy/Sokol A/B performance and the remaining manual resource and
+  pixel-oracle evidence.
 
-Those rows must be appended with exact commands, exit status, hardware/driver,
-display scale/server, and durable log or artifact paths before their stories or
-MAR-210 can move to `done`.
+Those remaining rows still require exact commands, exit status,
+hardware/driver, display scale/server, and durable log or artifact paths before
+their stories or MAR-210 can move to `done`.
