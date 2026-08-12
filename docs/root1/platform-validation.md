@@ -9,14 +9,19 @@ PASS and do not satisfy a dependency.
 
 | Host | Required path | Current evidence | Status |
 |---|---|---|---|
-| macOS arm64 | SDL3 Metal + Sokol + sokol_imgui | Build, 17 noninteractive tests, three real-display tests, Metal RGBA8 readback, 20 device and 100 resource lifecycles | PARTIAL — manual focus/IME, fixed A/B performance, and physical pen not yet recorded |
-| Ubuntu 24.04 x64 X11, GCC 13 | SDL3 GLCORE 4.1 | No physical/VM host run in this checkout | NOT RUN |
-| Windows 10 22H2 x64, VS2022, 100% DPI | SDL3 GLCORE 4.1 | Source/CMake path implemented; no Windows build or display run | NOT RUN |
-| Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Debug and Release build plus 20/20 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop, physical Ink, and second-host portable evidence remain open |
+| macOS arm64 | SDL3 Metal + Sokol + sokol_imgui | Build, 17 noninteractive tests, three real-display tests, Metal RGBA8 readback, 20 device and 100 resource lifecycles | PARTIAL — manual focus/IME and fixed A/B performance remain open |
+| Ubuntu/Linux x64 | Retained SDL3 X11 GLCORE 4.1 implementation | No qualification run; excluded from the current support matrix by the 2026-08-12 scope decision | NOT REQUIRED — unqualified, no support claim |
+| Windows 10 x64 | Retained Windows x64 implementation | No qualification run; excluded from the current support matrix by the 2026-08-12 scope decision | NOT REQUIRED — unqualified, no support claim |
+| Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Debug and Release build plus 20/20 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop and physical Ink evidence remain open |
 
 MAR-192 through MAR-210 therefore remain `open`, and MAR-163 remains blocked by
-MAR-210. This checkout does not claim Wayland, Windows ARM64, D3D/Vulkan,
-installer, or ImGui OS multi-viewport support.
+MAR-210. Current qualification targets macOS arm64 and Windows 11 x64 only.
+Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, and
+ImGui OS multi-viewport support are not claimed.
+
+The same 2026-08-12 scope decision accepts extraction into a new directory on
+the qualified Windows 11 host as the current portable package gate. A separate
+clean PC is `NOT REQUIRED`; this waiver does not create clean-machine evidence.
 
 ## Source and dependency identity
 
@@ -132,9 +137,10 @@ Additional checked boundaries:
 ## Windows 11 x64 evidence — 2026-08-12
 
 This is one Windows 11 host run at 100% reported display scale. It advances the
-Windows build, automated display, and same-host package slices, but it is not a
-Windows 10 run, high-DPI/manual desktop qualification, physical Windows Ink
-qualification, or a clean second-machine portable qualification.
+Windows build, automated display, and current same-host package gate, but it is
+not high-DPI/manual desktop or physical Windows Ink qualification. Windows 10
+and a separate clean-machine portable run are `NOT REQUIRED`, not inferred
+passes.
 
 ### Host
 
@@ -169,7 +175,7 @@ the RTX 5090 or the virtual display adapter.
 | `cmake --build build-msvc --config Debug --target marrow_verify_third_party` | 0 | Pinned SDL3, zlib, Dear ImGui, Sokol, patched sokol_imgui, shader, and tool hashes verified on Windows |
 | `cmake --build build-msvc --config Release --target marrow_portable_stage` | 0 | Portable folder, canonical manifest, ZIP, and ZIP SHA-256 generated |
 | `marrow_editor_shell.exe --project assets\fixtures\player_idle.marrow --auto-close 2` from the staged folder | 0 | Same-host staged-folder run |
-| The same command from `E:\Workspace\2026\Maroow-portable-check-8666edd\Marrow` after ZIP extraction | 0 | Same-host new-directory extraction/run; not a second clean host |
+| The same command from `E:\Workspace\2026\Maroow-portable-check-8666edd\Marrow` after ZIP extraction | 0 | Same-host new-directory extraction/run; satisfies the current package gate |
 
 Durable CTest log SHA-256 values:
 
@@ -208,20 +214,14 @@ VS2022 `devenv.exe` and the x64 `msvsmon.exe` remote debugger are installed.
 This establishes source-level debug-capable artifacts, but no interactive
 breakpoint/attach session was performed through the noninteractive SSH run.
 
-## Ubuntu, Windows, pen, and package evidence still required
+## Windows, pen, and performance evidence still required
 
-- Ubuntu 24.04 X11 GCC 13 clean build, OpenGL 4.1 context, display/pixel/
-  lifecycle/performance matrix.
-- Windows 10 22H2 VS2022 x64 Debug/Release build, display matrix, and portable
-  extraction/run.
 - Windows 11 at 150% or 200% DPI plus manual Korean IME, focus, clipboard,
   cursor, picking, minimize/restore, and driver evidence. The automated run
   above reported 100% scale only.
 - Windows Ink device name/driver/SDL pen IDs, three pressure levels,
   tilt/eraser metadata, focus/proximity cancellation, mouse parity, and one
   changed stroke/one undo.
-- Portable ZIP extraction/run on a separate clean Win10/Win11 machine; the
-  recorded extraction used a new directory on the same validated host.
 - Fixed legacy/Sokol A/B performance and the remaining manual resource and
   pixel-oracle evidence.
 

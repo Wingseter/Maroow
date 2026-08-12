@@ -61,10 +61,13 @@ SDL3 전환은 격리가 잘 되어 있어 며칠 규모이며, Windows 출시 �
 - MAR-199~204: process-root Sokol device, pass-free renderer core, SDL Metal/GL
   surface와 official `sokol_imgui`로 전환한 뒤 production raw GL/CGL을 제거한다.
 - MAR-205~209: VS2022 x64, UTF-16 AppData atomic preferences, Winsock,
-  Win10/11 editor, physical Windows Ink, portable folder를 검증한다.
-- MAR-210: macOS Metal, Ubuntu 24.04 X11, Win10 22H2, Win11의 같은 source
-  revision evidence를 모아야만 완료한다. 그 전에는 MAR-163이 열리지 않는다.
+  Windows 11 editor, physical Windows Ink, portable folder를 검증한다.
+- MAR-210: 2026-08-12 범위 결정에 따라 macOS arm64 Metal과 Windows 11 x64의
+  같은 source revision evidence를 모아야만 완료한다. Ubuntu/Linux와 Windows 10은
+  `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate가 아니다. 그 전에는 MAR-163이
+  열리지 않는다.
 
-현재 source tree에는 SDL3/Sokol 전환 코드와 Windows compile-time 경계가 반영되어
-있지만, 실제 지원 status는 `platform-validation.md`를 따른다. Ubuntu/Windows 실기,
-Windows Ink와 clean portable 실행 증거가 없으면 해당 story와 MAR-210은 open이다.
+현재 source tree에는 SDL3/Sokol 전환 코드, Linux X11 경로와 Windows compile-time 경계가
+반영되어 있지만, 실제 지원 status는 `platform-validation.md`를 따른다. Linux X11은
+비보증 구현으로 남고 현재 지원 주장을 하지 않는다. Windows 11 고배율·수동 UI,
+Windows Ink, 성능·pixel·resource 증거가 없으면 해당 story와 MAR-210은 open이다.

@@ -3067,7 +3067,7 @@
       "description": "Cut the production default to SDL while retaining GLFW for this checkpoint only as a compile-time rollback comparison.",
       "acceptanceCriteria": [
         "SDL is the default host; the historical macOS --auto-close business smoke remains headless and is not counted as SDL display evidence.",
-        "Real display smokes cover initialization, resize, minimize/restore, focus, and repeated lifecycle on macOS and Ubuntu 24.04 X11.",
+        "Real display smokes cover initialization, resize, minimize/restore, focus, and repeated lifecycle on macOS arm64 and Windows 11 x64; Linux X11 remains implemented but is NOT REQUIRED and unqualified.",
         "Same-revision Release GLFW/SDL A/B runs at 1440x900 meet the recorded median and p95 regression gate.",
         "The GLFW rollback build remains reproducible until this story passes."
       ],
@@ -3165,12 +3165,12 @@
     {
       "id": "MAR-202",
       "title": "Implement SDL Metal and GLCORE Sokol surfaces",
-      "description": "Supply Sokol environments and swapchains from SDL Metal on macOS and SDL OpenGL 4.1 Core on Linux, with exact formats and lifecycle handling.",
+      "description": "Supply Sokol environments and swapchains from SDL Metal on macOS and SDL OpenGL 4.1 Core on Windows, while retaining the unqualified Linux X11 implementation, with exact formats and lifecycle handling.",
       "acceptanceCriteria": [
         "macOS uses SDL_WINDOW_METAL, one MTLDevice, BGRA8 drawable, depth/stencil, optional 4x MSAA, and strong drawable lifetime through sg_commit.",
-        "Linux X11 uses an SDL GL 4.1 Core context and framebuffer 0; GL 4.1 failure is fatal and MSAA retries once at 1x.",
+        "Windows 11 uses an SDL GL 4.1 Core context and framebuffer 0; GL 4.1 failure is fatal and MSAA retries once at 1x. The shared Linux X11 path remains implemented but is NOT REQUIRED and gains no support claim.",
         "Nil drawable, minimize, zero pixels, resize, format/sample changes, and context/device failure skip or fail explicitly without invalid submission.",
-        "Real macOS Metal and Ubuntu X11 windows repeatedly render offscreen scene, main simgui pass, commit, and present."
+        "Real macOS Metal and Windows 11 GLCORE windows repeatedly render offscreen scene, main simgui pass, commit, and present."
       ],
       "validationCommands": [
         "cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON",
@@ -3269,11 +3269,11 @@
     {
       "id": "MAR-207",
       "title": "Qualify the integrated Windows editor",
-      "description": "Run the complete SDL3/Sokol GLCORE editor and all default targets on physical Windows 10 and Windows 11 systems.",
+      "description": "Run the complete SDL3/Sokol GLCORE editor and all default targets on Windows 11 x64. Windows 10 is NOT REQUIRED and receives no support claim.",
       "acceptanceCriteria": [
-        "Windows 10 22H2 and Windows 11 create an OpenGL 4.1 Core context and pass resize, minimize, focus, close, clipboard, cursor, Korean IME, and launch tests.",
+        "Windows 11 creates an OpenGL 4.1 Core context and passes resize, minimize, focus, close, clipboard, cursor, Korean IME, and launch tests.",
         "100 percent and at least one 150 or 200 percent DPI setting preserve logical/pixel metrics and picking alignment.",
-        "All default runtime, CLI, sample, editor, C ABI, project/export, and Agent tests execute on both systems.",
+        "All default runtime, CLI, sample, editor, C ABI, project/export, and Agent tests execute on Windows 11.",
         "Command logs include OS, CPU, GPU, driver, compiler, CMake, display scale, exit status, and artifact locations."
       ],
       "validationCommands": [
@@ -3314,7 +3314,7 @@
         "marrow_portable_stage creates Marrow/marrow_editor_shell.exe, runtime DLLs, fonts, icons, fixtures, licenses, THIRD_PARTY.md, README.txt, and MANIFEST.sha256.",
         "SDL is static and only TARGET_RUNTIME_DLLS are copied; no source or build tree is required at runtime.",
         "The canonical artifact is the folder; the matching ZIP and SHA-256 are transport artifacts only.",
-        "Clean extraction and launch with a bundled project pass on Windows 10 and Windows 11, with explicit missing-resource diagnostics."
+        "Extraction into a new directory and launch with a bundled project pass on the qualified Windows 11 host, with explicit missing-resource diagnostics. A separate clean PC is NOT REQUIRED and no clean-machine claim is made."
       ],
       "validationCommands": [
         "cmake --build build-msvc --config Release --target marrow_portable_stage",
@@ -3328,13 +3328,13 @@
     {
       "id": "MAR-210",
       "title": "Complete local platform qualification",
-      "description": "Qualify the exact source revision across macOS Metal, Ubuntu 24.04 X11, Windows 10, and Windows 11 and synchronize all platform authority documents.",
+      "description": "Qualify the exact source revision across macOS arm64 Metal and Windows 11 x64 GLCORE and synchronize all platform authority documents. Ubuntu/Linux and Windows 10 are NOT REQUIRED.",
       "acceptanceCriteria": [
-        "The same source revision passes the complete automated, display, pixel, performance, resource-lifetime, package, API/schema, and source-scan matrix on all four declared hosts.",
-        "Windows 11 physical pen evidence and clean Win10/Win11 portable-folder runs are included.",
+        "The same source revision passes the complete automated, display, pixel, performance, resource-lifetime, package, API/schema, and source-scan matrix on the two declared qualification hosts: macOS arm64 and Windows 11 x64.",
+        "Windows 11 physical pen evidence and same-host new-directory portable extraction/run evidence are included; a separate clean PC is NOT REQUIRED.",
         "platform-validation.md records dirty state, OS/build, hardware/driver, display server/scale, compiler/CMake, dependency hashes, commands, exit codes, logs, pen, and artifact hashes.",
         "discription.md, PRD, AGENTS.md, quick-start, concepts, editing-gap-analysis, and the research decision match the final implementation.",
-        "Ubuntu Wayland, Windows ARM64, D3D/Vulkan, installer, multi-viewport, and untested backends are not described as supported.",
+        "Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, multi-viewport, and untested backends are not described as supported.",
         "MAR-210 remains open and MAR-163 remains blocked until every physical evidence gate passes."
       ],
       "validationCommands": [

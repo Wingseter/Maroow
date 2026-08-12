@@ -21,9 +21,11 @@ SDL3 host and does not link `sokol_app` or `sokol_glue`:
 ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow
 ```
 
-On macOS this editor path is SDL Metal. Windows and Ubuntu X11 use an SDL OpenGL
-4.1 Core context behind `sokol_gfx`; an unavailable 4.1 context is a startup
-error rather than a GL 3.2 fallback.
+On macOS this editor path is SDL Metal. Windows and the retained Linux X11 code
+path use an SDL OpenGL 4.1 Core context behind `sokol_gfx`; an unavailable 4.1
+context is a startup error rather than a GL 3.2 fallback. Current qualification
+and support claims cover macOS arm64 and Windows 11 x64 only; Linux/Ubuntu and
+Windows 10 are `NOT REQUIRED` and unqualified.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:

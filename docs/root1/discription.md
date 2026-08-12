@@ -40,7 +40,7 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 - MAR-160은 viewport point hit를 constraint target, Bone joint, Bone body, Slot centroid, topmost rendered Attachment triangle의 stable category/distance/order precedence로 `SelectionSet`에 replace/toggle한다. Empty-space drag는 visible runtime-active Bone joint만 skeleton order로 replace/additive box-select한다. Selection 변화는 hierarchy anchor와 timeline focus를 transient하게 동기화하며 inspector와 모든 authoring tool은 active item 하나만 편집하고 group transform은 추가하지 않는다.
 - MAR-161은 Animation 모드의 runtime-active active Bone 하나에 58px screen-space rotation ring을 표시한다. Root와 `onlyTranslation`은 skeleton scale basis를, `normal` child는 gesture 시작 시 평가된 parent-world 2x2 basis를 freeze하여 absolute local rotation을 계산한다. `noRotationOrReflection`, `noScale`, `noScaleOrReflection`에서는 ring을 숨기고 unsupported-inherit hint를 표시한다. 연속 sample delta만 `(-180, 180]`로 unwrap하며 absolute degree는 정규화하지 않고 기존 transform-key transaction과 effective-track materialization 경로에 저장한다.
 - MAR-162는 같은 active Bone에 rotation ring 바깥 74px screen-space local X/Y/uniform scale handle을 동시에 표시한다. Root와 `onlyTranslation`은 skeleton scale, `normal` child는 evaluated parent-world 2x2에 local rotation/shear를 합성하되 local scale을 제거한 positive axis basis를 gesture 시작 시 freeze한다. Nonzero 축은 pivot projection의 signed ratio로, exact-zero 축은 74px당 scale 1의 delta로 절대 scale을 계산한다. Uniform은 시작 X:Y ratio와 signs를 함께 보존하고 `(0,0)`에서는 숨긴다. 기존 scale effective-track materialization과 transform-key transaction을 사용하며 mixed selection에서도 active Bone 하나만 편집한다.
-- MAR-192~210 플랫폼 프로그램은 제품 기능 MAR-163보다 먼저 실행한다. 실행 dependency는 `MAR-162 → MAR-192 → … → MAR-210 → MAR-163`이며, 코드가 한 호스트에서 동작하는 것과 지원 플랫폼 qualification을 구분한다. Ubuntu X11, Win10/11, 실물 Windows Ink, 성능·pixel·portable evidence가 모두 기록되기 전에는 MAR-210과 MAR-163 gate를 완료 처리하지 않는다.
+- MAR-192~210 플랫폼 프로그램은 제품 기능 MAR-163보다 먼저 실행한다. 실행 dependency는 `MAR-162 → MAR-192 → … → MAR-210 → MAR-163`이며, 코드가 한 호스트에서 동작하는 것과 지원 플랫폼 qualification을 구분한다. 2026-08-12 범위 결정에 따라 현재 qualification 대상은 macOS arm64와 Windows 11 x64뿐이다. Ubuntu/Linux와 Windows 10은 `NOT REQUIRED`이며 지원을 주장하지 않는다. 별도 PC portable 실행도 필수 gate가 아니고 같은 Windows 11 호스트의 새 압축해제 폴더 검증을 현재 package gate로 사용한다. 실물 Windows Ink, Windows 11 고배율·수동 UI, 성능·pixel·resource evidence가 기록되기 전에는 MAR-210과 MAR-163 gate를 완료 처리하지 않는다.
 - Parameter slider와 agent `parameter.set`은 ID 기반 direct preview 입력이며 `.marrow`나 runtime export에 저장하지 않는다. Persistent parameter-model CRUD만 project dirty 상태를 바꾼다.
 - Setup Pose는 현재 읽기 전용이다. Animation 모드의 본 포즈 변경은 현재 playhead의 키프레임으로 저장해야 하며, 저장되지 않는 preview-only 포즈/색상 편집은 허용하지 않는다.
 - 본·슬롯·스킨·어태치먼트 생성/삭제, 재부모화, 메시 topology·경로 제어점 편집, multi-selection group transform, partial/degraded project open은 현재 P1 범위 밖이다.
@@ -69,12 +69,13 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 | 플랫폼 | 창·입력 | GPU/ImGui | qualification 범위 |
 |---|---|---|---|
 | macOS arm64 | SDL3 Metal window, SDL3 input/IME/pen | `sokol_gfx` Metal + `sokol_imgui` | 현재 Metal 실기 호스트 |
-| Windows x64 | SDL3 OpenGL window, SDL3/Windows Ink pen | `sokol_gfx` GLCORE 4.1 + `sokol_imgui` | Win10 22H2, Win11, VS2022 |
-| Linux x64 | SDL3 X11 OpenGL window | `sokol_gfx` GLCORE 4.1 + `sokol_imgui` | Ubuntu 24.04 X11, GCC 13 |
+| Windows x64 | SDL3 OpenGL window, SDL3/Windows Ink pen | `sokol_gfx` GLCORE 4.1 + `sokol_imgui` | Windows 11, VS2022 |
+| Linux x64 | SDL3 X11 OpenGL window | `sokol_gfx` GLCORE 4.1 + `sokol_imgui` | 구현 유지, 현재 qualification/support 범위 밖 (`NOT REQUIRED`) |
 
-이 표는 구현 목표와 검증 매트릭스다. 실제 지원 주장은
+이 표는 구현 경계와 현재 검증 매트릭스다. 실제 지원 주장은
 `docs/root1/platform-validation.md`의 같은 revision 실기 PASS에만 근거한다.
-Wayland, Windows ARM64, D3D/Vulkan, installer, ImGui OS multi-viewport는 지원 범위가 아니다.
+Linux/Ubuntu, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer,
+ImGui OS multi-viewport는 현재 지원·qualification 범위가 아니다.
 
 렌더러는 세 경계로 나뉜다.
 

@@ -191,8 +191,10 @@
 
 Validated locally on 2026-08-09 without closing any platform story. The source
 implements the SDL3/Sokol architecture and Windows compile-time/service/package
-paths, but Ubuntu X11, Win10/11, physical Windows Ink, fixed legacy/Sokol A/B,
-and clean portable-folder evidence remain required by MAR-210.
+paths. A 2026-08-12 scope decision makes Ubuntu/Linux, Windows 10, and a separate-PC
+portable run `NOT REQUIRED`; their code paths do not gain support claims. Windows 11
+high-DPI/manual UI, physical Windows Ink, and fixed legacy/Sokol A/B evidence remain
+required by MAR-210.
 
 - `cmake --build build -j4` -> all default targets built.
 - `cmake --build build --target marrow_verify_third_party` -> pinned SDL3,

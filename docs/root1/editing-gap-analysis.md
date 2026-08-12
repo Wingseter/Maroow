@@ -1,6 +1,6 @@
 # Maroow 편집 기능 갭 분석 (vs Spine 4.2/4.3, Live2D Cubism 5.x)
 
-최종 갱신: 2026-08-09. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
+최종 갱신: 2026-08-12. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
 Preference Store, MAR-157 Typed SelectionSet, MAR-158 Selection Migration, MAR-159 Hierarchy
 Multi-Selection, MAR-160 Viewport Multi-Selection, MAR-161 Parent-Space Rotation Gizmo 및
@@ -63,7 +63,7 @@ milestone은 MAR-192이며 MAR-210 qualification 전에는 MAR-163을 시작하�
 | 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `shell_timeline.cpp` |
 | Clip duration | runtime authored/inferred/effective 경계, ordered `.marrow set_duration`, live UI·undo, key auto-grow, tail/queue/playhead 재구성, JSON↔MBIN 보존 | `authoring.cpp`, `session.cpp`, `shell_project_panels.cpp` |
 | User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, macOS/Linux/Windows resolver, Windows UTF-16 AppData와 durable atomic replace, unknown-field 보존, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
-| Platform/GPU shell | SDL3 window/input/IME/pen, macOS Metal 및 Windows/Linux GLCORE 4.1 Sokol surface, pass-free scene renderer, official sokol_imgui; 물리 플랫폼 qualification은 MAR-210까지 open | `sdl_window_host.cpp`, `sokol_graphics_device.cpp`, `viewport_renderer.cpp` |
+| Platform/GPU shell | SDL3 window/input/IME/pen, macOS Metal 및 Windows/Linux GLCORE 4.1 Sokol surface, pass-free scene renderer, official sokol_imgui; 현재 qualification은 macOS arm64와 Windows 11 x64만 대상으로 MAR-210까지 open | `sdl_window_host.cpp`, `sokol_graphics_device.cpp`, `viewport_renderer.cpp` |
 | Entity selection | 이름 기반 typed Bone/Slot/Attachment/Constraint 집합, 단일 active invariant, stable-order primitives, hierarchy replace/toggle/range/additive-range와 viewport typed point/bone-only box gesture, transient anchor, selected/active 구분 | `selection.cpp`, `shell_selection.cpp`, `selection_set_tests.cpp` |
 | 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale auto-key | `shell_viewport.cpp`, `shell_viewport_ui.cpp` |
 | 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `shell_timeline.cpp` |
@@ -267,9 +267,11 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 플랫폼 전환은 P1 제품 기능의 병렬 roadmap이 아니라 활성 PRD에 물리적으로 삽입된 선행
 dependency chain이다. 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
 raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
-revision 최종 로컬 매트릭스(MAR-210)다. 코드·단위 테스트가 구현돼도 macOS, Ubuntu X11,
-Win10, Win11, 실물 pen, pixel/performance/resource/package 증거가 모두 없으면 story를 done으로
-표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는 `platform-validation.md`가 authority다.
+revision 최종 로컬 매트릭스(MAR-210)다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
+`NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate에서 제외됐다. 코드·단위 테스트가 구현돼도
+macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/resource/package 증거가
+모두 없으면 story를 done으로 표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는
+`platform-validation.md`가 authority다.
 
 ### P1 — MAR-154~191
 
