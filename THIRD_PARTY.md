@@ -20,6 +20,26 @@ files used by the build.
   hosted CI.
 - License: zlib, copied to `licenses/SDL3.txt`.
 
+## zlib
+
+- Upstream: <https://github.com/madler/zlib>
+- Release: `1.3.2`
+- Source archive: <https://zlib.net/zlib-1.3.2.tar.gz>
+- Archive SHA-256: `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16`
+- Final local tree manifest SHA-256:
+  `2cfe9a7128fb7ed7726f7fa04eab2237a29b9b832ca710b99f17160f0b8da60c`
+- Local path: `external/zlib`
+- Snapshot policy: upstream CMake, license, public/private headers, and the 15
+  source files used by the static library are retained; tests, examples,
+  platform makefiles, documentation payloads, and optional contrib sources are
+  excluded. `contrib/CMakeLists.txt` is retained because the upstream top-level
+  CMake file includes it with every optional contrib target disabled.
+- Build policy: Windows builds use the vendored static `zlibstatic` target with
+  shared libraries, tests, installation, and optional contrib targets disabled.
+  macOS and Linux retain their existing system `ZLIB::ZLIB` dependency. Build
+  configuration does not fetch zlib from the network.
+- License: zlib, copied to `licenses/zlib.txt`.
+
 ## Dear ImGui
 
 - Upstream: <https://github.com/ocornut/imgui>

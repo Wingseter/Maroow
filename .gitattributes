@@ -4,6 +4,9 @@
 *.otf filter=lfs diff=lfs merge=lfs -text
 *.mbin filter=lfs diff=lfs merge=lfs -text
 
+# Preserve pinned third-party source bytes exactly; do not apply project whitespace rules.
+external/zlib/** -whitespace
+
 # Preserve exact upstream vendor snapshots even when their established style
 # contains trailing spaces; project-owned source remains under diff --check.
 external/imgui/** -whitespace

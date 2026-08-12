@@ -14,9 +14,35 @@ function(verify_sha relative expected)
     endif()
 endfunction()
 
+function(verify_tree_manifest relative expected)
+    set(tree "${ROOT}/${relative}")
+    if(NOT IS_DIRECTORY "${tree}")
+        message(FATAL_ERROR "Missing vendored dependency tree: ${relative}")
+    endif()
+
+    file(GLOB_RECURSE tree_files
+        LIST_DIRECTORIES FALSE
+        RELATIVE "${tree}"
+        "${tree}/*")
+    list(SORT tree_files)
+
+    set(manifest "")
+    foreach(tree_file IN LISTS tree_files)
+        file(SHA256 "${tree}/${tree_file}" file_sha)
+        string(APPEND manifest "${file_sha}  ./${tree_file}\n")
+    endforeach()
+    string(SHA256 actual "${manifest}")
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR
+            "Vendored dependency tree mismatch for ${relative}: ${actual}, expected ${expected}")
+    endif()
+endfunction()
+
 verify_sha("external/sdl3/CMakeLists.txt" "dd47de24dd913f753fe3c87f039ab8d6ca84937aef5122b1b469aa56015c08e3")
 verify_sha("external/sdl3/LICENSE.txt" "1c040b8271b37e5076359f8fd54240e371114112924d2df81ef87c7d6a1dfdfd")
 verify_sha("licenses/SDL3.txt" "1c040b8271b37e5076359f8fd54240e371114112924d2df81ef87c7d6a1dfdfd")
+verify_sha("licenses/zlib.txt" "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2")
+verify_tree_manifest("external/zlib" "2cfe9a7128fb7ed7726f7fa04eab2237a29b9b832ca710b99f17160f0b8da60c")
 verify_sha("licenses/Dear-ImGui.txt" "173506a2d6f7fb67990d257fb2507f188690eca39060c39469ae7bef43aae2a3")
 verify_sha("licenses/Sokol.txt" "72f9367756dba68918b8955092c14503934681862eee33cc16495a02f40025ef")
 verify_sha("licenses/sokol-tools-bin.txt" "d7bb344eb6e070a617d3b37b3bda6f4b3a08634dd0a413eca1a1b1d247859ee2")
@@ -65,4 +91,4 @@ if(NOT imgui_version MATCHES "IMGUI_VERSION[ \t]+\"1\\.92\\.6\"")
     message(FATAL_ERROR "Vendored Dear ImGui version is not 1.92.6")
 endif()
 
-message(STATUS "Vendored SDL3, Dear ImGui, Sokol, sokol_imgui, and sokol-shdc hashes verified")
+message(STATUS "Vendored SDL3, zlib, Dear ImGui, Sokol, sokol_imgui, and sokol-shdc hashes verified")
