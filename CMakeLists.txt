@@ -39,6 +39,13 @@ set(SDL_UNINSTALL OFF CACHE BOOL "" FORCE)
 set(SDL_REVISION
     "SDL-3.4.14-147a8ee32dbf9ac02f3794964490687b6bbda1bc"
     CACHE STRING "Pinned vendored SDL revision" FORCE)
+if(WIN32)
+    # GameInput is optional for SDL's gamepad/raw mouse path and is independent
+    # of the Windows Ink pen events used by Marrow. SDL's configure probe can
+    # see GameInput.h from a newer installed SDK than the VS generator actually
+    # selected, so keep this optional backend off for reproducible VS2022 builds.
+    set(HAVE_GAMEINPUT_H OFF CACHE INTERNAL "Disable optional SDL GameInput" FORCE)
+endif()
 if(UNIX AND NOT APPLE)
     set(SDL_X11 ON CACHE BOOL "" FORCE)
     set(SDL_WAYLAND OFF CACHE BOOL "" FORCE)
