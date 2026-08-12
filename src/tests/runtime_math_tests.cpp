@@ -105,9 +105,10 @@ int run_test(std::string name, TestFn&& test_fn) {
     TestContext context(std::move(name));
     test_fn(context);
     if (context.failures == 0) {
-        std::cout << "[PASS] " << context.name << '\n';
+        std::cout << "[PASS] " << context.name << std::endl;
     } else {
-        std::cout << "[FAIL] " << context.name << " (" << context.failures << ")\n";
+        std::cout << "[FAIL] " << context.name << " (" << context.failures << ')'
+                  << std::endl;
     }
     return context.failures;
 }

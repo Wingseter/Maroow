@@ -526,47 +526,57 @@ void test_pure_path_resolution(TestSuite& suite) {
     using marrow::editor::detail::PreferencePlatform;
     using marrow::editor::detail::resolve_preference_settings_path;
 
+    // Use paths that are absolute according to the host filesystem while
+    // exercising each target platform's pure path policy.
+#if defined(_WIN32)
+    const fs::path test_root = R"(C:\MarrowPreferenceTest)";
+#else
+    const fs::path test_root = "/marrow-preference-test";
+#endif
+    const fs::path override_home = test_root / "override" / "config";
+    const fs::path home = test_root / "users" / "test";
+    const fs::path xdg = test_root / "xdg" / "config";
+    const fs::path xdg_without_home = test_root / "xdg" / "without-home";
+
     PreferenceEnvironment environment;
-    environment.marrow_config_home = "/override/config";
-    environment.home = "/users/test";
-    environment.xdg_config_home = "/xdg/config";
+    environment.marrow_config_home = override_home.string();
+    environment.home = home.string();
+    environment.xdg_config_home = xdg.string();
 
     auto result = resolve_preference_settings_path(PreferencePlatform::MacOS, environment);
     suite.expect(static_cast<bool>(result) &&
-                     result.settings_path ==
-                         fs::path("/override/config/editor-settings.json"),
+                     result.settings_path == override_home / "editor-settings.json",
                  "MARROW_CONFIG_HOME should take priority on macOS");
     result = resolve_preference_settings_path(PreferencePlatform::Linux, environment);
     suite.expect(static_cast<bool>(result) &&
-                     result.settings_path ==
-                         fs::path("/override/config/editor-settings.json"),
+                     result.settings_path == override_home / "editor-settings.json",
                  "MARROW_CONFIG_HOME should take priority on Linux");
 
     environment.marrow_config_home.reset();
     result = resolve_preference_settings_path(PreferencePlatform::MacOS, environment);
     suite.expect(static_cast<bool>(result) &&
                      result.settings_path ==
-                         fs::path("/users/test/Library/Application Support/Marrow/editor-settings.json"),
+                         home / "Library" / "Application Support" / "Marrow" /
+                             "editor-settings.json",
                  "macOS should resolve settings below HOME Application Support");
     result = resolve_preference_settings_path(PreferencePlatform::Linux, environment);
     suite.expect(static_cast<bool>(result) &&
-                     result.settings_path ==
-                         fs::path("/xdg/config/marrow/editor-settings.json"),
+                     result.settings_path == xdg / "marrow" / "editor-settings.json",
                  "Linux should prefer an absolute XDG_CONFIG_HOME");
 
     environment.xdg_config_home.reset();
     result = resolve_preference_settings_path(PreferencePlatform::Linux, environment);
     suite.expect(static_cast<bool>(result) &&
-                     result.settings_path ==
-                         fs::path("/users/test/.config/marrow/editor-settings.json"),
+                     result.settings_path == home / ".config" / "marrow" /
+                         "editor-settings.json",
                  "Linux should fall back to HOME/.config");
 
     environment.marrow_config_home = "";
     environment.xdg_config_home = "";
     result = resolve_preference_settings_path(PreferencePlatform::Linux, environment);
     suite.expect(static_cast<bool>(result) &&
-                     result.settings_path ==
-                         fs::path("/users/test/.config/marrow/editor-settings.json"),
+                     result.settings_path == home / ".config" / "marrow" /
+                         "editor-settings.json",
                  "empty override and XDG values should be treated as unset");
 
     environment.marrow_config_home = "relative/override";
@@ -582,12 +592,12 @@ void test_pure_path_resolution(TestSuite& suite) {
                      result.settings_path.empty(),
                  "a relative XDG_CONFIG_HOME should be rejected without fallback");
 
-    environment.xdg_config_home = "/xdg/without-home";
+    environment.xdg_config_home = xdg_without_home.string();
     environment.home.reset();
     result = resolve_preference_settings_path(PreferencePlatform::Linux, environment);
     suite.expect(static_cast<bool>(result) &&
                      result.settings_path ==
-                         fs::path("/xdg/without-home/marrow/editor-settings.json"),
+                         xdg_without_home / "marrow" / "editor-settings.json",
                  "an absolute Linux XDG path should not require HOME");
 
     environment.xdg_config_home.reset();
