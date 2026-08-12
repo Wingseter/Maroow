@@ -14,6 +14,8 @@
 
 namespace marrow::editor::shell {
 
+constexpr double kWeightEpsilon = 1e-6;
+
 const char* weight_paint_mode_name(WeightPaintMode mode) {
     switch (mode) {
     case WeightPaintMode::Paint:
@@ -174,7 +176,6 @@ void normalize_mesh_weight_vertex_edit(marrow::editor::MeshWeightVertexEdit* ver
         return;
     }
 
-    constexpr double kWeightEpsilon = 1e-6;
     auto& influences = vertex->influences;
     influences.erase(
         std::remove_if(
@@ -624,7 +625,6 @@ bool apply_smooth_weight_to_vertex(
 
     marrow::editor::MeshWeightVertexEdit updated;
     updated.influences.reserve(ordered_bones.size());
-    constexpr double kWeightEpsilon = 1e-6;
     for (const std::string& bone_name : ordered_bones) {
         const auto current_it = std::find_if(
             vertex->influences.begin(),

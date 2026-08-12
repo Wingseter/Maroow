@@ -2732,7 +2732,7 @@ std::optional<LoadError> parse_event_timeline(
             return error;
         }
         if (find_optional_member(keyframe_value, "volume") != nullptr) {
-            keyframe.volume = volume;
+            keyframe.volume = static_cast<AnimationScalar>(volume);
         }
 
         double balance = 0.0;
@@ -2745,7 +2745,7 @@ std::optional<LoadError> parse_event_timeline(
             return error;
         }
         if (find_optional_member(keyframe_value, "balance") != nullptr) {
-            keyframe.balance = balance;
+            keyframe.balance = static_cast<AnimationScalar>(balance);
         }
 
         // Events are discrete markers, so equal timestamps are valid and must
