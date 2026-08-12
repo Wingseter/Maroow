@@ -2702,7 +2702,7 @@ std::optional<LoadError> parse_event_timeline(
             return error;
         }
         if (find_optional_member(keyframe_value, "float") != nullptr) {
-            keyframe.float_value = float_value;
+            keyframe.float_value = static_cast<AnimationScalar>(float_value);
         }
 
         if (const auto error = read_optional_string(

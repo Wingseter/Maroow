@@ -38,6 +38,7 @@ using marrow::runtime::TrackEntry;
 
 bool g_quantized_runtime_validation = false;
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kIkEpsilon = 1e-4;
 
 struct StateEventRecord {
     AnimationStateEventType type;
@@ -582,7 +583,6 @@ bool apply_reference_one_bone_ik(
     bool compress,
     bool stretch,
     double alpha) {
-    constexpr double kIkEpsilon = 1e-4;
     const auto safe_nonzero = [](double value) {
         if (std::abs(value) > kIkEpsilon) {
             return value;
@@ -686,7 +686,6 @@ bool apply_reference_two_bone_ik(
     bool stretch,
     double softness,
     double alpha) {
-    constexpr double kIkEpsilon = 1e-4;
     const auto safe_nonzero = [](double value) {
         if (std::abs(value) > kIkEpsilon) {
             return value;

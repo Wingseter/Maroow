@@ -66,6 +66,8 @@ namespace renderer_internal = marrow::renderer::internal;
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTolerance = 1e-6;
+constexpr float kPiF = 3.14159265358979323846f;
+constexpr float kTwoPiF = kPiF * 2.0f;
 
 struct TestContext {
     explicit TestContext(std::string test_name)
@@ -2126,8 +2128,6 @@ void test_animation_explicit_duration(TestContext& context) {
 }
 
 void test_constraint_fast_math_approximations(TestContext& context) {
-    constexpr float kPiF = 3.14159265358979323846f;
-    constexpr float kTwoPiF = kPiF * 2.0f;
     constexpr float kAtanToleranceRadians = 0.005f;
     constexpr float kTrigTolerance = 0.0012f;
     constexpr float kAcosTolerance = 1e-4f;
