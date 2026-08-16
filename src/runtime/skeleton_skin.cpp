@@ -535,7 +535,7 @@ std::optional<MeshAttachmentPose> Skeleton::evaluate_current_mesh_attachment(
     pose.triangles = geometry.triangles;
     pose.uvs = geometry.uvs;
 
-    const std::vector<double>* vertex_offsets = current_mesh_vertex_offsets(slot_index);
+    const std::vector<double>* vertex_offsets = current_final_mesh_vertex_offsets(slot_index);
     const BoneWorldTransformsView world_transforms = bone_world_transforms();
 
     for (std::size_t vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {

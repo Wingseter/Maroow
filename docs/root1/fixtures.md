@@ -1,6 +1,6 @@
 # Marrow Fixture Assets
 
-These fixtures turn the format examples in [docs/discription.md](discription.md) into checked-in runtime assets that future loader tests can reuse without rewriting sample data.
+These fixtures turn the format examples in [docs/root1/discription.md](discription.md) into checked-in runtime assets that future loader tests can reuse without rewriting sample data.
 
 ## Canonical runtime assets
 
@@ -33,7 +33,41 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 - `assets/fixtures/psd_import_sample.psd`
 - `assets/fixtures/psd_import_sample_reimport.psd`
 
-## Mapping to `docs/discription.md`
+## Validated parameter/deformer fixtures (MAR-122~128)
+
+MAR-121 is integrated into MAR-122. The following MAR-122~128 acceptance fixtures were validated on 2026-07-16 without changing `player_idle.*`.
+
+- `assets/fixtures/parameter_face_basic.mskl`: minimal bones/slots, continuous/discrete parameter semantics, groups, animation FFD, and 1D mouth-open shape composition.
+- `/tmp/marrow_parameter_face_basic.mbin` (generated): v2 generic-payload round-trip of the exported comprehensive parameter project; no parameter-specific binary section.
+- `assets/fixtures/parameter_face_basic.matl`: minimal atlas metadata for the face/mouth mesh.
+- `assets/fixtures/parameter_face_basic.marrow`: optional/lossless `.marrow.parameter_model` source used by project export and unknown-additive-field validation.
+- `assets/fixtures/parameter_deformer_grid.mskl`: 2D Cartesian warp, rotation pivot/influence, nesting, rejection, and dirty-cache validation.
+- `assets/fixtures/parameter_expression_lipsync.mskl`: direct/final separation, expression priority/fade/reset, amplitude/phoneme mapping, and filter validation.
+- `assets/fixtures/art_path_stroke.mskl`: atlas-free skeleton-local stroke, keyform, cap/join tessellation, and bounds validation.
+
+These fixtures must prove optional-empty compatibility first: existing runtime fixtures omit the new sections and continue to load as an empty parameter model.
+
+### Validated parameter checkpoint commands
+
+These commands are recorded with their 2026-07-16 results in `AGENTS.md`:
+
+```bash
+python3 -m json.tool assets/fixtures/parameter_face_basic.mskl > /dev/null
+python3 -m json.tool assets/fixtures/parameter_face_basic.marrow > /dev/null
+python3 -m json.tool assets/fixtures/parameter_deformer_grid.mskl > /dev/null
+python3 -m json.tool assets/fixtures/art_path_stroke.mskl > /dev/null
+python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/null
+./build/marrow_inspect assets/fixtures/parameter_face_basic.mskl
+./build/marrow_parameter_project_smoke assets/fixtures/parameter_face_basic.marrow
+./build/marrow_inspect --compare /tmp/marrow_parameter_face_basic.mbin /tmp/marrow_parameter_face_basic.mskl
+./build/marrow_fixture_smoke assets/fixtures/parameter_face_basic.mskl assets/fixtures/parameter_face_basic.matl
+./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_face_basic.mskl assets/fixtures/parameter_face_basic.matl
+./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl
+./build-bench/marrow_benchmark --skeletons 200
+./build-bench/marrow_benchmark --parameter-deformers --skeletons 200 --frames 240
+```
+
+## Mapping to `docs/root1/discription.md`
 
 ### `player_idle.mskl`
 
@@ -78,6 +112,11 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 - `attack` and `aim` now validate MAR-013:
   - `attack` is a short non-loop upper-body rotation used to prove track interruption and end/dispose after mixing out.
   - `aim` is a looping upper-body hold used to prove wildcard mix resolution, loop completion callbacks, queue promotion, and empty-animation fade-out back to setup pose.
+- MAR-154 duration compatibility is covered in the same animation trio:
+  - `aim` authors `duration: 0.5`, exactly equal to its inferred last-key time, so runtime and binary
+    smoke tests can verify explicit presence plus inferred/effective values.
+  - `idle` and `attack` deliberately omit `duration`; their effective boundaries remain the inferred
+    `1.0` and `0.4` seconds, respectively, proving old-asset fallback beside the new field.
 - Slot attachment names stay aligned with the draft example so atlas lookups can use `body` and `arm_l` verbatim, while animated swaps still resolve through the same atlas metadata.
 - Point attachment validation uses the `spawn_anchor` slot with local `x`, `y`, and `rotation` data so the runtime can expose world-space spawn anchor transforms from the active pose.
 - Bounding-box validation uses the `hurtbox` slot with a four-vertex polygon so the runtime can transform authored hit-detection shapes into world space.
@@ -97,6 +136,8 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
   - a shared string table for object keys and string values
   - float32 numeric payloads
   - a packed boolean bitfield
+- Its generic payload preserves the authored `aim.duration` member while keeping `idle` and
+  `attack` absent, and its `AKEY` section quantizes animation time against each effective duration.
 - Regenerate it from the JSON source with:
   - `./build/marrow_inspect --export-binary assets/fixtures/player_idle.mbin assets/fixtures/player_idle.mskl`
 - Validate JSON and binary equivalence with:
@@ -131,7 +172,7 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
 
 ### `player_idle.marrow`
 
-- The minimal `.marrow` fixture covers the editor-side project split implied by sections 4 and 9 in [docs/discription.md](discription.md):
+- The minimal `.marrow` fixture covers the editor-side project split implied by sections 4 and 9 in [docs/root1/discription.md](discription.md):
   - the root `runtime` object points at the canonical `player_idle.mskl` and `player_idle.matl` files without embedding any exported runtime payload inline.
   - the root `editor` object keeps authoring-only metadata such as the project name, preview animation, preview skin set, export directory, free-form notes, and viewport framing.
   - `editor.viewport.onion_skin` persists the editor-only ghost-frame preview state: the on/off toggle, frame-vs-keyframe mode, frame-0 anchoring, before/after counts, and the sampling step.
@@ -147,6 +188,8 @@ These fixtures turn the format examples in [docs/discription.md](discription.md)
     - `path` stores editor-authored slot binding, constrained chain, position/spacing, and rotate/translate mixes.
     - `transform` stores source/target binding plus rotate/translate/scale/shear mixes and the optional offset block.
     - `physics` stores secondary-motion chains plus inertia, damping, strength, gravity, wind, and mix values.
+- The checked-in project deliberately omits `animation_edits.set_duration`. It therefore proves that an old project continues to inherit `aim`'s explicit `0.5` boundary from the referenced runtime asset while `idle` and `attack` remain inference-driven.
+- MAR-155 project smoke copies this fixture into `/tmp/marrow_mar155_duration.marrow`, then seeds an ordered opaque future operation plus a known `set_duration` carrying an unknown additive field. The smoke verifies lossless semantic preservation, live preview and one-item undo, rejected shrink rollback, key auto-grow/no-shrink, save/reload, and explicit-duration JSON/MBIN export parity without changing the canonical project fixture.
 - the checked-in fixture overrides `idle.bones.spine.rotate`, `idle.deform.body.body_mesh`, `idle.drawOrder`, and `idle.events`, so the editor shell and project smoke validation can prove that project-authored transform, FFD, draw-order, and event edits supersede the referenced runtime skeleton until export time.
 - the authored `idle.drawOrder[1]` key intentionally reorders the visible slots to `body -> fx_mask -> spark_fx -> arm_l` so the sample project still proves draw-order authoring while keeping the exported clipping setup render-valid for the end-to-end renderer smoke path.
 - The checked-in fixture also persists one authored IK, path, transform, and physics constraint edit so the editor shell and project smoke validation can prove that project-authored constraints preview on the helper rig, export into root-level runtime arrays, and round-trip back through the exported `.mskl`.
@@ -191,7 +234,7 @@ Why this is the preferred contributor flow:
 
 ### `ik_constraints.mskl`
 
-- The root-level `ik` array now mirrors the IK Constraint extension in [docs/discription.md](discription.md):
+- The root-level `ik` array now mirrors the IK Constraint extension in [docs/root1/discription.md](discription.md):
   - `arm_positive` and `arm_negative` are two-bone chains with identical reach distances but opposite `bendPositive` values, so the runtime can prove bend direction changes without changing the authored target offset.
   - `turret_reach` is a one-bone full-mix chain that lands exactly on its target bone.
   - `turret_half_mix` reuses the same one-bone layout with `mix: 0.5` so the runtime can prove partial IK blending instead of only full overrides.
@@ -210,7 +253,7 @@ Why this is the preferred contributor flow:
 
 ### `path_transform_constraints.mskl`
 
-- The root-level `path` array mirrors the Path Constraint notes in [docs/discription.md](discription.md):
+- The root-level `path` array mirrors the Path Constraint notes in [docs/root1/discription.md](discription.md):
   - `rope_follow` binds the `guide` slot to a cubic path attachment encoded as two straight Bezier segments, which keeps the authored geometry easy to inspect while still exercising path attachment parsing.
   - the constrained `path_a -> path_b -> path_c` chain uses `position: 0.1` plus `spacingMode: "percent"` and `spacing: 0.3`, so the smoke test can assert exact world-space placements 20, 80, and 140 units along the 200-unit guide.
   - full `rotateMix` and `translateMix` verify both tangent-following rotation and path-position translation in one setup-pose solve.
@@ -221,13 +264,14 @@ Why this is the preferred contributor flow:
 
 ### `physics_constraints.mskl`
 
-- The root-level `physics` array mirrors the Physics Constraint notes in [docs/discription.md](discription.md):
+- The root-level `physics` array mirrors the Physics Constraint notes in [docs/root1/discription.md](discription.md):
   - `ribbon_secondary` constrains the directly chained `ribbon_01 -> ribbon_02` pair, keeping the authored hierarchy small enough to inspect while still providing a multi-bone secondary-motion chain.
   - `inertia: 0.85`, `damping: 4.0`, and `strength: 18.0` give the smoke test a deterministic spring response that visibly lags behind the driven `pivot` bone before settling.
   - the `gravity` and `wind` vectors stay non-zero so the runtime can preserve and step environmental force metadata alongside the spring parameters during the numeric secondary-motion test.
 - The fixture keeps a single dummy slot and empty animation because the loader still requires `slots` and `animations`, but the validation focus is the parsed physics metadata plus the numeric world-space motion over repeated simulation steps.
 
-## Intent for future stories
+## Intent for later milestones
 
 - Treat these files as the default parser fixtures unless a later story explicitly expands the format.
 - When the `.matl` format is formalized, update this document in the same change so the fixture-to-spec mapping stays explicit.
+- Keep the MAR-122~128 commands and measured results synchronized with `AGENTS.md` if these fixtures change.

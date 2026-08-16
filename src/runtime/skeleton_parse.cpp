@@ -2702,7 +2702,7 @@ std::optional<LoadError> parse_event_timeline(
             return error;
         }
         if (find_optional_member(keyframe_value, "float") != nullptr) {
-            keyframe.float_value = float_value;
+            keyframe.float_value = static_cast<AnimationScalar>(float_value);
         }
 
         if (const auto error = read_optional_string(
@@ -2732,7 +2732,7 @@ std::optional<LoadError> parse_event_timeline(
             return error;
         }
         if (find_optional_member(keyframe_value, "volume") != nullptr) {
-            keyframe.volume = volume;
+            keyframe.volume = static_cast<AnimationScalar>(volume);
         }
 
         double balance = 0.0;
@@ -2745,7 +2745,7 @@ std::optional<LoadError> parse_event_timeline(
             return error;
         }
         if (find_optional_member(keyframe_value, "balance") != nullptr) {
-            keyframe.balance = balance;
+            keyframe.balance = static_cast<AnimationScalar>(balance);
         }
 
         // Events are discrete markers, so equal timestamps are valid and must
@@ -5495,6 +5495,60 @@ std::optional<LoadError> parse_animations(
             animation.event_timeline_data = std::move(parsed_timeline);
         }
 
+        if (const Value* duration_value = find_optional_member(animation_value, "duration")) {
+            const std::string duration_path = path + ".duration";
+            if (const auto error = json::require_type(
+                    document,
+                    *duration_value,
+                    Value::Type::Number,
+                    duration_path)) {
+                return error;
+            }
+
+            const double authored_duration = duration_value->as_number();
+            if (!std::isfinite(authored_duration)) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration must be finite");
+            }
+            if (authored_duration < 0.0) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration must be non-negative");
+            }
+
+            // Timeline key times use AnimationScalar storage. Normalize the authored
+            // boundary through that same representation so a JSON duration literal
+            // exactly matching its last key cannot become microscopically shorter
+            // solely because the key was converted to float32.
+            const AnimationScalar stored_duration =
+                static_cast<AnimationScalar>(authored_duration);
+            if (!std::isfinite(stored_duration)) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration is outside the runtime animation-time range");
+            }
+            const double explicit_duration = static_cast<double>(stored_duration);
+
+            const double inferred_duration = animation.inferred_duration();
+            if (explicit_duration < inferred_duration) {
+                return validation_error(
+                    document,
+                    duration_value->location(),
+                    duration_path,
+                    "duration must not be shorter than the last timeline key (" +
+                        std::to_string(inferred_duration) + ")");
+            }
+
+            animation.explicit_duration = explicit_duration;
+        }
+
         parsed_animations.push_back(std::move(animation));
     }
 
@@ -5703,6 +5757,17 @@ SkeletonDataResult load_skeleton_data(const json::Document& document) {
         return result;
     }
 
+    ParameterModelDefinitions parameter_model;
+    if (const auto error = detail::parse_parameter_model(
+            document,
+            root,
+            slots,
+            skins,
+            &parameter_model)) {
+        result.error = *error;
+        return result;
+    }
+
     std::vector<PathConstraintData> path_constraints;
     if (const auto error = detail::parse_path_constraints(
             document,
@@ -5789,7 +5854,8 @@ SkeletonDataResult load_skeleton_data(const json::Document& document) {
             std::move(animations),
             std::move(skins),
             default_mix_duration,
-            std::move(mix_definitions));
+            std::move(mix_definitions),
+            std::move(parameter_model));
     } catch (const std::invalid_argument& error) {
         result.error = detail::validation_error(document, bones_location, "$.bones", error.what());
     }

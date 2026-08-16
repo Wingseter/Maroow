@@ -114,6 +114,12 @@ void erase_matching_timelines(std::vector<Timeline>* timelines, Predicate&& pred
         timelines->end());
 }
 
+template <typename Timeline>
+bool has_single_key_at_origin(const Timeline& timeline) {
+    return timeline.keyframes.size() == 1U &&
+        timeline.keyframes.front().time == AnimationScalar{0.0f};
+}
+
 void append_targeted_bone(std::vector<std::size_t>* targeted_bones, std::size_t bone_index) {
     if (targeted_bones == nullptr) {
         return;
@@ -155,6 +161,7 @@ std::vector<std::size_t> rebuild_targeted_bone_indices(const AnimationData& anim
 
 AnimationData::AnimationData(const AnimationData& other)
     : name(other.name),
+      explicit_duration(other.explicit_duration),
       targeted_bone_indices(other.targeted_bone_indices),
       bone_rotate_timelines(other.bone_rotate_timelines),
       bone_inherit_timelines(other.bone_inherit_timelines),
@@ -178,6 +185,7 @@ AnimationData& AnimationData::operator=(const AnimationData& other) {
     }
 
     name = other.name;
+    explicit_duration = other.explicit_duration;
     targeted_bone_indices = other.targeted_bone_indices;
     bone_rotate_timelines = other.bone_rotate_timelines;
     bone_inherit_timelines = other.bone_inherit_timelines;
@@ -257,24 +265,26 @@ void AnimationData::prepare_sampling_context(SamplingContext* context, double ti
 void AnimationData::prune_constant_timelines(
     const std::vector<BoneData>& bones,
     const std::vector<SlotData>& slots) {
+    // A pose-identical key after time zero still authors the clip boundary and
+    // must remain available to inferred_duration().
     erase_matching_timelines(&bone_rotate_timelines, [&](const BoneRotateTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.bone_index < bones.size() &&
             nearly_equal(timeline.keyframes.front().angle, 0.0);
     });
     erase_matching_timelines(&bone_inherit_timelines, [&](const BoneInheritTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.bone_index < bones.size() &&
             timeline.keyframes.front().inherit == bones[timeline.bone_index].inherit;
     });
     erase_matching_timelines(&bone_translate_timelines, [&](const BoneTranslateTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.bone_index < bones.size() &&
             nearly_equal(timeline.keyframes.front().x, bones[timeline.bone_index].setup_pose.x) &&
             nearly_equal(timeline.keyframes.front().y, bones[timeline.bone_index].setup_pose.y);
     });
     erase_matching_timelines(&bone_scale_timelines, [&](const BoneScaleTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.bone_index < bones.size() &&
             nearly_equal(
                 timeline.keyframes.front().x,
@@ -284,7 +294,7 @@ void AnimationData::prune_constant_timelines(
                 bones[timeline.bone_index].setup_pose.scale_y);
     });
     erase_matching_timelines(&bone_shear_timelines, [&](const BoneShearTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.bone_index < bones.size() &&
             nearly_equal(
                 timeline.keyframes.front().x,
@@ -294,21 +304,21 @@ void AnimationData::prune_constant_timelines(
                 bones[timeline.bone_index].setup_pose.shear_y);
     });
     erase_matching_timelines(&slot_attachment_timelines, [&](const SlotAttachmentTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.slot_index < slots.size() &&
             timeline.keyframes.front().attachment_name == slots[timeline.slot_index].setup_attachment;
     });
     erase_matching_timelines(&slot_color_timelines, [&](const SlotColorTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             timeline.slot_index < slots.size() &&
             slot_color_matches(timeline.keyframes.front().color, slots[timeline.slot_index].color);
     });
     erase_matching_timelines(&mesh_deform_timelines, [&](const MeshDeformTimeline& timeline) {
-        return timeline.keyframes.size() == 1U &&
+        return has_single_key_at_origin(timeline) &&
             is_zero_offset_vector(timeline.keyframes.front().vertex_offsets);
     });
     if (draw_order_timeline_data.has_value() &&
-        draw_order_timeline_data->keyframes.size() == 1U &&
+        has_single_key_at_origin(*draw_order_timeline_data) &&
         draw_order_timeline_data->keyframes.front().slot_indices.size() == slots.size()) {
         bool draw_order_identity = true;
         for (std::size_t slot_index = 0;
@@ -616,7 +626,7 @@ double timeline_duration(const std::vector<Keyframe>& keyframes) {
 
 } // namespace
 
-double AnimationData::duration() const {
+double AnimationData::inferred_duration() const {
     double max_time = 0.0;
     for (const BoneRotateTimeline& timeline : bone_rotate_timelines) {
         max_time = std::max(max_time, timeline_duration(timeline.keyframes));
@@ -650,6 +660,10 @@ double AnimationData::duration() const {
     }
 
     return max_time;
+}
+
+double AnimationData::duration() const {
+    return explicit_duration.value_or(inferred_duration());
 }
 
 std::optional<std::size_t> sample_sequence_frame(

@@ -1,6 +1,8 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 
 project(Marrow LANGUAGES C CXX)
+
+include(CTest)
 
 if(APPLE)
     enable_language(OBJC)
@@ -11,31 +13,99 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    # Source files and fixtures are UTF-8. Make the compiler interpretation
+    # independent of the active Windows system code page.
+    add_compile_options(/utf-8)
+endif()
+
 option(
     MARROW_ENABLE_THREAD_SANITIZER
     "Build the dedicated runtime concurrency stress target with ThreadSanitizer instrumentation"
     OFF)
 
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-add_subdirectory(external/glfw)
+option(
+    MARROW_ENABLE_DISPLAY_TESTS
+    "Build tests which require a real display and graphics device"
+    OFF)
+
+add_library(marrow_windowing_support STATIC
+    src/editor/windowing.cpp
+)
+
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+set(SDL_UNINSTALL OFF CACHE BOOL "" FORCE)
+set(SDL_REVISION
+    "SDL-3.4.14-147a8ee32dbf9ac02f3794964490687b6bbda1bc"
+    CACHE STRING "Pinned vendored SDL revision" FORCE)
+if(WIN32)
+    # GameInput is optional for SDL's gamepad/raw mouse path and is independent
+    # of the Windows Ink pen events used by Marrow. SDL's configure probe can
+    # see GameInput.h from a newer installed SDK than the VS generator actually
+    # selected, so keep this optional backend off for reproducible VS2022 builds.
+    set(HAVE_GAMEINPUT_H OFF CACHE INTERNAL "Disable optional SDL GameInput" FORCE)
+endif()
+if(UNIX AND NOT APPLE)
+    set(SDL_X11 ON CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND OFF CACHE BOOL "" FORCE)
+endif()
+add_subdirectory(external/sdl3 EXCLUDE_FROM_ALL)
+
+add_library(marrow_window_host STATIC
+    src/editor/sdl_input.cpp
+    src/editor/sdl_window_host.cpp
+)
+
+target_include_directories(marrow_window_host
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/src/editor
+        ${PROJECT_SOURCE_DIR}/external
+)
+
+target_link_libraries(marrow_window_host
+    PUBLIC
+        marrow_windowing_support
+        SDL3::SDL3
+)
 
 if(APPLE)
-    find_library(MARROW_OPENGL_LIBRARY OpenGL REQUIRED)
-    set(MARROW_OPENGL_LIBRARIES ${MARROW_OPENGL_LIBRARY})
-else()
-    find_package(OpenGL REQUIRED)
-    set(MARROW_OPENGL_LIBRARIES OpenGL::GL)
+    set_source_files_properties(
+        src/editor/sdl_window_host.cpp
+        PROPERTIES
+            LANGUAGE OBJCXX
+            COMPILE_FLAGS "-fobjc-arc"
+    )
 endif()
 
+target_include_directories(marrow_windowing_support
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
 if(UNIX AND NOT APPLE)
+    find_package(OpenGL REQUIRED)
+    set(MARROW_OPENGL_LIBRARIES OpenGL::GL)
     find_package(Threads REQUIRED)
     find_package(X11 REQUIRED)
 endif()
 
-find_package(ZLIB REQUIRED)
+if(WIN32)
+    set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(external/zlib EXCLUDE_FROM_ALL)
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+else()
+    find_package(ZLIB REQUIRED)
+endif()
 find_package(Doxygen QUIET)
 
 set(MARROW_DOXYGEN_CONFIG ${PROJECT_BINARY_DIR}/Doxyfile)
@@ -46,56 +116,84 @@ configure_file(
 )
 
 set(MARROW_IMGUI_DIR ${PROJECT_SOURCE_DIR}/external/imgui)
-add_library(marrow_imgui STATIC
+add_library(marrow_imgui_core STATIC
     ${MARROW_IMGUI_DIR}/imgui.cpp
     ${MARROW_IMGUI_DIR}/imgui_draw.cpp
     ${MARROW_IMGUI_DIR}/imgui_tables.cpp
     ${MARROW_IMGUI_DIR}/imgui_widgets.cpp
-    ${MARROW_IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-    ${MARROW_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
 )
 
-target_include_directories(marrow_imgui
+target_include_directories(marrow_imgui_core
+    PUBLIC
+        ${MARROW_IMGUI_DIR}
+)
+
+add_library(marrow_imgui_sdl3 STATIC
+    ${MARROW_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+)
+
+target_include_directories(marrow_imgui_sdl3
     PUBLIC
         ${MARROW_IMGUI_DIR}
         ${MARROW_IMGUI_DIR}/backends
-        ${PROJECT_SOURCE_DIR}/external/glfw/include
 )
 
-target_link_libraries(marrow_imgui
+target_link_libraries(marrow_imgui_sdl3
     PUBLIC
-        glfw
-        ${MARROW_OPENGL_LIBRARIES}
+        marrow_imgui_core
+        SDL3::SDL3
 )
 
-if(APPLE)
-    target_compile_definitions(marrow_imgui PRIVATE GL_SILENCE_DEPRECATION)
-endif()
+add_library(marrow_sokol_imgui_compile_probe STATIC EXCLUDE_FROM_ALL
+    src/tests/sokol_imgui_compile_probe.cpp
+)
+target_include_directories(marrow_sokol_imgui_compile_probe PRIVATE
+    ${PROJECT_SOURCE_DIR}/external
+    ${MARROW_IMGUI_DIR}
+)
+
+add_executable(marrow_sokol_imgui_runtime_probe
+    src/tests/sokol_imgui_runtime_probe.cpp
+)
+target_include_directories(marrow_sokol_imgui_runtime_probe PRIVATE
+    ${PROJECT_SOURCE_DIR}/external
+    ${MARROW_IMGUI_DIR}
+)
+target_link_libraries(marrow_sokol_imgui_runtime_probe PRIVATE marrow_imgui_core)
+
+add_custom_target(marrow_verify_third_party
+    COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/VerifyThirdParty.cmake
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Verifying vendored dependency revisions and hashes"
+    VERBATIM
+)
 
 set(MARROW_RENDERER_SHADER_SOURCE
     ${PROJECT_SOURCE_DIR}/src/renderer/marrow_renderer_shader.glsl)
-set(MARROW_RENDERER_SHADER_HEADER
-    ${PROJECT_SOURCE_DIR}/src/renderer/generated/marrow_renderer_shader.h)
+set(MARROW_RENDERER_SHADER_METAL_HEADER
+    ${PROJECT_SOURCE_DIR}/src/renderer/generated/marrow_renderer_shader_metal.h)
+set(MARROW_RENDERER_SHADER_GL_HEADER
+    ${PROJECT_SOURCE_DIR}/src/renderer/generated/marrow_renderer_shader_gl.h)
 
 set(MARROW_SOKOL_SHDC "")
 set(MARROW_RENDERER_SHADER_SLANG "")
 if(APPLE)
     set(MARROW_SOKOL_SHDC ${PROJECT_SOURCE_DIR}/external/sokol-tools-bin/bin/osx/sokol-shdc)
-    set(MARROW_RENDERER_SHADER_SLANG glsl410:metal_macos)
+elseif(WIN32)
+    set(MARROW_SOKOL_SHDC ${PROJECT_SOURCE_DIR}/external/sokol-tools-bin/bin/win32/sokol-shdc.exe)
 elseif(UNIX)
     set(MARROW_SOKOL_SHDC ${PROJECT_SOURCE_DIR}/external/sokol-tools-bin/bin/linux/sokol-shdc)
-    set(MARROW_RENDERER_SHADER_SLANG glsl410)
 endif()
 
 if(MARROW_SOKOL_SHDC AND EXISTS ${MARROW_SOKOL_SHDC})
     add_custom_command(
-        OUTPUT ${MARROW_RENDERER_SHADER_HEADER}
+        OUTPUT ${MARROW_RENDERER_SHADER_GL_HEADER}
         COMMAND ${CMAKE_COMMAND} -E make_directory
             ${PROJECT_SOURCE_DIR}/src/renderer/generated
         COMMAND ${MARROW_SOKOL_SHDC}
             --input ${MARROW_RENDERER_SHADER_SOURCE}
-            --output ${MARROW_RENDERER_SHADER_HEADER}
-            --slang ${MARROW_RENDERER_SHADER_SLANG}
+            --output ${MARROW_RENDERER_SHADER_GL_HEADER}
+            --slang glsl410
             --format sokol
             --bytecode
             --ifdef
@@ -106,20 +204,84 @@ if(MARROW_SOKOL_SHDC AND EXISTS ${MARROW_SOKOL_SHDC})
         VERBATIM
     )
 
+    if(APPLE)
+        add_custom_command(
+            OUTPUT ${MARROW_RENDERER_SHADER_METAL_HEADER}
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${PROJECT_SOURCE_DIR}/src/renderer/generated
+            COMMAND ${MARROW_SOKOL_SHDC}
+                --input ${MARROW_RENDERER_SHADER_SOURCE}
+                --output ${MARROW_RENDERER_SHADER_METAL_HEADER}
+                --slang metal_macos
+                --format sokol
+                --bytecode
+                --ifdef
+                --no-log-cmdline
+            DEPENDS
+                ${MARROW_RENDERER_SHADER_SOURCE}
+                ${MARROW_SOKOL_SHDC}
+            VERBATIM
+        )
+    elseif(NOT EXISTS ${MARROW_RENDERER_SHADER_METAL_HEADER})
+        message(FATAL_ERROR
+            "The committed Metal shader header is missing; regenerate it on macOS.")
+    endif()
+
     add_custom_target(marrow_renderer_shaders
-        DEPENDS ${MARROW_RENDERER_SHADER_HEADER}
+        DEPENDS
+            ${MARROW_RENDERER_SHADER_GL_HEADER}
+            ${MARROW_RENDERER_SHADER_METAL_HEADER}
     )
 endif()
 
-add_library(marrow_renderer STATIC
-    src/renderer/sokol_backend.cpp
+add_library(marrow_renderer_commands STATIC
     src/renderer/module.cpp
-    ${MARROW_RENDERER_SHADER_HEADER}
+)
+
+target_include_directories(marrow_renderer_commands
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/renderer
+)
+
+add_library(marrow_renderer_core STATIC
+    src/renderer/sokol_gfx_impl.cpp
+    src/renderer/sokol_scene_renderer.cpp
+    ${MARROW_RENDERER_SHADER_GL_HEADER}
+    ${MARROW_RENDERER_SHADER_METAL_HEADER}
+)
+
+target_include_directories(marrow_renderer_core
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/external
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/renderer/generated
+)
+
+add_library(marrow_renderer_sapp_host STATIC
+    src/renderer/sokol_sapp_impl.cpp
+    src/renderer/sokol_backend.cpp
+)
+
+target_include_directories(marrow_renderer_sapp_host
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/external
+        ${PROJECT_SOURCE_DIR}/src/renderer/generated
+)
+
+add_library(marrow_renderer STATIC
+    src/renderer/demo_shell.cpp
 )
 
 if(APPLE)
     set_source_files_properties(
         src/renderer/sokol_backend.cpp
+        src/renderer/sokol_gfx_impl.cpp
+        src/renderer/sokol_scene_renderer.cpp
+        src/renderer/sokol_sapp_impl.cpp
         PROPERTIES
             LANGUAGE OBJCXX
     )
@@ -129,8 +291,7 @@ target_include_directories(marrow_renderer
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
     PRIVATE
-        ${PROJECT_SOURCE_DIR}/external
-        ${PROJECT_SOURCE_DIR}/src/renderer/generated
+        ${PROJECT_SOURCE_DIR}/src/renderer
 )
 
 set(MARROW_RUNTIME_SOURCES
@@ -140,6 +301,9 @@ set(MARROW_RUNTIME_SOURCES
     src/runtime/binary.cpp
     src/runtime/profiler.cpp
     src/runtime/module.cpp
+    src/runtime/parameter_model.cpp
+    src/runtime/parameter_parse.cpp
+    src/runtime/parameter_state.cpp
     src/runtime/atlas.cpp
     src/runtime/json.cpp
     src/runtime/skeleton.cpp
@@ -158,6 +322,16 @@ add_library(marrow_runtime STATIC
 
 target_include_directories(marrow_runtime
     PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+
+add_library(marrow_timeline_model STATIC
+    src/editor/timeline_model.cpp
+)
+
+target_include_directories(marrow_timeline_model
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/src/editor
         ${PROJECT_SOURCE_DIR}/include
 )
 
@@ -215,24 +389,40 @@ add_library(marrow_c STATIC
 target_include_directories(marrow_c
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
-    PRIVATE
-        ${PROJECT_SOURCE_DIR}/src/editor
-        ${MARROW_IMGUI_DIR}
 )
 
 target_link_libraries(marrow_c
     PUBLIC
-        marrow_renderer
+        marrow_renderer_commands
         marrow_editor
+)
+
+target_link_libraries(marrow_renderer_commands
+    PUBLIC
+        marrow_runtime
+    PRIVATE
+        ZLIB::ZLIB
+)
+
+target_link_libraries(marrow_renderer_core
+    PUBLIC
+        marrow_renderer_commands
+)
+
+target_link_libraries(marrow_renderer_sapp_host
+    PUBLIC
+        marrow_renderer_core
 )
 
 target_link_libraries(marrow_renderer
     PUBLIC
-        marrow_runtime
-        ZLIB::ZLIB
+        marrow_renderer_commands
+    PRIVATE
+        marrow_renderer_sapp_host
 )
 
 if(TARGET marrow_renderer_shaders)
+    add_dependencies(marrow_renderer_core marrow_renderer_shaders)
     add_dependencies(marrow_renderer marrow_renderer_shaders)
 endif()
 
@@ -242,7 +432,14 @@ if(APPLE)
     find_library(MARROW_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
     find_library(MARROW_METAL_FRAMEWORK Metal REQUIRED)
 
-    target_link_libraries(marrow_renderer
+    target_link_libraries(marrow_renderer_core
+        PUBLIC
+            ${MARROW_FOUNDATION_FRAMEWORK}
+            ${MARROW_QUARTZCORE_FRAMEWORK}
+            ${MARROW_METAL_FRAMEWORK}
+    )
+
+    target_link_libraries(marrow_renderer_sapp_host
         PRIVATE
             ${MARROW_FOUNDATION_FRAMEWORK}
             ${MARROW_COCOA_FRAMEWORK}
@@ -277,20 +474,43 @@ elseif(UNIX AND NOT APPLE)
         message(FATAL_ERROR "marrow_renderer requires the Xcursor library for sokol_app.")
     endif()
 
-    target_link_libraries(marrow_renderer
+    target_link_libraries(marrow_renderer_core
+        PUBLIC
+            ${MARROW_OPENGL_LIBRARIES}
+    )
+
+    target_link_libraries(marrow_renderer_sapp_host
         PRIVATE
             ${MARROW_SOKOL_PLATFORM_LIBRARIES}
+    )
+elseif(WIN32)
+    target_link_libraries(marrow_renderer_core PUBLIC opengl32)
+    target_link_libraries(marrow_renderer_sapp_host
+        PRIVATE
+            user32
+            shell32
+            ole32
+            gdi32
+            opengl32
     )
 endif()
 
 add_library(marrow_editor STATIC
     src/editor/module.cpp
+    src/editor/selection.cpp
+    src/editor/preferences.cpp
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/parameter_project_model.cpp
+    src/editor/authoring.cpp
+    src/editor/session.cpp
     src/editor/agent_dispatch.cpp
-    src/editor/icon_registry.cpp
-    src/editor/shell_core.cpp
+    src/editor/agent_handlers_inspection.cpp
+    src/editor/agent_handlers_editing.cpp
+    src/editor/agent_handlers_constraints.cpp
+    src/editor/agent_handlers_parameters.cpp
+    src/editor/agent_handlers_management.cpp
 )
 
 target_include_directories(marrow_editor
@@ -298,16 +518,19 @@ target_include_directories(marrow_editor
         ${PROJECT_SOURCE_DIR}/include
     PRIVATE
         ${PROJECT_SOURCE_DIR}/src/editor
-        ${MARROW_IMGUI_DIR}
 )
 
 target_link_libraries(marrow_editor
     PUBLIC
         marrow_runtime
     PRIVATE
+        marrow_timeline_model
         ZLIB::ZLIB
-        ${MARROW_OPENGL_LIBRARIES}
 )
+
+if(WIN32)
+    target_link_libraries(marrow_editor PRIVATE shell32 ole32)
+endif()
 
 add_executable(marrow_bootstrap
     src/main.cpp
@@ -333,13 +556,22 @@ target_link_libraries(marrow_renderer_sample
         marrow_renderer
 )
 
+add_executable(marrow_validator
+    src/samples/marrow_validator.cpp
+)
+
+target_link_libraries(marrow_validator
+    PRIVATE
+        marrow_renderer
+)
+
 add_executable(marrow_fixture_smoke
     src/samples/runtime_fixture_smoke.cpp
 )
 
 target_link_libraries(marrow_fixture_smoke
     PRIVATE
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_c_smoke
@@ -369,8 +601,113 @@ target_include_directories(marrow_unit_tests
 
 target_link_libraries(marrow_unit_tests
     PRIVATE
-        marrow_renderer
+        marrow_renderer_commands
 )
+
+add_executable(marrow_renderer_link_boundary_tests
+    src/tests/renderer_link_boundary_tests.cpp
+)
+
+add_library(marrow_viewport_interaction_kernel STATIC
+    src/editor/viewport_interaction_kernel.cpp
+)
+
+target_include_directories(marrow_viewport_interaction_kernel
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+add_executable(marrow_viewport_interaction_tests
+    src/tests/viewport_interaction_kernel_tests.cpp
+)
+
+target_link_libraries(marrow_viewport_interaction_tests
+    PRIVATE
+        marrow_viewport_interaction_kernel
+)
+
+add_executable(marrow_timeline_model_tests
+    src/tests/timeline_model_tests.cpp
+)
+
+target_include_directories(marrow_timeline_model_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_timeline_model_tests
+    PRIVATE
+        marrow_editor
+)
+
+add_executable(marrow_preference_tests
+    src/tests/preference_store_tests.cpp
+)
+
+target_include_directories(marrow_preference_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_preference_tests
+    PRIVATE
+        marrow_editor
+)
+
+add_executable(marrow_selection_tests
+    src/tests/selection_set_tests.cpp
+)
+
+target_link_libraries(marrow_selection_tests
+    PRIVATE
+        marrow_editor
+)
+
+add_executable(marrow_windowing_tests
+    src/tests/windowing_tests.cpp
+)
+
+target_link_libraries(marrow_windowing_tests
+    PRIVATE
+        marrow_windowing_support
+)
+
+add_executable(marrow_pen_input_tests
+    src/tests/pen_input_tests.cpp
+    src/editor/sdl_input.cpp
+)
+
+target_include_directories(marrow_pen_input_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/external/sdl3/include
+)
+
+add_executable(marrow_window_host_smoke
+    src/tests/window_host_smoke.cpp
+)
+
+target_link_libraries(marrow_window_host_smoke
+    PRIVATE
+        marrow_window_host
+)
+
+target_link_libraries(marrow_pen_input_tests
+    PRIVATE
+        marrow_windowing_support
+)
+
+add_executable(marrow_agent_socket_tests
+    src/tests/agent_socket_tests.cpp
+    src/editor/agent_socket.cpp
+)
+
+target_include_directories(marrow_agent_socket_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_agent_socket_tests PRIVATE marrow_editor)
+if(WIN32)
+    target_link_libraries(marrow_agent_socket_tests PRIVATE ws2_32)
+endif()
 
 add_executable(marrow_benchmark
     src/samples/marrow_benchmark.cpp
@@ -383,8 +720,7 @@ target_include_directories(marrow_benchmark
 
 target_link_libraries(marrow_benchmark
     PRIVATE
-        marrow_runtime
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_thread_stress
@@ -447,6 +783,15 @@ target_link_libraries(marrow_project_smoke
         marrow_editor
 )
 
+add_executable(marrow_parameter_project_smoke
+    src/samples/parameter_project_smoke.cpp
+)
+
+target_link_libraries(marrow_parameter_project_smoke
+    PRIVATE
+        marrow_editor
+)
+
 add_executable(marrow_atlas_packer_smoke
     src/samples/atlas_packer_smoke.cpp
 )
@@ -459,7 +804,7 @@ target_include_directories(marrow_atlas_packer_smoke
 target_link_libraries(marrow_atlas_packer_smoke
     PRIVATE
         marrow_editor
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_psd_import_smoke
@@ -469,7 +814,7 @@ add_executable(marrow_psd_import_smoke
 target_link_libraries(marrow_psd_import_smoke
     PRIVATE
         marrow_editor
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_agent_dispatch_smoke
@@ -481,22 +826,67 @@ target_link_libraries(marrow_agent_dispatch_smoke
         marrow_c
 )
 
+add_dependencies(marrow_renderer_link_boundary_tests
+    marrow_c_smoke
+    marrow_agent_dispatch_smoke
+    marrow_unit_tests
+    marrow_fixture_smoke
+    marrow_benchmark
+)
+
 add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
+    src/editor/shell_core.cpp
+    src/editor/shell_preview.cpp
+    src/editor/shell_asset_watch.cpp
+    src/editor/shell_derived_cache.cpp
+    src/editor/timeline_controller.cpp
+    src/editor/shell_timeline.cpp
+    src/editor/shell_constraints.cpp
+    src/editor/shell_selection.cpp
+    src/editor/shell_inspector.cpp
+    src/editor/shell_weight_paint.cpp
+    src/editor/viewport_interaction_controller.cpp
+    src/editor/viewport_ffd_controller.cpp
+    src/editor/shell_viewport_ui.cpp
+    src/editor/shell_project_panels.cpp
+    src/editor/shell_parameters.cpp
+    src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
+    src/editor/shell_smoke_project.cpp
+    src/editor/shell_smoke_viewport.cpp
+    src/editor/shell_smoke_ffd.cpp
+    src/editor/shell_smoke_timeline.cpp
+    src/editor/shell_smoke_frames.cpp
+    src/editor/shell_smoke_parameters.cpp
     src/editor/shell_widgets.cpp
     src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
     src/editor/agent_socket.cpp
+    src/editor/sokol_imgui_impl.cpp
+    src/editor/sokol_graphics_device.cpp
+)
+
+target_include_directories(marrow_editor_shell
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/external
+        ${PROJECT_SOURCE_DIR}/src/renderer/generated
 )
 
 target_link_libraries(marrow_editor_shell
     PRIVATE
         marrow_editor
-        marrow_renderer
-        marrow_imgui
+        marrow_renderer_core
+        marrow_timeline_model
+        marrow_viewport_interaction_kernel
+        marrow_imgui_sdl3
+        marrow_window_host
 )
+
+if(WIN32)
+    target_link_libraries(marrow_editor_shell PRIVATE ws2_32)
+endif()
 
 if(APPLE)
     target_sources(marrow_editor_shell PRIVATE
@@ -532,6 +922,108 @@ add_custom_target(marrow_editor_icons ALL
     DEPENDS ${MARROW_EDITOR_ICON_STAMP})
 add_dependencies(marrow_editor_shell marrow_editor_icons)
 
+if(WIN32)
+    set(MARROW_PORTABLE_ROOT
+        "${PROJECT_BINARY_DIR}/portable/$<CONFIG>")
+    set(MARROW_PORTABLE_DIR
+        "${MARROW_PORTABLE_ROOT}/Marrow")
+    set(MARROW_PORTABLE_ZIP
+        "${MARROW_PORTABLE_ROOT}/Marrow-$<CONFIG>-x64.zip")
+
+    add_custom_target(marrow_portable_stage
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${MARROW_PORTABLE_DIR}
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${MARROW_PORTABLE_DIR}
+            ${MARROW_PORTABLE_DIR}/assets
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:marrow_editor_shell>
+            ${MARROW_PORTABLE_DIR}/marrow_editor_shell.exe
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${PROJECT_SOURCE_DIR}/assets/fonts
+            ${MARROW_PORTABLE_DIR}/fonts
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${PROJECT_SOURCE_DIR}/assets/icons/export/white_48
+            ${MARROW_PORTABLE_DIR}/icons
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${PROJECT_SOURCE_DIR}/assets/fixtures
+            ${MARROW_PORTABLE_DIR}/assets/fixtures
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${PROJECT_SOURCE_DIR}/licenses
+            ${MARROW_PORTABLE_DIR}/licenses
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${PROJECT_SOURCE_DIR}/THIRD_PARTY.md
+            ${MARROW_PORTABLE_DIR}/THIRD_PARTY.md
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${PROJECT_SOURCE_DIR}/packaging/README-Windows.txt
+            ${MARROW_PORTABLE_DIR}/README.txt
+        COMMAND ${CMAKE_COMMAND} -E copy -t ${MARROW_PORTABLE_DIR}
+            $<TARGET_RUNTIME_DLLS:marrow_editor_shell>
+        COMMAND ${CMAKE_COMMAND}
+            -DROOT=${MARROW_PORTABLE_DIR}
+            -P ${PROJECT_SOURCE_DIR}/cmake/GeneratePortableManifest.cmake
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${MARROW_PORTABLE_ZIP}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${MARROW_PORTABLE_ROOT}
+            ${CMAKE_COMMAND} -E tar cf ${MARROW_PORTABLE_ZIP}
+                --format=zip Marrow
+        COMMAND ${CMAKE_COMMAND}
+            -DARCHIVE=${MARROW_PORTABLE_ZIP}
+            -P ${PROJECT_SOURCE_DIR}/cmake/HashPortableArchive.cmake
+        COMMAND_EXPAND_LISTS
+        DEPENDS marrow_editor_shell
+        WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+        COMMENT "Staging the self-contained Marrow portable folder and transport ZIP"
+        VERBATIM
+    )
+endif()
+
+if(MARROW_ENABLE_DISPLAY_TESTS)
+    add_executable(marrow_gpu_parity_smoke
+        src/tests/gpu_parity_smoke.cpp
+        src/editor/sokol_graphics_device.cpp
+    )
+    if(APPLE)
+        target_sources(marrow_gpu_parity_smoke PRIVATE
+            src/tests/gpu_readback_metal.mm
+        )
+        set_source_files_properties(
+            src/tests/gpu_readback_metal.mm
+            PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+        )
+        target_compile_definitions(marrow_gpu_parity_smoke PRIVATE SOKOL_METAL)
+    else()
+        target_sources(marrow_gpu_parity_smoke PRIVATE
+            src/tests/gpu_readback_gl.cpp
+        )
+        target_compile_definitions(marrow_gpu_parity_smoke PRIVATE SOKOL_GLCORE)
+        if(WIN32)
+            target_link_libraries(marrow_gpu_parity_smoke PRIVATE opengl32)
+        elseif(UNIX)
+            target_link_libraries(marrow_gpu_parity_smoke PRIVATE ${MARROW_OPENGL_LIBRARIES})
+        endif()
+    endif()
+    target_include_directories(marrow_gpu_parity_smoke PRIVATE
+        ${PROJECT_SOURCE_DIR}/external
+        ${PROJECT_SOURCE_DIR}/src/editor
+        ${PROJECT_SOURCE_DIR}/src/tests
+    )
+    target_link_libraries(marrow_gpu_parity_smoke PRIVATE
+        marrow_renderer_core
+        marrow_window_host
+    )
+
+    add_custom_target(marrow_editor_display_smoke
+        COMMAND ${CMAKE_COMMAND} -E env
+            MARROW_DISPLAY_SMOKE=1
+            $<TARGET_FILE:marrow_editor_shell>
+            --project ${PROJECT_SOURCE_DIR}/assets/fixtures/player_idle.marrow
+            --auto-close 20
+        DEPENDS marrow_editor_shell
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMENT "Running the SDL/Sokol editor display smoke"
+        VERBATIM
+    )
+endif()
+
 if(DOXYGEN_FOUND)
     add_custom_target(marrow_docs
         COMMAND ${DOXYGEN_EXECUTABLE} ${MARROW_DOXYGEN_CONFIG}
@@ -549,5 +1041,248 @@ else()
 endif()
 
 if(APPLE)
-    target_compile_definitions(marrow_editor_shell PRIVATE GL_SILENCE_DEPRECATION)
+    target_compile_definitions(marrow_editor_shell PRIVATE SOKOL_METAL)
+else()
+    target_compile_definitions(marrow_editor_shell PRIVATE SOKOL_GLCORE)
+endif()
+
+if(BUILD_TESTING)
+    add_test(
+        NAME marrow.sokol_imgui_lifecycle
+        COMMAND marrow_sokol_imgui_runtime_probe
+    )
+    set_tests_properties(marrow.sokol_imgui_lifecycle PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;dependency;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.windowing_unit
+        COMMAND marrow_windowing_tests
+    )
+    set_tests_properties(marrow.windowing_unit PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "windowing;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.pen_input_unit
+        COMMAND marrow_pen_input_tests
+    )
+    set_tests_properties(marrow.pen_input_unit PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "windowing;pen;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.agent_socket_transport
+        COMMAND marrow_agent_socket_tests
+    )
+    set_tests_properties(marrow.agent_socket_transport PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;agent;socket;unit;noninteractive"
+    )
+
+    if(MARROW_ENABLE_DISPLAY_TESTS)
+        add_test(
+            NAME marrow.window_host_smoke
+            COMMAND marrow_window_host_smoke
+        )
+        set_tests_properties(marrow.window_host_smoke PROPERTIES
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            LABELS "windowing;integration;display"
+        )
+
+        add_test(
+            NAME marrow.gpu_parity_smoke
+            COMMAND marrow_gpu_parity_smoke
+        )
+        set_tests_properties(marrow.gpu_parity_smoke PROPERTIES
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            LABELS "renderer;integration;display"
+        )
+
+        add_test(
+            NAME marrow.editor_display_smoke
+            COMMAND ${CMAKE_COMMAND} -E env
+                MARROW_DISPLAY_SMOKE=1
+                $<TARGET_FILE:marrow_editor_shell>
+                --project ${PROJECT_SOURCE_DIR}/assets/fixtures/player_idle.marrow
+                --auto-close 20
+        )
+        set_tests_properties(marrow.editor_display_smoke PROPERTIES
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+            LABELS "editor;integration;display"
+        )
+    endif()
+
+    add_test(
+        NAME marrow.runtime_unit
+        COMMAND marrow_unit_tests
+    )
+    set_tests_properties(marrow.runtime_unit PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.renderer_link_boundary
+        COMMAND marrow_renderer_link_boundary_tests
+            $<TARGET_FILE:marrow_c_smoke>
+            $<TARGET_FILE:marrow_agent_dispatch_smoke>
+            $<TARGET_FILE:marrow_unit_tests>
+            $<TARGET_FILE:marrow_fixture_smoke>
+            $<TARGET_FILE:marrow_benchmark>
+    )
+    set_tests_properties(marrow.renderer_link_boundary PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;guardrail;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.viewport_interaction_kernel
+        COMMAND marrow_viewport_interaction_tests
+    )
+    set_tests_properties(marrow.viewport_interaction_kernel PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;viewport;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.timeline_model
+        COMMAND marrow_timeline_model_tests
+    )
+    set_tests_properties(marrow.timeline_model PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;timeline;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.preference_store
+        COMMAND marrow_preference_tests
+    )
+    set_tests_properties(marrow.preference_store PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;preferences;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.selection_set
+        COMMAND marrow_selection_tests
+    )
+    set_tests_properties(marrow.selection_set PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;selection;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.runtime_fixture_smoke
+        COMMAND marrow_fixture_smoke
+            assets/fixtures/player_idle.mskl
+            assets/fixtures/player_idle.matl
+    )
+    set_tests_properties(marrow.runtime_fixture_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;fixture;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.renderer_skip_render_smoke
+        COMMAND marrow_renderer_sample
+            --hud
+            --skip-render
+            assets/fixtures/player_idle.mskl
+            assets/fixtures/player_idle.matl
+    )
+    set_tests_properties(marrow.renderer_skip_render_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.project_smoke
+        COMMAND marrow_project_smoke
+            assets/fixtures/player_idle.marrow
+    )
+    set_tests_properties(marrow.project_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;project;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.parameter_project_smoke
+        COMMAND marrow_parameter_project_smoke
+            assets/fixtures/parameter_face_basic.marrow
+    )
+    set_tests_properties(marrow.parameter_project_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;editor;parameter;project;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.parameter_editor_shell_smoke
+        COMMAND marrow_editor_shell
+            --project assets/fixtures/parameter_face_basic.marrow
+            --auto-close 2
+    )
+    set_tests_properties(marrow.parameter_editor_shell_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;parameter;shell;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.art_path_renderer_smoke
+        COMMAND marrow_renderer_sample
+            --skip-render
+            --no-atlas
+            assets/fixtures/art_path_stroke.mskl
+    )
+    set_tests_properties(marrow.art_path_renderer_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "runtime;renderer;parameter;art-path;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.renderer_missing_atlas_guard
+        COMMAND marrow_renderer_sample
+            --skip-render
+            --no-atlas
+            assets/fixtures/parameter_face_basic.mskl
+    )
+    set_tests_properties(marrow.renderer_missing_atlas_guard PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;parameter;guardrail;noninteractive"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME marrow.agent_dispatch_smoke
+        COMMAND marrow_agent_dispatch_smoke
+    )
+    set_tests_properties(marrow.agent_dispatch_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;agent;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.c_abi_smoke
+        COMMAND marrow_c_smoke
+    )
+    set_tests_properties(marrow.c_abi_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "c-abi;smoke;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.editor_shell_smoke
+        COMMAND marrow_editor_shell
+            --project
+            assets/fixtures/player_idle.marrow
+            --auto-close
+            5
+    )
+    set_tests_properties(marrow.editor_shell_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;smoke;noninteractive"
+    )
 endif()

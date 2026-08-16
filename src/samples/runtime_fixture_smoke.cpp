@@ -38,6 +38,7 @@ using marrow::runtime::TrackEntry;
 
 bool g_quantized_runtime_validation = false;
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kIkEpsilon = 1e-4;
 
 struct StateEventRecord {
     AnimationStateEventType type;
@@ -582,7 +583,6 @@ bool apply_reference_one_bone_ik(
     bool compress,
     bool stretch,
     double alpha) {
-    constexpr double kIkEpsilon = 1e-4;
     const auto safe_nonzero = [](double value) {
         if (std::abs(value) > kIkEpsilon) {
             return value;
@@ -686,7 +686,6 @@ bool apply_reference_two_bone_ik(
     bool stretch,
     double softness,
     double alpha) {
-    constexpr double kIkEpsilon = 1e-4;
     const auto safe_nonzero = [](double value) {
         if (std::abs(value) > kIkEpsilon) {
             return value;
@@ -1162,6 +1161,29 @@ bool validate_fixture_skeleton(const Document& document) {
         return print_error(*error);
     }
 
+    const Value* idle_animation = marrow::runtime::json::find_member(*animations, "idle");
+    const Value* attack_animation = marrow::runtime::json::find_member(*animations, "attack");
+    const Value* aim_animation = marrow::runtime::json::find_member(*animations, "aim");
+    if (idle_animation == nullptr || !idle_animation->is_object() ||
+        attack_animation == nullptr || !attack_animation->is_object() ||
+        aim_animation == nullptr || !aim_animation->is_object()) {
+        std::cerr << "Skeleton fixture is missing the idle, attack, or aim animation object.\n";
+        return false;
+    }
+
+    const Value* idle_duration =
+        marrow::runtime::json::find_member(*idle_animation, "duration");
+    const Value* attack_duration =
+        marrow::runtime::json::find_member(*attack_animation, "duration");
+    const Value* aim_duration =
+        marrow::runtime::json::find_member(*aim_animation, "duration");
+    if (idle_duration != nullptr || attack_duration != nullptr ||
+        aim_duration == nullptr || !aim_duration->is_number() ||
+        !require_near(aim_duration->as_number(), 0.5, "fixture aim duration")) {
+        std::cerr << "Skeleton fixture did not preserve authored duration presence.\n";
+        return false;
+    }
+
     if (const auto error = marrow::runtime::json::require_member(
             document, *skeleton, "name", Value::Type::String, "$.skeleton")) {
         return print_error(*error);
@@ -1608,6 +1630,20 @@ bool validate_runtime_skeleton_model(const std::shared_ptr<const SkeletonData>& 
         attack->targeted_bone_indices != std::vector<std::size_t>{2} ||
         aim->targeted_bone_indices != std::vector<std::size_t>{2}) {
         std::cerr << "SkeletonData relationships do not match the fixture.\n";
+        return false;
+    }
+
+    if (idle->explicit_duration.has_value() ||
+        attack->explicit_duration.has_value() ||
+        !aim->explicit_duration.has_value() ||
+        !require_near(idle->inferred_duration(), 1.0, "idle inferred duration") ||
+        !require_near(idle->duration(), 1.0, "idle effective duration") ||
+        !require_near(attack->inferred_duration(), 0.4, "attack inferred duration") ||
+        !require_near(attack->duration(), 0.4, "attack effective duration") ||
+        !require_near(*aim->explicit_duration, 0.5, "aim explicit duration") ||
+        !require_near(aim->inferred_duration(), 0.5, "aim inferred duration") ||
+        !require_near(aim->duration(), 0.5, "aim effective duration")) {
+        std::cerr << "SkeletonData animation duration metadata did not match the fixture.\n";
         return false;
     }
 

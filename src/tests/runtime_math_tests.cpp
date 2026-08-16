@@ -2,9 +2,13 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -16,6 +20,7 @@
 #include "marrow/runtime/animation_compare.hpp"
 #include "marrow/runtime/animation.hpp"
 #include "marrow/runtime/animation_state.hpp"
+#include "marrow/runtime/parameter_state.hpp"
 #include "marrow/runtime/profiler.hpp"
 #include "marrow/runtime/skeleton.hpp"
 #include "skeleton_internal.hpp"
@@ -44,6 +49,8 @@ using marrow::runtime::BoneWorldTransform;
 using marrow::runtime::BoundingBoxAttachmentData;
 using marrow::runtime::IkConstraintData;
 using marrow::runtime::Interpolation;
+using marrow::runtime::ParameterModelDefinitions;
+using marrow::runtime::ParameterState;
 using marrow::runtime::PhysicsConstraintData;
 using marrow::runtime::PhysicsMode;
 using marrow::runtime::RotateKeyframe;
@@ -59,6 +66,8 @@ namespace renderer_internal = marrow::renderer::internal;
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTolerance = 1e-6;
+constexpr float kPiF = 3.14159265358979323846f;
+constexpr float kTwoPiF = kPiF * 2.0f;
 
 struct TestContext {
     explicit TestContext(std::string test_name)
@@ -96,9 +105,10 @@ int run_test(std::string name, TestFn&& test_fn) {
     TestContext context(std::move(name));
     test_fn(context);
     if (context.failures == 0) {
-        std::cout << "[PASS] " << context.name << '\n';
+        std::cout << "[PASS] " << context.name << std::endl;
     } else {
-        std::cout << "[FAIL] " << context.name << " (" << context.failures << ")\n";
+        std::cout << "[FAIL] " << context.name << " (" << context.failures << ')'
+                  << std::endl;
     }
     return context.failures;
 }
@@ -185,7 +195,8 @@ std::shared_ptr<const SkeletonData> make_skeleton_data(
     std::vector<SkinData> skins = {},
     std::vector<AnimationData> animations = {},
     double default_mix_duration = 0.0,
-    std::vector<AnimationMixDefinition> mix_definitions = {}) {
+                   std::vector<AnimationMixDefinition> mix_definitions = {},
+                   ParameterModelDefinitions parameter_model = {}) {
     SkeletonInfo info;
     info.name = "runtime_math_unit_tests";
     return marrow::allocate_shared<SkeletonData>(
@@ -200,7 +211,8 @@ std::shared_ptr<const SkeletonData> make_skeleton_data(
         std::move(animations),
         std::move(skins),
         default_mix_duration,
-        std::move(mix_definitions));
+        std::move(mix_definitions),
+        std::move(parameter_model));
 }
 
 std::shared_ptr<const SkeletonData> make_skeleton_data_with_constraints(
@@ -357,12 +369,41 @@ std::shared_ptr<const SkeletonData> make_renderer_cache_test_data() {
     alt_skin.name = "alt";
     alt_skin.slot_attachments.push_back({0U, make_region_attachment("body_alt", "body_alt")});
 
+    ParameterModelDefinitions parameter_model;
+    marrow::runtime::ParameterDefinition stroke_parameter;
+    stroke_parameter.id = "stroke.collapse";
+    stroke_parameter.name = "Stroke Collapse";
+    parameter_model.parameters.push_back(std::move(stroke_parameter));
+
+    marrow::runtime::ArtPathDefinition art_path;
+    art_path.id = "cache.stroke";
+    art_path.name = "Cache Stroke";
+    art_path.points = {{-2.0, 0.0}, {2.0, 0.0}};
+    marrow::runtime::ArtPathParameterKeyforms keyforms;
+    keyforms.parameter = "stroke.collapse";
+    keyforms.keyforms.push_back({
+        0.0,
+        {{-2.0, 0.0}, {2.0, 0.0}},
+        1.0,
+        {}});
+    keyforms.keyforms.push_back({
+        1.0,
+        {{2.0, 0.0}, {-2.0, 0.0}},
+        1.0,
+        {}});
+    art_path.parameter_keyforms = std::move(keyforms);
+    parameter_model.art_paths.push_back(std::move(art_path));
+
     return make_skeleton_data(
         std::move(bones),
         {},
         {},
         {body_slot, arm_slot},
-        {default_skin, alt_skin});
+        {default_skin, alt_skin},
+        {},
+        0.0,
+        {},
+        std::move(parameter_model));
 }
 
 std::shared_ptr<const SkeletonData> make_renderer_mesh_cache_test_data(bool include_clip_slot) {
@@ -411,6 +452,49 @@ std::shared_ptr<const SkeletonData> make_renderer_mesh_cache_test_data(bool incl
         {},
         std::move(slots),
         {std::move(default_skin)});
+}
+
+std::shared_ptr<const SkeletonData> make_renderer_parameter_cache_test_data() {
+  std::vector<BoneData> bones;
+  bones.push_back(make_bone("root", std::nullopt));
+  bones.push_back(make_bone("arm", 0U));
+
+  SlotData face_slot;
+  face_slot.name = "face";
+  face_slot.bone_index = 0U;
+  face_slot.setup_attachment = "body_mesh";
+
+  SlotData arm_slot;
+  arm_slot.name = "arm";
+  arm_slot.bone_index = 1U;
+  arm_slot.setup_attachment = "arm_mesh";
+
+  SkinData skin;
+  skin.name = "default";
+  skin.slot_attachments.push_back(
+      {0U, make_mesh_attachment("body_mesh", "body_mesh")});
+  skin.slot_attachments.push_back(
+      {1U, make_mesh_attachment("arm_mesh", "arm_default")});
+
+  ParameterModelDefinitions parameter_model;
+  marrow::runtime::ParameterDefinition parameter;
+  parameter.id = "face.amount";
+  parameter.name = "Face Amount";
+  parameter_model.parameters.push_back(std::move(parameter));
+
+  marrow::runtime::ParameterShapeDefinition shape;
+  shape.id = "face.shape";
+  shape.target_slot = "face";
+  shape.target_attachment = "body_mesh";
+  shape.parameter = "face.amount";
+  shape.blend_mode = marrow::runtime::ParameterShapeBlendMode::AdditiveClamped;
+  shape.keyforms.push_back({0.0, std::vector<double>(8U, 0.0)});
+  shape.keyforms.push_back({1.0, std::vector<double>(8U, 2.0)});
+  parameter_model.parameter_shapes.push_back(std::move(shape));
+
+  return make_skeleton_data(std::move(bones), {}, {}, {face_slot, arm_slot},
+                            {std::move(skin)}, {}, 0.0, {},
+                            std::move(parameter_model));
 }
 
 BoneWorldTransform reference_local_transform(const BoneTransform& transform) {
@@ -1360,8 +1444,8 @@ void test_animation_timeline_index_and_sampling_cursor(TestContext& context) {
     animation.bone_scale_timelines.push_back(marrow::runtime::BoneScaleTimeline{
         1U,
         {
-            marrow::runtime::VectorKeyframe{0.0, 1.0, 1.0, Interpolation::linear()},
-            marrow::runtime::VectorKeyframe{1.0, 1.5, 0.75, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{0.0, -2.0, 1.5, Interpolation::linear()},
+            marrow::runtime::VectorKeyframe{1.0, 2.0, -1.5, Interpolation::linear()},
         }});
     animation.bone_shear_timelines.push_back(marrow::runtime::BoneShearTimeline{
         1U,
@@ -1432,11 +1516,619 @@ void test_animation_timeline_index_and_sampling_cursor(TestContext& context) {
         sampling_context.rotate_last_keyframe_indices.size() == 1U &&
             sampling_context.rotate_last_keyframe_indices[0] == 0U,
         "rewinding the sample time should reset the cached rotate cursor");
+
+    const auto negative_scale =
+        loaded_animation->sample_bone_scale(1U, 0.25, &sampling_context);
+    const auto exact_zero_scale =
+        loaded_animation->sample_bone_scale(1U, 0.5, &sampling_context);
+    const auto reflected_scale =
+        loaded_animation->sample_bone_scale(1U, 0.75, &sampling_context);
+    context.expect(
+        negative_scale.has_value() && exact_zero_scale.has_value() &&
+            reflected_scale.has_value(),
+        "signed scale timeline should sample across zero");
+    if (negative_scale.has_value()) {
+        context.expect_near(
+            negative_scale->x,
+            -1.0,
+            "signed scale should retain a negative x component");
+        context.expect_near(
+            negative_scale->y,
+            0.75,
+            "signed scale should retain a positive y component");
+    }
+    if (exact_zero_scale.has_value()) {
+        context.expect(
+            exact_zero_scale->x == 0.0 && exact_zero_scale->y == 0.0,
+            "linear signed scale crossing should sample exact zero");
+    }
+    if (reflected_scale.has_value()) {
+        context.expect_near(
+            reflected_scale->x,
+            1.0,
+            "signed scale should cross to a positive x component");
+        context.expect_near(
+            reflected_scale->y,
+            -0.75,
+            "signed scale should cross to a negative y component");
+    }
+    context.expect(
+        sampling_context.scale_last_keyframe_indices.size() == 1U &&
+            sampling_context.scale_last_keyframe_indices[0] == 0U,
+        "signed scale sampling should use the cached vector timeline cursor");
+}
+
+void test_animation_explicit_duration(TestContext& context) {
+    constexpr std::string_view duration_source = R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "explicit_duration_test",
+    "width": 1,
+    "height": 1
+  },
+  "bones": [
+    { "name": "root" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "animations": {
+    "missing": {
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    },
+    "equal": {
+      "duration": 0.3,
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    },
+    "longer": {
+      "duration": 1.0,
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    },
+    "empty_missing": {},
+    "empty_zero": { "duration": 0.0 },
+    "empty_positive": { "duration": 0.75 },
+    "constant_boundary": {
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.6, "angle": 0.0 }
+          ]
+        }
+      }
+    }
+  }
+})json";
+
+    const auto document_result =
+        marrow::runtime::json::parse_document(duration_source, "explicit_duration_test.mskl");
+    context.expect(
+        static_cast<bool>(document_result),
+        document_result.error.has_value()
+            ? document_result.error->format()
+            : "explicit-duration document should parse");
+    if (!document_result) {
+        return;
+    }
+
+    const auto data_result = marrow::runtime::load_skeleton_data(*document_result.document);
+    context.expect(
+        static_cast<bool>(data_result),
+        data_result.error.has_value()
+            ? data_result.error->format()
+            : "explicit-duration document should load");
+    if (!data_result) {
+        return;
+    }
+
+    const auto& data = data_result.skeleton_data;
+    const AnimationData* missing = data->find_animation("missing");
+    const AnimationData* equal = data->find_animation("equal");
+    const AnimationData* longer = data->find_animation("longer");
+    const AnimationData* empty_missing = data->find_animation("empty_missing");
+    const AnimationData* empty_zero = data->find_animation("empty_zero");
+    const AnimationData* empty_positive = data->find_animation("empty_positive");
+    const AnimationData* constant_boundary = data->find_animation("constant_boundary");
+    context.expect(missing != nullptr, "missing-duration animation should load");
+    context.expect(equal != nullptr, "equal-duration animation should load");
+    context.expect(longer != nullptr, "longer-duration animation should load");
+    context.expect(empty_missing != nullptr, "empty animation without duration should load");
+    context.expect(empty_zero != nullptr, "empty animation with zero duration should load");
+    context.expect(empty_positive != nullptr, "empty animation with positive duration should load");
+    context.expect(
+        constant_boundary != nullptr,
+        "pose-identical nonzero boundary animation should load");
+    if (missing == nullptr || equal == nullptr || longer == nullptr ||
+        empty_missing == nullptr || empty_zero == nullptr || empty_positive == nullptr ||
+        constant_boundary == nullptr) {
+        return;
+    }
+
+    const double stored_decimal = static_cast<double>(
+        static_cast<marrow::runtime::AnimationScalar>(0.3));
+    context.expect(
+        !missing->explicit_duration.has_value(),
+        "missing duration should preserve inferred fallback presence");
+    context.expect_near(
+        missing->inferred_duration(),
+        stored_decimal,
+        "missing duration should infer the last key");
+    context.expect_near(
+        missing->duration(),
+        stored_decimal,
+        "missing duration should use the inferred last key");
+
+    context.expect(
+        equal->explicit_duration.has_value(),
+        "decimal duration equal to the last key should remain explicit");
+    if (equal->explicit_duration.has_value()) {
+        context.expect_near(
+            *equal->explicit_duration,
+            stored_decimal,
+            "equal decimal duration should normalize to timeline storage");
+    }
+    context.expect_near(
+        equal->inferred_duration(),
+        stored_decimal,
+        "equal duration should retain its inferred boundary");
+    context.expect_near(
+        equal->duration(),
+        stored_decimal,
+        "equal duration should use its explicit boundary");
+
+    context.expect(
+        longer->explicit_duration.has_value(),
+        "longer duration should remain explicit");
+    context.expect_near(longer->inferred_duration(), stored_decimal, "longer inferred duration");
+    context.expect_near(longer->duration(), 1.0, "longer effective duration");
+
+    context.expect(
+        !empty_missing->explicit_duration.has_value(),
+        "empty missing duration should retain absence");
+    context.expect_near(empty_missing->inferred_duration(), 0.0, "empty inferred duration");
+    context.expect_near(empty_missing->duration(), 0.0, "empty fallback duration");
+    context.expect(
+        empty_zero->explicit_duration.has_value(),
+        "empty zero duration should retain explicit presence");
+    context.expect_near(empty_zero->duration(), 0.0, "empty explicit zero duration");
+    context.expect(
+        empty_positive->explicit_duration.has_value(),
+        "empty positive duration should retain explicit presence");
+    context.expect_near(
+        empty_positive->inferred_duration(),
+        0.0,
+        "empty positive duration should still infer zero");
+    context.expect_near(
+        empty_positive->duration(),
+        0.75,
+        "empty positive duration should use the explicit value");
+
+    const double stored_constant_boundary = static_cast<double>(
+        static_cast<marrow::runtime::AnimationScalar>(0.6));
+    context.expect(
+        !constant_boundary->explicit_duration.has_value(),
+        "pose-identical boundary should retain inferred duration mode");
+    context.expect(
+        constant_boundary->bone_rotate_timelines.size() == 1U,
+        "pose-identical nonzero key should not be pruned");
+    context.expect_near(
+        constant_boundary->inferred_duration(),
+        stored_constant_boundary,
+        "pose-identical nonzero key should define inferred duration");
+    context.expect_near(
+        constant_boundary->duration(),
+        stored_constant_boundary,
+        "pose-identical nonzero key should define effective fallback duration");
+
+    AnimationData copied = *longer;
+    context.expect(
+        copied.explicit_duration == longer->explicit_duration,
+        "copy construction should preserve explicit duration");
+    AnimationData assigned;
+    assigned = *longer;
+    context.expect(
+        assigned.explicit_duration == longer->explicit_duration,
+        "copy assignment should preserve explicit duration");
+
+    const auto make_single_duration_source = [](std::string_view duration_member) {
+        return std::string(R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": { "name": "duration_validation", "width": 1, "height": 1 },
+  "bones": [{ "name": "root" }],
+  "slots": [{ "name": "body", "bone": "root", "attachment": "body" }],
+  "animations": {
+    "clip": {
+)json") + std::string(duration_member) + R"json(
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0 },
+            { "time": 0.3, "angle": 30.0 }
+          ]
+        }
+      }
+    }
+  }
+})json";
+    };
+    const auto expect_loader_rejection = [&](std::string_view duration_member,
+                                             std::string_view label) {
+        const auto parsed = marrow::runtime::json::parse_document(
+            make_single_duration_source(duration_member),
+            std::string(label) + ".mskl");
+        context.expect(
+            static_cast<bool>(parsed),
+            parsed.error.has_value() ? parsed.error->format() : "validation JSON should parse");
+        if (!parsed) {
+            return;
+        }
+
+        const auto loaded = marrow::runtime::load_skeleton_data(*parsed.document);
+        context.expect(!loaded, std::string(label) + " should be rejected");
+        if (loaded.error.has_value()) {
+            context.expect(
+                loaded.error->message.find("$.animations.clip.duration") != std::string::npos,
+                std::string(label) + " should report the duration JSON path");
+        }
+    };
+    expect_loader_rejection("      \"duration\": \"0.3\",", "duration wrong type");
+    expect_loader_rejection("      \"duration\": -0.1,", "negative duration");
+    expect_loader_rejection("      \"duration\": 0.29,", "duration shorter than last key");
+    expect_loader_rejection("      \"duration\": 1e39,", "duration outside runtime range");
+
+    auto non_finite_document = marrow::runtime::json::parse_document(
+        make_single_duration_source("      \"duration\": 1.0,"),
+        "non_finite_duration.mskl");
+    context.expect(
+        static_cast<bool>(non_finite_document),
+        non_finite_document.error.has_value()
+            ? non_finite_document.error->format()
+            : "non-finite mutation source should parse");
+    if (non_finite_document) {
+        auto* animations_value = marrow::runtime::json::find_member(
+            non_finite_document.document->root,
+            "animations");
+        auto* clip_value = animations_value != nullptr
+            ? marrow::runtime::json::find_member(*animations_value, "clip")
+            : nullptr;
+        auto* duration_value = clip_value != nullptr
+            ? marrow::runtime::json::find_member(*clip_value, "duration")
+            : nullptr;
+        context.expect(duration_value != nullptr, "non-finite source should expose duration");
+        if (duration_value != nullptr) {
+            *duration_value = marrow::runtime::json::Value(
+                std::numeric_limits<double>::infinity(),
+                duration_value->location());
+            const auto loaded = marrow::runtime::load_skeleton_data(
+                *non_finite_document.document);
+            context.expect(!loaded, "non-finite duration should be rejected");
+            if (loaded.error.has_value()) {
+                context.expect(
+                    loaded.error->message.find("$.animations.clip.duration") !=
+                        std::string::npos,
+                    "non-finite duration should report the duration JSON path");
+            }
+        }
+    }
+
+    {
+        AnimationState state(data);
+        Skeleton skeleton(data);
+        const auto entry = state.set_animation(0U, "longer", false, 0.0);
+        state.update(0.6);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.6, "tail should sample inside explicit duration");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            30.0,
+            "tail should hold the last authored pose");
+    }
+
+    {
+        AnimationState state(data);
+        int complete_count = 0;
+        state.set_listener(
+            [&](AnimationState&,
+                marrow::runtime::AnimationStateEventType type,
+                const std::shared_ptr<marrow::runtime::TrackEntry>&,
+                const marrow::runtime::AnimationEvent*) {
+                if (type == marrow::runtime::AnimationStateEventType::Complete) {
+                    ++complete_count;
+                }
+            });
+        const auto entry = state.set_animation(0U, "longer", false, 0.0);
+        state.update(0.99);
+        context.expect(!entry->is_complete(), "non-loop clip should not complete before explicit end");
+        context.expect(complete_count == 0, "non-loop callback should wait for explicit end");
+        state.update(0.01);
+        context.expect(entry->is_complete(), "non-loop clip should complete at explicit end");
+        context.expect(complete_count == 1, "non-loop clip should complete exactly once");
+    }
+
+    {
+        AnimationState state(data);
+        Skeleton skeleton(data);
+        int complete_count = 0;
+        state.set_listener(
+            [&](AnimationState&,
+                marrow::runtime::AnimationStateEventType type,
+                const std::shared_ptr<marrow::runtime::TrackEntry>&,
+                const marrow::runtime::AnimationEvent*) {
+                if (type == marrow::runtime::AnimationStateEventType::Complete) {
+                    ++complete_count;
+                }
+            });
+        const auto entry = state.set_animation(0U, "longer", true, 0.0);
+        state.update(1.25);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.25, "loop should wrap at explicit end");
+        context.expect(complete_count == 1, "loop should callback once per explicit boundary");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            25.0,
+            "loop pose should sample from the explicit-duration remainder",
+            1e-4);
+    }
+
+    {
+        AnimationState state(data);
+        state.set_animation(0U, "longer", false, 0.0);
+        state.add_animation(0U, "missing", false, 0.0, 0.0);
+        state.update(0.8);
+        context.expect(
+            state.get_current(0U)->animation_name == "longer",
+            "queue should not promote at the inferred last key");
+        state.update(0.3);
+        const auto current = state.get_current(0U);
+        context.expect(current != nullptr, "queue should retain a current entry");
+        if (current != nullptr) {
+            context.expect(
+                current->animation_name == "missing",
+                "queue should promote at the explicit duration");
+            context.expect_near(current->track_time, 0.1, "queue should carry boundary overshoot");
+        }
+    }
+
+    {
+        AnimationState state(data);
+        Skeleton skeleton(data);
+        const auto entry = state.set_animation(0U, "longer", false, 0.0);
+        entry->reverse = true;
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 1.0, "reverse should begin at explicit end");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            30.0,
+            "reverse should hold the tail pose before the last key");
+        state.update(0.6);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.4, "reverse should traverse explicit tail");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            30.0,
+            "reverse tail should continue holding the last key");
+        state.update(0.2);
+        state.apply(skeleton);
+        context.expect_near(entry->animation_time(), 0.2, "reverse should enter keyed range");
+        context.expect_near(
+            skeleton.bone_poses()[0].local_pose.rotation,
+            20.0,
+            "reverse should sample the keyed range after the explicit tail",
+            1e-4);
+    }
+
+    {
+        AnimationState source_state(data);
+        source_state.set_animation(0U, "longer", true, 0.0);
+        source_state.update(0.8);
+        const AnimationStateSnapshot snapshot = source_state.capture_state();
+
+        AnimationState restored_state(data);
+        restored_state.restore_state(snapshot);
+        auto restored_entry = restored_state.get_current(0U);
+        context.expect(restored_entry != nullptr, "snapshot should restore explicit-duration entry");
+        if (restored_entry != nullptr) {
+            context.expect_near(
+                restored_entry->animation_duration(),
+                1.0,
+                "snapshot should resolve the explicit duration from reloaded data");
+            context.expect_near(
+                restored_entry->animation_time(),
+                0.8,
+                "snapshot should preserve explicit tail playback time");
+            restored_state.update(0.3);
+            context.expect_near(
+                restored_entry->animation_time(),
+                0.1,
+                "restored loop should wrap at the explicit duration");
+        }
+    }
+
+    {
+        AnimationState state(data);
+        const auto empty_entry = state.set_empty_animation(0U, 0.4);
+        state.add_animation(0U, "missing", false, 0.0, 0.0);
+        context.expect(empty_entry->is_empty, "synthetic empty entry should remain marked empty");
+        context.expect_near(
+            empty_entry->animation_duration(),
+            0.0,
+            "synthetic empty animation should not acquire a clip duration");
+        context.expect_near(empty_entry->mix_duration, 0.4, "empty entry should retain mix duration");
+        context.expect_near(empty_entry->track_end, 0.4, "empty track end should remain mix duration");
+        context.expect(!empty_entry->is_complete(), "synthetic empty entry should not report complete");
+        state.update(0.39);
+        context.expect(
+            state.get_current(0U) == empty_entry,
+            "synthetic empty should transition using mix duration, not clip duration");
+        state.update(0.02);
+        context.expect(
+            state.get_current(0U) != nullptr &&
+                state.get_current(0U)->animation_name == "missing",
+            "queued clip should start after the empty mix boundary");
+    }
+
+    const std::filesystem::path binary_path =
+        std::filesystem::temp_directory_path() / "marrow_mar154_explicit_duration_test.mbin";
+    if (const auto error = marrow::runtime::write_skeleton_binary_document(
+            *document_result.document,
+            binary_path)) {
+        context.expect(false, error->format());
+    } else {
+        const auto generic_document = marrow::runtime::load_skeleton_document(binary_path);
+        context.expect(
+            static_cast<bool>(generic_document),
+            generic_document.error.has_value()
+                ? generic_document.error->format()
+                : "binary generic document should load");
+        if (generic_document) {
+            const auto* animations_value = marrow::runtime::json::find_member(
+                generic_document.document->root,
+                "animations");
+            const auto* generic_longer = animations_value != nullptr
+                ? marrow::runtime::json::find_member(*animations_value, "longer")
+                : nullptr;
+            const auto* generic_missing = animations_value != nullptr
+                ? marrow::runtime::json::find_member(*animations_value, "missing")
+                : nullptr;
+            const auto* generic_longer_duration = generic_longer != nullptr
+                ? marrow::runtime::json::find_member(*generic_longer, "duration")
+                : nullptr;
+            const auto* generic_missing_duration = generic_missing != nullptr
+                ? marrow::runtime::json::find_member(*generic_missing, "duration")
+                : nullptr;
+            context.expect(
+                generic_longer_duration != nullptr && generic_longer_duration->is_number(),
+                "binary generic payload should preserve explicit duration presence");
+            if (generic_longer_duration != nullptr && generic_longer_duration->is_number()) {
+                context.expect_near(
+                    generic_longer_duration->as_number(),
+                    1.0,
+                    "binary generic payload should preserve explicit duration value");
+            }
+            context.expect(
+                generic_missing_duration == nullptr,
+                "binary generic payload should preserve duration absence");
+        }
+
+        const auto binary_result = marrow::runtime::load_skeleton_data(binary_path);
+        context.expect(
+            static_cast<bool>(binary_result),
+            binary_result.error.has_value()
+                ? binary_result.error->format()
+                : "optimized explicit-duration binary should load");
+        if (binary_result) {
+            const AnimationData* binary_longer =
+                binary_result.skeleton_data->find_animation("longer");
+            const AnimationData* binary_missing =
+                binary_result.skeleton_data->find_animation("missing");
+            context.expect(binary_longer != nullptr, "binary should retain longer animation");
+            context.expect(binary_missing != nullptr, "binary should retain missing animation");
+            if (binary_longer != nullptr) {
+                context.expect(
+                    binary_longer->explicit_duration.has_value(),
+                    "binary runtime should retain explicit duration presence");
+                context.expect_near(
+                    binary_longer->duration(),
+                    1.0,
+                    "binary runtime should retain effective duration");
+                context.expect(
+                    binary_longer->bone_rotate_timelines.size() == 1U &&
+                        binary_longer->bone_rotate_timelines[0].keyframes.size() == 2U,
+                    "AKEY payload should retain both rotate endpoints");
+                if (binary_longer->bone_rotate_timelines.size() == 1U &&
+                    binary_longer->bone_rotate_timelines[0].keyframes.size() == 2U) {
+                    constexpr double u16_range = 65535.0;
+                    const double expected_quantized_time = static_cast<double>(
+                        static_cast<marrow::runtime::AnimationScalar>(
+                            std::round(stored_decimal * u16_range) / u16_range));
+                    const double packed_time = static_cast<double>(
+                        binary_longer->bone_rotate_timelines[0].keyframes[1].time);
+                    context.expect_near(
+                        packed_time,
+                        expected_quantized_time,
+                        "AKEY time should quantize against the explicit tail",
+                        1e-8);
+                    context.expect(
+                        std::abs(packed_time - stored_decimal) > 1e-6,
+                        "AKEY endpoint should demonstrate explicit-tail time scaling");
+                }
+            }
+            if (binary_missing != nullptr) {
+                context.expect(
+                    !binary_missing->explicit_duration.has_value(),
+                    "binary runtime should not infer authored duration presence");
+            }
+
+            const auto comparison = marrow::runtime::compare_animation_roundtrip(
+                *data,
+                *binary_result.skeleton_data);
+            context.expect(
+                static_cast<bool>(comparison),
+                comparison.error.value_or("explicit-duration binary roundtrip should compare"));
+        }
+    }
+    std::error_code remove_error;
+    std::filesystem::remove(binary_path, remove_error);
+
+    const auto make_comparison_data = [](std::optional<double> explicit_duration) {
+        AnimationData animation = make_rotate_animation(
+            "compare",
+            0U,
+            {{0.0, 0.0}, {0.3, 30.0}});
+        animation.explicit_duration = explicit_duration;
+        return make_skeleton_data(
+            {make_bone("root", std::nullopt)},
+            {},
+            {},
+            {},
+            {},
+            {std::move(animation)});
+    };
+    const auto comparison_source = make_comparison_data(1.0);
+    const auto comparison_missing = make_comparison_data(std::nullopt);
+    const auto presence_mismatch = marrow::runtime::compare_animation_roundtrip(
+        *comparison_source,
+        *comparison_missing);
+    context.expect(!presence_mismatch, "comparison should reject explicit-duration presence mismatch");
+    context.expect(
+        presence_mismatch.error.has_value() &&
+            presence_mismatch.error->find("presence mismatch") != std::string::npos,
+        "comparison should identify explicit-duration presence mismatch");
+
+    const auto comparison_different = make_comparison_data(1.1);
+    const auto value_mismatch = marrow::runtime::compare_animation_roundtrip(
+        *comparison_source,
+        *comparison_different);
+    context.expect(!value_mismatch, "comparison should reject explicit-duration value mismatch");
+    context.expect(
+        value_mismatch.error.has_value() &&
+            value_mismatch.error->find("value mismatch") != std::string::npos,
+        "comparison should identify explicit-duration value mismatch");
 }
 
 void test_constraint_fast_math_approximations(TestContext& context) {
-    constexpr float kPiF = 3.14159265358979323846f;
-    constexpr float kTwoPiF = kPiF * 2.0f;
     constexpr float kAtanToleranceRadians = 0.005f;
     constexpr float kTrigTolerance = 0.0012f;
     constexpr float kAcosTolerance = 1e-4f;
@@ -1610,7 +2302,7 @@ void test_topological_bone_reorder(TestContext& context) {
     animation.bone_rotate_timelines.push_back(BoneRotateTimeline{
         0,
         0.0,
-        {RotateKeyframe{0.0, 0.0, Interpolation::linear()}}});
+        {RotateKeyframe{0.0, 10.0, Interpolation::linear()}}});
 
     std::vector<BoneData> bones;
     bones.push_back(make_bone("hand", 2, BoneTransform{5.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0}));
@@ -1687,6 +2379,12 @@ void test_topological_bone_reorder(TestContext& context) {
         return;
     }
 
+    context.expect(
+        reordered_animation->bone_rotate_timelines.size() == 1U,
+        "non-constant animation timeline should survive topological reorder");
+    if (reordered_animation->bone_rotate_timelines.empty()) {
+        return;
+    }
     context.expect(
         reordered_animation->bone_rotate_timelines[0].bone_index == 2,
         "animation bone indices should remap to the reordered skeleton");
@@ -2672,6 +3370,235 @@ void test_binary_key_quantization_and_reduction(TestContext& context) {
     std::filesystem::remove(binary_path, remove_error);
 }
 
+void test_json_value_string_literal_construction(TestContext& context) {
+    const marrow::runtime::json::Value literal_value("edit_ik_constraint", {});
+    context.expect(
+        literal_value.is_string(),
+        "string literal should construct a JSON string value, not boolean");
+
+    const char* channel_name = "rotate";
+    const marrow::runtime::json::Value pointer_value(channel_name, {});
+    context.expect(
+        pointer_value.is_string(),
+        "const char* should construct a JSON string value, not boolean");
+    if (pointer_value.is_string()) {
+        context.expect(
+            pointer_value.as_string() == "rotate",
+            "const char* JSON value should preserve the string payload");
+    }
+}
+
+void test_binary_multi_turn_rotate_fallback(TestContext& context) {
+    const auto document_result = marrow::runtime::json::parse_document(
+        R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "multi_turn_rotate_fallback",
+    "width": 64,
+    "height": 64
+  },
+  "bones": [
+    { "name": "root" },
+    { "name": "child", "parent": "root" },
+    { "name": "positive_alias", "parent": "root" },
+    { "name": "negative_alias", "parent": "root" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root", "attachment": "body" }
+  ],
+  "animations": {
+    "spin": {
+      "bones": {
+        "root": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0, "curve": "linear" },
+            { "time": 1.0, "angle": 450.0 }
+          ],
+          "translate": [
+            { "time": 0.0, "x": 0.0, "y": 0.0, "curve": "linear" },
+            { "time": 1.0, "x": 16.0, "y": 8.0 }
+          ]
+        },
+        "child": {
+          "rotate": [
+            { "time": 0.0, "angle": 10.0, "curve": "linear" },
+            { "time": 1.0, "angle": 40.0 }
+          ]
+        },
+        "positive_alias": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0, "curve": "linear" },
+            { "time": 1.0, "angle": 1440.0 }
+          ]
+        },
+        "negative_alias": {
+          "rotate": [
+            { "time": 0.0, "angle": 0.0, "curve": "linear" },
+            { "time": 1.0, "angle": -1440.0 }
+          ]
+        }
+      }
+    }
+  }
+})json",
+        "multi_turn_rotate_fallback.mskl");
+    context.expect(
+        static_cast<bool>(document_result),
+        document_result.error.has_value()
+            ? document_result.error->format()
+            : "multi-turn fallback document should parse");
+    if (!document_result) {
+        return;
+    }
+
+    const auto original_result =
+        marrow::runtime::load_skeleton_data(*document_result.document);
+    context.expect(
+        static_cast<bool>(original_result),
+        original_result.error.has_value()
+            ? original_result.error->format()
+            : "multi-turn fallback runtime should load");
+    if (!original_result) {
+        return;
+    }
+
+    const std::filesystem::path binary_path =
+        std::filesystem::temp_directory_path() /
+        "marrow_mar161_multi_turn_rotate_fallback.mbin";
+    if (const auto error = marrow::runtime::write_skeleton_binary_document(
+            *document_result.document,
+            binary_path)) {
+        context.expect(false, error->format());
+        return;
+    }
+
+    marrow::runtime::SkeletonBinaryInspection inspection;
+    if (const auto error = marrow::runtime::inspect_skeleton_binary(binary_path, &inspection)) {
+        context.expect(false, error->format());
+        std::filesystem::remove(binary_path);
+        return;
+    }
+    context.expect(
+        inspection.binary_version == 2U,
+        "multi-turn fallback should retain the MBIN v2 wire version");
+    context.expect(
+        inspection.has_optimized_animation_section,
+        "multi-turn fallback should retain the optional AKEY section");
+    context.expect(
+        inspection.animation_count == 1U,
+        "multi-turn fallback should retain the packed animation entry");
+    context.expect(
+        inspection.rotate_channel_count == 1U,
+        "AKEY should omit every unrepresentable multi-turn rotate channel only");
+    context.expect(
+        inspection.translate_channel_count == 1U,
+        "AKEY should keep independently representable translate channels");
+
+    const auto generic_document = marrow::runtime::load_skeleton_document(binary_path);
+    context.expect(
+        static_cast<bool>(generic_document),
+        generic_document.error.has_value()
+            ? generic_document.error->format()
+            : "multi-turn generic binary document should load");
+    if (generic_document) {
+        const auto* animations =
+            marrow::runtime::json::find_member(generic_document.document->root, "animations");
+        const auto* spin = animations != nullptr
+            ? marrow::runtime::json::find_member(*animations, "spin")
+            : nullptr;
+        const auto* bones = spin != nullptr
+            ? marrow::runtime::json::find_member(*spin, "bones")
+            : nullptr;
+        const auto expect_generic_angle = [&](const char* bone_name, double expected) {
+            const auto* bone = bones != nullptr
+                ? marrow::runtime::json::find_member(*bones, bone_name)
+                : nullptr;
+            const auto* rotate = bone != nullptr
+                ? marrow::runtime::json::find_member(*bone, "rotate")
+                : nullptr;
+            const auto* final_angle = rotate != nullptr && rotate->is_array() &&
+                    rotate->as_array().size() == 2U
+                ? marrow::runtime::json::find_member(rotate->as_array()[1], "angle")
+                : nullptr;
+            context.expect(
+                final_angle != nullptr && final_angle->is_number(),
+                std::string("generic MBIN payload should retain ") + bone_name +
+                    " multi-turn rotate key");
+            if (final_angle != nullptr && final_angle->is_number()) {
+                context.expect_near(
+                    final_angle->as_number(),
+                    expected,
+                    std::string("generic MBIN payload should preserve ") + bone_name +
+                        " raw multi-turn value");
+            }
+        };
+        expect_generic_angle("root", 450.0);
+        expect_generic_angle("positive_alias", 1440.0);
+        expect_generic_angle("negative_alias", -1440.0);
+    }
+
+    const auto binary_result = marrow::runtime::load_skeleton_data(binary_path);
+    context.expect(
+        static_cast<bool>(binary_result),
+        binary_result.error.has_value()
+            ? binary_result.error->format()
+            : "multi-turn fallback binary runtime should load");
+    if (binary_result) {
+        const AnimationData* animation =
+            binary_result.skeleton_data->find_animation("spin");
+        const BoneRotateTimeline* root_rotate = animation != nullptr
+            ? animation->find_rotate_timeline(0U)
+            : nullptr;
+        context.expect(
+            root_rotate != nullptr && root_rotate->keyframes.size() == 2U,
+            "runtime should use the generic multi-turn rotate channel");
+        if (root_rotate != nullptr && root_rotate->keyframes.size() == 2U) {
+            context.expect_near(
+                root_rotate->keyframes.back().angle,
+                450.0,
+                "generic runtime fallback should preserve the raw multi-turn key");
+        }
+        const auto expect_runtime_angle = [&](const char* bone_name, double expected) {
+            const auto bone_index = binary_result.skeleton_data->find_bone_index(bone_name);
+            const BoneRotateTimeline* rotate =
+                animation != nullptr && bone_index.has_value()
+                ? animation->find_rotate_timeline(*bone_index)
+                : nullptr;
+            context.expect(
+                rotate != nullptr && rotate->keyframes.size() == 2U,
+                std::string("runtime should use generic fallback for ") + bone_name);
+            if (rotate != nullptr && rotate->keyframes.size() == 2U) {
+                context.expect_near(
+                    rotate->keyframes.back().angle,
+                    expected,
+                    std::string("runtime should preserve ") + bone_name +
+                        " raw multi-turn key");
+            }
+        };
+        expect_runtime_angle("positive_alias", 1440.0);
+        expect_runtime_angle("negative_alias", -1440.0);
+
+        const auto comparison = marrow::runtime::compare_animation_roundtrip(
+            *original_result.skeleton_data,
+            *binary_result.skeleton_data);
+        context.expect(
+            static_cast<bool>(comparison),
+            comparison.error.value_or("multi-turn binary roundtrip should compare"));
+        if (comparison) {
+            context.expect(
+                comparison.metrics.max_rotation_error_degrees < 0.1,
+                "multi-turn fallback should preserve normalized rotation orientation");
+            context.expect(
+                comparison.metrics.max_translation_error_pixels < 0.5,
+                "neighboring packed translation should remain within tolerance");
+        }
+    }
+
+    std::error_code remove_error;
+    std::filesystem::remove(binary_path, remove_error);
+}
+
 void test_runtime_profiler_frame(TestContext& context) {
     marrow::runtime::ProfilerCapture profiler(true);
     profiler.begin_frame();
@@ -3096,6 +4023,869 @@ void test_prepared_scene_cache_dirty_updates(TestContext& context) {
     context.expect(
         attachment_names(cache.scene()) == std::vector<std::string>({"body_alt", "arm_default"}),
         "skin swaps should rebuild the affected cached attachment");
+
+    skeleton.set_scale(2.0, 0.5);
+    skeleton.update_world_transforms(PhysicsMode::Pose);
+    const marrow::renderer::PreparedSceneCacheResult scale_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    const marrow::renderer::PreparedSceneResult scale_reference =
+        marrow::renderer::prepare_setup_pose_scene(skeleton, *atlas_data);
+    context.expect(static_cast<bool>(scale_result), scale_result.error_message);
+    context.expect(static_cast<bool>(scale_reference), scale_reference.error_message);
+    context.expect(
+        scale_result.update_info != nullptr &&
+            !scale_result.update_info->cache_hit &&
+            scale_result.update_info->dirty_slot_count == 2U &&
+            scale_result.update_info->rebuilt_slot_count == 2U,
+        "global scale changes should rebuild every atlas-backed slot record");
+    if (scale_result && scale_reference &&
+        !scale_result.scene->draw_commands.empty() &&
+        !scale_reference.scene->draw_commands.empty()) {
+        const auto* cached_region = marrow::renderer::region_attachment_command(
+            scale_result.scene->draw_commands.front());
+        const auto* reference_region = marrow::renderer::region_attachment_command(
+            scale_reference.scene->draw_commands.front());
+        context.expect(
+            cached_region != nullptr && reference_region != nullptr &&
+                std::abs(
+                    cached_region->vertices.front().position.x -
+                    reference_region->vertices.front().position.x) <= kTolerance &&
+                std::abs(
+                    cached_region->vertices.front().position.y -
+                    reference_region->vertices.front().position.y) <= kTolerance,
+            "scaled cached region geometry should match fresh preparation");
+    }
+
+    context.expect(
+        skeleton.set_parameter_value("stroke.collapse", 0.5),
+        "cache error regression should set the collapsing ArtPath parameter");
+    const marrow::renderer::PreparedSceneCacheResult first_failure =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    const marrow::renderer::PreparedSceneCacheResult repeated_failure =
+        marrow::renderer::prepare_setup_pose_scene_cached(
+            &cache,
+            skeleton,
+            *atlas_data);
+    context.expect(
+        !first_failure && !repeated_failure && !cache.has_scene(),
+        "a failed atlas-backed rebuild must invalidate the old scene and fail again");
+
+  const auto parameter_data = make_renderer_parameter_cache_test_data();
+  Skeleton parameter_skeleton(parameter_data);
+  parameter_skeleton.update_world_transforms(PhysicsMode::Pose);
+  marrow::renderer::PreparedSceneCache parameter_cache;
+  const marrow::renderer::PreparedSceneCacheResult parameter_initial_result =
+      marrow::renderer::prepare_setup_pose_scene_cached(
+          &parameter_cache, parameter_skeleton, *atlas_data);
+  context.expect(static_cast<bool>(parameter_initial_result),
+                 parameter_initial_result.error_message);
+  context.expect(
+      parameter_initial_result.update_info != nullptr &&
+          parameter_initial_result.update_info->rebuilt_slot_count == 2U,
+      "initial parameter cache build should prepare both mesh slots");
+
+  context.expect(parameter_skeleton.set_parameter_value("face.amount", 1.0),
+                 "parameter cache test should update the dependent parameter");
+  const marrow::renderer::PreparedSceneCacheResult parameter_update_result =
+      marrow::renderer::prepare_setup_pose_scene_cached(
+          &parameter_cache, parameter_skeleton, *atlas_data);
+  context.expect(static_cast<bool>(parameter_update_result),
+                 parameter_update_result.error_message);
+  context.expect(
+      parameter_update_result.update_info != nullptr &&
+          parameter_update_result.update_info->dirty_slot_count == 1U &&
+          parameter_update_result.update_info->rebuilt_slot_count == 1U,
+      "parameter revisions should rebuild only slots whose final offsets "
+      "changed");
+  context.expect(
+      parameter_cache.slot_dirty_flags() == std::vector<bool>({true, false}),
+      "parameter dependency updates should leave unrelated mesh slots cached");
+}
+
+void test_parameter_definitions_and_composition(TestContext &context) {
+  const auto face_result = marrow::runtime::load_skeleton_data(
+      "assets/fixtures/parameter_face_basic.mskl");
+  context.expect(static_cast<bool>(face_result),
+                 face_result.error.has_value()
+                     ? face_result.error->format()
+                     : "parameter face fixture should load");
+  if (!face_result) {
+    return;
+  }
+
+  context.expect(face_result.skeleton_data->parameters().size() == 2U,
+                 "parameter definitions should load in declaration order");
+  context.expect(face_result.skeleton_data->parameter_groups().size() == 1U,
+                 "parameter groups should load");
+  const auto mouth_index =
+      face_result.skeleton_data->find_parameter_index("mouth.open");
+  const auto variant_index =
+      face_result.skeleton_data->find_parameter_index("face.variant");
+  context.expect(mouth_index.has_value(),
+                 "continuous parameter id lookup should succeed");
+  context.expect(variant_index.has_value(),
+                 "discrete parameter id lookup should succeed");
+  if (!mouth_index.has_value() || !variant_index.has_value()) {
+    return;
+  }
+  context.expect(
+      face_result.skeleton_data->parameter_affects_slot(*mouth_index, 0U),
+      "shape parameter dependency bitset should mark its affected slot");
+  context.expect(
+      !face_result.skeleton_data->parameter_affects_slot(*variant_index, 0U),
+      "unrelated parameters should stay out of a slot dependency bitset");
+  context.expect(face_result.skeleton_data->parameter_affected_slots(
+                     *mouth_index) == std::vector<std::size_t>{0U},
+                 "parameter-to-slot dependency lookup should be precomputed");
+  context.expect(
+      face_result.skeleton_data->parameter_affected_slots(*variant_index)
+          .empty(),
+      "parameters without mesh consumers should have no affected slots");
+
+  Skeleton face(face_result.skeleton_data);
+  context.expect(face.parameter_revision() == 0U,
+                 "new parameter buffers should start at revision 0");
+  context.expect_near(face.parameter_values()[*mouth_index], 0.0,
+                      "continuous parameter should start at its default");
+  context.expect(face.set_parameter_value("mouth.open", 2.0),
+                 "known id setter should succeed");
+  context.expect_near(face.direct_parameter_values()[*mouth_index], 2.0,
+                      "direct input should remain available before final clamp");
+  context.expect_near(face.parameter_values()[*mouth_index], 1.0,
+                      "clamped continuous values should stop at max");
+  const std::uint64_t clamped_revision = face.parameter_revision();
+  context.expect(face.set_parameter_value(*mouth_index, 9.0),
+                 "known index setter should succeed");
+  context.expect_near(face.direct_parameter_values()[*mouth_index], 9.0,
+                      "same final value may preserve a different direct input");
+  context.expect(
+      face.parameter_revision() == clamped_revision,
+      "setting the same normalized value should not advance revision");
+  context.expect(face.set_parameter_value(*variant_index, 1.6),
+                 "discrete setter should succeed");
+  context.expect_near(face.parameter_values()[*variant_index], 2.0,
+                      "discrete values should use std::round semantics");
+  context.expect_near(face.direct_parameter_values()[*variant_index], 1.6,
+                      "discrete rounding should occur after direct input composition");
+  context.expect(face.set_parameter_value(*variant_index, 9.4),
+                 "unclamped discrete setter should succeed");
+  context.expect_near(
+      face.parameter_values()[*variant_index], 9.0,
+      "clamp=false should preserve out-of-range rounded values");
+  const std::uint64_t before_invalid = face.parameter_revision();
+  context.expect(!face.set_parameter_value("missing.parameter", 1.0),
+                 "missing parameter ids should be rejected");
+  context.expect(!face.set_parameter_value(
+                     *mouth_index, std::numeric_limits<double>::infinity()),
+                 "non-finite parameter values should be rejected");
+  context.expect(face.parameter_revision() == before_invalid,
+                 "invalid setters should not mutate revision");
+  face.reset_parameters();
+  context.expect_near(face.parameter_values()[*mouth_index], 0.0,
+                      "reset should restore mouth default");
+  context.expect_near(face.parameter_values()[*variant_index], 0.0,
+                      "reset should restore variant default");
+
+  const auto state_result = marrow::runtime::load_skeleton_data(
+      "assets/fixtures/parameter_expression_lipsync.mskl");
+  context.expect(static_cast<bool>(state_result),
+                 state_result.error.has_value()
+                     ? state_result.error->format()
+                     : "expression/lip fixture should load");
+  if (!state_result) {
+    return;
+  }
+  Skeleton composed(state_result.skeleton_data);
+  ParameterState state(state_result.skeleton_data);
+  context.expect(state.set_amplitude(1.0),
+                 "finite amplitude input should be accepted");
+  state.set_phoneme("E");
+  context.expect(state.activate_expression("smile"),
+                 "smile expression should activate");
+  context.expect(state.update(0.05),
+                 "parameter state should accept a finite positive dt");
+  context.expect(state.apply(composed),
+                 "matching parameter state should apply to skeleton");
+
+  const std::size_t composed_mouth =
+      *state_result.skeleton_data->find_parameter_index("mouth.open");
+  const std::size_t composed_form =
+      *state_result.skeleton_data->find_parameter_index("mouth.form");
+  const std::size_t composed_eye =
+      *state_result.skeleton_data->find_parameter_index("eye.open");
+  const double attack_alpha = 1.0 - std::exp(-0.05 / 0.02);
+  const double smoothing_alpha = 1.0 - std::exp(-0.05 / 0.04);
+  context.expect_near(
+      composed.parameter_values()[composed_mouth],
+      1.25 * attack_alpha * smoothing_alpha,
+      "amplitude should apply scale/bias, attack, then smoothing");
+  context.expect_near(
+      composed.parameter_values()[composed_form], 1.0,
+      "phoneme override plus half-faded additive smile should clamp at max");
+  context.expect_near(
+      composed.parameter_values()[composed_eye], 0.9,
+      "half-faded additive expression should contribute a weighted delta");
+
+  context.expect(state.activate_expression("surprised"),
+                 "surprised expression should activate");
+  context.expect(state.apply(composed),
+                 "higher-priority override should apply");
+  context.expect_near(composed.parameter_values()[composed_mouth], 1.0,
+                      "higher-priority override should run after lip mapping "
+                      "and lower priority expression");
+  context.expect_near(composed.parameter_values()[composed_eye], 1.0,
+                      "override expression should author an absolute target");
+  context.expect(state.deactivate_expression("surprised"),
+                 "hold expression should deactivate");
+  context.expect(state.apply(composed),
+                 "held expression should remain applicable");
+  context.expect_near(composed.parameter_values()[composed_eye], 1.0,
+                      "hold policy should retain its final contribution");
+  context.expect(state.clear_expression("surprised"),
+                 "explicit clear should remove held expression");
+  context.expect(state.deactivate_expression("smile"),
+                 "restore expression should begin fade out");
+  context.expect(state.update(0.05), "restore fade should update");
+  context.expect(state.apply(composed),
+                 "restored parameter state should apply");
+  context.expect_near(
+      composed.parameter_values()[composed_eye], 1.0,
+      "restore fade should remove the expression after its duration");
+  state.set_phoneme("unknown");
+  context.expect(
+      state.update(0.0),
+      "zero dt should be valid and zero-tau filters should be immediate");
+  context.expect(state.apply(composed), "unknown phoneme state should apply");
+  context.expect_near(composed.parameter_values()[composed_form], 0.0,
+                      "unknown phonemes should map to zero");
+  context.expect(!state.update(-0.01),
+                 "negative parameter-state dt should be rejected");
+}
+
+void test_parameter_state_transition_semantics(TestContext &context) {
+  ParameterModelDefinitions expression_model;
+  marrow::runtime::ParameterDefinition parameter;
+  parameter.id = "p";
+  parameter.name = "P";
+  parameter.min_value = -10.0;
+  parameter.max_value = 10.0;
+  parameter.clamp = false;
+  expression_model.parameters.push_back(parameter);
+
+  const auto make_override =
+      [](std::string id, double value, double duration, int priority,
+         marrow::runtime::ExpressionResetPolicy reset_policy) {
+        marrow::runtime::ExpressionDefinition expression;
+        expression.id = id;
+        expression.name = id;
+        expression.targets.push_back({"p", std::nullopt, value});
+        expression.duration = duration;
+        expression.blend = marrow::runtime::ExpressionBlend::Override;
+        expression.priority = priority;
+        expression.reset_policy = reset_policy;
+        return expression;
+      };
+  expression_model.expressions.push_back(
+      make_override("same.first", 0.25, 0.0, 5,
+                    marrow::runtime::ExpressionResetPolicy::Restore));
+  expression_model.expressions.push_back(
+      make_override("same.second", 0.75, 0.0, 5,
+                    marrow::runtime::ExpressionResetPolicy::Restore));
+  expression_model.expressions.push_back(
+      make_override("restore", 1.0, 1.0, 10,
+                    marrow::runtime::ExpressionResetPolicy::Restore));
+  expression_model.expressions.push_back(make_override(
+      "hold", 2.0, 0.0, 10, marrow::runtime::ExpressionResetPolicy::Hold));
+  const auto expression_data =
+      make_skeleton_data({make_bone("root", std::nullopt)}, {}, {}, {}, {}, {},
+                         0.0, {}, std::move(expression_model));
+  Skeleton expression_skeleton(expression_data);
+  ParameterState expression_state(expression_data);
+
+  context.expect(expression_state.activate_expression("same.first") &&
+                     expression_state.activate_expression("same.second") &&
+                     expression_state.apply(expression_skeleton),
+                 "same-priority expressions should activate and apply");
+  context.expect_near(
+      expression_skeleton.parameter_values()[0], 0.75,
+      "same-priority expressions should apply in activation order");
+  expression_state.clear_expressions();
+  context.expect(
+      expression_state.activate_expression("same.second") &&
+          expression_state.activate_expression("same.first") &&
+          expression_state.apply(expression_skeleton),
+      "same-priority expressions should support reversed activation order");
+  context.expect_near(
+      expression_skeleton.parameter_values()[0], 0.25,
+      "later activation should win for same-priority overrides");
+
+  expression_state.clear_expressions();
+  context.expect(expression_state.activate_expression("restore") &&
+                     expression_state.update(1.0) &&
+                     expression_state.apply(expression_skeleton),
+                 "restore expression should complete fade in");
+  context.expect_near(expression_skeleton.parameter_values()[0], 1.0,
+                      "restore expression should reach its absolute target");
+  context.expect(expression_state.deactivate_expression("restore") &&
+                     expression_state.update(0.25) &&
+                     expression_state.apply(expression_skeleton),
+                 "restore expression should begin fade out");
+  context.expect_near(
+      expression_skeleton.parameter_values()[0], 0.75,
+      "restore fade out should reduce contribution over duration");
+  context.expect(expression_state.update(0.75) &&
+                     expression_state.apply(expression_skeleton),
+                 "restore expression should finish fade out");
+  context.expect_near(expression_skeleton.parameter_values()[0], 0.0,
+                      "restore expression should be removed after fade out");
+  context.expect(expression_state.active_expression_ids().empty(),
+                 "completed restore fades should leave no active expression");
+
+  context.expect(
+      expression_state.activate_expression("hold") &&
+          expression_state.apply(expression_skeleton) &&
+          expression_state.deactivate_expression("hold") &&
+          expression_state.update(10.0) &&
+          expression_state.apply(expression_skeleton),
+      "held expression should survive deactivation and time advancement");
+  context.expect_near(expression_skeleton.parameter_values()[0], 2.0,
+                      "hold policy should preserve its final contribution");
+  context.expect(expression_state.clear_expression("hold") &&
+                     expression_state.apply(expression_skeleton),
+                 "explicit clear should remove a held expression");
+  context.expect_near(expression_skeleton.parameter_values()[0], 0.0,
+                      "clearing hold should restore direct input");
+
+  ParameterModelDefinitions ordering_model;
+  marrow::runtime::ParameterDefinition ordering_parameter;
+  ordering_parameter.id = "ordered";
+  ordering_parameter.name = "Ordered";
+  ordering_parameter.min_value = 0.0;
+  ordering_parameter.max_value = 1.0;
+  ordering_parameter.default_value = 0.0;
+  ordering_parameter.type = marrow::runtime::ParameterType::Discrete;
+  ordering_parameter.clamp = true;
+  ordering_model.parameters.push_back(ordering_parameter);
+  marrow::runtime::ExpressionDefinition ordering_expression;
+  ordering_expression.id = "subtract";
+  ordering_expression.name = "Subtract";
+  ordering_expression.blend = marrow::runtime::ExpressionBlend::Additive;
+  ordering_expression.targets.push_back({"ordered", std::nullopt, -1.0});
+  ordering_model.expressions.push_back(ordering_expression);
+  const auto ordering_data = make_skeleton_data(
+      {make_bone("root", std::nullopt)}, {}, {}, {}, {}, {}, 0.0, {},
+      std::move(ordering_model));
+  Skeleton ordering_skeleton(ordering_data);
+  ParameterState ordering_state(ordering_data);
+  context.expect(ordering_skeleton.set_parameter_value("ordered", 2.0),
+                 "composition-order direct input should set");
+  const std::uint64_t direct_revision = ordering_skeleton.parameter_revision();
+  context.expect_near(ordering_skeleton.direct_parameter_values()[0], 2.0,
+                      "composition must retain the pre-clamp direct input");
+  context.expect(ordering_state.activate_expression("subtract") &&
+                     ordering_state.apply(ordering_skeleton),
+                 "composition-order expression should apply");
+  context.expect_near(
+      ordering_skeleton.parameter_values()[0], 1.0,
+      "direct, expression, discrete round, and clamp must run in fixed order");
+  context.expect(
+      ordering_skeleton.parameter_revision() == direct_revision,
+      "composition that preserves the final value should not churn revisions");
+
+  ParameterModelDefinitions lip_model;
+  marrow::runtime::ParameterDefinition lip_parameter = parameter;
+  lip_parameter.id = "lip";
+  lip_parameter.name = "Lip";
+  lip_model.parameters.push_back(lip_parameter);
+  marrow::runtime::LipSyncMappingDefinition mapping;
+  mapping.source = marrow::runtime::LipSyncSource::Amplitude;
+  mapping.parameter = "lip";
+  mapping.scale = 2.0;
+  mapping.bias = 0.1;
+  mapping.attack = 0.5;
+  mapping.release = 1.0;
+  mapping.smoothing = 0.25;
+  lip_model.lip_sync.mappings.push_back(mapping);
+  const auto lip_data =
+      make_skeleton_data({make_bone("root", std::nullopt)}, {}, {}, {}, {}, {},
+                         0.0, {}, std::move(lip_model));
+  Skeleton lip_skeleton(lip_data);
+  ParameterState lip_state(lip_data);
+  context.expect(lip_state.set_amplitude(1.0) && lip_state.update(0.5) &&
+                     lip_state.apply(lip_skeleton),
+                 "lip attack transition should apply");
+  const double attack_envelope = 2.1 * (1.0 - std::exp(-1.0));
+  const double attack_smoothed = attack_envelope * (1.0 - std::exp(-2.0));
+  context.expect_near(
+      lip_skeleton.parameter_values()[0], attack_smoothed,
+      "lip mapping should apply scale/bias, attack envelope, then smoothing");
+  context.expect(lip_state.set_amplitude(0.0) && lip_state.update(0.5) &&
+                     lip_state.apply(lip_skeleton),
+                 "lip release transition should apply");
+  const double release_envelope =
+      0.1 + (attack_envelope - 0.1) * std::exp(-0.5);
+  const double release_smoothed =
+      release_envelope + (attack_smoothed - release_envelope) * std::exp(-2.0);
+  context.expect_near(
+      lip_skeleton.parameter_values()[0], release_smoothed,
+      "lip release should precede smoothing with exponential alpha");
+}
+
+void test_parameter_shape_final_offsets(TestContext &context) {
+  const auto result = marrow::runtime::load_skeleton_data(
+      "assets/fixtures/parameter_face_basic.mskl");
+  context.expect(static_cast<bool>(result),
+                 result.error.has_value()
+                     ? result.error->format()
+                     : "parameter shape fixture should load");
+  if (!result) {
+    return;
+  }
+
+  Skeleton skeleton(result.skeleton_data);
+  skeleton.mesh_deform_states()[0].attachment_name = "face_mesh";
+  skeleton.mesh_deform_states()[0].vertex_offsets.assign(8U, 1.0);
+  context.expect(
+      skeleton.current_mesh_vertex_offsets(0U) != nullptr,
+      "animation FFD accessor should remain independently observable");
+  context.expect(skeleton.set_parameter_value("mouth.open", 0.5),
+                 "shape parameter should set");
+  const std::vector<double> *final_offsets =
+      skeleton.current_final_mesh_vertex_offsets(0U);
+  context.expect(final_offsets != nullptr,
+                 "parameter shape should produce final offsets");
+  if (final_offsets != nullptr) {
+    const std::vector<double> expected = {0.0, -2.0, 0.0, -2.0,
+                                          0.0, 4.0,  0.0, 4.0};
+    context.expect(final_offsets->size() == expected.size(),
+                   "final offsets should preserve mesh topology");
+    for (std::size_t index = 0;
+         index < std::min(final_offsets->size(), expected.size()); ++index) {
+      context.expect_near((*final_offsets)[index], expected[index],
+                          "normalized_override should replace animation FFD "
+                          "before interpolation");
+    }
+  }
+  const std::vector<double> *animation_offsets =
+      skeleton.current_mesh_vertex_offsets(0U);
+  context.expect_near(
+      animation_offsets != nullptr ? (*animation_offsets)[0] : -1.0, 1.0,
+      "final evaluation must not mutate animation FFD state");
+  skeleton.update_world_transforms();
+  const auto pose = skeleton.evaluate_current_mesh_attachment(0U);
+  context.expect(pose.has_value(),
+                 "mesh pose should evaluate with final parameter offsets");
+  if (pose.has_value()) {
+    context.expect_near(pose->vertices[0].x, -48.0,
+                        "mesh evaluation should use final x offset", 1e-4);
+    context.expect_near(pose->vertices[0].y, -50.0,
+                        "mesh evaluation should use final y offset", 1e-4);
+  }
+
+  std::vector<BoneData> bones;
+  bones.push_back(make_bone("root", std::nullopt));
+  bones.push_back(make_bone("mesh_child", 0U));
+  SlotData slot;
+  slot.name = "face";
+  slot.bone_index = 0U;
+  slot.setup_attachment = "mesh";
+  SkinData skin;
+  skin.name = "default";
+  SkinSlotData skin_slot;
+  skin_slot.slot_index = 0U;
+  skin_slot.attachment = make_mesh_attachment("mesh", "mesh");
+  skin.slot_attachments.push_back(std::move(skin_slot));
+
+  ParameterModelDefinitions model;
+  marrow::runtime::ParameterDefinition parameter;
+  parameter.id = "p";
+  parameter.name = "P";
+  parameter.min_value = 0.0;
+  parameter.max_value = 1.0;
+  parameter.default_value = 0.0;
+  model.parameters.push_back(parameter);
+  marrow::runtime::ParameterShapeDefinition additive;
+  additive.id = "additive";
+  additive.target_slot = "face";
+  additive.target_attachment = "mesh";
+  additive.parameter = "p";
+  additive.blend_mode =
+      marrow::runtime::ParameterShapeBlendMode::AdditiveClamped;
+  additive.keyforms.push_back({0.0, std::vector<double>(8U, 1.0)});
+  model.parameter_shapes.push_back(additive);
+  marrow::runtime::ParameterShapeDefinition override_shape = additive;
+  override_shape.id = "override";
+  override_shape.blend_mode =
+      marrow::runtime::ParameterShapeBlendMode::NormalizedOverride;
+  override_shape.keyforms.front().vertices.assign(8U, 2.0);
+  model.parameter_shapes.push_back(std::move(override_shape));
+  const auto ordered_data =
+      make_skeleton_data(std::move(bones), {}, {}, {slot}, {std::move(skin)},
+                         {}, 0.0, {}, std::move(model));
+  Skeleton ordered(ordered_data);
+  const std::vector<double> *ordered_offsets =
+      ordered.current_final_mesh_vertex_offsets(0U);
+  context.expect(ordered_offsets != nullptr,
+                 "ordered shape stack should evaluate");
+  if (ordered_offsets != nullptr) {
+    for (double value : *ordered_offsets) {
+      context.expect_near(value, 3.0,
+                          "normalized_override must run before additive shapes "
+                          "regardless of declaration order");
+    }
+  }
+
+  ParameterModelDefinitions wide_model;
+  for (std::size_t index = 0; index < 65U; ++index) {
+    marrow::runtime::ParameterDefinition wide_parameter;
+    wide_parameter.id = "wide." + std::to_string(index);
+    wide_parameter.name = wide_parameter.id;
+    wide_model.parameters.push_back(std::move(wide_parameter));
+  }
+  marrow::runtime::ParameterShapeDefinition wide_shape;
+  wide_shape.id = "wide.shape";
+  wide_shape.target_slot = "face";
+  wide_shape.target_attachment = "mesh";
+  wide_shape.parameter = "wide.64";
+  wide_shape.keyforms.push_back({0.0, std::vector<double>(8U, 0.0)});
+  wide_model.parameter_shapes.push_back(std::move(wide_shape));
+  SlotData wide_slot;
+  wide_slot.name = "face";
+  wide_slot.bone_index = 0U;
+  wide_slot.setup_attachment = "mesh";
+  SkinData wide_skin;
+  wide_skin.name = "default";
+  wide_skin.slot_attachments.push_back(
+      {0U, make_mesh_attachment("mesh", "mesh")});
+  const auto wide_data = make_skeleton_data(
+      {make_bone("root", std::nullopt)}, {}, {}, {wide_slot},
+      {std::move(wide_skin)}, {}, 0.0, {}, std::move(wide_model));
+  context.expect(wide_data->parameter_affects_slot(64U, 0U),
+                 "dependency bitset should address parameters beyond the first "
+                 "64-bit word");
+  context.expect(!wide_data->parameter_affects_slot(0U, 0U),
+                 "dependency bitset should not alias separate 64-bit words");
+  context.expect(
+      wide_data->parameter_affected_slots(64U) == std::vector<std::size_t>{0U},
+      "inverse affected-slot lookup should include high parameter indices");
+}
+
+void test_parameter_deformer_and_art_path_evaluation(TestContext &context) {
+  const auto deformer_result = marrow::runtime::load_skeleton_data(
+      "assets/fixtures/parameter_deformer_grid.mskl");
+  context.expect(static_cast<bool>(deformer_result),
+                 deformer_result.error.has_value()
+                     ? deformer_result.error->format()
+                     : "parameter deformer fixture should load");
+  if (!deformer_result) {
+    return;
+  }
+  const std::size_t warp_x_index =
+      *deformer_result.skeleton_data->find_parameter_index("face.angle_x");
+  const std::size_t warp_y_index =
+      *deformer_result.skeleton_data->find_parameter_index("face.angle_y");
+  const std::size_t roll_index =
+      *deformer_result.skeleton_data->find_parameter_index("face.roll");
+  context.expect(
+      deformer_result.skeleton_data->parameter_affects_slot(warp_x_index, 0U) &&
+          deformer_result.skeleton_data->parameter_affects_slot(warp_y_index,
+                                                                0U) &&
+          deformer_result.skeleton_data->parameter_affects_slot(roll_index, 0U),
+      "leaf and parent deformer bindings should populate slot dependency bits");
+  Skeleton deformed(deformer_result.skeleton_data);
+  context.expect(deformed.set_parameter_value("face.angle_x", 1.0),
+                 "warp x should set");
+  context.expect(deformed.set_parameter_value("face.angle_y", 1.0),
+                 "warp y should set");
+  const std::vector<double> *warped =
+      deformed.current_final_mesh_vertex_offsets(0U);
+  context.expect(warped != nullptr, "warp should produce final mesh offsets");
+  if (warped != nullptr && warped->size() == 8U) {
+    const std::vector<double> expected = {0.0, 0.0,  0.0, 0.0,
+                                          4.0, -4.0, 4.0, 4.0};
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+      context.expect_near(
+          (*warped)[index], expected[index],
+          "warp endpoint should evaluate its authored Cartesian keyform", 1e-4);
+    }
+  }
+  context.expect(deformed.set_parameter_value("face.roll", 30.0),
+                 "rotation should set");
+  const std::vector<double> *rotated =
+      deformed.current_final_mesh_vertex_offsets(0U);
+  context.expect(rotated != nullptr,
+                 "nested rotation/warp chain should evaluate");
+  if (rotated != nullptr && rotated->size() >= 2U) {
+    const double radians = 15.0 * kPi / 180.0;
+    const double rotated_x =
+        -48.0 * std::cos(radians) + 48.0 * std::sin(radians);
+    const double rotated_y =
+        -48.0 * std::sin(radians) - 48.0 * std::cos(radians);
+    context.expect_near(
+        (*rotated)[0], rotated_x + 48.0,
+        "rotation influence should apply child output before its parent warp",
+        1e-4);
+    context.expect_near((*rotated)[1], rotated_y + 48.0,
+                        "parent warp should endpoint-hold and leave child "
+                        "output outside its lattice unchanged",
+                        1e-4);
+  }
+
+  const auto art_result = marrow::runtime::load_skeleton_data(
+      "assets/fixtures/art_path_stroke.mskl");
+  context.expect(static_cast<bool>(art_result),
+                 art_result.error.has_value() ? art_result.error->format()
+                                              : "art path fixture should load");
+  if (!art_result) {
+    return;
+  }
+  Skeleton art(art_result.skeleton_data);
+  context.expect(art.set_parameter_value("brow.raise", 0.5),
+                 "art path parameter should set");
+  const std::vector<marrow::runtime::EvaluatedArtPath> &paths =
+      art.current_art_paths();
+  context.expect(paths.size() == 2U,
+                 "art paths should preserve JSON declaration order");
+  if (paths.size() >= 2U) {
+    context.expect_near(paths[0].points[0].y, 14.0,
+                        "art path points should interpolate linearly");
+    context.expect_near(paths[0].width, 9.0,
+                        "art path width should interpolate linearly");
+    context.expect_near(paths[0].color.r, 0.23,
+                        "art path color should interpolate linearly");
+    context.expect_near(paths[1].width, 5.0,
+                        "unbound art path should preserve base state");
+  }
+
+  ParameterModelDefinitions parent_model;
+  marrow::runtime::ParameterDefinition angle_parameter;
+  angle_parameter.id = "angle";
+  angle_parameter.name = "Angle";
+  angle_parameter.min_value = 0.0;
+  angle_parameter.max_value = 1.0;
+  parent_model.parameters.push_back(angle_parameter);
+  marrow::runtime::ParameterDeformerDefinition rotation;
+  rotation.id = "path.rotation";
+  rotation.name = "Path Rotation";
+  rotation.kind = marrow::runtime::ParameterDeformerKind::Rotation;
+  rotation.parameter_bindings.push_back({
+      "angle",
+      std::nullopt,
+      marrow::runtime::ParameterDeformerAxis::Angle,
+  });
+  rotation.influence = 1.0;
+  rotation.rotation_keyforms = {{0.0, 0.0}, {1.0, 90.0}};
+  parent_model.parameter_deformers.push_back(std::move(rotation));
+  marrow::runtime::ArtPathDefinition parented_path;
+  parented_path.id = "parented";
+  parented_path.name = "Parented";
+  parented_path.parent_deformer = "path.rotation";
+  parented_path.points = {{1.0, 0.0}, {2.0, 0.0}};
+  parented_path.width = 1.0;
+  parent_model.art_paths.push_back(std::move(parented_path));
+  const auto parent_data =
+      make_skeleton_data({make_bone("root", std::nullopt)}, {}, {}, {}, {}, {},
+                         0.0, {}, std::move(parent_model));
+  Skeleton parented(parent_data);
+  context.expect(parented.set_parameter_value("angle", 1.0),
+                 "parent deformer parameter should set");
+  const auto &parented_paths = parented.current_art_paths();
+  context.expect(parented_paths.size() == 1U,
+                 "parented art path should evaluate");
+  if (!parented_paths.empty()) {
+    context.expect_near(parented_paths[0].points[0].x, 0.0,
+                        "parent rotation should transform x");
+    context.expect_near(parented_paths[0].points[0].y, 1.0,
+                        "parent rotation should transform y");
+  }
+
+  ParameterModelDefinitions invalid_color_model;
+  marrow::runtime::ArtPathDefinition invalid_color_path;
+  invalid_color_path.id = "invalid.color";
+  invalid_color_path.name = "Invalid Color";
+  invalid_color_path.points = {{0.0, 0.0}, {1.0, 0.0}};
+  invalid_color_path.width = 1.0;
+  invalid_color_path.color.r = std::numeric_limits<double>::quiet_NaN();
+  invalid_color_model.art_paths.push_back(std::move(invalid_color_path));
+  bool rejected_invalid_color = false;
+  try {
+    (void)make_skeleton_data({make_bone("root", std::nullopt)}, {}, {}, {}, {},
+                             {}, 0.0, {}, std::move(invalid_color_model));
+  } catch (const std::invalid_argument &) {
+    rejected_invalid_color = true;
+  }
+  context.expect(
+      rejected_invalid_color,
+      "programmatic ArtPath definitions should reject non-finite colors");
+}
+
+void test_parameter_loader_validation(TestContext &context) {
+  const auto wrong_root = marrow::runtime::json::parse_document(R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {"name": "bad_parameter_root", "width": 1, "height": 1},
+  "bones": [{"name": "root"}],
+  "slots": [],
+  "skins": {"default": {}},
+  "animations": {},
+  "parameters": {}
+})json");
+  context.expect(static_cast<bool>(wrong_root),
+                 "invalid parameter fixture JSON should parse");
+  if (wrong_root) {
+    const auto load_result =
+        marrow::runtime::load_skeleton_data(*wrong_root.document);
+    context.expect(!load_result, "present optional parameter root sections "
+                                 "should enforce their declared JSON type");
+  }
+
+  std::ifstream stream("assets/fixtures/parameter_deformer_grid.mskl");
+  std::string cyclic_source{std::istreambuf_iterator<char>(stream),
+                            std::istreambuf_iterator<char>()};
+  const std::string marker = "\"kind\": \"warp\",";
+  const std::size_t marker_offset = cyclic_source.find(marker);
+  context.expect(marker_offset != std::string::npos,
+                 "cycle test should find warp definition");
+  if (marker_offset != std::string::npos) {
+    cyclic_source.insert(marker_offset + marker.size(),
+                         "\n      \"parent\": \"face.roll.deformer\",");
+    const auto cyclic_document =
+        marrow::runtime::json::parse_document(cyclic_source);
+    context.expect(static_cast<bool>(cyclic_document),
+                   cyclic_document.error.has_value()
+                       ? cyclic_document.error->format()
+                       : "cyclic deformer source should parse as JSON");
+    if (cyclic_document) {
+      const auto cyclic_result =
+          marrow::runtime::load_skeleton_data(*cyclic_document.document);
+      context.expect(!cyclic_result, "loader should reject deformer cycles and "
+                                     "deeper-than-one parent chains");
+    }
+  }
+
+  std::ifstream malformed_lattice_stream(
+      "assets/fixtures/parameter_deformer_grid.mskl");
+  std::string malformed_lattice_source{
+      std::istreambuf_iterator<char>(malformed_lattice_stream),
+      std::istreambuf_iterator<char>()};
+  const std::string base_lattice =
+      "\"control_points\": [-48, -48, 48, -48, -48, 48, 48, 48]";
+  const std::size_t lattice_offset =
+      malformed_lattice_source.find(base_lattice);
+  context.expect(lattice_offset != std::string::npos,
+                 "lattice validation test should find the base control points");
+  if (lattice_offset != std::string::npos) {
+    malformed_lattice_source.replace(
+        lattice_offset, base_lattice.size(),
+        "\"control_points\": [-48, -48, 48, -48, -48, 48, 47, 47]");
+    const auto malformed_document =
+        marrow::runtime::json::parse_document(malformed_lattice_source);
+    context.expect(static_cast<bool>(malformed_document),
+                   "malformed lattice source should remain valid JSON");
+    if (malformed_document) {
+      context.expect(
+          !marrow::runtime::load_skeleton_data(*malformed_document.document),
+          "loader should reject non-axis-aligned warp base lattices");
+    }
+  }
+
+  std::ifstream cartesian_stream(
+      "assets/fixtures/parameter_deformer_grid.mskl");
+  std::string incomplete_cartesian_source{
+      std::istreambuf_iterator<char>(cartesian_stream),
+      std::istreambuf_iterator<char>()};
+  const std::string cartesian_pair = "{\"x\": 1, \"y\": 1,";
+  const std::size_t cartesian_offset =
+      incomplete_cartesian_source.find(cartesian_pair);
+  context.expect(cartesian_offset != std::string::npos,
+                 "Cartesian validation test should find the final keyform");
+  if (cartesian_offset != std::string::npos) {
+    incomplete_cartesian_source.replace(cartesian_offset, cartesian_pair.size(),
+                                        "{\"x\": -1, \"y\": 1,");
+    const auto incomplete_document =
+        marrow::runtime::json::parse_document(incomplete_cartesian_source);
+    context.expect(static_cast<bool>(incomplete_document),
+                   "incomplete Cartesian source should remain valid JSON");
+    if (incomplete_document) {
+      context.expect(
+          !marrow::runtime::load_skeleton_data(*incomplete_document.document),
+          "loader should reject duplicate and missing warp Cartesian keyforms");
+    }
+  }
+
+  const auto zero_path_document = marrow::runtime::json::parse_document(R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {"name": "zero_path", "width": 1, "height": 1},
+  "bones": [{"name": "root"}],
+  "slots": [],
+  "skins": {"default": {}},
+  "animations": {},
+  "artPaths": [{
+    "id": "zero",
+    "name": "Zero",
+    "points": [0, 0, 0, 0],
+    "width": 1,
+    "color": {"r": 1, "g": 1, "b": 1, "a": 1},
+    "cap": "butt",
+    "join": "miter"
+  }]
+})json");
+  context.expect(static_cast<bool>(zero_path_document),
+                 "zero path source should parse");
+  if (zero_path_document) {
+    context.expect(
+        !marrow::runtime::load_skeleton_data(*zero_path_document.document),
+        "loader should reject ArtPaths without a non-zero-length segment");
+  }
+
+  std::ifstream linked_stream(
+      "assets/fixtures/linked_mesh_deform_inheritance.mskl");
+  std::string linked_override_source{
+      std::istreambuf_iterator<char>(linked_stream),
+      std::istreambuf_iterator<char>()};
+  const std::size_t root_end = linked_override_source.rfind("\n}");
+  context.expect(
+      root_end != std::string::npos,
+      "linked override validation test should find the root terminator");
+  if (root_end != std::string::npos) {
+    linked_override_source.insert(root_end, R"json(,
+  "parameters": [
+    {"id": "a", "name": "A", "min": 0, "max": 1, "default": 0,
+     "type": "continuous", "clamp": true},
+    {"id": "b", "name": "B", "min": 0, "max": 1, "default": 0,
+     "type": "continuous", "clamp": true}
+  ],
+  "parameterShapes": [
+    {"id": "base.override", "target_slot": "body",
+     "target_attachment": "body_mesh", "parameter": "a",
+     "blend_mode": "normalized_override",
+     "keyforms": [{"value": 0, "vertices": [0, 0, 0, 0, 0, 0, 0, 0]}]},
+    {"id": "linked.override", "target_slot": "body",
+     "target_attachment": "linked_deform", "parameter": "b",
+     "blend_mode": "normalized_override",
+     "keyforms": [{"value": 0, "vertices": [0, 0, 0, 0, 0, 0, 0, 0]}]}
+  ]
+)json");
+    const auto linked_override_document =
+        marrow::runtime::json::parse_document(linked_override_source);
+    context.expect(static_cast<bool>(linked_override_document),
+                   linked_override_document.error.has_value()
+                       ? linked_override_document.error->format()
+                       : "linked override source should parse");
+    if (linked_override_document) {
+      context.expect(!marrow::runtime::load_skeleton_data(
+                         *linked_override_document.document),
+                     "loader should reject normalized overrides whose "
+                     "linked-mesh match sets overlap");
+    }
+  }
 }
 
 } // namespace
@@ -3112,6 +4902,7 @@ int main() {
     failures += run_test(
         "Animation Timeline Index And Sampling Cursor",
         test_animation_timeline_index_and_sampling_cursor);
+    failures += run_test("Animation Explicit Duration", test_animation_explicit_duration);
     failures += run_test("Matrix Composition", test_matrix_composition);
     failures += run_test("Topological Bone Reorder", test_topological_bone_reorder);
     failures += run_test(
@@ -3147,8 +4938,29 @@ int main() {
         "PreparedScene Cache Dirty Updates",
         test_prepared_scene_cache_dirty_updates);
     failures += run_test(
+        "Parameter Definitions And Composition",
+        test_parameter_definitions_and_composition);
+    failures += run_test(
+        "Parameter State Transition Semantics",
+        test_parameter_state_transition_semantics);
+    failures += run_test(
+        "Parameter Shape Final Offsets",
+        test_parameter_shape_final_offsets);
+    failures += run_test(
+        "Parameter Deformer And ArtPath Evaluation",
+        test_parameter_deformer_and_art_path_evaluation);
+    failures += run_test(
+        "Parameter Loader Validation",
+        test_parameter_loader_validation);
+    failures += run_test(
         "Binary Key Quantization And Reduction",
         test_binary_key_quantization_and_reduction);
+    failures += run_test(
+        "Binary Multi-Turn Rotate Fallback",
+        test_binary_multi_turn_rotate_fallback);
+    failures += run_test(
+        "JSON Value String Literal Construction",
+        test_json_value_string_literal_construction);
     failures += run_test("Runtime Profiler Frame", test_runtime_profiler_frame);
 
     if (failures != 0) {

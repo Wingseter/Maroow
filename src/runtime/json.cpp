@@ -1,8 +1,10 @@
 #include "marrow/runtime/json.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -559,10 +561,26 @@ std::string escape_json_string(std::string_view text) {
     return escaped.str();
 }
 
+std::string serialize_number(double value) {
+    std::array<char, 64U> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (converted.ec == std::errc{}) {
+        return std::string(buffer.data(), converted.ptr);
+    }
+
+    // The fixed buffer is ample for finite doubles, but retain a portable
+    // round-trip fallback for standard-library implementations that decline
+    // a floating-point to_chars conversion.
+    std::ostringstream number_stream;
+    number_stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    return number_stream.str();
+}
+
 void serialize_value(
     const Value& value,
     int indent_size,
     int indent_level,
+    bool round_trip_numbers,
     std::ostringstream* output) {
     switch (value.type()) {
     case Value::Type::Null:
@@ -572,9 +590,13 @@ void serialize_value(
         *output << (value.as_boolean() ? "true" : "false");
         return;
     case Value::Type::Number: {
-        std::ostringstream number_stream;
-        number_stream << std::setprecision(15) << value.as_number();
-        *output << number_stream.str();
+        if (round_trip_numbers) {
+            *output << serialize_number(value.as_number());
+        } else {
+            std::ostringstream number_stream;
+            number_stream << std::setprecision(15) << value.as_number();
+            *output << number_stream.str();
+        }
         return;
     }
     case Value::Type::String:
@@ -590,7 +612,12 @@ void serialize_value(
         *output << "[\n";
         for (std::size_t index = 0; index < array.size(); ++index) {
             *output << std::string((indent_level + 1) * indent_size, ' ');
-            serialize_value(array[index], indent_size, indent_level + 1, output);
+            serialize_value(
+                array[index],
+                indent_size,
+                indent_level + 1,
+                round_trip_numbers,
+                output);
             if (index + 1 < array.size()) {
                 *output << ',';
             }
@@ -611,7 +638,12 @@ void serialize_value(
         for (const auto& [key, member_value] : object) {
             *output << std::string((indent_level + 1) * indent_size, ' ')
                     << '\"' << escape_json_string(key) << "\": ";
-            serialize_value(member_value, indent_size, indent_level + 1, output);
+            serialize_value(
+                member_value,
+                indent_size,
+                indent_level + 1,
+                round_trip_numbers,
+                output);
             if (index + 1 < object.size()) {
                 *output << ',';
             }
@@ -707,6 +739,9 @@ Value::Value(double number_value, SourceLocation location)
 Value::Value(std::string string_value, SourceLocation location)
     : location_(location),
       storage_(std::move(string_value)) {}
+
+Value::Value(const char* string_value, SourceLocation location)
+    : Value(std::string(string_value), location) {}
 
 Value::Value(Array array_value, SourceLocation location)
     : location_(location),
@@ -903,7 +938,14 @@ std::string serialize_compact(const Value& value) {
 
 std::string serialize_pretty(const Value& value, int indent_size) {
     std::ostringstream output;
-    serialize_value(value, std::max(indent_size, 0), 0, &output);
+    serialize_value(value, std::max(indent_size, 0), 0, false, &output);
+    output << '\n';
+    return output.str();
+}
+
+std::string serialize_pretty_round_trip(const Value& value, int indent_size) {
+    std::ostringstream output;
+    serialize_value(value, std::max(indent_size, 0), 0, true, &output);
     output << '\n';
     return output.str();
 }

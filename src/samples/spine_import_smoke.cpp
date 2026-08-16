@@ -62,6 +62,26 @@ bool warnings_include_fragments(
         });
 }
 
+bool diagnostics_include_fragments(
+    const marrow::runtime::SpineImportReport& report,
+    marrow::runtime::SpineImportDiagnosticSeverity severity,
+    std::string_view code,
+    std::initializer_list<std::string_view> fragments) {
+    return std::any_of(
+        report.diagnostics.begin(),
+        report.diagnostics.end(),
+        [&](const marrow::runtime::SpineImportDiagnostic& diagnostic) {
+            return diagnostic.severity == severity && diagnostic.code == code &&
+                std::all_of(
+                    fragments.begin(),
+                    fragments.end(),
+                    [&](std::string_view fragment) {
+                        return diagnostic.path.find(fragment) != std::string::npos ||
+                            diagnostic.message.find(fragment) != std::string::npos;
+                    });
+        });
+}
+
 bool expect_optional_near(
     const std::optional<double>& actual,
     double expected,
@@ -640,6 +660,17 @@ bool verify_best_n_pruning_asset(const PruneRegressionExpectation& expectation) 
             expectation.attachment_name,
             expectation.expected_affected_vertex_count),
         label + " raw import should log the pruned vertex count");
+    ok &= expect(
+        diagnostics_include_fragments(
+            raw_import_result.report,
+            marrow::runtime::SpineImportDiagnosticSeverity::Warning,
+            "weighted_mesh_pruned",
+            {
+                expectation.slot_name,
+                expectation.attachment_name,
+                std::to_string(expectation.expected_affected_vertex_count),
+            }),
+        label + " raw import report should log the pruned vertex count");
     if (raw_import_result.error.has_value()) {
         ok &= expect_not_contains(
             raw_import_result.error->message,
@@ -671,6 +702,17 @@ bool verify_best_n_pruning_asset(const PruneRegressionExpectation& expectation) 
             expectation.attachment_name,
             expectation.expected_affected_vertex_count),
         label + " stripped import should log the pruned vertex count");
+    ok &= expect(
+        diagnostics_include_fragments(
+            stripped_import_result.report,
+            marrow::runtime::SpineImportDiagnosticSeverity::Warning,
+            "weighted_mesh_pruned",
+            {
+                expectation.slot_name,
+                expectation.attachment_name,
+                std::to_string(expectation.expected_affected_vertex_count),
+            }),
+        label + " stripped import report should log the pruned vertex count");
 
     const auto load_result = marrow::runtime::load_skeleton_data(*stripped_import_result.document);
     if (!load_result) {
@@ -926,6 +968,86 @@ bool verify_curve_regression_fixture() {
         1e-5,
         "Spine vector sampled translation");
 
+    return ok;
+}
+
+bool verify_unsupported_field_report() {
+    constexpr std::string_view kUnsupportedFieldFixture = R"json(
+{
+  "skeleton": { "spine": "4.2.19" },
+  "bones": [
+    { "name": "root" }
+  ],
+  "slots": [
+    { "name": "body", "bone": "root" }
+  ],
+  "skins": [
+    {
+      "name": "default",
+      "attachments": {}
+    }
+  ],
+  "physics": [
+    { "name": "hair", "bone": "root" }
+  ],
+  "animations": {
+    "idle": {
+      "slots": {
+        "body": {
+          "twoColor": [
+            { "time": 0.0, "light": "ffffffff", "dark": "000000ff" }
+          ]
+        }
+      },
+      "physics": {
+        "hair": [
+          { "time": 0.0, "mix": 1.0 }
+        ]
+      }
+    }
+  }
+}
+)json";
+
+    const auto document_result = marrow::runtime::json::parse_document(
+        kUnsupportedFieldFixture,
+        "<spine-unsupported-field-report>");
+    if (!document_result) {
+        std::cerr << document_result.error->format() << '\n';
+        return false;
+    }
+
+    const auto import_result =
+        marrow::runtime::import_spine_json_document(*document_result.document);
+    bool ok = true;
+    ok &= expect(import_result.document.has_value(), "unsupported report fixture should import");
+    ok &= expect(
+        import_result.report.status == marrow::runtime::SpineImportStatus::AcceptedWithWarnings,
+        "unsupported report fixture should import with warnings");
+    ok &= expect(
+        import_result.report.spine_version == "4.2.19",
+        "unsupported report fixture should record the Spine version");
+    ok &= expect(
+        diagnostics_include_fragments(
+            import_result.report,
+            marrow::runtime::SpineImportDiagnosticSeverity::Unsupported,
+            "physics_constraints_unsupported",
+            {"$.physics", "unsupported Spine physics constraints"}),
+        "root physics constraints should be reported as unsupported");
+    ok &= expect(
+        diagnostics_include_fragments(
+            import_result.report,
+            marrow::runtime::SpineImportDiagnosticSeverity::Unsupported,
+            "two_color_timeline_unsupported",
+            {"$.animations.idle.slots.body.twoColor", "twoColor"}),
+        "two-color slot timelines should be reported as unsupported");
+    ok &= expect(
+        diagnostics_include_fragments(
+            import_result.report,
+            marrow::runtime::SpineImportDiagnosticSeverity::Unsupported,
+            "constraint_timelines_skipped",
+            {"$.animations.idle", "physics"}),
+        "physics animation timelines should be reported as skipped");
     return ok;
 }
 
@@ -1504,6 +1626,20 @@ bool verify_real_asset_constraint_timeline_warnings() {
                     expectation.timeline_types_fragment,
                 }),
             label + " should warn about skipped constraint timelines");
+        ok &= expect(
+            import_result.report.status ==
+                marrow::runtime::SpineImportStatus::AcceptedWithWarnings,
+            label + " report should import with warnings");
+        ok &= expect(
+            diagnostics_include_fragments(
+                import_result.report,
+                marrow::runtime::SpineImportDiagnosticSeverity::Unsupported,
+                "constraint_timelines_skipped",
+                {
+                    expectation.animation_path_fragment,
+                    expectation.timeline_types_fragment,
+                }),
+            label + " report should warn about skipped constraint timelines");
         if (!import_result.document.has_value()) {
             continue;
         }
@@ -1547,6 +1683,16 @@ int main(int argc, char** argv) {
 
     const auto& data = *load_result.skeleton_data;
     bool ok = true;
+
+    ok &= expect(
+        import_result.report.status == marrow::runtime::SpineImportStatus::Accepted,
+        "sample Spine import report should be accepted");
+    ok &= expect(
+        import_result.report.spine_version == "4.2.19",
+        "sample Spine import report should include skeleton.spine");
+    ok &= expect(
+        import_result.report.diagnostics.empty(),
+        "sample Spine import report should not contain diagnostics");
 
     ok &= expect(data.skins().size() == 1, "expected one imported skin");
     ok &= expect(data.animations().size() == 1, "expected one imported animation");
@@ -1707,6 +1853,7 @@ int main(int argc, char** argv) {
         1e-6,
         "runtime should apply imported scale x");
     ok &= verify_curve_regression_fixture();
+    ok &= verify_unsupported_field_report();
     ok &= verify_goblins_curve_import();
     ok &= verify_owl_zero_weight_mesh_import();
     ok &= verify_best_n_pruning_real_assets();

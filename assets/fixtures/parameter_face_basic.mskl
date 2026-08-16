@@ -1,0 +1,166 @@
+{
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {
+    "name": "parameter_face_basic",
+    "width": 128,
+    "height": 128
+  },
+  "bones": [
+    {
+      "name": "root"
+    }
+  ],
+  "slots": [
+    {
+      "name": "face",
+      "bone": "root",
+      "attachment": "face_mesh"
+    }
+  ],
+  "skins": {
+    "default": {
+      "face": {
+        "attachment": "face_mesh",
+        "type": "mesh",
+        "region": "face",
+        "vertices": [
+          -48,
+          -48,
+          48,
+          -48,
+          48,
+          48,
+          -48,
+          48
+        ],
+        "triangles": [
+          0,
+          1,
+          2,
+          2,
+          3,
+          0
+        ],
+        "uvs": [
+          0,
+          0,
+          1,
+          0,
+          1,
+          1,
+          0,
+          1
+        ],
+        "weights": [
+          [
+            {
+              "bone": "root",
+              "x": -48,
+              "y": -48,
+              "weight": 1
+            }
+          ],
+          [
+            {
+              "bone": "root",
+              "x": 48,
+              "y": -48,
+              "weight": 1
+            }
+          ],
+          [
+            {
+              "bone": "root",
+              "x": 48,
+              "y": 48,
+              "weight": 1
+            }
+          ],
+          [
+            {
+              "bone": "root",
+              "x": -48,
+              "y": 48,
+              "weight": 1
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "animations": {
+    "idle": {
+      "deform": {
+        "face": {
+          "face_mesh": [
+            {
+              "time": 0,
+              "vertices": [0, 0, 0, 0, 0, 0, 0, 0],
+              "curve": "linear"
+            },
+            {
+              "time": 1,
+              "vertices": [0, 0, 1, 0, 1, 0, 0, 0],
+              "curve": "linear"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "parameters": [
+    {
+      "id": "mouth.open",
+      "name": "Mouth Open",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "type": "continuous",
+      "clamp": true,
+      "ui_step": 0.01,
+      "units": "ratio"
+    },
+    {
+      "id": "face.variant",
+      "name": "Face Variant",
+      "min": 0,
+      "max": 3,
+      "default": 0,
+      "type": "discrete",
+      "clamp": false,
+      "ui_step": 1
+    }
+  ],
+  "parameterGroups": [
+    {
+      "id": "face",
+      "name": "Face",
+      "parameters": [
+        "mouth.open",
+        "face.variant"
+      ],
+      "collapsed": false,
+      "color_tag": "rose"
+    }
+  ],
+  "parameterShapes": [
+    {
+      "id": "mouth.open.shape",
+      "target_slot": "face",
+      "target_attachment": "face_mesh",
+      "parameter": "mouth.open",
+      "blend_mode": "normalized_override",
+      "keyforms": [
+        {
+          "value": 0,
+          "vertices": [0, 0, 0, 0, 0, 0, 0, 0]
+        },
+        {
+          "value": 1,
+          "vertices": [0, -4, 0, -4, 0, 8, 0, 8]
+        }
+      ]
+    }
+  ]
+}

@@ -947,6 +947,47 @@ bool populate_rotate_channel(
     double duration,
     double tolerance_degrees,
     PackedAnimationChannel* channel_out) {
+    const auto segment_preserves_winding = [](double from, double to, bool stepped) {
+        if (stepped) {
+            return true;
+        }
+        const double raw_delta = to - from;
+        const double normalized_delta =
+            detail::normalize_rotation_degrees(to) -
+            detail::normalize_rotation_degrees(from);
+        return std::isfinite(raw_delta) && std::isfinite(normalized_delta) &&
+            std::abs(raw_delta - normalized_delta) <= 1e-8;
+    };
+
+    // AKEY stores each rotation key in one normalized turn. Sampling a handful
+    // of points cannot prove that a continuous multi-turn segment is safe: for
+    // example, 0 -> 1440 degrees aliases at every quarter-segment sample while
+    // being 180 degrees wrong at one eighth. Reject winding structurally before
+    // allowing the optional packed channel to override the canonical payload.
+    for (std::size_t index = 1; index < original_timeline.keyframes.size(); ++index) {
+        const RotateKeyframe& previous = original_timeline.keyframes[index - 1U];
+        const RotateKeyframe& current = original_timeline.keyframes[index];
+        if (!segment_preserves_winding(
+                previous.angle,
+                current.angle,
+                previous.interpolation.kind() == InterpolationKind::Stepped)) {
+            return false;
+        }
+    }
+    for (std::size_t index = 1; index < reduced_layout.indices.size(); ++index) {
+        const RotateKeyframe& previous =
+            original_timeline.keyframes[reduced_layout.indices[index - 1U]];
+        const RotateKeyframe& current =
+            original_timeline.keyframes[reduced_layout.indices[index]];
+        if (!segment_preserves_winding(
+                previous.angle,
+                current.angle,
+                reduced_layout.interpolations[index - 1U].kind ==
+                    InterpolationKind::Stepped)) {
+            return false;
+        }
+    }
+
     PackedAnimationChannel channel;
     channel.bone_index = original_timeline.bone_index;
     channel.kind = PackedChannelKind::Rotate;
@@ -1171,9 +1212,9 @@ std::optional<json::LoadError> build_packed_animation_payloads(
                         animation_payload.duration,
                         options.rotation_error_tolerance_degrees,
                         &channel)) {
-                    return make_write_failure(
-                        document.source_path,
-                        "failed to quantize rotate timeline for animation '" + animation.name + "'");
+                    // The generic document remains the canonical fallback for channels whose
+                    // winding cannot be represented by AKEY's normalized rotation payload.
+                    continue;
                 }
             }
             animation_payload.channels.push_back(std::move(channel));

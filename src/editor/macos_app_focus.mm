@@ -9,10 +9,21 @@ namespace marrow::editor::platform {
 bool activate_editor_application() {
     @autoreleasepool {
         [NSApplication sharedApplication];
-        const BOOL activation_policy_set =
-            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp finishLaunching];
+        [[NSRunningApplication currentApplication]
+            activateWithOptions:NSApplicationActivateAllWindows];
         [NSApp activateIgnoringOtherApps:YES];
-        return activation_policy_set == YES && uses_regular_activation_policy();
+
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            if (uses_regular_activation_policy()) {
+                return true;
+            }
+            [[NSRunLoop currentRunLoop]
+                runMode:NSDefaultRunLoopMode
+                beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        }
+        return uses_regular_activation_policy();
     }
 }
 

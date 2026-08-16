@@ -1,14 +1,15 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/discription.md. Phase 1 (MAR-001–039) delivered core runtime and editor. Phase 2 (MAR-040–066) fixed Spine compliance bugs and added GL rendering. Phase 3 (MAR-067+) targets production readiness: multi-backend rendering, game engine integration, Spine import, atlas packing, performance, artist workflow, and documentation.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, MAR-122–128 Maroow-native parameter-modeling checkpoint, MAR-154–155 duration checkpoints, MAR-156 versioned user-preference checkpoint, MAR-157 typed-selection checkpoint, MAR-158 selection-migration checkpoint, MAR-159 hierarchy-multi-selection checkpoint, MAR-160 viewport-multi-selection checkpoint, MAR-161 parent-space-rotation checkpoint, MAR-162 signed-local-scale checkpoint, Task #28 behavior-preserving refactor checkpoint, MAR-163 single-vertex-FFD checkpoint, and MAR-164 attachment-local multi-vertex-FFD checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-165–191 form the remaining strictly linear editing-P1 dependency chain beginning at MAR-165. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
   "qualityGates": [
-    "Treat docs/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
-    "Keep each story small enough for one Ralph iteration and preserve the documented dependency order: renderer/runtime validation before advanced editor work.",
-    "When a story changes file formats, update checked-in sample assets and any matching operational docs in the same iteration.",
-    "Every completed story must leave the repository in a clean git state with build, test, or inspection commands recorded in AGENTS.md and the Ralph progress log.",
+    "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
+    "Keep each milestone small, vertical, and independently verifiable while preserving the documented dependency order: renderer/runtime validation before advanced editor work.",
+    "When a milestone changes file formats, update checked-in sample assets and matching operational docs in the same milestone checkpoint.",
+    "Record the focused build, test, benchmark, or inspection commands for each completed milestone checkpoint in AGENTS.md.",
     "Prefer runtime-verifiable slices over placeholder scaffolding; if a feature cannot be fully validated yet, add the smallest executable test harness that proves the implemented slice.",
-    "Bug-fix stories must include a regression test that would have caught the original defect, added to marrow_fixture_smoke or a dedicated test target."
+    "Bug-fix stories must include a regression test that would have caught the original defect, added to marrow_fixture_smoke or a dedicated test target.",
+    "New GUI and agent capabilities must share UI-free authoring operations and preserve the existing C ABI and agent request/response contracts."
   ],
   "stories": [
     {
@@ -46,11 +47,11 @@
     {
       "id": "MAR-003",
       "title": "Check in canonical .mskl and .matl fixtures",
-      "description": "Convert the format examples in docs/discription.md into checked-in fixture assets that cover skeleton metadata, bones, slots, animations, and atlas metadata for repeatable tests.",
+      "description": "Convert the format examples in docs/root1/discription.md into checked-in fixture assets that cover skeleton metadata, bones, slots, animations, and atlas metadata for repeatable tests.",
       "acceptanceCriteria": [
         "A sample .mskl file exists under an examples or assets directory.",
         "A sample .matl file exists and references plausible atlas regions used by the sample skeleton.",
-        "The repository documents how the fixtures map back to docs/discription.md."
+        "The repository documents how the fixtures map back to docs/root1/discription.md."
       ],
       "dependsOn": [
         "MAR-001"
@@ -1514,11 +1515,11 @@
       "title": "Write Quick Start guide and API concepts documentation",
       "description": "Create the most important documentation pages: a Quick Start (load → animate → render in one page) and a Concepts page explaining SkeletonData/Skeleton/AnimationState architecture. Add Doxygen comments to all public API headers.",
       "acceptanceCriteria": [
-        "docs/quick-start.md shows a complete working example from zero to rendered animation.",
-        "docs/concepts.md explains the SkeletonData→Skeleton→AnimationState→Renderer data flow.",
+        "docs/root1/quick-start.md shows a complete working example from zero to rendered animation.",
+        "docs/root1/concepts.md explains the SkeletonData→Skeleton→AnimationState→Renderer data flow.",
         "All public functions in include/marrow/ have @brief and @param Doxygen comments.",
         "Doxygen builds with zero warnings.",
-        "docs/format-spec.md documents .mskl, .matl, .mbin, and .marrow file formats.",
+        "docs/root1/format-spec.md documents .mskl, .matl, .mbin, and .marrow file formats.",
         "AGENTS.md links to all documentation entry points."
       ],
       "dependsOn": [],
@@ -1880,7 +1881,7 @@
     {
       "id": "MAR-106",
       "title": "Fix renderer_sample setup-pose region attachment placement check",
-      "description": "Ralph error log shows marrow_renderer_sample --skip-render fails on an inherited setup-pose region-attachment placement assertion. The float conversion changed bone transform precision, causing the hard-coded expected values in the renderer sample to drift. Update the expected values to match float-precision world transforms.",
+      "description": "A regression log shows marrow_renderer_sample --skip-render fails on an inherited setup-pose region-attachment placement assertion. The float conversion changed bone transform precision, causing the hard-coded expected values in the renderer sample to drift. Update the expected values to match float-precision world transforms.",
       "acceptanceCriteria": [
         "marrow_renderer_sample --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl passes.",
         "marrow_renderer_sample --hud --skip-render passes.",
@@ -1896,7 +1897,7 @@
     {
       "id": "MAR-107",
       "title": "Fix fixture smoke IK world-transform pass count assertion",
-      "description": "Ralph error log shows marrow_fixture_smoke fails on 'IK constraint solve should perform exactly one full world-transform pass per update' assertion. The constraint subtree optimization changed the world-transform update pattern. Update the assertion to match the new targeted-subtree approach.",
+      "description": "A regression log shows marrow_fixture_smoke fails on 'IK constraint solve should perform exactly one full world-transform pass per update' assertion. The constraint subtree optimization changed the world-transform update pattern. Update the assertion to match the new targeted-subtree approach.",
       "acceptanceCriteria": [
         "marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl passes.",
         "IK constraint validation assertions reflect the targeted-subtree world-transform pattern.",
@@ -2059,8 +2060,8 @@
       ],
       "status": "done",
       "startedAt": "2026-04-04T02:58:44.317890+00:00",
-      "completedAt": null,
-      "updatedAt": "2026-04-04T02:58:44.317897+00:00"
+      "completedAt": "2026-04-11T08:03:16+00:00",
+      "updatedAt": "2026-04-11T08:03:16+00:00"
     },
     {
       "id": "MAR-116",
@@ -2138,6 +2139,1701 @@
       ],
       "status": "done",
       "completedAt": "2026-04-11T07:02:36.092832+00:00"
+    },
+    {
+      "id": "MAR-120",
+      "title": "Fix parameter/deformer format boundary and roadmap slices",
+      "description": "Turn docs/enhancement/02-live2d-parameter-deformer-system.md into executable roadmap boundaries: define the .marrow authoring section, optional .mskl/.mbin runtime sections, evaluation order, fixture names, and non-compatibility language before runtime implementation begins.",
+      "acceptanceCriteria": [
+        "docs/root1/format-spec.md documents .marrow.parameter_model with parameters, groups, deformers, blend_shapes, art_paths, expressions, and lip_sync fields.",
+        "docs/root1/format-spec.md documents optional .mskl root sections parameters, parameterGroups, parameterShapes, parameterDeformers, artPaths, expressions, and lipSync with empty-section semantics while keeping version 1.",
+        "docs/root1/concepts.md documents the runtime ownership model and fixed evaluation order: setup -> skin/linked mesh -> animation FFD -> parameter shapes/deformers -> prepared render geometry.",
+        "docs/root1/fixtures.md reserves parameter_face_basic, parameter_deformer_grid, parameter_expression_lipsync, and art_path_stroke fixture names without changing existing player_idle fixtures.",
+        "AGENTS.md and PRD references use docs/root1/discription.md and docs/root1 documentation entry points.",
+        "The PRD contains MAR-120 through MAR-128 as small vertical stories for the parameter/deformer track.",
+        "Docs and PRD state that this is Maroow-native parameter modeling, not Live2D Cubism Core, SDK ABI, proprietary file, or importer compatibility."
+      ],
+      "dependsOn": [
+        "MAR-119"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-141",
+      "title": "Make setup and preview-only editor controls honest",
+      "description": "Remove misleading unsaved pose/color writes and expose the imported setup contract.",
+      "acceptanceCriteria": [
+        "Setup-mode bone transforms and slot colors are read-only and labelled as imported setup data.",
+        "Animation-mode authoring remains unavailable until a persistent key path is active.",
+        "Global Add/Remove Key controls are disabled instead of reporting placeholder actions.",
+        "Shell smoke proves these controls do not change dirty state or history."
+      ],
+      "dependsOn": [
+        "MAR-140"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-142",
+      "title": "Add transactional animation auto-key authoring",
+      "description": "Add live EditorSession gesture refresh and persist inspector transform edits as playhead keys.",
+      "acceptanceCriteria": [
+        "EditTransaction supports repeated runtime preview refresh, one final history entry, and exact cancel rollback.",
+        "Animation-mode inspector translate/rotate/scale/shear always upserts absolute local keys at the playhead.",
+        "Setup mode remains read-only and playback pauses when authoring begins.",
+        "GUI and set_transform share the same project-domain key upsert operation.",
+        "Session and shell smokes cover live preview, Escape, undo, redo, and save/reload."
+      ],
+      "dependsOn": [
+        "MAR-141"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-143",
+      "title": "Stabilize viewport camera and add inverse mapping",
+      "description": "Decouple camera framing from animated pose bounds and add exact bidirectional coordinate conversion.",
+      "acceptanceCriteria": [
+        "world_from_screen is the inverse of screen_from_world across pan and zoom.",
+        "Pose changes never recenter or rescale the camera.",
+        "Wheel zoom preserves the world point under the cursor and Fit is the only reframing command.",
+        "Viewport smoke covers load initialization, roundtrip, zoom anchoring, pose stability, and Fit."
+      ],
+      "dependsOn": [
+        "MAR-140"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-144",
+      "title": "Move bones and IK targets in the viewport",
+      "description": "Add free/X/Y translate gizmo dragging that auto-keys the selected animation.",
+      "acceptanceCriteria": [
+        "Selected bones and IK target bones expose free, X, and Y move handles in Animation mode.",
+        "World targets convert through root scale or the parent 2x2 inverse, including rotation, shear, and non-uniform scale.",
+        "Singular parents cancel without mutation; Escape restores project/runtime/preview.",
+        "One drag produces one undo entry and pauses playback/hot reload/mutating agent work.",
+        "Smoke covers root, transformed parent, singular parent, IK target, undo, and redo."
+      ],
+      "dependsOn": [
+        "MAR-142",
+        "MAR-143"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-145",
+      "title": "Edit slot color and attachment timelines in the GUI",
+      "description": "Turn the existing slot light-color and attachment runtime/agent paths into full timeline editors.",
+      "acceptanceCriteria": [
+        "Light RGBA keys support add, edit, remove, interpolation, preview, undo, and export.",
+        "Attachment keys support named attachments and none with stepped interpolation.",
+        "Inspector setup dark tint stays read-only and preview attachment composition stays transient.",
+        "GUI and existing agent handlers share project-domain mutations.",
+        "Project and shell smokes cover roundtrip and rollback."
+      ],
+      "dependsOn": [
+        "MAR-142"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-146",
+      "title": "Add timeline ruler, frame display, zoom, and pan",
+      "description": "Replace duration-fixed lanes with a stable time viewport and 60 FPS ruler.",
+      "acceptanceCriteria": [
+        "Timeline view owns visible start and pixels-per-second independently from clip duration.",
+        "A seconds/frame ruler, playhead, cursor-centered zoom, and horizontal pan are rendered.",
+        "Project editor metadata defaults display FPS to 60 without changing runtime seconds.",
+        "Moving the last key does not rescale the visible timeline."
+      ],
+      "dependsOn": [
+        "MAR-140"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-147",
+      "title": "Select timeline keys and box ranges",
+      "description": "Introduce timeline-local key identities and multi-selection without changing global entity selection.",
+      "acceptanceCriteria": [
+        "Click selects a key, Cmd/Ctrl toggles it, and empty-lane drag box-selects keys.",
+        "TimelineKeyRef distinguishes track and key identity, including same-time events.",
+        "Selection follows rebuilds and synchronizes the playhead, track, hierarchy, and inspector.",
+        "Selection-only actions do not dirty the project."
+      ],
+      "dependsOn": [
+        "MAR-146"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-148",
+      "title": "Wire global Add and Remove Key actions",
+      "description": "Make the timeline toolbar operate on the selected editable lane and key selection.",
+      "acceptanceCriteria": [
+        "Add samples the effective value at the playhead for every editable lane.",
+        "Remove deletes selected/exact-playhead project keys and reports imported-track limitations honestly.",
+        "Inherit remains visibly read-only rather than accepting a placeholder action.",
+        "Each action is atomic, undoable, and covered by shell smoke."
+      ],
+      "dependsOn": [
+        "MAR-145",
+        "MAR-147"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-149",
+      "title": "Retime multiple timeline keys by dragging",
+      "description": "Move selected keys by one shared delta with frame snapping and collision protection.",
+      "acceptanceCriteria": [
+        "All selected keys receive one delta and one transaction/history entry.",
+        "Default 60 FPS snapping is bypassed with Alt.",
+        "The global delta clamps at zero and unselected neighbors; event ties preserve stable order.",
+        "Invalid rebuilds and Escape restore all tracks atomically.",
+        "Agent registry exposes an atomic timeline.retime_keyframes operation."
+      ],
+      "dependsOn": [
+        "MAR-142",
+        "MAR-147"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-150",
+      "title": "Copy, cut, and paste timeline keys",
+      "description": "Add a typed editor clipboard for active-animation key workflows.",
+      "acceptanceCriteria": [
+        "Cmd/Ctrl+C/X/V copies complete typed payloads and preserves multi-track relative timing.",
+        "Paste aligns the earliest copied key to the playhead and replaces same-track/time collisions.",
+        "A single compatible track may remap to the selected destination; multi-track paste preserves targets.",
+        "Cut/paste is atomic and cannot silently delete an imported source track.",
+        "Tests cover transform, deform, slot, draw-order, event, collision, and rollback cases."
+      ],
+      "dependsOn": [
+        "MAR-149"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-151",
+      "title": "Persist animation catalog edits and expose agent CRUD",
+      "description": "Add ordered editor-only create/rename/delete operations and shared animation authoring services.",
+      "acceptanceCriteria": [
+        ".marrow animation_edits replay before typed timelines without changing runtime format versions.",
+        "Duplicate deep-copies the effective JSON animation and preserves unknown timeline families.",
+        "Rename/delete update timeline, mixing, active animation, queue, and preview references atomically.",
+        "Missing sources, duplicate destinations, and deleting the last clip are rejected.",
+        "animation.create/duplicate/rename/delete support dry-run, undo, and registry coverage."
+      ],
+      "dependsOn": [
+        "MAR-142"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-152",
+      "title": "Add animation catalog management UI",
+      "description": "Expose create, duplicate, rename, and confirmed delete for the selected clip.",
+      "acceptanceCriteria": [
+        "The animation panel validates unique non-empty names and selects the resulting clip.",
+        "Delete requires confirmation and is disabled for the final clip.",
+        "Selection, queue, playback, and active-animation metadata remain valid after every operation.",
+        "Each catalog mutation is one EditorSession transaction and one undo item.",
+        "No explicit clip-duration control is introduced in this story."
+      ],
+      "dependsOn": [
+        "MAR-151"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-153",
+      "title": "Validate editing P0 end to end",
+      "description": "Prove viewport manipulation, auto-key, dopesheet editing, slot lanes, and catalog CRUD survive the full project/export workflow.",
+      "acceptanceCriteria": [
+        "Viewport drag creates a key, updates preview, saves/reloads, and exports to JSON and binary.",
+        "Dopesheet selection, retime, clipboard, slot color, and attachment edits roundtrip with undo/redo.",
+        "Animation create/duplicate/rename/delete preserves unknown data and rejects final deletion.",
+        "All focused CTest labels and documented direct project/agent/editor/renderer smokes pass.",
+        "AGENTS.md records any newly introduced commands and validated results."
+      ],
+      "dependsOn": [
+        "MAR-144",
+        "MAR-148",
+        "MAR-150",
+        "MAR-152"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-12"
+    },
+    {
+      "id": "MAR-121",
+      "title": "Integrate the parameter runtime foundation into MAR-122",
+      "description": "Tracking tombstone only. The parameter definitions, immutable SkeletonData ownership, per-Skeleton values, loader fallback, inspection, and runtime tests originally assigned here are integrated into MAR-122 and are not implemented as a separate milestone.",
+      "acceptanceCriteria": [
+        "The roadmap and PRD identify MAR-122 as the owner of the complete parameter runtime foundation and project-export slice.",
+        "No standalone MAR-121 implementation or validation checkpoint is scheduled."
+      ],
+      "dependsOn": [
+        "MAR-120"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-122",
+      "title": "Add the parameter runtime foundation and project export",
+      "description": "Implement Maroow-native parameter definitions and per-instance values together with the typed .marrow parameters/groups authoring model and .mskl/.mbin export path. Other parameter_model families remain losslessly preserved JSON until their later milestones promote them to typed data.",
+      "acceptanceCriteria": [
+        "The runtime defines ParameterType, ParameterDefinition, and ParameterGroupDefinition; SkeletonData owns immutable definitions and exposes ordered access plus id-to-index lookup.",
+        "Skeleton owns one per-instance parameter buffer and exposes parameter_values(), set_parameter_value(id/index, value), reset_parameters(), and parameter_revision().",
+        "Parameter numeric fields and setter inputs must be finite; continuous values are applied directly, discrete values use std::round semantics, clamp:true alone limits the result to min/max, and clamp:false permits out-of-range values.",
+        "Setting an already-effective value changes neither parameter_revision nor parameter/deformer dirty state, while missing ids and invalid indices fail without mutating unrelated values.",
+        "Absent runtime parameters and parameterGroups load as an empty model for every existing .mskl/.mbin asset, and marrow_inspect reports counts plus default/range/type data when definitions exist.",
+        "ProjectData contains .marrow.parameter_model with typed parameters and groups and losslessly preserved deformers, blend_shapes, art_paths, expressions, lip_sync, and unknown additive fields.",
+        "Project load/save preserves unknown additive data, omits parameter_model when it is completely empty, and leaves existing projects that omit it byte-stable under unchanged serialization.",
+        "build_runtime_document() exports parameters and groups as optional runtime-root parameters and parameterGroups sections without changing .mskl version 1.",
+        ".mbin version 2 carries the new logical roots through its existing generic JSON-like document payload; this milestone adds no binary section or version bump.",
+        "The validated parameter_face_basic.marrow/.mskl/.matl fixtures cover project export, runtime inspection, JSON validation, generated MBIN export/compare, and existing player_idle project/runtime regressions."
+      ],
+      "dependsOn": [
+        "MAR-120"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-123",
+      "title": "Evaluate 1D parameter mesh shapes after animation FFD",
+      "description": "Promote .marrow.blend_shapes and runtime parameterShapes to typed 1D attachment-local mesh shapes, preserving animation FFD as a separate observable layer and adding the final local-offset path used before GPU skinning.",
+      "acceptanceCriteria": [
+        "Project load/save/export and runtime loading use typed parameterShapes records with id, target_slot, target_attachment, one continuous parameter, blend_mode, and strictly increasing keyforms of value plus vertices.",
+        "Every keyform vertices array contains exactly the target mesh x/y offset count; linked meshes reuse existing deform-inheritance resolution and incompatible inherited topology is rejected by the loader.",
+        "Shape evaluation holds the nearest endpoint outside the authored range and linearly interpolates between adjacent keyforms inside it.",
+        "Evaluation order is setup/linked-mesh resolution, animation FFD, normalized_override, additive_clamped, parameter deformer, then GPU skinning.",
+        "At most one normalized_override shape may target an attachment; it replaces that target's complete animation FFD result, while additive_clamped shapes add endpoint-clamped interpolation results in declaration order.",
+        "All shape output remains attachment-local so existing weighted GPU skinning is preserved.",
+        "Skeleton::current_mesh_vertex_offsets(slot) remains animation-FFD-only and Skeleton::current_final_mesh_vertex_offsets(slot) exposes the final local offsets consumed by renderer preparation.",
+        "The validated parameter_face_basic fixture covers endpoint/linear interpolation, override/additive composition, linked and weighted meshes, FFD separation, runtime smoke, and renderer --skip-render bounds."
+      ],
+      "dependsOn": [
+        "MAR-122"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-124",
+      "title": "Add warp and rotation parameter deformers",
+      "description": "Promote .marrow.deformers and runtime parameterDeformers to typed 2D bilinear warp and attachment-local rotation chains with strict topology validation, parameter dependency caching, and separate benchmark reporting.",
+      "acceptanceCriteria": [
+        "Warp records require exactly two bindings shaped {parameter, axis}, one axis x and one axis y, and both referenced parameters are continuous.",
+        "Warp grid_cols and grid_rows count control points and are each at least two; the row-major base control_points form an axis-aligned monotone rectangular lattice.",
+        "Warp keyforms contain x, y, and a full control_points array for every Cartesian x/y key coordinate; evaluation uses endpoint hold on each axis and bilinear interpolation inside the authored rectangle.",
+        "Vertices outside the base lattice are unchanged by warp evaluation.",
+        "Rotation records require exactly one continuous {parameter, axis:angle} binding; strictly increasing {value, angle} keyforms use linear interpolation and endpoint hold, with attachment-local pivot and output and influence constrained to [0,1].",
+        "A leaf or child evaluates first and then its optional parent is applied to that output; each deformer has at most one parent, only one parent-child nesting level is accepted, and cycles or deeper chains fail loading with actionable errors.",
+        "Each slot may belong to exactly one leaf chain; independent deformers on the same slot and ambiguous ancestor/child double targeting are rejected.",
+        "SkeletonData precomputes parameter dependency bitsets and affected-slot lookup, Skeleton caches final offsets, and only shapes/deformers depending on parameters whose effective final values changed are reevaluated.",
+        "The validated parameter_deformer_grid fixture covers bilinear interpolation, rotation pivot/influence, nesting, ambiguity, cycle, depth, outside-lattice, and dirty-cache regressions.",
+        "marrow_benchmark adds --parameter-deformers and reports parameter_us and deformer_us without a new global profiler phase or initial hard latency gate; existing non-parameter 200-skeleton acceptance remains required."
+      ],
+      "dependsOn": [
+        "MAR-123"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-125",
+      "title": "Prepare renderable ArtPath stroke objects",
+      "description": "Promote .marrow.art_paths and runtime artPaths to typed skeleton-local root-overlay strokes, with deterministic CPU tessellation and atlas-free renderer preparation through the existing solid-white triangle path.",
+      "acceptanceCriteria": [
+        "ArtPath is a runtime type distinct from constraint paths and stores skeleton-local points, width, color, cap, join, optional parent_deformer, and optional parameter_keyforms.",
+        "parameter_keyforms use exactly one continuous parameter; every strictly increasing keyform stores the complete {parameter, value, points, width, color} state, evaluates linearly with endpoint hold, and then applies the optional parent deformer.",
+        "ArtPaths draw as root overlays in JSON declaration order after all slot draw and clipping events; no slot binding, draw-order field, or clipping behavior is added.",
+        "The CPU tessellator supports butt/square/round caps and miter/bevel/round joins, uses eight segments per semicircle, and falls back from miter to bevel beyond four times half-width.",
+        "Consecutive zero-length segments are skipped, and an ArtPath with fewer than two remaining valid points is rejected.",
+        "PreparedStrokeCommand data becomes ordinary triangles using kSolidWhiteTextureHandle, normal blend, and the single-color shader; the existing C render-command ABI remains unchanged.",
+        "prepare_setup_pose_scene(skeleton) and its cached overload accept stroke-only skeletons without an atlas and return a clear missing-atlas error if atlas-backed attachments are present.",
+        "ArtPath bounds include half-width plus cap extension, and the active art_path_stroke plan covers cap/join tessellation, bounds, atlas-free preparation, parameter evaluation, and existing path-constraint regressions."
+      ],
+      "dependsOn": [
+        "MAR-124"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-126",
+      "title": "Compose expressions and lip-sync into parameter state",
+      "description": "Promote .marrow expressions/lip_sync and their runtime roots to typed composition data. ParameterState owns expression activation and external mouth-input filters while Skeleton keeps separate direct and final parameter buffers.",
+      "acceptanceCriteria": [
+        "ParameterState owns the active expression stack, activation order, amplitude/phoneme input, and envelope/smoothing state; Skeleton owns direct and final buffers.",
+        "set_parameter_value() changes the direct preview value and parameter_values() exposes the final composed value.",
+        "Composition order is direct preview, lip-mapping override, expressions from low priority to high with activation order breaking ties, discrete std::round, then optional clamp.",
+        "Expression blend is additive or override; additive targets are deltas, override targets are absolute values, duration controls fade-in/fade-out, restore removes a contribution after fade-out, and hold persists it until explicit clear/reset.",
+        "Lip-sync source is amplitude or phoneme only, each target parameter has at most one mapping, and duplicate targets are rejected.",
+        "Lip processing order is scale/bias, attack/release envelope, then smoothing; every filter uses alpha = 1 - exp(-dt/tau), tau zero updates immediately, and an unmapped phoneme supplies zero input.",
+        "ParameterState exposes update(dt) and apply(Skeleton&); audio analysis and parameter ownership in AnimationState or the C ABI are out of scope.",
+        "The validated parameter_expression_lipsync fixture covers priority/activation order, additive/override, fade, restore/hold/reset, amplitude, phoneme fallback, attack/release/smoothing, direct/final separation, and deterministic runtime smoke."
+      ],
+      "dependsOn": [
+        "MAR-125"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-129",
+      "title": "Register a focused noninteractive CTest guardrail",
+      "description": "Turn the existing direct smoke commands into one focused CTest entrypoint before the editor architecture changes, without replacing or changing any executable's direct command-line behavior.",
+      "acceptanceCriteria": [
+        "The top-level build enables CTest through the standard BUILD_TESTING flow.",
+        "CTest registers exactly seven focused tests: marrow_unit_tests, the player_idle runtime fixture smoke, renderer --hud --skip-render preparation, player_idle project smoke, agent dispatch smoke, C ABI smoke, and the player_idle editor shell auto-close smoke.",
+        "Every registered test uses the source root as its WORKING_DIRECTORY so existing relative fixture paths remain valid.",
+        "Tests carry useful runtime, renderer, editor, agent, project, C-ABI, unit, fixture, smoke, and noninteractive labels as appropriate.",
+        "ctest --test-dir build --output-on-failure is documented in AGENTS.md alongside discovery and useful label-filter commands.",
+        "All pre-existing direct validation commands remain documented and continue to invoke the same executables and arguments.",
+        "AGENTS.md lists the exact 24 named cases currently emitted by marrow_unit_tests and retains the interactive Metal host validation notes."
+      ],
+      "dependsOn": [
+        "MAR-120"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-130",
+      "title": "Characterize editor and agent external behavior",
+      "description": "Expand behavior-focused smoke coverage before moving ownership so the current C ABI, agent protocol, serialization, playback, history, import, export, and visible editor workflows become an executable compatibility baseline.",
+      "acceptanceCriteria": [
+        "Agent dispatch characterization covers all 44 existing operations and asserts every operation name remains callable with its current argument contract.",
+        "Coverage explicitly includes terminate, save/review execution, redo, transform removal, Spine atlas import, PSD import/re-import, and atlas-pack paths that were previously missing.",
+        "Tests assert operation categories, permission failures, status and error codes, error messages, response metadata, affected-target summaries, and JSON result shapes.",
+        "Dry-run tests prove project data, runtime data, preview state, dirty state, revisions, and history remain unchanged.",
+        "Review tests prove queueing, monotonic review IDs, approve/reject behavior, and execution of the originally reviewed command.",
+        "Undo/redo tests preserve existing grouping and merge behavior for user and agent edits.",
+        "Compatibility tests prove byte-identical .marrow serialization and logically equivalent .mskl/.mbin exports for unchanged fixtures.",
+        "Runtime fixture and renderer --skip-render preparation continue to pass for the checked-in player_idle assets without fixture rewrites."
+      ],
+      "dependsOn": [
+        "MAR-129"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-131",
+      "title": "Unify editor mutations under session history",
+      "description": "Introduce the EditorSession transaction and snapshot foundation, route production shell mutations through it, and retire the parallel public ProjectCommand history implementation while preserving current behavior.",
+      "acceptanceCriteria": [
+        "include/marrow/editor/session.hpp introduces a move-only EditorSession and transaction API without UI framework types.",
+        "A non-nestable transaction descriptor records edit kind, label, merge key, merge permission, and project/runtime/preview impact flags.",
+        "A transaction captures the prior project and preview state and commits one atomic history entry only after validation and any required runtime rebuild succeed.",
+        "Cancellation, validation failure, or runtime rebuild failure restores the exact prior project and preview state and creates no history entry.",
+        "A no-change transaction creates no history entry and does not change dirty state or revision counters.",
+        "History remains capped at 100 entries and preserves the current merge-key and grouped-drag behavior.",
+        "Preview skin and attachment composition remains transient and does not mark the project dirty, but remains undoable and redoable.",
+        "Production shell edits use the unified session history, and ProjectCommand, ProjectCommandStack, and make_project_command are removed from the public project API and implementation.",
+        "Session tests cover rollback, no-change edits, preview-only history, merge behavior, the depth cap, and undo/redo restoration."
+      ],
+      "dependsOn": [
+        "MAR-130"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-132",
+      "title": "Move editor playback into a preview controller",
+      "description": "Move animation selection and preview playback ownership out of shell free functions into a private PreviewController used by EditorSession, without changing frame advancement or visible playback behavior.",
+      "acceptanceCriteria": [
+        "A private PreviewController owns selected animation, playback time, loop, queue, mix, reverse, Skeleton, and AnimationState state.",
+        "Seeking, selection changes, preview composition, runtime rebinding, state snapshot, and state restoration are expressed as controller operations rather than shell free functions.",
+        "Normal frame advancement remains incremental through AnimationState update/apply and does not rebuild runtime data.",
+        "Runtime rebinding after a project edit preserves compatible animation selection, playback time, loop/queue/mix/reverse state, and transient preview composition.",
+        "Failed transactions restore the prior preview controller state exactly.",
+        "Shell timeline playback and scrubbing use EditorSession preview controls without directly owning Skeleton or AnimationState.",
+        "Tests cover animation selection, seeking, incremental advancement, looping, queue/mix/reverse state, preview composition, runtime rebinding, and playback retention across undo/redo."
+      ],
+      "dependsOn": [
+        "MAR-131"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-133",
+      "title": "Make EditorSession own authoring state",
+      "description": "Complete the UI-free EditorSession ownership boundary for project lifecycle, compiled runtime data, preview, dirty state, revisions, history, save, and export, then make ShellState compose it.",
+      "acceptanceCriteria": [
+        "EditorSession exposes open, reload, save, and export_runtime lifecycle operations with actionable errors and no ImGui, GLFW, OpenGL, or shell types in its public header.",
+        "Project data, load state, compiled runtime data, PreviewController, dirty baseline, edit transactions, and history are owned by EditorSession.",
+        "Callers receive read-only project and runtime access plus preview controls, undo/redo, dirty state, and save/export operations rather than mutable ownership leaks.",
+        "Monotonic project, runtime, and preview revision counters advance only for their documented impacts.",
+        "Successful save establishes the new dirty baseline, failed save leaves session state unchanged, and export does not silently clear project dirtiness.",
+        "Successful and failed open/reload operations have deterministic ownership and rollback semantics.",
+        "ShellState composes EditorSession and reacts to revision changes for UI cache, selection, viewport, and file-watcher synchronization.",
+        "Session tests cover successful and failed load, dirty baselines, save/export semantics, revision increments, runtime rebuilds, and playback retention."
+      ],
+      "dependsOn": [
+        "MAR-132"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-134",
+      "title": "Migrate the C API and agent control to EditorSession",
+      "description": "Move the opaque C project, socket dispatch, review execution, and agent lifecycle onto EditorSession plus a UI-free AgentControlState while keeping C ABI v1 and the JSON protocol unchanged.",
+      "acceptanceCriteria": [
+        "AgentControlState owns pause/terminate state, current operation, activity log, review queue, and monotonic activity/review IDs without shell or UI dependencies.",
+        "AgentCommandContext contains EditorSession and AgentControlState references, and the C++ dispatcher signature is dispatch(AgentCommandContext&, Value).",
+        "The opaque C MarrowProject owns EditorSession and AgentControlState while every existing C function, status code, ownership rule, and ABI version remains unchanged.",
+        "Socket worker threads continue to queue commands only, and all dispatch and mutation remain main-thread single-writer operations.",
+        "Review approval executes against the same session/control context and preserves the reviewed command's protocol response.",
+        "Project and dispatcher implementation paths no longer include shell_types.hpp or depend on ImGui, GLFW, or OpenGL types.",
+        "C ABI and agent characterization smokes pass without changing fixture files, response JSON, or exported data."
+      ],
+      "dependsOn": [
+        "MAR-133"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-135",
+      "title": "Drive agent dispatch from one operation registry",
+      "description": "Replace dispatcher string branching with one registry that binds operation metadata to handlers, generates operations.list, and delegates cohesive handler groups while preserving exact JSON behavior.",
+      "acceptanceCriteria": [
+        "One registry entry owns each operation's name, category, permissions, review requirement, dry-run metadata, and non-null handler.",
+        "operations.list is generated solely from the registry and preserves existing operation names, ordering, categories, permission metadata, and response shape.",
+        "Dispatcher lookup uses the registry instead of a parallel string if/else chain or independently maintained metadata table.",
+        "Handlers are split into inspection, editing/timeline, constraints, and management/validation modules with narrow private interfaces.",
+        "Tests reject duplicate operation names and handlerless registry entries.",
+        "Every one of the 44 characterized operations resolves to exactly one handler.",
+        "Argument validation, dry-run behavior, review routing, status/error messages, response metadata, undo grouping, and exported results remain byte-for-byte or structurally equivalent as appropriate."
+      ],
+      "dependsOn": [
+        "MAR-134"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-136",
+      "title": "Extract the timeline shell module",
+      "description": "Move timeline models, animation editors, scrubbing, and playback controls out of shell_main.cpp into a feature-owned shell_timeline module backed by EditorSession.",
+      "acceptanceCriteria": [
+        "Timeline row/key models, selection state adapters, editors, and timeline window drawing live in shell_timeline source and narrow private headers.",
+        "Playback, play/pause, looping, reverse, queue/mix controls, seeking, and scrubbing call EditorSession preview APIs.",
+        "Transform, deform, draw-order, event, state-preview, and constraint timeline edits use EditorSession transactions with existing labels and merge behavior.",
+        "Timeline selection remains synchronized with hierarchy, inspector, animation selection, and viewport preview.",
+        "Immediate edit preview and incremental frame playback preserve current behavior without runtime rebuilds during ordinary advancement.",
+        "Editor shell smoke coverage validates playback, scrubbing, keyed edits, grouped undo/redo, and selection synchronization after extraction."
+      ],
+      "dependsOn": [
+        "MAR-135"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-137",
+      "title": "Extract the constraint shell module",
+      "description": "Move constraint selection, default construction, runtime/project conversion, mutation, preview, and panel code into a feature-owned shell_constraints module.",
+      "acceptanceCriteria": [
+        "Constraint type selection, defaults, conversion helpers, mutation helpers, and panel rendering live in shell_constraints source and narrow private headers.",
+        "IK, path, transform, and physics constraint authoring continue to use the existing project schema and runtime conversion rules.",
+        "All constraint mutations use EditorSession transactions and preserve validation, dirty state, preview rebuild, undo grouping, and redo behavior.",
+        "Constraint selection stays synchronized with hierarchy, timeline, inspector, and viewport overlays.",
+        "Constraint preview, debug overlay toggles, and runtime export remain externally unchanged.",
+        "Editor and project smokes cover the existing create/edit behavior, invalid rollback, immediate preview, undo/redo, and export after extraction."
+      ],
+      "dependsOn": [
+        "MAR-136"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-138",
+      "title": "Extract selection and inspector shell modules",
+      "description": "Separate hierarchy and selection coordination from bone, slot, skin, and attachment inspection/editing so each UI feature owns a narrow module rather than shell_main.cpp globals.",
+      "acceptanceCriteria": [
+        "Hierarchy tree drawing and bone, slot, skin, attachment, animation, and constraint selection synchronization live in a private shell_selection module.",
+        "Bone, slot, skin, attachment, and project property inspection/editing live in a private shell_inspector module.",
+        "Selection transitions keep hierarchy, inspector, timeline, viewport picking, and agent-driven changes synchronized.",
+        "Inspector mutations use EditorSession transactions, preserve immediate preview, and retain current edit labels and merge behavior.",
+        "Preview-only skin and attachment composition remains transient, non-dirty, undoable, and visibly synchronized.",
+        "Editor shell smokes validate bone picking, hierarchy changes, inspector edits, skin/attachment selection, and grouped undo/redo after extraction."
+      ],
+      "dependsOn": [
+        "MAR-137"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-139",
+      "title": "Extract weight-paint and viewport shell modules",
+      "description": "Move mesh-weight computation and brush gestures into shell_weight_paint, and move viewport window, settings, overlays, camera, picking, and interaction into shell_viewport-owned interfaces.",
+      "acceptanceCriteria": [
+        "Mesh influence lookup, normalization, brush falloff, paint, erase, smooth, heatmap, and stroke gesture state live in a private shell_weight_paint module.",
+        "Viewport window composition, framebuffer sizing, camera pan/zoom, picking, settings, debug overlays, onion skins, and interaction routing live behind narrow shell_viewport interfaces.",
+        "Paint, erase, and smooth strokes preserve current numeric results, weight normalization, heatmap colors, immediate preview, and one-history-entry gesture grouping.",
+        "Viewport selection and gestures remain synchronized with hierarchy, inspector, timeline, and EditorSession revisions.",
+        "Viewport renderer, icon, widget, OpenGL, and ImGui code is compiled only for the shell-facing target path.",
+        "Editor shell smoke coverage validates paint/erase/smooth, overlays, picking, camera interaction, onion skinning, hot reload, and undo/redo after extraction."
+      ],
+      "dependsOn": [
+        "MAR-138"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-140",
+      "title": "Clean up editor shell composition and target boundaries",
+      "description": "Finish the refactor by extracting project/runtime/agent panels, replacing the God-state compatibility header, removing adapters and duplicate declarations, and enforcing a UI-free marrow_editor library before MAR-127 begins.",
+      "acceptanceCriteria": [
+        "Project lifecycle, runtime/export, and agent activity/review panels live in feature-owned shell modules using EditorSession and AgentControlState interfaces.",
+        "shell_types.hpp is removed and replaced by a UI-only shell_state.hpp plus narrow private feature headers without duplicate cross-module declarations.",
+        "Transitional project, preview, history, and dispatch adapters are removed after all call sites use EditorSession, PreviewController, AgentCommandContext, and the operation registry.",
+        "marrow_editor is UI-free, depends only on marrow_runtime and Zlib, and does not compile shell, icon, widget, viewport, ImGui, GLFW, or OpenGL code.",
+        "Shell, icons, widgets, viewport, and platform code compile only into marrow_editor_shell, with icon_registry.cpp compiled exactly once.",
+        "shell_main.cpp is responsible only for CLI/platform startup, theme and docking setup, frame composition, and shutdown.",
+        "The existing combined C API and renderer targets are not split as part of this story.",
+        "C ABI v1, agent JSON, file formats, serialization, fixtures, playback, undo grouping, save/export, hot reload, and visible editor workflows remain unchanged.",
+        "The full CTest guardrail and the documented direct C ABI, agent, project, runtime fixture, renderer skip-render, and five-frame editor shell commands pass."
+      ],
+      "dependsOn": [
+        "MAR-139"
+      ],
+      "status": "done",
+      "startedAt": "2026-07-12T04:34:04+00:00",
+      "completedAt": "2026-07-12T04:34:04+00:00",
+      "updatedAt": "2026-07-12T04:34:04+00:00"
+    },
+    {
+      "id": "MAR-127",
+      "title": "Add parameter modeling authoring tools to the editor",
+      "description": "Build a Parameter Modeling shell mode and shared UI-free authoring primitives after the runtime and editing-P0 gates. Persistent model edits and transient direct-parameter preview use explicit transaction impacts and distinct dirty semantics.",
+      "acceptanceCriteria": [
+        "ShellMode::Parameter preserves the current animation and playhead on entry, stops playback only, and disables Weight Paint plus bone transform gizmos.",
+        "PreviewState stores ID-keyed direct parameter values, the active expression, and synthetic amplitude/phoneme input; reload/rebuild preserves surviving IDs, prunes deleted IDs, and initializes new IDs to defaults.",
+        "Parameter sliders and numeric inputs are Preview-only, undoable, non-dirty, and never serialized/exported; a continuous slider drag merges into one history entry.",
+        "Parameters, Shapes/Deformers, Expressions, and Lip Sync panels provide create/edit/delete and target binding for parameters, groups, blend shapes, warp/rotation deformers, expressions, and lip mappings.",
+        "Created stable IDs cannot be renamed; deleting a referenced parameter or a deformer with children is rejected with the dependency list, while deleting a group leaves its parameters intact.",
+        "Persistent mutations use one Project|Runtime|Preview transaction that atomically updates dirty state, undo/redo, and runtime preview through common UI-free parameter CRUD, capture_deformer_keyform, create_expression, upsert_lip_sync_mapping, and preview setter primitives.",
+        "Lattice-point and rotation-pivot gestures edit one existing keyform in one transaction; if no coordinate keyform exists, a Capture confirmation creates it and applies the gesture in that same transaction.",
+        "Capture copies animation-FFD-only offsets for blend shapes, current evaluated lattice for warp, and current angle for rotation; it uses epsilon 1e-9 * max(1, parameter range) and replaces collisions only after explicit GUI confirmation.",
+        "ArtPath point authoring, raw mesh vertex sculpting, and keyform copy/mirror are explicitly excluded.",
+        "The validated parameter project/shell fixtures cover current-pose entry, transient undo/non-dirty sliders, CRUD/dependency errors, capture confirm/replace, save/reload, and JSON/MBIN runtime export."
+      ],
+      "dependsOn": [
+        "MAR-126",
+        "MAR-140",
+        "MAR-153"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-128",
+      "title": "Expose parameter/deformer authoring through agent commands",
+      "description": "Expose the exact six-operation parameter authoring surface through the C++ registry and Python MCP facade, sharing MAR-127 UI-free primitives and dry-run candidate validation.",
+      "acceptanceCriteria": [
+        "parameters.list takes no arguments and returns definitions, groups, direct and final values, and counts as read-only inspection.",
+        "parameter.set accepts {id,value,dry_run?}, is Preview-only, undoable, and non-dirty, and returns requested, applied, and clamped values.",
+        "deformer.create accepts a complete kind-specific typed {deformer,dry_run?}; keyform.capture accepts {deformer,replace?:false,dry_run?} and captures one keyform at the current preview coordinate.",
+        "expression.create accepts a complete typed {expression,dry_run?}; lip_sync.map accepts {mapping,dry_run?} and upserts by target parameter.",
+        "The five mutation operations are registered with category edit, mutating true, review false, dry_run true, and requires_project true; parameters.list remains read-only.",
+        "Dry-run validates project and preview copies plus a candidate runtime build without changing project/preview data, history, dirty state, or revision counters.",
+        "parameter.set has Preview impact only; the other four mutations use Project|Runtime|Preview impact and one non-merging undo entry.",
+        "keyform capture rejects a coordinate collision unless replace:true is supplied, and bulk capture is not supported.",
+        "Mutations preserve the existing via Agent history label and activity log; save and export remain existing explicit reviewed operations.",
+        "marrow_agent_dispatch_smoke and tools/mcp/test_client.py compare the exact C++/Python operation-name set, which grows from 49 to 55, and cover dry-run invariants, mutation, undo, candidate rebuild, and export-preview behavior."
+      ],
+      "dependsOn": [
+        "MAR-127"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-16"
+    },
+    {
+      "id": "MAR-154",
+      "title": "Add explicit runtime animation clip duration",
+      "description": "Add optional animations.<name>.duration runtime data while separating authored duration from key-derived duration and preserving existing format and ABI boundaries.",
+      "acceptanceCriteria": [
+        "AnimationData stores optional explicit_duration, exposes inferred_duration(), and keeps duration() as the effective explicit-or-inferred accessor.",
+        "The loader accepts a finite non-negative duration no shorter than the last key; absent duration falls back to inference and empty clips are covered.",
+        "Loop, queue, complete, reverse, empty-animation, and snapshot behavior consistently uses effective duration.",
+        "JSON and MBIN preserve explicit duration without changing .mskl version 1, .mbin version 2, or the C ABI.",
+        "Runtime unit tests cover explicit, derived, and empty duration plus playback edge cases.",
+        "Fixture smoke and JSON-versus-MBIN inspection prove old-asset fallback and binary equivalence."
+      ],
+      "dependsOn": [
+        "MAR-128"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-17"
+    },
+    {
+      "id": "MAR-155",
+      "title": "Author animation clip duration in the editor",
+      "description": "Persist explicit duration through an ordered set_duration animation edit and one shared UI-free editor and agent mutation.",
+      "acceptanceCriteria": [
+        "Optional .marrow.animation_edits set_duration operations load, save, materialize, and export without affecting old projects or unknown edit families.",
+        "The UI edits duration with live preview, dirty tracking, and one undoable EditorSession transaction.",
+        "Moving or creating a key past the clip boundary automatically extends duration in the same transaction.",
+        "Manual shrink below the last authored key is rejected atomically without changing project, preview, selection, or history.",
+        "The C++ operation registry and Python MCP facade expose matching dry-run, validation, affected-animation, mutation, and undo behavior.",
+        "Project, shell, agent, and MCP smoke tests cover auto-grow, rejected shrink, undo/redo, save/reload, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-154"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-17"
+    },
+    {
+      "id": "MAR-156",
+      "title": "Add a versioned user preference store",
+      "description": "Introduce an atomically saved user-local JSON store shared by curve defaults and later Recent Projects without coupling preferences to project state.",
+      "acceptanceCriteria": [
+        "A UI-free service loads and saves versioned editor-settings.json with safe defaults for missing or unsupported optional fields.",
+        "Production paths are ~/Library/Application Support/Marrow/editor-settings.json on macOS and XDG_CONFIG_HOME/marrow/editor-settings.json, falling back to ~/.config/marrow/editor-settings.json, on Linux.",
+        "MARROW_CONFIG_HOME isolates tests from real user preferences.",
+        "Saving uses a same-directory temporary file and atomic rename, preserving the last valid file on failure.",
+        "Preference activity never dirties a project or enters project history and provides shared typed storage for curve default and recents.",
+        "Focused tests cover first run, roundtrip, version handling, malformed input, override isolation, and atomic-save failure."
+      ],
+      "dependsOn": [
+        "MAR-155"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-18"
+    },
+    {
+      "id": "MAR-157",
+      "title": "Introduce the typed SelectionSet domain model",
+      "description": "Replace single optional selection with a UI-free name-based set for imported-rig entities plus one typed active item and legacy compatibility accessors.",
+      "acceptanceCriteria": [
+        "SelectionSet stores Bone, Slot, Attachment, and Constraint selections with at most one active typed member.",
+        "Deterministic replace, toggle, range-add, clear, prune, and remap primitives preserve active-member invariants and stable ordering.",
+        "Attachment and constraint identities contain sufficient name scope to avoid collisions without introducing stable-ID or topology changes.",
+        "Compatibility accessors preserve existing single-selection workflows while migration proceeds.",
+        "Selection is transient: it is not serialized and never affects project dirty state or history; unit tests cover mixed sets and invariants."
+      ],
+      "dependsOn": [
+        "MAR-156"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "MAR-158",
+      "title": "Migrate editor selection consumers to SelectionSet",
+      "description": "Move shell consumers onto SelectionSet, including source-replacement migration and reusable constraint-identity remap/prune primitives; constraint lifecycle invocation remains owned by MAR-178.",
+      "acceptanceCriteria": [
+        "Hierarchy, inspector, viewport, timeline, constraints, and weight-paint consumers use SelectionSet as their single source of truth.",
+        "Reload and atomic runtime-source adoption remap surviving names and prune targets absent from the new imported rig.",
+        "SelectionSet exposes tested constraint-identity remap and prune primitives that preserve unrelated selections; MAR-178 invokes them from actual constraint rename/delete transactions.",
+        "Compatibility accessors remain only a narrow facade and active-item behavior stays deterministic across preview refreshes.",
+        "Project and shell smokes cover reload, missing targets, mixed selection, direct remap/prune primitive behavior, and unchanged dirty/history state without claiming constraint lifecycle integration."
+      ],
+      "dependsOn": [
+        "MAR-157"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-18"
+    },
+    {
+      "id": "MAR-159",
+      "title": "Add hierarchy multi-selection gestures",
+      "description": "Expose platform-correct replace, toggle, visible-range, and additive-range hierarchy gestures over SelectionSet.",
+      "acceptanceCriteria": [
+        "Plain click replaces selection and activates the clicked item; Cmd on macOS or Ctrl elsewhere toggles it with deterministic active fallback.",
+        "Shift selects the anchor-to-clicked range in current visible order, excluding filtered and collapsed rows.",
+        "Cmd/Ctrl+Shift adds the visible range without clearing existing selections.",
+        "Range anchors reset safely when filtering, collapse, or source replacement invalidates them.",
+        "Selected and active rendering is distinct, no group transform is added, and shell smokes cover gestures plus dirty/history invariants."
+      ],
+      "dependsOn": [
+        "MAR-158"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-21"
+    },
+    {
+      "id": "MAR-160",
+      "title": "Add viewport multi-selection gestures",
+      "description": "Integrate deterministic viewport hit selection and bone-only box selection while leaving inspectors and gizmos scoped to the active item.",
+      "acceptanceCriteria": [
+        "Point picking uses documented stable precedence across gizmos, bones, slots, attachments, and constraint targets.",
+        "Plain and Cmd/Ctrl point gestures replace or toggle the same typed selection shown in the hierarchy.",
+        "Dragging empty viewport space performs bone-only replace or additive box selection in stable skeleton order.",
+        "Inspector, gizmo, FFD, constraint, and weight tools edit only the active item under multi-selection.",
+        "Shell smokes cover overlap precedence, both box directions, additive selection, hierarchy synchronization, and no group or topology editing."
+      ],
+      "dependsOn": [
+        "MAR-159"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-21"
+    },
+    {
+      "id": "MAR-161",
+      "title": "Add a parent-space rotation gizmo",
+      "description": "Rotate the active bone by solving absolute local rotation through the parent transform and auto-keying one transactional gesture.",
+      "acceptanceCriteria": [
+        "Animation mode shows a fixed 58-pixel radius, 6-pixel hit-band rotation ring only for the runtime-active active Bone; input resolves active gesture or brush, translate Free/X/Y, rotation ring, viewport entity hit, then empty-space box.",
+        "Root and OnlyTranslation use the skeleton-scale basis, while Normal children freeze the evaluated parent-world 2-by-2 basis at gesture start; transformed, sheared, non-uniform, reflected, and negative-determinant parents are covered.",
+        "NoRotationOrReflection, NoScale, and NoScaleOrReflection hide the ring and show an unsupported-inherit viewport hint instead of applying a raw-parent inverse.",
+        "Per-sample deltas unwrap into (-180, 180] with the exact tie at positive 180; absolute local rotation remains unnormalized across deliberate multi-turn gestures, while samples within 2 pixels of the pivot suspend and rebase the angular reference.",
+        "The gesture pauses playback, auto-keys through full effective rotate-track materialization, previews live, preserves mixed selection context, commits one undo entry, and leaves click/no-movement unchanged; Escape, context loss, invalid math, and refresh failure roll back project/runtime/preview content, dirty/history, and selection context.",
+        "Project and exported JSON preserve finite raw multi-turn keys; MBIN v2 omits only an unrepresentable packed rotate channel and uses its canonical generic payload, with runtime acceptance defined by 360-degree-equivalent orientation rather than winding playback.",
+        "Public editor API, SelectionSet, .marrow schema, .mskl v1, .mbin v2, C ABI v1, and the 56-operation Agent/MCP surface remain unchanged."
+      ],
+      "dependsOn": [
+        "MAR-160"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-21"
+    },
+    {
+      "id": "MAR-162",
+      "title": "Add signed local scale gizmos",
+      "description": "Scale the active bone with local X, local Y, and uniform handles while preserving signed values, exact zero, and transactional auto-key semantics.",
+      "acceptanceCriteria": [
+        "Animation mode shows fixed local X, local Y, and uniform handles 74 pixels from the pivot with a 6-pixel hit radius only for the runtime-active active Bone; input resolves active gesture or brush, translate Free/X/Y, rotation, scale, viewport entity hit, then empty-space box.",
+        "Root and OnlyTranslation use the skeleton-scale basis, while Normal children freeze positive scale-free local axes from the evaluated parent-world 2-by-2 and local rotation/shear at gesture start; non-uniform, reflected, and negative-determinant parents are covered.",
+        "NoRotationOrReflection, NoScale, and NoScaleOrReflection hide scale with rotation and show an unsupported-inherit viewport hint; singular, degenerate, non-finite, and unsolvable mappings cancel instead of applying a raw-parent basis.",
+        "A nonzero X or Y start value follows the signed pointer projection ratio, while an exactly-zero start axis uses (projection - start projection) / 74 so it can recover through zero without division.",
+        "The uniform handle multiplies both starting axes by one signed ratio, preserving their X-to-Y ratio and signs through a joint sign flip; one zero remains zero, while a (0,0) start hides uniform.",
+        "The gesture pauses playback, auto-keys both absolute scale components through full effective-track materialization, previews live, preserves mixed selection context, commits one undo entry, and leaves click/no-movement unchanged; Escape, context loss, invalid math, and refresh failure roll back project/runtime/preview content, dirty/history, and selection context.",
+        "Project save/reload and exported JSON/MBIN preserve finite negative and exact-zero scale keys; public editor API, SelectionSet, .marrow schema, .mskl v1, .mbin v2, C ABI v1, and the 56-operation Agent/MCP surface remain unchanged."
+      ],
+      "dependsOn": [
+        "MAR-161"
+      ],
+      "status": "done",
+      "completedAt": "2026-07-25"
+    },
+    {
+      "id": "MAR-192",
+      "title": "Characterize the editor platform baseline and add the host seam",
+      "description": "Freeze the existing GLFW/raw-GL behavior and introduce shell-private window, quit, event, and pen seams without changing the default backend.",
+      "acceptanceCriteria": [
+        "Record the 13-test baseline, runtime/editor labels, C ABI, 56-operation Agent registry, project/export, renderer pixel smoke, launch focus, Retina metrics, Release frame time, and resource counts.",
+        "Add WindowMetrics, WindowHostConfig, FrameSurface, neutral QuitRequested, and event/pen translation seams while native window handles remain private to the shell.",
+        "Preserve public APIs, schemas, CLI flags, selection, undo, dirty, export, and hot-reload semantics.",
+        "Existing tests and fixtures remain identical and focused seam unit tests pass."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build",
+        "cmake --build build",
+        "ctest --test-dir build --output-on-failure",
+        "./build/marrow_windowing_tests"
+      ],
+      "dependsOn": [
+        "MAR-162"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-193",
+      "title": "Freeze SDL3, ImGui, sokol_imgui, and shader-tool dependencies",
+      "description": "Vendor the exact platform stack with complete provenance and no configure-time network fetch while GLFW remains the active host.",
+      "acceptanceCriteria": [
+        "Vendor SDL 3.4.14 at 147a8ee, ImGui v1.92.6-docking at 2a1b69f, matching Sokol util at 31d8a3f with only the 59f0433 shutdown patch, and sokol-shdc at 03138cef for macOS, Linux, and Windows x64.",
+        "THIRD_PARTY.md records source URLs, revisions, hashes, licenses, and the local patch; ImGui core and transition backends are verified as one revision.",
+        "SDL is static, configure performs no fetch, and SDL does not enter the UI-free marrow_editor link closure.",
+        "C++17 simgui compile plus validation-enabled setup/frame/shutdown probes pass and shader regeneration is a clean diff."
+      ],
+      "validationCommands": [
+        "cmake --build build --target marrow_verify_third_party",
+        "cmake --build build --target marrow_sokol_imgui_compile_probe",
+        "./build/marrow_sokol_imgui_runtime_probe",
+        "cmake --build build --target marrow_renderer_shaders"
+      ],
+      "dependsOn": [
+        "MAR-192"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-194",
+      "title": "Add the parallel SDL OpenGL window host",
+      "description": "Implement the private SDL host alongside the GLFW host for one compile-time comparison checkpoint, initially retaining the legacy raw-GL renderer.",
+      "acceptanceCriteria": [
+        "MARROW_EDITOR_WINDOW_BACKEND=GLFW|SDL selects separate build-time hosts and defaults to GLFW for this checkpoint only.",
+        "SdlWindowHost owns SDL initialization, a real window/context, events, swap, close, and failure cleanup without leaking native handles.",
+        "Both build directories preserve fixture, CLI, and editor business-smoke output.",
+        "The display-enabled marrow_window_host_smoke creates a real SDL surface and validates repeated failure-safe lifecycle behavior."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-glfw -DMARROW_EDITOR_WINDOW_BACKEND=GLFW",
+        "cmake -S . -B build-sdl -DMARROW_EDITOR_WINDOW_BACKEND=SDL -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "ctest --test-dir build-sdl --output-on-failure -L windowing"
+      ],
+      "dependsOn": [
+        "MAR-193"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-195",
+      "title": "Reach SDL input, DPI, focus, and IME parity",
+      "description": "Move keyboard, mouse, clipboard, cursor, text input, IME, focus, and pixel metrics to the SDL3 ImGui platform backend while retaining legacy GPU rendering.",
+      "acceptanceCriteria": [
+        "Every SDL event reaches ImGui_ImplSDL3_ProcessEvent exactly once and SDL alone owns keyboard, mouse, clipboard, cursor, and IME platform behavior.",
+        "Logical coordinates remain distinct from drawable pixels; Retina scaling and picking stay aligned and targets resize only on pixel-size changes.",
+        "Cmd/Ctrl selection gestures, shortcut suppression, launch focus, --verify-launch-focus, and focus-loss gesture cancellation retain their meanings.",
+        "Synthetic events, Korean preedit/commit, and recorded macOS Cmd-Tab and Windows Alt-Tab evidence pass on real displays."
+      ],
+      "validationCommands": [
+        "./build/marrow_windowing_tests",
+        "ctest --test-dir build-display --output-on-failure -L windowing",
+        "./build/marrow_editor_shell --verify-launch-focus"
+      ],
+      "dependsOn": [
+        "MAR-194"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-196",
+      "title": "Add pressure-aware weight painting",
+      "description": "Introduce transient SDL pen metadata and apply normalized pressure to all existing weight-paint modes without changing radius, spacing, formats, or transaction semantics.",
+      "acceptanceCriteria": [
+        "ViewportPointerState tracks source, active pen/window IDs, logical position, proximity/down, finite clamped pressure, tilt, eraser, and timestamp without persistence.",
+        "Synthetic pen mouse drives ImGui position/buttons once while raw pen events update metadata only; first-down ownership lasts until up, proximity-out, or focus loss.",
+        "Paint, Erase, and Smooth use configured_strength times pressure times radial_falloff; missing pressure and ordinary mouse use 1.0.",
+        "Zero/no-change strokes add no mutation or history; one changed stroke adds exactly one undo entry and mouse fixtures remain byte-equivalent.",
+        "Unit tests cover 0/0.5/1, clamp, NaN/Inf, missing axis, multiple IDs, proximity, focus loss, and synthetic-event de-duplication."
+      ],
+      "validationCommands": [
+        "./build/marrow_pen_input_tests",
+        "./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2",
+        "ctest --test-dir build --output-on-failure -L editor"
+      ],
+      "dependsOn": [
+        "MAR-195"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-197",
+      "title": "Make SDL the default window and input host",
+      "description": "Cut the production default to SDL while retaining GLFW for this checkpoint only as a compile-time rollback comparison.",
+      "acceptanceCriteria": [
+        "SDL is the default host; the historical macOS --auto-close business smoke remains headless and is not counted as SDL display evidence.",
+        "Real display smokes cover initialization, resize, minimize/restore, focus, and repeated lifecycle on macOS arm64 and Windows 11 x64; Linux X11 remains implemented but is NOT REQUIRED and unqualified.",
+        "Same-revision Release GLFW/SDL A/B runs at 1440x900 meet the recorded median and p95 regression gate.",
+        "The GLFW rollback build remains reproducible until this story passes."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "cmake --build build-display",
+        "ctest --test-dir build-display --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-196"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-198",
+      "title": "Remove GLFW completely",
+      "description": "Delete the GLFW vendor tree, ImGui GLFW backend, build option, callbacks, includes, and native window-pointer coupling after SDL qualification.",
+      "acceptanceCriteria": [
+        "Production and build sources contain no GLFW references or linked GLFW artifacts.",
+        "The project configures and builds from a clean SDL-only tree and all noninteractive plus display tests pass.",
+        "Launch focus and project-menu QuitRequested behavior remain equivalent.",
+        "Completed historical stories remain unchanged except for a supersession note pointing to MAR-198."
+      ],
+      "validationCommands": [
+        "rg -n 'GLFW|glfw' CMakeLists.txt src include external/imgui/backends",
+        "cmake -S . -B build-clean",
+        "ctest --test-dir build-clean --output-on-failure"
+      ],
+      "dependsOn": [
+        "MAR-197"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-199",
+      "title": "Split Sokol device, scene core, and standalone app ownership",
+      "description": "Separate the process-root sokol_gfx singleton and pass-free scene renderer from the Sokol-app standalone sample adapter without changing the public Backend surface.",
+      "acceptanceCriteria": [
+        "marrow_renderer_core owns the single SOKOL_GFX_IMPL and pass-free scene resources; marrow_renderer_sapp_host alone owns SOKOL_APP_IMPL and SOKOL_GLUE_IMPL.",
+        "The editor binary contains no sapp or sglue symbols, while standalone samples retain the compatibility umbrella target.",
+        "SokolGraphicsDevice rejects nested sg_setup and owns the only editor sg_setup/sg_shutdown pair.",
+        "Renderer sample, validator, C ABI, and editor link closures all pass."
+      ],
+      "validationCommands": [
+        "cmake --build build --target marrow_renderer_sample marrow_validator marrow_c_smoke marrow_editor_shell",
+        "nm -gU build/marrow_editor_shell | rg 'sapp_|sglue_'",
+        "./build/marrow_c_smoke"
+      ],
+      "dependsOn": [
+        "MAR-198"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-200",
+      "title": "Make the scene renderer pass-free and capacity-safe",
+      "description": "Move atlas, white fallback, samplers, shaders, streams, and format-keyed pipelines into a renderer that submits only to an already-open pass.",
+      "acceptanceCriteria": [
+        "The scene renderer never creates a window, begins the main pass, commits, or calls Sokol app/glue APIs.",
+        "Onion background, current scene, and foreground command lists are preflighted together before the pass.",
+        "Insufficient streams grow to the next power of two; allocation failure retains prior buffers and rejects the frame explicitly without truncation.",
+        "Setup pose, clip/stencil, sequence, weighted mesh, FFD, tint/PMA/blend, white fallback, batching, and atlas hot reload retain parity."
+      ],
+      "validationCommands": [
+        "./build/marrow_renderer_sample --skip-render assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl",
+        "./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl",
+        "./build/marrow_unit_tests"
+      ],
+      "dependsOn": [
+        "MAR-199"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-201",
+      "title": "Add Sokol editor viewport and texture resources",
+      "description": "Implement Sokol offscreen viewport, overlays, icons, texture views, camera UV orientation, and atlas cache behind one temporary OPENGL|SOKOL build switch.",
+      "acceptanceCriteria": [
+        "Viewport targets remain RGBA8 plus DEPTH_STENCIL at sample_count 1 and preserve background/onion/current/foreground ordering in one pass.",
+        "Icons and viewport textures use sg_image, sg_view, sg_sampler, and simgui_imtextureid_with_sampler rather than GLuint.",
+        "UV orientation follows sg_query_features().origin_top_left and picking/overlay alignment differs by at most one physical pixel.",
+        "Resize and hot reload publish new handles at a frame boundary and retire old handles only after the last referencing commit.",
+        "Native GL/Metal readback is isolated to the test-only GpuReadback target."
+      ],
+      "validationCommands": [
+        "./build/marrow_windowing_tests",
+        "./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2",
+        "rg -n 'gl[A-Z]|GLuint' src/editor"
+      ],
+      "dependsOn": [
+        "MAR-200"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-202",
+      "title": "Implement SDL Metal and GLCORE Sokol surfaces",
+      "description": "Supply Sokol environments and swapchains from SDL Metal on macOS and SDL OpenGL 4.1 Core on Windows, while retaining the unqualified Linux X11 implementation, with exact formats and lifecycle handling.",
+      "acceptanceCriteria": [
+        "macOS uses SDL_WINDOW_METAL, one MTLDevice, BGRA8 drawable, depth/stencil, optional 4x MSAA, and strong drawable lifetime through sg_commit.",
+        "Windows 11 uses an SDL GL 4.1 Core context and framebuffer 0; GL 4.1 failure is fatal and MSAA retries once at 1x. The shared Linux X11 path remains implemented but is NOT REQUIRED and gains no support claim.",
+        "Nil drawable, minimize, zero pixels, resize, format/sample changes, and context/device failure skip or fail explicitly without invalid submission.",
+        "Real macOS Metal and Windows 11 GLCORE windows repeatedly render offscreen scene, main simgui pass, commit, and present."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "ctest --test-dir build-display --output-on-failure -L windowing",
+        "ctest --test-dir build-display --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-201"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-203",
+      "title": "Make full Sokol and sokol_imgui the editor default",
+      "description": "Switch the SDL production frame loop to Sokol resources and official sokol_imgui while retaining raw OpenGL for this comparison checkpoint only.",
+      "acceptanceCriteria": [
+        "Frame order is SDL events, raw pen metadata, one ImGui SDL event dispatch, SDL NewFrame, simgui_new_frame, offscreen viewport, main swapchain pass, simgui_render, commit, then GL-only SDL swap.",
+        "sokol_imgui owns ImGui context/frame/render lifecycle; the SDL3 backend alone owns platform input and OS multi-viewports remain disabled.",
+        "Same-revision raw-GL/Sokol feature, pixel, picking, median/p95 performance, and 100-resize/reload resource A/B gates pass.",
+        "Selection, undo, dirty, export, hot reload, C ABI, CLI, and all 56 Agent operations remain unchanged."
+      ],
+      "validationCommands": [
+        "cmake --build build-display --target marrow_gpu_parity_smoke",
+        "ctest --test-dir build-display --output-on-failure -L display",
+        "./build/marrow_agent_dispatch_smoke",
+        "./build/marrow_c_smoke"
+      ],
+      "dependsOn": [
+        "MAR-202"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-204",
+      "title": "Remove production raw OpenGL and CGL rendering",
+      "description": "Delete the raw FBO, overlay, GLuint icon, ImGui OpenGL3, CGL, and temporary GPU-backend paths after Sokol parity passes.",
+      "acceptanceCriteria": [
+        "The macOS editor uses Metal only; production src/editor contains no direct GL/CGL calls or ImGui OpenGL backend.",
+        "Windows and Linux retain GL only behind sokol_gfx; production glad is absent.",
+        "Test-only GpuReadback is the sole declared native backend-query/readback exception.",
+        "Twenty complete editor init/frame/shutdown cycles destroy viewport, icon, atlas, simgui, sg, native surface, window, and SDL in the required order."
+      ],
+      "validationCommands": [
+        "rg -n 'gl[A-Z]|GLuint|CGL|imgui_impl_opengl' src/editor CMakeLists.txt",
+        "otool -L build/marrow_editor_shell",
+        "ctest --test-dir build-display --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-203"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-205",
+      "title": "Add the VS2022 x64 and split-shader foundation",
+      "description": "Make all runtime, CLI, renderer, editor, and test targets compile and link under VS2022 x64 without production glad.",
+      "acceptanceCriteria": [
+        "CMake selects the pinned Windows sokol-shdc.exe and glsl410 while committed Metal and GL headers are generated separately.",
+        "Windows and Linux produce identical GL header hashes from identical input and arguments; non-Mac hosts cannot overwrite Metal output.",
+        "WIN32/MSVC libraries, resource paths, and multi-config Debug/Release behavior are explicit.",
+        "VS2022 x64 clean Debug and Release all-target builds link without glad, D3D, Vulkan, or unsupported backend claims."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-msvc -G \"Visual Studio 17 2022\" -A x64 -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "cmake --build build-msvc --config Debug",
+        "ctest --test-dir build-msvc -C Debug --output-on-failure",
+        "cmake --build build-msvc --config Release"
+      ],
+      "dependsOn": [
+        "MAR-204"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-206",
+      "title": "Port PreferenceStore and AgentSocket to Windows",
+      "description": "Implement UTF-16 AppData atomic preferences and a Winsock 2.2 native socket layer without changing UTF-8 JSON, CLI, auth, framing, or operation semantics.",
+      "acceptanceCriteria": [
+        "MARROW_CONFIG_HOME remains first; otherwise SHGetKnownFolderPath(FOLDERID_RoamingAppData) resolves %APPDATA%/Marrow/editor-settings.json.",
+        "Windows writes a same-directory UTF-16 path with WriteFile and FlushFileBuffers, then replaces with MoveFileExW REPLACE_EXISTING|WRITE_THROUGH while preserving old valid bytes on failure.",
+        "Process-level Winsock RAII and NativeSocket normalize SOCKET, INVALID_SOCKET, closesocket, shutdown, partial I/O, interrupted/would-block errors, and orderly close.",
+        "Loopback-only bind, token authentication, line-delimited JSON, ports, CLI flags, and 56 operations are unchanged.",
+        "Injected preference roots/failures and repeated partial socket transport/start-stop tests pass on POSIX and Windows."
+      ],
+      "validationCommands": [
+        "./build/marrow_preference_tests",
+        "./build/marrow_agent_socket_tests",
+        "./build/marrow_agent_dispatch_smoke",
+        "tools/mcp/venv/bin/python tools/mcp/test_client.py"
+      ],
+      "dependsOn": [
+        "MAR-205"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-207",
+      "title": "Qualify the integrated Windows editor",
+      "description": "Run the complete SDL3/Sokol GLCORE editor and all default targets on Windows 11 x64. Windows 10 is NOT REQUIRED and receives no support claim.",
+      "acceptanceCriteria": [
+        "Windows 11 creates an OpenGL 4.1 Core context and passes resize, minimize, focus, close, clipboard, cursor, Korean IME, and launch tests.",
+        "100 percent and at least one 150 or 200 percent DPI setting preserve logical/pixel metrics and picking alignment.",
+        "All default runtime, CLI, sample, editor, C ABI, project/export, and Agent tests execute on Windows 11.",
+        "Command logs include OS, CPU, GPU, driver, compiler, CMake, display scale, exit status, and artifact locations."
+      ],
+      "validationCommands": [
+        "ctest --test-dir build-msvc -C Debug --output-on-failure",
+        "ctest --test-dir build-msvc -C Release --output-on-failure",
+        "ctest --test-dir build-msvc -C Release --output-on-failure -L display"
+      ],
+      "dependsOn": [
+        "MAR-206"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-208",
+      "title": "Qualify physical Windows Ink pressure input",
+      "description": "Validate real SDL pen events and pressure-aware weight painting on Windows 11 with a pressure-capable pen or tablet.",
+      "acceptanceCriteria": [
+        "Evidence records device and driver, SDL pen IDs, raw events, and at least three distinguishable pressure levels.",
+        "Real paint output varies monotonically with pressure while ordinary mouse output remains unchanged.",
+        "Tilt and eraser metadata are observed without automatically changing mode, shape, or radius.",
+        "Proximity/focus cancellation, no-axis fallback, zero-pressure no-op, and one changed stroke/one undo pass on hardware.",
+        "The story remains open if physical pressure evidence is absent."
+      ],
+      "validationCommands": [
+        "./build-msvc/Release/marrow_pen_input_tests.exe",
+        "./build-msvc/Release/marrow_editor_shell.exe --project assets/fixtures/player_idle.marrow"
+      ],
+      "dependsOn": [
+        "MAR-207"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-209",
+      "title": "Stage the Windows x64 portable folder",
+      "description": "Produce a canonical self-contained Marrow folder plus transport ZIP and hashes, without an installer.",
+      "acceptanceCriteria": [
+        "marrow_portable_stage creates Marrow/marrow_editor_shell.exe, runtime DLLs, fonts, icons, fixtures, licenses, THIRD_PARTY.md, README.txt, and MANIFEST.sha256.",
+        "SDL is static and only TARGET_RUNTIME_DLLS are copied; no source or build tree is required at runtime.",
+        "The canonical artifact is the folder; the matching ZIP and SHA-256 are transport artifacts only.",
+        "Extraction into a new directory and launch with a bundled project pass on the qualified Windows 11 host, with explicit missing-resource diagnostics. A separate clean PC is NOT REQUIRED and no clean-machine claim is made."
+      ],
+      "validationCommands": [
+        "cmake --build build-msvc --config Release --target marrow_portable_stage",
+        "Get-FileHash build-msvc/portable/Release/Marrow-Release-x64.zip -Algorithm SHA256"
+      ],
+      "dependsOn": [
+        "MAR-208"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-210",
+      "title": "Complete local platform qualification",
+      "description": "Qualify the exact source revision across macOS arm64 Metal and Windows 11 x64 GLCORE and synchronize all platform authority documents. Ubuntu/Linux and Windows 10 are NOT REQUIRED.",
+      "acceptanceCriteria": [
+        "The same source revision passes the complete automated, display, pixel, performance, resource-lifetime, package, API/schema, and source-scan matrix on the two declared qualification hosts: macOS arm64 and Windows 11 x64.",
+        "Windows 11 physical pen evidence and same-host new-directory portable extraction/run evidence are included; a separate clean PC is NOT REQUIRED.",
+        "platform-validation.md records dirty state, OS/build, hardware/driver, display server/scale, compiler/CMake, dependency hashes, commands, exit codes, logs, pen, and artifact hashes.",
+        "discription.md, PRD, AGENTS.md, quick-start, concepts, editing-gap-analysis, and the research decision match the final implementation.",
+        "Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, multi-viewport, and untested backends are not described as supported.",
+        "MAR-210 remains open until every physical evidence gate passes."
+      ],
+      "validationCommands": [
+        "cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON",
+        "cmake --build build-platform-release",
+        "ctest --test-dir build-platform-release --output-on-failure",
+        "git diff --check"
+      ],
+      "dependsOn": [
+        "MAR-209"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-163",
+      "title": "Auto-key one FFD vertex in the viewport",
+      "description": "Edit one existing mesh vertex by materializing the full effective deform and solving attachment-local FFD without changing mesh topology.",
+      "acceptanceCriteria": [
+        "Animation mode exposes all vertices of the exact active, currently displayed mesh Attachment at final parameter-composed positions with a fixed 6-pixel nearest hit and lower-index tie-break; press order is active gesture, weight brush, translate, rotation, scale, FFD vertex, entity, then box.",
+        "One influence uses its bone-world 2-by-2 inverse and multiple influences invert the weighted matrix sum frozen at gesture start; non-uniform and reflected transforms work while empty, malformed, relative-singular, and non-finite mappings reject before mutation.",
+        "Normal meshes target themselves; linked deform=true meshes target their immediate parent and deform=false meshes target themselves while shared topology, UVs, and weights remain read-only.",
+        "Starting a drag samples the selected animation at the playhead into a geometry-sized full vector, materializes every effective imported deform key and curve, updates only one X/Y pair within a 1e-6 key-time tolerance, and inserts new keys as linear without baking parameter output.",
+        "The gesture pauses playback, previews live, preserves typed selection, hierarchy anchor, and timeline focus, commits exactly one undo entry, and leaves click/no-movement unchanged; Escape, focus/context loss, invalid math or payload, refresh failure, and downstream override cancel the full transaction.",
+        "A dedicated shell smoke covers single- and multi-influence vertices, linked warrior_body to body_mesh targeting, sparse interpolation, no-op, undo/redo, rollback, .marrow save/reload, and JSON/MBIN full-vector identity; kernel tables cover hit, inverse, invalid, full-vector, and precedence cases.",
+        "Public editor API, SelectionSet, .marrow schema, .mskl v1, .mbin v2, C ABI v1, GPU resources, and the 56-operation Agent/MCP surface remain unchanged; Windows validation is not a MAR-163 completion gate and grants no qualification credit."
+      ],
+      "dependsOn": [
+        "MAR-162"
+      ],
+      "status": "done",
+      "completedAt": "2026-08-16"
+    },
+    {
+      "id": "MAR-164",
+      "title": "Edit multiple FFD vertices atomically",
+      "description": "Add attachment-local vertex selection and move existing selected vertices together with all-or-nothing solving and one gesture transaction.",
+      "acceptanceCriteria": [
+        "Shell-private transient selection is scoped by slot, skin, displayed attachment, deform target, and vertex count and stores sorted unique indices without changing SelectionSet, .marrow, runtime formats, C ABI, GPU resources, or Agent/MCP operations.",
+        "Plain point press replaces an unselected vertex, preserves an already-selected group for a thresholded drag, and collapses a sub-threshold selected click; Cmd on macOS or Ctrl elsewhere toggles only, while normalized forward/reverse boxes provide inclusive plain replace/clear and additive/no-op semantics.",
+        "Dragging a selected vertex validates every frozen single- or weighted-influence inverse before mutation, applies one common world-space delta from the gesture-start snapshot, atomically updates only the selected pairs in one full animation-only FFD vector, and refreshes runtime once per update.",
+        "Normal and linked deform=false attachments target themselves, linked deform=true attachments keep the displayed child as selection scope while editing the immediate parent timeline, and topology, UVs, weights, and parameter-composed output remain unbaked and read-only.",
+        "Selection survives playhead, animation, parameter preview, undo/redo, and ordinary rebuilds while the exact displayed scope remains valid; mode, weight-paint context, attachment, skin, deform-target, and successful source/project adoption changes clear it, while failed adoption and gesture rollback preserve it.",
+        "Click/no-movement and return-to-start leave no materialized history; a successful group drag creates exactly one full-vector key and one undo entry, while any invalid member, refresh failure, downstream override, Escape, or focus/context loss rolls back the entire candidate.",
+        "UI-free kernel and dedicated FFD shell smokes cover point/box selection, atomic mixed-influence solving, linked parent targeting, singular all-or-nothing rejection, lifecycle persistence, save/reload and JSON/MBIN v2 identity; default and Debug/Release display suites plus export, runtime, C ABI, Agent/socket/MCP, third-party, and diff gates pass without Windows qualification credit."
+      ],
+      "dependsOn": [
+        "MAR-163"
+      ],
+      "status": "done",
+      "completedAt": "2026-08-16"
+    },
+    {
+      "id": "MAR-165",
+      "title": "Share project viewport transform snapping",
+      "description": "Persist one UI-free project snap model shared by translate, rotate, and scale gestures with opt-in defaults and deterministic modifier behavior.",
+      "acceptanceCriteria": [
+        "An optional additive .marrow snap section defaults off for old projects and stores a 10-unit world grid, 15-degree local-angle snap, and 0.1 absolute-scale snap.",
+        "Translate, rotate, and scale use one domain primitive only during active gestures, including signed and exactly zero scale.",
+        "Alt always bypasses enabled snapping; Cmd on macOS or Ctrl elsewhere temporarily enables disabled applicable snapping.",
+        "Snap settings are transactional project state, while modifier use is transient and does not itself dirty the project.",
+        "Project and shell smokes cover all gizmos, default-off compatibility, reflected parents, modifiers, save/reload, and export-neutral settings."
+      ],
+      "dependsOn": [
+        "MAR-164"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-166",
+      "title": "Add grid and magnetic FFD vertex snapping",
+      "description": "Extend shared snapping for FFD gestures with world-grid alignment and 8-pixel screen-space matching against visible mesh vertices.",
+      "acceptanceCriteria": [
+        "FFD movement considers the world grid and all visible mesh vertices within 8 screen pixels after camera and deformation transforms.",
+        "Selected vertices are excluded; equal-distance candidates use stable attachment-and-vertex identity ordering.",
+        "Magnetic vertex snapping takes precedence over grid snapping whenever an eligible candidate exists.",
+        "Alt bypasses both sources and Cmd/Ctrl temporarily enables disabled vertex snapping under the shared rules.",
+        "Shell smokes cover threshold boundaries, selected exclusion, tie-breaks, zoom, weighted/linked meshes, vertex-over-grid precedence, group drag, cancel, and undo."
+      ],
+      "dependsOn": [
+        "MAR-165"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-167",
+      "title": "Add a synchronized scalar graph view",
+      "description": "Plot supported continuous timeline components while sharing playhead and key selection with the dopesheet and exposing the runtime's segment-wide easing constraint.",
+      "acceptanceCriteria": [
+        "The graph plots Transform rotation, translation X/Y, scale X/Y, shear X/Y, and Slot R/G/B/A scalar series.",
+        "Graph and dopesheet share key identities, selection, active key, and playhead; graph pan and zoom remain transient and duration-independent.",
+        "Linear, stepped, and cubic segments are visually distinct.",
+        "FFD and discrete lanes are excluded, and the UI states that one outgoing easing is shared across each Transform or RGBA key rather than per component.",
+        "Shell smokes cover supported series, exclusions, synchronization, rendering, and the fact that display interactions do not dirty history or add agent operations."
+      ],
+      "dependsOn": [
+        "MAR-166"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-168",
+      "title": "Edit graph key time and scalar value",
+      "description": "Drag graph points through shared authoring primitives so component values, whole-key time, collisions, frame snapping, and duration growth match the dopesheet.",
+      "acceptanceCriteria": [
+        "Vertical drag edits only the active scalar component while horizontal drag changes the entire key's time and all of its components.",
+        "Graph editing reuses common frame snap, collision, neighboring-key, stable-identity, and explicit-duration auto-grow rules.",
+        "A collision, non-finite value, or invalid context rolls graph and dopesheet preview back atomically.",
+        "One drag creates one transaction with live preview, cancel, undo/redo, and stable selection.",
+        "Shell and project smokes cover every supported lane family, component preservation, frame snap, auto-grow, collision cancellation, save/reload, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-167"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-169",
+      "title": "Edit shared Bezier handles graphically",
+      "description": "Drag the active key's outgoing shared four-value easing and expose the same UI-free interpolation mutation through agent and MCP surfaces.",
+      "acceptanceCriteria": [
+        "The graph edits the outgoing [cx1, cy1, cx2, cy2] easing with stable normalized-time and scalar-value mapping.",
+        "Control-point X values stay in [0, 1], while finite Y overshoot is allowed.",
+        "The curve remains segment-wide across Transform or RGBA components; changing the displayed scalar does not create independent curves.",
+        "One handle drag is one transaction with preview, cancel, undo/redo, and exact invalid-input rollback.",
+        "C++ registry and Python MCP interpolation operations provide matching dry-run, validation, affected-key, mutation, and undo behavior.",
+        "Runtime, shell, agent, and MCP tests cover flat and overshoot curves, X limits, linear/stepped conversion, save/reload, and export."
+      ],
+      "dependsOn": [
+        "MAR-168"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-170",
+      "title": "Add fixed curve presets and remembered defaults",
+      "description": "Provide deterministic interpolation presets and store the user's last default curve in the versioned preference service.",
+      "acceptanceCriteria": [
+        "Presets are Linear, Stepped, Ease [0.25, 0.1, 0.25, 1], Ease-In [0.42, 0, 1, 1], Ease-Out [0, 0, 0.58, 1], and Ease-In-Out [0.42, 0, 0.58, 1].",
+        "Applying a preset to compatible selected keys is deterministic and creates one previewed undoable transaction.",
+        "The last chosen default initializes newly authored continuous segments and is atomically stored in editor-settings.json without dirtying the project.",
+        "Missing or invalid preference data falls back to Linear and never rewrites existing curves.",
+        "GUI, C++ agent, and Python MCP preset application share the interpolation operation and preserve segment-wide easing.",
+        "Preference, project, shell, agent, and MCP tests cover constants, MARROW_CONFIG_HOME restoration, undo grouping, save/reload, and export."
+      ],
+      "dependsOn": [
+        "MAR-169"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-171",
+      "title": "Add project-local automatic curve handles",
+      "description": "Store manual or automatic curve intent and a driver component as optional .marrow-only metadata, resolving it to the existing shared runtime easing.",
+      "acceptanceCriteria": [
+        "Optional additive metadata records manual/auto mode and driver scalar, defaulting old projects to manual behavior.",
+        "Auto mode applies monotone Fritsch-Carlson tangents to the driver series, including flat and repeated values without non-finite output or unintended overshoot.",
+        "Neighbor time/value, driver, retime, and duration changes recompute affected shared curves in the same transaction.",
+        "Dragging either handle switches the segment to manual in that gesture; runtime JSON/MBIN export contains only the resolved existing easing and keeps format versions.",
+        "Curve-mode mutation has matching C++ agent and Python MCP dry-run, validation, affected-key, mutation, and undo behavior.",
+        "Runtime math, project, shell, agent, and MCP tests cover monotone, flat, driver-change, manual conversion, save/reload, and export cases."
+      ],
+      "dependsOn": [
+        "MAR-170"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-172",
+      "title": "Synchronize opted-in loop boundary keys",
+      "description": "Persist lane-level loop synchronization and manage duration-boundary keys only when explicit duration and a time-zero key make the operation unambiguous.",
+      "acceptanceCriteria": [
+        "Optional additive lane metadata defaults off and can enable synchronization only with explicit clip duration and a key exactly at time zero.",
+        "Enabling creates or adopts one managed key exactly at duration whose value and shared curve follow the first-key boundary contract.",
+        "First-key value or curve, explicit duration, retime, and auto-curve changes update the managed boundary in the same transaction.",
+        "Managed identity prevents selection, clipboard, retime, or duration edits from producing duplicate or stale boundary keys.",
+        "The UI-free loop-sync operation has matching C++ agent and Python MCP dry-run, validation, affected-lane, mutation, and undo behavior.",
+        "Project, shell, agent, and MCP tests cover missing prerequisites, opt-in/out, synchronization changes, save/reload, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-171"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-173",
+      "title": "Scale selected key times atomically",
+      "description": "Scale the current timeline-key selection around the opposite range edge through one shared UI-free retime operation.",
+      "acceptanceCriteria": [
+        "Dragging either selection edge uses the opposite edge as a fixed pivot and accepts finite positive scale ratios only.",
+        "Keys with the same event time remain tied, while non-event time collisions and intrusion into unselected neighboring keys reject the entire operation.",
+        "Frame snapping and any required explicit-duration growth reuse the common authoring rules and occur in the same transaction.",
+        "Preview, cancel, stable selection, undo, redo, and save/reload treat one scaling gesture as one atomic edit.",
+        "The C++ operation registry and Python MCP facade expose matching dry-run, affected-key, validation, mutation, undo, and export-preview behavior.",
+        "Project, shell, agent, and MCP smokes cover both pivots, event ties, invalid ratios, collisions, neighbor rejection, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-172"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-174",
+      "title": "Control transient preview playback speed",
+      "description": "Add bounded preview speed controls and presets that compose with reverse playback without becoming project authoring state.",
+      "acceptanceCriteria": [
+        "Preview speed accepts finite values from 0.05x through 8x and exposes 0.25x, 0.5x, 1x, and 2x presets.",
+        "Speed multiplies preview time progression and composes predictably with the existing reverse toggle, looping, scrubbing, and pause state.",
+        "Changing speed is transient and never serializes, dirties the project, enters history, or alters runtime export.",
+        "Opening, reloading, or replacing a project resets speed through one documented session default without affecting authored playback data.",
+        "Shell smokes cover bounds, presets, forward and reverse progression, loop boundaries, pause/resume, and unchanged dirty/history state; no agent operation is added."
+      ],
+      "dependsOn": [
+        "MAR-173"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-175",
+      "title": "Unify manual weight authoring",
+      "description": "Move brush, numeric, normalization, binding, and agent weight edits onto one UI-free canonical weight primitive.",
+      "acceptanceCriteria": [
+        "Paint, Erase, Smooth, Replace, numeric influence edits, Normalize, Rebind, and agent mutations all use the same domain implementation.",
+        "Every result removes non-positive influences, merges duplicate bones, sorts by descending weight then skeleton order, caps at four, and normalizes the sum to one.",
+        "The viewport offers a Replace brush, an active-vertex numeric influence table, selected-scope Normalize, and setup-pose Rebind without changing topology.",
+        "Invalid bones, non-finite values, empty results, and failed rebinds reject atomically with exact preview rollback and one undo step per accepted gesture or command.",
+        "Weight bind and numeric mutations have matching C++ registry and Python MCP validation, dry-run, affected-vertex, mutation, undo, and export-preview behavior.",
+        "Unit, project, shell, agent, and MCP tests prove identical canonical output across every manual path, undo/redo, save/reload, and export."
+      ],
+      "dependsOn": [
+        "MAR-174"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-176",
+      "title": "Generate deterministic automatic weights",
+      "description": "Compute repeatable top-four weights for existing mesh vertices from an explicit candidate-bone set in setup pose.",
+      "acceptanceCriteria": [
+        "The operation requires an explicit checked candidate-bone list and never silently expands it to the whole skeleton.",
+        "Weights derive from inverse-square distance between each setup-world vertex and each candidate setup-world bone segment.",
+        "The closest four candidates are chosen deterministically with skeleton order as the distance tie-break, then pass through the MAR-175 canonicalization rules.",
+        "Zero-length segments and isolated or otherwise degenerate vertices fall back to the nearest valid candidate; an empty candidate set rejects without mutation.",
+        "GUI and matching C++ registry/Python MCP operations support selected scope, dry-run summaries, one-step undo, and export-preview rebuild.",
+        "Unit and smoke tests cover joints, equal distances, zero-length bones, isolated vertices, repeated runs, candidate subsets, save/reload, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-175"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-177",
+      "title": "Add constraint lifecycle project operations",
+      "description": "Represent rename and delete for all four constraint families as ordered optional project-overlay operations without changing runtime format versions.",
+      "acceptanceCriteria": [
+        "Optional .marrow.constraint_edits.operations load and save ordered rename and delete records for IK, path, transform, and physics constraints.",
+        "Base-backed constraints use rename operations and delete tombstones, while project-only constraints rename or delete their upsert entries directly.",
+        "Materialization applies lifecycle operations deterministically before later upserts and rejects missing sources, duplicate targets, family mismatches, and invalid order atomically.",
+        "Old projects and unknown optional project fields retain existing behavior, and runtime .mskl v1, .mbin v2, and C ABI v1 remain unchanged.",
+        "Project smoke covers mixed base/project constraints, ordered chains, tombstones, collision rollback, save/reload, merge, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-176"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-178",
+      "title": "Expose constraint rename and delete surfaces",
+      "description": "Connect lifecycle operations for every constraint family to confirmation UI, undoable domain commands, and agent/MCP surfaces.",
+      "acceptanceCriteria": [
+        "IK, path, transform, and physics constraints expose rename and confirmed delete actions with collision and reference previews.",
+        "One UI-free lifecycle command atomically cascades runtime root arrays, skins[].constraints, project upserts, ordered operations, and SelectionSet active/selected identities.",
+        "Base-backed and project-only constraints produce the MAR-177 representation appropriate to their ownership.",
+        "Each accepted GUI action is one EditorSession transaction with preview, dirty state, undo, and redo; cancellation or failure changes nothing.",
+        "C++ registry and Python MCP operations provide matching metadata, dry-run, affected-reference summaries, mutation, undo, and export-preview behavior.",
+        "Project, shell, agent, and MCP smokes cover all families, skin references, selection remap/prune, collisions, confirmation, rollback, save/reload, and export."
+      ],
+      "dependsOn": [
+        "MAR-177"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-179",
+      "title": "Complete constraint parameter widgets",
+      "description": "Expose the remaining runtime-backed IK and physics fields in the editor and close the IK agent/MCP parity gap.",
+      "acceptanceCriteria": [
+        "IK editing includes softness, compress, and stretch with the same defaults and validation used by runtime parsing.",
+        "Physics editing includes step, x, y, rotate, scaleX, shearX, limit, and massInverse.",
+        "Every widget uses EditorSession transactions, updates preview immediately, and roundtrips through project materialization and runtime export.",
+        "IK C++ operation metadata and Python MCP wrappers expose the previously missing fields with matching validation and dry-run responses.",
+        "Project, shell, agent, and MCP smokes cover boundary values, invalid rollback, undo/redo, save/reload, and JSON/MBIN equivalence for all added fields."
+      ],
+      "dependsOn": [
+        "MAR-178"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-180",
+      "title": "Make project I/O and source adoption atomic",
+      "description": "Provide atomic project lifecycle primitives, complete Save As rebasing, and failure-safe runtime-source replacement before adding file dialogs.",
+      "acceptanceCriteria": [
+        "Project save writes a temporary file in the destination directory and atomically renames it so failure preserves the previous file byte-for-byte.",
+        "Save As rebases every relative asset, export, atlas-pack, and PSD provenance path against the new project directory while preserving absolute paths.",
+        "EditorSession::create and close establish and tear down imported-rig sessions without inventing native rig or topology authoring.",
+        "Runtime-source adoption validates and builds the replacement completely before swapping project source, preview, selection, or session ownership.",
+        "Project and session tests inject write, rename, validation, and rebuild failures and prove unchanged files and in-memory sessions, plus correct successful rebase/save/reload/export."
+      ],
+      "dependsOn": [
+        "MAR-179"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-181",
+      "title": "Add core File path workflows",
+      "description": "Connect New, Open, Save, and Save As to dependency-free ImGui path modals and the atomic EditorSession lifecycle.",
+      "acceptanceCriteria": [
+        "A native ImGui directory/path modal with no new external dependency drives New, Open, Save, and Save As.",
+        "New validates an existing skeleton source, at least one atlas, and a target .marrow path before constructing a session.",
+        "A valid New starts a dirty in-memory imported-rig project and does not write the target path until the user explicitly saves.",
+        "Open and Save As use MAR-180 atomic adoption and rebasing; invalid input or failure leaves the current session, selection, preview, dirty state, and history untouched.",
+        "Shell and project smokes cover path validation, cancel, New without immediate write, Open, Save, Save As, relative references, and failure rollback."
+      ],
+      "dependsOn": [
+        "MAR-180"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-182",
+      "title": "Unify dirty-session intent handling",
+      "description": "Route every session-replacing or terminating intent through one Save, Discard, or Cancel state machine.",
+      "acceptanceCriteria": [
+        "New, Open, Reload, Quit, and native OS close requests enter the same dirty-intent state machine when unsaved changes exist.",
+        "Save completes the pending intent only after an atomic save succeeds; Discard performs the intent without persisting current changes.",
+        "Cancel keeps the current session and pending intent state available for a deterministic retry or explicit dismissal.",
+        "Save failure preserves the current session and pending intent, reports the error, and never falls through to discard, replacement, or shutdown.",
+        "Shell smokes cover every intent and response, repeated requests, modal close, save-path cancellation, save failure, OS close, and successful continuation."
+      ],
+      "dependsOn": [
+        "MAR-181"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-183",
+      "title": "Persist and manage recent projects",
+      "description": "Use the versioned preference store to maintain a bounded recent-project list without affecting project state.",
+      "acceptanceCriteria": [
+        "Recent projects are canonical absolute paths, de-duplicated in most-recent-first order, and capped at 10 entries.",
+        "Only successful Open, Save As, or the first successful save of a New session records or promotes an entry; failed, cancelled, Reload, and ordinary Save actions do not.",
+        "Opening a recent entry uses the MAR-182 dirty-intent flow and promotes the entry only after the project opens successfully.",
+        "Missing paths remain visible but disabled, with Remove and Clear Missing actions.",
+        "Recent-project preference writes are atomic, never dirty the project or enter undo history, and expose no C++ agent or Python MCP mutation.",
+        "Preference and shell tests cover canonicalization, ordering, de-duplication, eviction, missing paths, MARROW_CONFIG_HOME isolation, and failed-action preservation."
+      ],
+      "dependsOn": [
+        "MAR-182"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-184",
+      "title": "Add stepped inherit timeline overlays",
+      "description": "Add an optional project overlay and UI-free merge path for authoring runtime-compatible bone inherit timelines.",
+      "acceptanceCriteria": [
+        "An optional additive .marrow overlay identifies animation, bone, stable key identity, finite non-negative time, and one of normal, onlyTranslation, noRotationOrReflection, noScale, or noScaleOrReflection.",
+        "Absent overlay data preserves old-project behavior, and inherit keys are stepped-only with continuous curve data rejected.",
+        "Materialization combines imported base timelines and project overlays without mutating shared SkeletonData or losing unrelated animation data.",
+        "The UI-free merge primitive produces deterministic effective timelines and reports missing animations, bones, invalid modes, and time collisions before mutation.",
+        "Runtime export emits the existing inherit timeline representation in .mskl and .mbin while retaining current format versions and JSON/binary equivalence.",
+        "Project and runtime tests cover all five modes, empty/base-backed/project-only timelines, old-project loading, save/reload, merge errors, and export."
+      ],
+      "dependsOn": [
+        "MAR-183"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-185",
+      "title": "Complete inherit timeline editing parity",
+      "description": "Expose inherit keys through the timeline, shared key-editing workflows, and matching agent operations.",
+      "acceptanceCriteria": [
+        "The editor supports Add, Edit, and exact-playhead Remove for stepped inherit keys while preserving stable same-time identities.",
+        "Inherit lanes participate in shared key selection, retime, positive time scaling, and typed clipboard workflows with atomic collision and neighbor validation.",
+        "Edits use common duration auto-grow and transaction primitives so rejection leaves project, preview, selection, and history unchanged.",
+        "Animation rename and delete atomically cascade inherit overlays, key selections, clipboard references, and preview state.",
+        "set_inherit_keyframe and remove_inherit_keyframe have matching C++ registry and Python MCP metadata, dry-run, validation, affected-key, mutation, undo, and export-preview behavior.",
+        "Project, shell, agent, and MCP tests cover all five modes, add/edit/remove, selection workflows, cascade, undo/redo, save/reload, and JSON/MBIN export."
+      ],
+      "dependsOn": [
+        "MAR-184"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-186",
+      "title": "Collect structured project diagnostics",
+      "description": "Create a shared read-only diagnostic collector with stable identities, typed navigation targets, and allowlisted fix identifiers.",
+      "acceptanceCriteria": [
+        "Each issue has a stable code, severity, message, typed target, and optional safe-fix ID, with deterministic ordering and identity across unchanged revisions.",
+        "Collection is UI-free, read-only, and limited to normally opened sessions; partial or degraded first-open diagnostics and automatic correction are excluded.",
+        "project.diagnostics preserves error_count, warning_count, project_dirty, and review_queue_count while adding issues and an issue_count.",
+        "The collector reports orphan overlays, non-canonical weights, and stale preview references with safe-fix IDs only where applicable.",
+        "Typed targets resolve through SelectionSet and panel-focus metadata without mutating selection during collection.",
+        "Project, agent, and MCP tests cover deterministic results, severity counts, legacy summary compatibility, typed targets, revision changes, and zero-mutation inspection."
+      ],
+      "dependsOn": [
+        "MAR-185"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-187",
+      "title": "Add the Problems view and safe fixes",
+      "description": "Present structured diagnostics with navigation and a narrowly allowlisted set of undoable repairs.",
+      "acceptanceCriteria": [
+        "The Problems view groups and filters issues by severity and displays collector counts without changing project state.",
+        "Activating an issue selects its typed target and focuses the appropriate hierarchy, timeline, inspector, weight, or preview panel when the target still exists.",
+        "The view refreshes from project and runtime revisions and handles removed targets without stale selection or crashes.",
+        "The only initial fixes are orphan-overlay removal, canonical weight normalization, and stale-preview-reference reset.",
+        "Inspection never dirties the project; an explicitly invoked fix uses one validated transaction and one undo entry, with no automatic fix on project open.",
+        "Shell and project tests cover grouping, filters, navigation, revision refresh, all three allowlisted fixes, rejection, undo/redo, and inspection invariants."
+      ],
+      "dependsOn": [
+        "MAR-186"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-188",
+      "title": "Plan provenance-aware PSD reimports",
+      "description": "Persist PSD provenance and compute a deterministic staging diff through a UI-free planning API without changing the current project or asset bundle.",
+      "acceptanceCriteria": [
+        "Optional .marrow.editor.import_sources.psd data stores project-relative source provenance and stable mappings from PSD group/name identities to imported layers and runtime targets.",
+        "Old projects without provenance still load, while Save As rebases PSD provenance through the MAR-180 relative-path rules.",
+        "Planning parses and builds the candidate PSD bundle entirely in staging without modifying project data, runtime sources, history, or target files.",
+        "The plan classifies layers as added, updated, or missing using exact group and layer names; it never infers renames.",
+        "Missing layers default to preservation, and the deterministic plan exposes stable layer identities and proposed target changes for later review.",
+        "Project and PSD tests cover provenance round-trip, relative-path rebasing, nested groups, added/updated/missing classification, duplicate identities, parse failure, and zero-mutation planning."
+      ],
+      "dependsOn": [
+        "MAR-187"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-189",
+      "title": "Commit PSD reimports atomically",
+      "description": "Validate and replace a staged PSD asset bundle through a journaled commit with complete rollback.",
+      "acceptanceCriteria": [
+        "The staged layer directory, textures, atlas, and skeleton are validated together with the current project overlay before any target is changed.",
+        "A UI-free commit API replaces all target resources through journaled renames and reports success only after every replacement and runtime-source adoption succeeds.",
+        "Parse/build failures and an injected failure after every commit step restore the original target bundle byte-for-byte and leave the active runtime source unchanged.",
+        "A successful commit updates PSD provenance and layer mappings while preserving unrelated animation, curve, constraint, inherit, mesh, and editor overlays.",
+        "The reviewed import.psd_layers C++ operation and Python MCP tool expose the same dry-run plan, whitelist and approval checks, and execute this commit path after approval instead of merely queueing it.",
+        "PSD, agent, and MCP tests cover successful commit, approval boundaries, missing preservation/deletion inputs, overlay preservation, every failpoint, rollback bytes, and journal cleanup."
+      ],
+      "dependsOn": [
+        "MAR-188"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-190",
+      "title": "Add the PSD reimport review UI",
+      "description": "Connect PSD planning and atomic commit to an explicit preview and confirmation workflow.",
+      "acceptanceCriteria": [
+        "The ImGui reimport flow displays source provenance and grouped added, updated, and missing layer changes before enabling confirmation.",
+        "Missing-layer deletion checkboxes default off, so missing layers are preserved unless the user explicitly selects them for deletion.",
+        "Cancel, modal close, stale-plan detection, planning failure, and commit failure leave the project, runtime source, files, selection, and history unchanged.",
+        "Confirmation executes the MAR-189 atomic commit with exactly the reviewed missing-layer choices.",
+        "Success adopts the new runtime source while preserving existing unsaved overlays and undo/redo history, then refreshes selection, preview, diagnostics, and provenance safely.",
+        "Shell and PSD tests cover preview contents, default preservation, selected deletion, cancellation, stale source changes, successful adoption, overlay/history preservation, and rollback errors."
+      ],
+      "dependsOn": [
+        "MAR-189"
+      ],
+      "status": "open"
+    },
+    {
+      "id": "MAR-191",
+      "title": "Validate and document Editing P1",
+      "description": "Run the complete P1 interaction, persistence, export, parity, and rollback suite and synchronize the project documentation.",
+      "acceptanceCriteria": [
+        "End-to-end tests cover duration, selection, gizmos, FFD, snapping, graph editing, loop synchronization, time scaling, playback speed, weights, constraint lifecycle, file workflows, inherit editing, Problems, and PSD reimport.",
+        "Old and newly authored projects survive save/reload, and exported .mskl/.mbin assets remain equivalent without changing .mskl v1, .mbin v2, or C ABI v1.",
+        "C++ registry and Python MCP parity covers duration, interpolation and curve mode, loop sync, time scaling, weight bind and auto-weight, constraint lifecycle, inherit keys, and reviewed PSD reimport; transient selection, graph display, file dialogs, recents, and playback speed remain unexposed.",
+        "Project Save/Save As and every PSD parse/build/commit failpoint prove atomic rollback, including byte-for-byte asset preservation and unchanged active sessions on failure.",
+        "The roadmap, editing-gap analysis, architecture description, format specification, and AGENTS.md validation commands reflect the implemented P1 schemas, operations, exclusions, and observed results.",
+        "Final validation passes cmake --build build, full CTest plus runtime/editor labels, project/agent/PSD smokes, MCP schema/client checks, renderer --skip-render, and git diff --check."
+      ],
+      "dependsOn": [
+        "MAR-190"
+      ],
+      "status": "open"
     }
   ]
 }

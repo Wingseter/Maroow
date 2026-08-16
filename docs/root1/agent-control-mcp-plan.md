@@ -23,7 +23,7 @@ Maroow는 Spine/Live2D 류의 2D 스켈레탈 애니메이션 에디터(C++17, I
 
 - `ProjectData`(`include/marrow/editor/project.hpp`)가 **UI 의존성 0의 순수 데이터** + JSON 직렬화 내장.
 - 18+ 종 편집 연산에 대한 finder/mutator API 완비.
-- 스냅샷 기반 undo/redo (`ProjectCommandStack`, `UndoStack`, `kMaxDepth=100`).
+- `EditorSession` 트랜잭션 기반 undo/redo (병합 및 최대 깊이 100).
 - headless smoke 하니스 존재(`src/samples/editor_project_smoke.cpp`, `src/editor/shell_smoke.cpp`).
 - 안정적 C ABI(`include/marrow/marrow_c.h`).
 - **약점**: 편집 로직이 `shell_main.cpp` UI 핸들러에 박혀 있음(스냅샷 캡처가 핸들러 안). 프로젝트
@@ -44,12 +44,13 @@ Maroow 에디터 (임베디드 Agent 소켓 리스너, 별도 스레드)
 AgentCommandDispatcher  ── 공유 코어 ──┐
   │  finder/mutator + 스냅샷 undo       │
   ▼                                     ▼
-ProjectData / UndoStack          CLI/C ABI (headless 검증·CI 경로)
+EditorSession / ProjectData     CLI/C ABI (headless 검증·CI 경로)
 ```
 
 핵심 설계 원칙:
-- **공유 코어 1개**: `AgentCommandDispatcher`가 JSON 커맨드 → `ProjectData` 변경 → 스냅샷 undo
-  push → 뷰포트 dirty 처리를 담당. 이 코어를 (a) live 소켓, (b) headless CLI/C ABI 양쪽이 호출.
+- **공유 코어 1개**: `AgentCommandDispatcher`가 JSON 커맨드를 registry handler로 라우팅하고,
+  `EditorSession` transaction이 `ProjectData` 변경, 검증, runtime rebuild, undo/redo, dirty state를 담당.
+  이 코어를 (a) live 소켓, (b) headless CLI/C ABI 양쪽이 호출.
 - **스레드 안전**: 소켓 리스너는 별도 스레드에서 수신만. 실제 `ProjectData` 변경은 lock-free/뮤텍스
   큐에 적재 → ImGui 메인 루프가 프레임마다 drain하여 메인 스레드에서 실행. 결과는 응답 큐로 반환.
 - **검증 루프 친화**: 모든 변경 응답에 갱신된 씬 상태 요약을 함께 반환(에이전트가 즉시 검증).
@@ -59,8 +60,8 @@ ProjectData / UndoStack          CLI/C ABI (headless 검증·CI 경로)
 ## 변경/추가 파일 (핵심)
 
 - `include/marrow/editor/agent_dispatch.hpp` / `src/editor/agent_dispatch.cpp` *(신규)*
-  - `AgentCommandDispatcher`: `dispatch(const json& cmd) -> json result`. 기존
-    `find_*_edit()` mutator + `make_project_command()` + `command_stack.push()` 재사용.
+  - `AgentCommandDispatcher`: `dispatch(AgentCommandContext&, Value) -> AgentDispatchResult`.
+    Registry metadata와 handler를 한 항목으로 묶고 `EditorSession` transaction을 사용.
   - 커맨드 스키마(JSON): `{ "op": "...", "args": {...} }`. 결과 = `{ "ok", "scene_delta"|"error" }`.
 - `src/editor/shell_main.cpp` *(리팩터)*
   - 기존 UI 핸들러의 "스냅샷→mutate→push" 블록을 `AgentCommandDispatcher` 호출로 치환

@@ -57,6 +57,7 @@ enum class BenchmarkMode {
     SimdPropagation,
     RuntimeStress,
     AnimationLayers,
+    ParameterDeformers,
 };
 
 enum class StressConstraintDriveMode {
@@ -110,6 +111,12 @@ struct AnimationLayerBenchmarkResult {
     double single_layer_us_per_skeleton{0.0};
     double layered_us_per_skeleton{0.0};
     double overhead_pct{0.0};
+    double checksum{0.0};
+};
+
+struct ParameterDeformerBenchmarkResult {
+    double parameter_us{0.0};
+    double deformer_us{0.0};
     double checksum{0.0};
 };
 
@@ -847,6 +854,8 @@ void print_usage(std::string_view program) {
               << "  " << program
               << " --animation-layers [--skeletons N] [--bones N] [--frames N]\n"
               << "  " << program
+              << " --parameter-deformers [--skeletons N] [--frames N]\n"
+              << "  " << program
               << " --runtime-stress skeleton.mskl\n";
 }
 
@@ -898,6 +907,10 @@ Options parse_options(int argc, char** argv) {
             if (options.frame_count == kDefaultStressFrameCount) {
                 options.frame_count = kAnimationLayerDefaultFrameCount;
             }
+            continue;
+        }
+        if (argument == "--parameter-deformers") {
+            options.mode = BenchmarkMode::ParameterDeformers;
             continue;
         }
         if (argument == "--runtime-stress") {
@@ -2618,6 +2631,96 @@ int run_simd_mode(const Options& options) {
     return 0;
 }
 
+ParameterDeformerBenchmarkResult run_parameter_deformer_benchmark(const Options& options) {
+    const std::filesystem::path fixture_path =
+        "assets/fixtures/parameter_deformer_grid.mskl";
+    const auto load_result = marrow::runtime::load_skeleton_data(fixture_path);
+    if (!load_result) {
+        throw std::runtime_error(load_result.error->format());
+    }
+    if (load_result.skeleton_data->parameters().size() != 3U ||
+        load_result.skeleton_data->parameter_deformers().size() != 2U) {
+        throw std::runtime_error(
+            "parameter deformer benchmark fixture did not expose the expected model");
+    }
+
+    std::vector<marrow::runtime::Skeleton> skeletons;
+    skeletons.reserve(options.skeleton_count);
+    for (std::size_t index = 0; index < options.skeleton_count; ++index) {
+        skeletons.emplace_back(load_result.skeleton_data);
+        skeletons.back().set_to_setup_pose();
+    }
+
+    const auto drive_parameters = [&](std::size_t frame_index) {
+        const double phase = static_cast<double>(frame_index) * 0.071;
+        for (std::size_t skeleton_index = 0; skeleton_index < skeletons.size(); ++skeleton_index) {
+            const double offset = static_cast<double>(skeleton_index) * 0.013;
+            marrow::runtime::Skeleton& skeleton = skeletons[skeleton_index];
+            skeleton.set_parameter_value("face.angle_x", std::sin(phase + offset));
+            skeleton.set_parameter_value("face.angle_y", std::cos(phase * 0.83 + offset));
+            skeleton.set_parameter_value("face.roll", std::sin(phase * 0.41 + offset) * 30.0);
+        }
+    };
+    const auto evaluate_deformers = [&]() {
+        double checksum = 0.0;
+        for (marrow::runtime::Skeleton& skeleton : skeletons) {
+            for (std::size_t slot_index = 0;
+                 slot_index < skeleton.data()->slots().size();
+                 ++slot_index) {
+                const std::vector<double>* offsets =
+                    skeleton.current_final_mesh_vertex_offsets(slot_index);
+                if (offsets != nullptr) {
+                    for (std::size_t offset_index = 0U;
+                         offset_index < offsets->size();
+                         ++offset_index) {
+                        checksum += (*offsets)[offset_index] *
+                            static_cast<double>(offset_index + 1U);
+                    }
+                }
+            }
+        }
+        return checksum;
+    };
+
+    for (std::size_t frame = 0; frame < kStressWarmupFrameCount; ++frame) {
+        drive_parameters(frame);
+        (void)evaluate_deformers();
+    }
+
+    double parameter_seconds = 0.0;
+    double deformer_seconds = 0.0;
+    double checksum = 0.0;
+    for (std::size_t frame = 0; frame < options.frame_count; ++frame) {
+        parameter_seconds += measure_seconds([&]() {
+            drive_parameters(frame + kStressWarmupFrameCount);
+        });
+        deformer_seconds += measure_seconds([&]() {
+            checksum += evaluate_deformers();
+        });
+    }
+
+    const double work_units =
+        static_cast<double>(options.frame_count * options.skeleton_count);
+    ParameterDeformerBenchmarkResult result;
+    result.parameter_us = parameter_seconds * 1'000'000.0 / work_units;
+    result.deformer_us = deformer_seconds * 1'000'000.0 / work_units;
+    result.checksum = checksum;
+    return result;
+}
+
+int run_parameter_deformer_mode(const Options& options) {
+    const ParameterDeformerBenchmarkResult result =
+        run_parameter_deformer_benchmark(options);
+    std::cout << std::fixed << std::setprecision(2)
+              << "mode=parameter_deformers"
+              << " skeletons=" << options.skeleton_count
+              << " frames=" << options.frame_count
+              << " parameter_us=" << result.parameter_us
+              << " deformer_us=" << result.deformer_us
+              << " checksum=" << result.checksum << '\n';
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2640,6 +2743,8 @@ int main(int argc, char** argv) {
             return run_animation_layer_mode(options);
         case BenchmarkMode::SimdPropagation:
             return run_simd_mode(options);
+        case BenchmarkMode::ParameterDeformers:
+            return run_parameter_deformer_mode(options);
         }
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';

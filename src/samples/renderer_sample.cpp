@@ -285,6 +285,7 @@ bool require_mask_matches_clip(
 struct DrawCommandCounts {
     std::size_t region_attachments{0};
     std::size_t dynamic_mesh_attachments{0};
+    std::size_t art_path_strokes{0};
 };
 
 DrawCommandCounts count_draw_commands(const marrow::renderer::PreparedScene& scene) {
@@ -296,6 +297,10 @@ DrawCommandCounts count_draw_commands(const marrow::renderer::PreparedScene& sce
         }
         if (marrow::renderer::dynamic_mesh_attachment_command(command) != nullptr) {
             ++counts.dynamic_mesh_attachments;
+            continue;
+        }
+        if (marrow::renderer::stroke_command(command) != nullptr) {
+            ++counts.art_path_strokes;
         }
     }
     return counts;
@@ -392,10 +397,25 @@ void translate_prepared_scene(
             continue;
         }
 
-        auto* attachment = std::get_if<marrow::renderer::DynamicMeshDrawCommand>(&command);
-        for (auto& vertex : attachment->masked_vertices) {
-            vertex.position.x += offset_x;
-            vertex.position.y += offset_y;
+        if (auto* attachment =
+                std::get_if<marrow::renderer::DynamicMeshDrawCommand>(&command)) {
+            for (auto& vertex : attachment->masked_vertices) {
+                vertex.position.x += offset_x;
+                vertex.position.y += offset_y;
+            }
+            continue;
+        }
+
+        auto* stroke = std::get_if<marrow::renderer::PreparedStrokeCommand>(&command);
+        for (auto& vertex : stroke->vertices) {
+            vertex.x += offset_x;
+            vertex.y += offset_y;
+        }
+        if (stroke->has_bounds) {
+            stroke->bounds_min.x += offset_x;
+            stroke->bounds_min.y += offset_y;
+            stroke->bounds_max.x += offset_x;
+            stroke->bounds_max.y += offset_y;
         }
     }
 }
@@ -446,15 +466,23 @@ bool append_scene_instance(
             continue;
         }
 
-        const auto* mesh = marrow::renderer::dynamic_mesh_attachment_command(source_command);
-        marrow::renderer::DynamicMeshDrawCommand adjusted = *mesh;
-        adjusted.draw_order_index += event_offset;
-        for (auto& payload : adjusted.vertex_payloads) {
-            for (std::size_t influence_index = 0; influence_index < payload.influence_count;
-                 ++influence_index) {
-                payload.bone_indices[influence_index] += bone_offset;
+        if (const auto* mesh =
+                marrow::renderer::dynamic_mesh_attachment_command(source_command)) {
+            marrow::renderer::DynamicMeshDrawCommand adjusted = *mesh;
+            adjusted.draw_order_index += event_offset;
+            for (auto& payload : adjusted.vertex_payloads) {
+                for (std::size_t influence_index = 0; influence_index < payload.influence_count;
+                     ++influence_index) {
+                    payload.bone_indices[influence_index] += bone_offset;
+                }
             }
+            destination->draw_commands.push_back(std::move(adjusted));
+            continue;
         }
+
+        marrow::renderer::PreparedStrokeCommand adjusted =
+            *marrow::renderer::stroke_command(source_command);
+        adjusted.draw_order_index += event_offset;
         destination->draw_commands.push_back(std::move(adjusted));
     }
 
@@ -804,6 +832,7 @@ struct Options {
     std::optional<int> auto_close_frames;
     bool skip_render{false};
     bool hud_overlay{false};
+    bool no_atlas{false};
 };
 
 std::optional<Options> parse_options(int argc, char** argv) {
@@ -814,6 +843,10 @@ std::optional<Options> parse_options(int argc, char** argv) {
         const std::string_view argument(argv[index]);
         if (argument == "--skip-render") {
             options.skip_render = true;
+            continue;
+        }
+        if (argument == "--no-atlas") {
+            options.no_atlas = true;
             continue;
         }
         if (argument == "--hud") {
@@ -884,6 +917,18 @@ bool validate_generic_renderer_sample(
     const std::filesystem::path& atlas_image_path) {
     marrow::runtime::Skeleton skeleton(skeleton_data);
     skeleton.set_to_setup_pose();
+    for (const marrow::runtime::ParameterDefinition& parameter :
+         skeleton_data->parameters()) {
+        if (parameter.type == marrow::runtime::ParameterType::Continuous) {
+            const double midpoint = parameter.min_value +
+                ((parameter.max_value - parameter.min_value) * 0.5);
+            if (!skeleton.set_parameter_value(parameter.id, midpoint)) {
+                std::cerr << "Could not set generic renderer parameter "
+                          << parameter.id << ".\n";
+                return false;
+            }
+        }
+    }
 
     const auto scene_result =
         marrow::renderer::prepare_setup_pose_scene(skeleton, *atlas_data);
@@ -900,6 +945,35 @@ bool validate_generic_renderer_sample(
     if (scene.bone_palette.size() != skeleton_data->bones().size()) {
         std::cerr << "Prepared scene did not preserve the imported bone palette.\n";
         return false;
+    }
+    for (std::size_t slot_index = 0U; slot_index < skeleton_data->slots().size();
+         ++slot_index) {
+        const std::vector<double>* final_offsets =
+            skeleton.current_final_mesh_vertex_offsets(slot_index);
+        if (final_offsets == nullptr) {
+            continue;
+        }
+        const auto* mesh = find_dynamic_mesh_attachment(
+            scene, skeleton_data->slots()[slot_index].name);
+        if (mesh == nullptr || final_offsets->size() != mesh->deform_offsets.size() * 2U) {
+            std::cerr << "Renderer did not consume final parameter mesh offsets for slot "
+                      << skeleton_data->slots()[slot_index].name << ".\n";
+            return false;
+        }
+        for (std::size_t vertex_index = 0U;
+             vertex_index < mesh->deform_offsets.size();
+             ++vertex_index) {
+            if (!require_near(
+                    mesh->deform_offsets[vertex_index].x,
+                    (*final_offsets)[vertex_index * 2U],
+                    "parameter mesh x offset") ||
+                !require_near(
+                    mesh->deform_offsets[vertex_index].y,
+                    (*final_offsets)[vertex_index * 2U + 1U],
+                    "parameter mesh y offset")) {
+                return false;
+            }
+        }
     }
 
     constexpr std::array<float, 16> kIdentityProjection{{
@@ -933,6 +1007,7 @@ bool validate_generic_renderer_sample(
               << ", bones=" << scene.bone_palette.size()
               << ", regions=" << draw_counts.region_attachments
               << ", meshes=" << draw_counts.dynamic_mesh_attachments
+              << ", strokes=" << draw_counts.art_path_strokes
               << ", clips=" << scene.clip_attachments.size()
               << ", drawCommands=" << scene.draw_commands.size()
               << ", drawCalls=" << batch_summary.draw_call_count
@@ -972,6 +1047,190 @@ bool validate_generic_renderer_sample(
     return true;
 }
 
+bool validate_atlas_free_renderer_sample(
+    const Options& options,
+    const std::shared_ptr<const marrow::runtime::SkeletonData>& skeleton_data) {
+    marrow::runtime::Skeleton skeleton(skeleton_data);
+    skeleton.set_to_setup_pose();
+
+    const auto scene_result = marrow::renderer::prepare_setup_pose_scene(skeleton);
+    if (!scene_result) {
+        std::cerr << scene_result.error_message << '\n';
+        return false;
+    }
+
+    const marrow::renderer::PreparedScene& scene = *scene_result.scene;
+    const DrawCommandCounts counts = count_draw_commands(scene);
+    if (counts.art_path_strokes == 0U ||
+        counts.region_attachments != 0U ||
+        counts.dynamic_mesh_attachments != 0U) {
+        std::cerr << "Atlas-free renderer validation expected one or more ArtPath strokes only.\n";
+        return false;
+    }
+    if (scene.ordered_events.size() != scene.draw_commands.size()) {
+        std::cerr << "ArtPath overlay events did not match the prepared stroke count.\n";
+        return false;
+    }
+    for (std::size_t index = 0; index < scene.draw_commands.size(); ++index) {
+        const auto* stroke = marrow::renderer::stroke_command(scene.draw_commands[index]);
+        if (stroke == nullptr || stroke->vertices.empty() || stroke->indices.empty() ||
+            !stroke->has_bounds || stroke->blend_mode != marrow::runtime::BlendMode::Normal ||
+            stroke->dark_color.has_value() || stroke->clip_attachment_name.has_value() ||
+            scene.ordered_events[index].kind != marrow::renderer::PreparedSceneEventKind::Draw ||
+            scene.ordered_events[index].index != index) {
+            std::cerr << "ArtPath stroke did not preserve overlay/render invariants.\n";
+            return false;
+        }
+    }
+
+    if (options.skeleton_path.filename() == "art_path_stroke.mskl") {
+        const marrow::renderer::PreparedStrokeCommand* round_stroke = nullptr;
+        const marrow::renderer::PreparedStrokeCommand* square_stroke = nullptr;
+        for (const auto& command : scene.draw_commands) {
+            const auto* stroke = marrow::renderer::stroke_command(command);
+            if (stroke == nullptr) continue;
+            if (stroke->art_path_id == "brow.stroke") round_stroke = stroke;
+            if (stroke->art_path_id == "effect.stroke") square_stroke = stroke;
+        }
+        if (round_stroke == nullptr || square_stroke == nullptr ||
+            round_stroke->vertices.size() != 45U ||
+            round_stroke->indices.size() != 81U ||
+            square_stroke->vertices.size() != 11U ||
+            square_stroke->indices.size() != 15U ||
+            round_stroke->bounds_min.x > -43.98 ||
+            round_stroke->bounds_max.x < 43.98 ||
+            square_stroke->bounds_min.x > -27.4 ||
+            square_stroke->bounds_max.x < 27.4) {
+            std::cerr << "ArtPath cap/join tessellation or width-expanded bounds changed: "
+                      << "round(v=" << (round_stroke == nullptr ? 0U : round_stroke->vertices.size())
+                      << ", i=" << (round_stroke == nullptr ? 0U : round_stroke->indices.size())
+                      << ", minX=" << (round_stroke == nullptr ? 0.0 : round_stroke->bounds_min.x)
+                      << ", maxX=" << (round_stroke == nullptr ? 0.0 : round_stroke->bounds_max.x)
+                      << "), square(v="
+                      << (square_stroke == nullptr ? 0U : square_stroke->vertices.size())
+                      << ", i=" << (square_stroke == nullptr ? 0U : square_stroke->indices.size())
+                      << ", minX=" << (square_stroke == nullptr ? 0.0 : square_stroke->bounds_min.x)
+                      << ", maxX=" << (square_stroke == nullptr ? 0.0 : square_stroke->bounds_max.x)
+                      << ").\n";
+            return false;
+        }
+    }
+
+    marrow::renderer::PreparedSceneCache cache;
+    const auto cached_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(&cache, skeleton);
+    if (!cached_result || cached_result.scene->draw_commands.size() != scene.draw_commands.size()) {
+        std::cerr << (cached_result.error_message.empty()
+                          ? "Atlas-free cached preparation changed the ArtPath stroke count."
+                          : cached_result.error_message)
+                  << '\n';
+        return false;
+    }
+
+    const auto* unscaled_stroke = marrow::renderer::stroke_command(
+        cached_result.scene->draw_commands.front());
+    if (unscaled_stroke == nullptr || unscaled_stroke->vertices.empty()) {
+        std::cerr << "Atlas-free cached preparation lost ArtPath geometry.\n";
+        return false;
+    }
+    const marrow::renderer::RenderPoint unscaled_vertex = unscaled_stroke->vertices.front();
+    skeleton.set_scale(-2.0, 0.5);
+    const auto scaled_cached_result =
+        marrow::renderer::prepare_setup_pose_scene_cached(&cache, skeleton);
+    const auto* scaled_stroke = scaled_cached_result &&
+            !scaled_cached_result.scene->draw_commands.empty()
+        ? marrow::renderer::stroke_command(
+              scaled_cached_result.scene->draw_commands.front())
+        : nullptr;
+    if (!scaled_cached_result || scaled_cached_result.update_info->cache_hit ||
+        scaled_stroke == nullptr || scaled_stroke->vertices.empty() ||
+        !require_near(
+            scaled_stroke->vertices.front().x,
+            unscaled_vertex.x * -2.0,
+            "ArtPath skeleton scale x") ||
+        !require_near(
+            scaled_stroke->vertices.front().y,
+            unscaled_vertex.y * 0.5,
+            "ArtPath skeleton scale y")) {
+        std::cerr << "ArtPath scaling did not invalidate and rebuild the cached scene.\n";
+        return false;
+    }
+    skeleton.set_scale(1.0, 1.0);
+
+    const auto atlas_required_data =
+        marrow::runtime::load_skeleton_data("assets/fixtures/player_idle.mskl");
+    if (!atlas_required_data) {
+        std::cerr << atlas_required_data.error->format() << '\n';
+        return false;
+    }
+    marrow::runtime::Skeleton atlas_required(atlas_required_data.skeleton_data);
+    atlas_required.set_to_setup_pose();
+    const std::vector<marrow::runtime::SlotState> setup_slots =
+        atlas_required.slot_states();
+    for (marrow::runtime::SlotState& slot : atlas_required.slot_states()) {
+        slot.attachment_name.clear();
+        slot.attachment_skin_index.reset();
+    }
+    marrow::renderer::PreparedSceneCache missing_atlas_cache;
+    const auto empty_cached_result = marrow::renderer::prepare_setup_pose_scene_cached(
+        &missing_atlas_cache, atlas_required);
+    atlas_required.slot_states() = setup_slots;
+    const auto missing_atlas_result = marrow::renderer::prepare_setup_pose_scene_cached(
+        &missing_atlas_cache, atlas_required);
+    if (!empty_cached_result || missing_atlas_result ||
+        missing_atlas_result.error_message.find("requires atlas metadata") ==
+            std::string::npos) {
+        std::cerr << "Atlas-free cache hid an attachment that requires atlas metadata.\n";
+        return false;
+    }
+
+    constexpr std::array<float, 16> kIdentityProjection{{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    const auto command_list_result =
+        marrow::renderer::build_render_command_list(scene, kIdentityProjection);
+    if (!command_list_result || command_list_result.command_list->commands.empty()) {
+        std::cerr << (command_list_result.error_message.empty()
+                          ? "ArtPath renderer did not create a triangle draw command."
+                          : command_list_result.error_message)
+                  << '\n';
+        return false;
+    }
+    for (const auto& command : command_list_result.command_list->commands) {
+        if (command.texture_handle != marrow::renderer::kSolidWhiteTextureHandle ||
+            command.blend_mode != marrow::runtime::BlendMode::Normal ||
+            command.shader_variant != marrow::renderer::ColorShaderVariant::SingleColor) {
+            std::cerr << "ArtPath draw command did not use solid-white normal single-color rendering.\n";
+            return false;
+        }
+    }
+
+    std::cout << "Atlas-free ArtPath renderer validation passed: skeleton="
+              << scene.skeleton_name << ", strokes=" << counts.art_path_strokes
+              << ", drawCalls=" << command_list_result.command_list->commands.size() << ".\n";
+
+    if (options.skip_render) {
+        return true;
+    }
+
+    marrow::renderer::SampleAppWindow window;
+    window.title = "Marrow ArtPath Validation";
+    window.width = 1280;
+    window.height = 720;
+    const marrow::renderer::DemoShell shell(window, scene, {}, options.hud_overlay);
+    if (const std::optional<std::string> render_error =
+            options.auto_close_frames.has_value()
+                ? shell.run(options.auto_close_frames)
+                : shell.run()) {
+        std::cerr << *render_error << '\n';
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -984,6 +1243,10 @@ int main(int argc, char** argv) {
     if (!skeleton_result) {
         std::cerr << skeleton_result.error->format() << '\n';
         return 1;
+    }
+
+    if (options->no_atlas) {
+        return validate_atlas_free_renderer_sample(*options, skeleton_result.skeleton_data) ? 0 : 1;
     }
 
     const auto atlas_result = marrow::runtime::AtlasLoader::load(options->atlas_path);

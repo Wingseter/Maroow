@@ -200,6 +200,29 @@ struct DynamicMeshDrawCommand {
     std::vector<std::size_t> masked_indices;
 };
 
+/**
+ * @brief CPU-tessellated skeleton-local ArtPath triangle geometry.
+ *
+ * Stroke commands are root overlays. They use the renderer's solid-white
+ * texture, normal blending, the single-color shader, and never participate in
+ * slot clipping or draw-order placement.
+ */
+struct PreparedStrokeCommand {
+    std::string art_path_id;
+    std::string art_path_name;
+    std::string texture_name{"__marrow_solid_white"};
+    std::size_t draw_order_index{0};
+    runtime::BlendMode blend_mode{runtime::BlendMode::Normal};
+    runtime::SlotColor color{};
+    std::optional<runtime::SlotColor> dark_color;
+    std::optional<std::string> clip_attachment_name;
+    std::vector<RenderPoint> vertices;
+    std::vector<std::size_t> indices;
+    RenderPoint bounds_min{};
+    RenderPoint bounds_max{};
+    bool has_bounds{false};
+};
+
 struct ClipAttachmentDrawCommand {
     std::string slot_name;
     std::string attachment_name;
@@ -212,7 +235,10 @@ struct ClipAttachmentDrawCommand {
     std::vector<RenderPoint> polygon;
 };
 
-using PreparedDrawCommand = std::variant<RegionAttachmentDrawCommand, DynamicMeshDrawCommand>;
+using PreparedDrawCommand = std::variant<
+    RegionAttachmentDrawCommand,
+    DynamicMeshDrawCommand,
+    PreparedStrokeCommand>;
 
 enum class PreparedSceneEventKind {
     ClipStart,
@@ -318,6 +344,9 @@ public:
         PreparedSceneCache* cache,
         const runtime::Skeleton& skeleton,
         const runtime::AtlasData& atlas);
+    friend PreparedSceneCacheResult prepare_setup_pose_scene_cached(
+        PreparedSceneCache* cache,
+        const runtime::Skeleton& skeleton);
     friend const PreparedSceneBatchSummary* summarize_prepared_scene_batches_cached(
         PreparedSceneCache* cache);
 
@@ -343,6 +372,9 @@ public:
     const runtime::SkeletonData* skeleton_data_{nullptr};
     const runtime::AtlasData* atlas_data_{nullptr};
     bool cached_visible_{true};
+    std::uint64_t cached_parameter_revision_{0};
+    double cached_scale_x_{1.0};
+    double cached_scale_y_{1.0};
     PreparedScene scene_{};
     bool has_scene_{false};
     PreparedSceneBatchSummary batch_summary_{};
@@ -423,6 +455,13 @@ PreparedSceneResult prepare_setup_pose_scene(
     const runtime::Skeleton& skeleton,
     const runtime::AtlasData& atlas);
 /**
+ * @brief Prepares an atlas-free scene for an ArtPath-only skeleton.
+ *
+ * Point, bounds, constraint-path, and clipping-only slots are ignored. A
+ * region or mesh attachment produces a clear missing-atlas error.
+ */
+PreparedSceneResult prepare_setup_pose_scene(const runtime::Skeleton& skeleton);
+/**
  * @brief Updates or reuses a cached prepared scene for one skeleton instance.
  * @param cache Cache object that persists across frames.
  * @param skeleton Skeleton instance containing the current pose.
@@ -433,6 +472,10 @@ PreparedSceneCacheResult prepare_setup_pose_scene_cached(
     PreparedSceneCache* cache,
     const runtime::Skeleton& skeleton,
     const runtime::AtlasData& atlas);
+/** @brief Cached overload for atlas-free ArtPath-only preparation. */
+PreparedSceneCacheResult prepare_setup_pose_scene_cached(
+    PreparedSceneCache* cache,
+    const runtime::Skeleton& skeleton);
 /**
  * @brief Converts a prepared scene into packed GPU submission data.
  * @param scene Prepared scene to convert.
@@ -485,6 +528,8 @@ const RegionAttachmentDrawCommand* region_attachment_command(const PreparedDrawC
  * @return Dynamic mesh pointer, or `nullptr` when the command is not a mesh draw.
  */
 const DynamicMeshDrawCommand* dynamic_mesh_attachment_command(const PreparedDrawCommand& command);
+/** @brief Returns the ArtPath stroke view of a prepared draw command. */
+const PreparedStrokeCommand* stroke_command(const PreparedDrawCommand& command);
 /**
  * @brief Loads a PNG texture and falls back to a white texel when loading fails.
  * @param image_path Path to the atlas image.

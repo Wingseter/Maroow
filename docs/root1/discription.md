@@ -26,6 +26,31 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 | **Marrow Editor** | 본 배치, 키프레임, 애니메이션 편집 (standalone 앱) |
 | **marrow-runtime** | molga-engine 내장, 포맷 로드 및 재생 |
 
+### 현재 제품 단계와 저작 범위
+
+장기 비전은 본·슬롯·스킨·어태치먼트·메시까지 자체 저작하는 Spine Pro 대체제지만,
+현재 제품 단계는 **임포트한 리그를 기반으로 애니메이션과 후처리를 저작하는 에디터**다.
+
+- 베이스 `.mskl`은 본, 슬롯, 스킨, 어태치먼트와 메시 topology의 소유자다.
+- `.marrow`는 베이스 런타임 자산 참조와 이름 기반 애니메이션·제약·웨이트 편집 overlay, editor-only metadata를 저장한다. 활성 파라미터 마일스톤의 optional `parameter_model`과 P1의 duration operation, viewport snap, curve/loop metadata, constraint lifecycle, inherit overlay, PSD provenance도 모두 additive 필드다. 알 수 없는 additive 필드는 load/save에서 보존한다.
+- 사용자별 UI 기본값은 프로젝트 상태와 분리된 versioned `editor-settings.json`에 저장한다. MAR-156의 UI-free `PreferenceStore`는 curve 기본 preset과 raw Recent Projects 경로를 공유 저장하며 `.marrow` dirty/history/revision, runtime 포맷, C ABI, Agent/MCP 표면을 변경하지 않는다.
+- MAR-157의 UI-free `SelectionSet`은 imported Bone/Slot/Attachment/Constraint의 정확한 이름 identity와 단일 active item을 소유하는 transient editor 상태다. `ShellState`만 이를 소유하며 `ProjectData`, `PreviewState`, history snapshot, preference store, runtime 포맷, C ABI, Agent/MCP에는 저장하거나 노출하지 않는다. Attachment identity는 slot·skin·attachment 이름을, Constraint identity는 kind·name을 모두 포함한다.
+- MAR-158은 hierarchy, inspector, viewport, timeline, constraint, weight-paint가 이 `SelectionSet`을 유일한 entity-selection 원본으로 직접 해석하게 한다. 성공한 project/runtime source 교체 뒤에만 exact typed identity를 새 runtime에 재해석하고 누락 항목만 stable order와 active fallback을 보존하며 prune한다. Preview skin/attachment refresh와 일반 authoring rebuild는 identity를 자동 교체하거나 prune하지 않으며 실패한 source 교체는 selection과 기존 runtime bundle을 보존한다.
+- MAR-159는 `ShellState`의 transient exact-identity hierarchy anchor와 매 frame 실제 렌더된 Bone/Slot/Attachment row 순서를 사용해 plain replace, macOS Cmd/기타 Ctrl toggle, Shift visible-range replace, Cmd/Ctrl+Shift additive-range를 `SelectionSet`에 적용한다. Attachment row ID는 slot·skin·attachment 전체 scope를 사용한다. Anchor는 filter/collapse로 visible order에서 사라지거나 성공한 source 교체에서 identity가 누락될 때만 초기화하며 실패한 교체에서는 보존한다. 모든 selected row는 공통 배경을, active row만 primary rail/text를 표시하고 inspector/gizmo/timeline/constraint/weight consumer는 active item 하나만 편집한다. 이 상태는 project/history/runtime과 분리되며 group transform을 추가하지 않는다.
+- MAR-160은 viewport point hit를 constraint target, Bone joint, Bone body, Slot centroid, topmost rendered Attachment triangle의 stable category/distance/order precedence로 `SelectionSet`에 replace/toggle한다. Empty-space drag는 visible runtime-active Bone joint만 skeleton order로 replace/additive box-select한다. Selection 변화는 hierarchy anchor와 timeline focus를 transient하게 동기화하며 inspector와 모든 authoring tool은 active item 하나만 편집하고 group transform은 추가하지 않는다.
+- MAR-161은 Animation 모드의 runtime-active active Bone 하나에 58px screen-space rotation ring을 표시한다. Root와 `onlyTranslation`은 skeleton scale basis를, `normal` child는 gesture 시작 시 평가된 parent-world 2x2 basis를 freeze하여 absolute local rotation을 계산한다. `noRotationOrReflection`, `noScale`, `noScaleOrReflection`에서는 ring을 숨기고 unsupported-inherit hint를 표시한다. 연속 sample delta만 `(-180, 180]`로 unwrap하며 absolute degree는 정규화하지 않고 기존 transform-key transaction과 effective-track materialization 경로에 저장한다.
+- MAR-162는 같은 active Bone에 rotation ring 바깥 74px screen-space local X/Y/uniform scale handle을 동시에 표시한다. Root와 `onlyTranslation`은 skeleton scale, `normal` child는 evaluated parent-world 2x2에 local rotation/shear를 합성하되 local scale을 제거한 positive axis basis를 gesture 시작 시 freeze한다. Nonzero 축은 pivot projection의 signed ratio로, exact-zero 축은 74px당 scale 1의 delta로 절대 scale을 계산한다. Uniform은 시작 X:Y ratio와 signs를 함께 보존하고 `(0,0)`에서는 숨긴다. 기존 scale effective-track materialization과 transform-key transaction을 사용하며 mixed selection에서도 active Bone 하나만 편집한다.
+- MAR-163 checkpoint는 Animation 모드에서 현재 표시 중인 exact active mesh Attachment의 모든 최종-pose vertex를 screen-space handle로 노출하고 한 번의 press-drag 동안 vertex 하나를 편집하는 기반을 닫았다. 한 influence는 해당 bone world 2x2, 여러 influence는 `sum(weight * bone world 2x2)`를 gesture 시작 시 freeze하고 inverse로 world pointer delta를 animation-FFD-local delta로 바꾼다. 기존 deform timeline 전체와 curve를 geometry 크기의 full-vector project overlay로 materialize한 뒤 선택 pair만 바꾸며, linked `deform=true`는 immediate parent attachment를 target으로 한다. Parameter-composed 최종 위치는 handle에만 반영하고 key에는 선택 animation의 animation-FFD-only vector를 저장한다.
+- MAR-164는 그 handle 아래에 `{slot, skin, displayed attachment, deform target, vertex count}` scope와 오름차순 unique index를 가진 shell-private persistent vertex sub-selection을 추가한다. Plain point는 replace 또는 selected-group drag/click-collapse를, macOS Cmd/기타 Ctrl은 toggle-only를 수행한다. 유효한 FFD overlay의 진짜 empty space는 Bone box보다 FFD box가 먼저 받아 forward/reverse inclusive plain replace/clear와 additive/no-op을 제공한다. Group drag는 모든 vertex의 frozen weighted inverse를 먼저 검증하고 하나의 common world delta를 gesture-start animation-only full vector의 선택 pair에만 atomic하게 적용한다. 하나라도 malformed, out-of-range, singular, non-finite이거나 refresh/downstream verification이 실패하면 materialization과 transaction 전체를 rollback한다. Linked `deform=true`는 displayed child scope를 유지하면서 immediate parent timeline 하나를 수정하고, `deform=false`는 child 자체를 target으로 한다. 이 sub-selection은 같은 exact displayed Attachment에서 playhead·animation·parameter preview·undo/redo·일반 rebuild 동안 유지되지만 mode·Weight Paint·skin·attachment·deform target 변경과 성공한 source/project adoption에서 clear된다. 실패한 adoption과 gesture rollback은 보존한다. `.marrow`, `SelectionSet`, runtime 포맷, C ABI, GPU, 56-operation Agent/MCP surface는 변경하지 않는다.
+- Task #28의 behavior-preserving 핵심 경계 리팩터, MAR-163과 MAR-164는 2026-08-16에 완료됐다. MAR-165는 완료된 MAR-164에 직접 의존하는 다음 제품 milestone이다. MAR-192~210 플랫폼 프로그램은 별도 재개 결정 전까지 open인 병렬 보류 qualification backlog다. 코드가 한 호스트에서 동작하는 것과 지원 플랫폼 qualification은 계속 구분한다. 2026-08-12 범위 결정에 따라 현재 qualification 대상은 macOS arm64와 Windows 11 x64뿐이다. Ubuntu/Linux와 Windows 10은 `NOT REQUIRED`이며 지원을 주장하지 않는다. 별도 PC portable 실행도 필수 gate가 아니고 같은 Windows 11 호스트의 새 압축해제 폴더 검증을 현재 package gate로 사용한다. 실물 Windows Ink, Windows 11 고배율·수동 UI, 성능·pixel·resource evidence가 기록되기 전에는 MAR-210을 완료 처리하지 않는다.
+- Task #28의 viewport 내부 경계에서 `viewport_interaction_kernel`은 ImGui, Sokol, `ShellState` 없이 frozen rotation basis/unwrap, signed·exact-zero scale mapping, FFD nearest-hit/weighted inverse, point·box selection set algebra와 atomic multi-pair full-vector update, press/entity hit precedence, completion 결정을 계산한다. `viewport_interaction_controller`는 Bone transform을, shell-private `viewport_ffd_controller`는 attachment-local selection reconciliation, group FFD begin/update/finish, deform materialization, linked target, session transaction, rollback과 one-undo를 소유한다. `shell_viewport_ui`는 ImGui 입력 해석과 selected/hover/drag-source/marquee 표시만 소유하고 FFD 회귀는 별도 `shell_smoke_ffd.cpp` translation unit에 격리한다. 이 private build/source 경계는 public editor API나 entity `SelectionSet` identity를 바꾸지 않는다.
+- Task #28의 timeline 내부 경계에서 `timeline_model`은 ImGui와 `ShellState` 없이 track/key identity, same-time ordinal, selection reconciliation, clipboard collision/order, retime bounds·snap, duration maximum과 completion 결정을 계산한다. `timeline_controller`가 effective imported curve materialization, project/runtime mutation, session transaction, rollback과 one-undo를 소유하고 `shell_timeline`은 ImGui 입력 해석과 표시를 담당한다. Add-key와 live retime 직후에는 현재 frame의 row reference를 안전하게 다시 잡기 위해 의도적으로 uncached track rebuild를 사용하고, 일반 표시 경로의 runtime-revision/identity keyed cache는 유지한다.
+- Parameter slider와 agent `parameter.set`은 ID 기반 direct preview 입력이며 `.marrow`나 runtime export에 저장하지 않는다. Persistent parameter-model CRUD만 project dirty 상태를 바꾼다.
+- Setup Pose는 현재 읽기 전용이다. Animation 모드의 본 포즈 변경은 현재 playhead의 키프레임으로 저장해야 하며, 저장되지 않는 preview-only 포즈/색상 편집은 허용하지 않는다.
+- 본·슬롯·스킨·어태치먼트 생성/삭제, 재부모화, 메시 topology·경로 제어점 편집, entity `SelectionSet`의 group transform, partial/degraded project open은 현재 P1 범위 밖이다. MAR-164의 attachment-local FFD vertex sub-selection은 entity selection이나 hierarchy anchor/timeline focus를 바꾸는 group transform이 아니다.
+- P1은 `.mskl` v1, `.mbin` v2와 C ABI v1을 유지한다. 구 자산 fallback과 기존 C 함수·ownership 규칙을 깨는 version bump는 하지 않는다.
+- 장기 자체 리그 저작 단계에서는 기존 이름 기반 오버레이를 계속 확장하지 않는다. 버전과 stable ID를 가진 canonical `.marrow` authoring graph를 먼저 설계하고, 임포트 자산을 그 graph로 한 번 변환하는 경계를 정의한다.
+
 ---
 
 ## 3. 기술 스택
@@ -34,8 +59,66 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 |---|---|---|
 | 에디터 언어 | **C++** | molga-engine과 동일 스택, 학습 비용 없음 |
 | 에디터 UI | **Dear ImGui** | Mac 지원, MIT 라이센스, C++ 친화적 |
-| 렌더링 | **sokol_app + sokol_gfx** | 단일 셰이더/렌더링 코드로 Metal(macOS)과 OpenGL(Linux) 지원 |
+| 창·입력 | **SDL3** | high-DPI, IME, pen pressure와 macOS/Windows/Linux 단일 event 경계 |
+| 에디터 렌더링 | **sokol_gfx + sokol_imgui** | macOS Metal, Windows/Linux GLCORE 4.1의 단일 GPU 자원·pass 모델 |
+| standalone sample | **sokol_app + sokol_glue** | convenience sample host에만 한정하며 editor에는 링크하지 않음 |
 | 스키닝 방식 | **GPU 스키닝 (Vertex Shader)** | 성능 우위, 쉐이더 커스텀 가능 |
+
+---
+
+## 3-1. 플랫폼·GPU 소유권
+
+최종 production 경계는 다음과 같다.
+
+| 플랫폼 | 창·입력 | GPU/ImGui | qualification 범위 |
+|---|---|---|---|
+| macOS arm64 | SDL3 Metal window, SDL3 input/IME/pen | `sokol_gfx` Metal + `sokol_imgui` | 현재 Metal 실기 호스트 |
+| Windows x64 | SDL3 OpenGL window, SDL3/Windows Ink pen | `sokol_gfx` GLCORE 4.1 + `sokol_imgui` | Windows 11, VS2022 |
+| Linux x64 | SDL3 X11 OpenGL window | `sokol_gfx` GLCORE 4.1 + `sokol_imgui` | 구현 유지, 현재 qualification/support 범위 밖 (`NOT REQUIRED`) |
+
+이 표는 구현 경계와 현재 검증 매트릭스다. 실제 지원 주장은
+`docs/root1/platform-validation.md`의 같은 revision 실기 PASS에만 근거한다.
+Linux/Ubuntu, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer,
+ImGui OS multi-viewport는 현재 지원·qualification 범위가 아니다.
+
+렌더러는 네 내부 경계로 나뉜다.
+
+- `marrow_renderer_commands`가 scene preparation, atlas/PNG decode, geometry,
+  command packing, CPU cache, software stencil을 소유하며 `marrow_runtime`과
+  zlib만 링크한다. C ABI, Agent smoke, runtime unit/fixture test, CPU benchmark는
+  이 경계까지만 사용한다.
+- `marrow_renderer_core`가 executable별 유일한 `SOKOL_GFX_IMPL`과 한 번만
+  컴파일되는 Sokol scene executor를 소유한다. White fallback, sampler,
+  shader, streaming buffer와 format/depth/sample 기반 GPU pipeline cache가 이
+  계층에 있다.
+- `marrow_renderer_sapp_host`만 `SOKOL_APP_IMPL`과 `SOKOL_GLUE_IMPL`을 소유하며
+  device/pass/window adapter에서 scene executor에 위임해 standalone renderer
+  sample을 구동한다. Editor와 CPU-only binary에는 `sapp_*`/`sglue_*` 심볼이
+  없어야 한다.
+- `marrow_editor_shell`만 SDL3, ImGui SDL3 platform backend, `sokol_imgui`,
+  window surface와 main pass/commit을 소유한다. UI-free `marrow_editor`는
+  SDL/Sokol/ImGui에 의존하지 않는다.
+
+기존 `marrow_renderer` 타깃 이름과 public renderer/C ABI 표면은 호환성
+umbrella로 유지하며 새 내부 타깃을 설치 API로 노출하지 않는다.
+
+Editor frame은 SDL event poll과 raw pen metadata 갱신, event당 한 번의
+`ImGui_ImplSDL3_ProcessEvent`, `ImGui_ImplSDL3_NewFrame`, `simgui_new_frame`,
+1x offscreen viewport, main swapchain pass, `simgui_render`, `sg_commit`, GL에서만
+`SDL_GL_SwapWindow` 순서다. UI와 pointer는 logical coordinate를 사용하고 GPU
+target은 drawable pixel size를 사용한다. Texture UV는 hard-coded flip이 아니라
+`sg_query_features().origin_top_left`로 결정한다.
+
+종료는 authoring gesture/callback 차단, viewport/icon/atlas/scene resource,
+ImGui SDL3 backend, `simgui`, `sg`, native Metal/GL surface, SDL window, `SDL_Quit`
+순서다. Nested `sg_setup`은 허용하지 않는다.
+
+Pen pressure는 shell transient `ViewportPointerState`에만 존재한다. Synthetic pen
+mouse가 ImGui 위치·button을 전달하고 raw pen event는 pressure/tilt/eraser metadata만
+갱신한다. Paint/Erase/Smooth stamp 강도는
+`configured_strength × pressure × radial_falloff`이며 mouse와 pressure-axis 없는
+장치는 `1.0`이다. Radius, spacing, project/preference/runtime format, C ABI와
+Agent/MCP 표면은 바뀌지 않는다.
 
 ---
 
@@ -44,16 +127,18 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 | 확장자 | 용도 | 형식 |
 |---|---|---|
 | `.marrow` | 에디터 프로젝트 파일 | JSON (초기), 추후 바이너리 컴파일러 추가 |
-| `.mskl` | 본 구조 + 애니메이션 데이터 (runtime import용) | JSON → 추후 바이너리 |
+| `.mskl` | 본 구조 + 애니메이션 데이터 (runtime import용) | JSON interchange/runtime source |
 | `.mbin` | 프로덕션용 런타임 스켈레톤 바이너리 | Compact binary |
 | `.matl` | 텍스처 아틀라스 메타데이터 | JSON |
 | `.png` | 실제 텍스처 아틀라스 | 이미지 |
 
-> 개발 초기에는 JSON으로 시작, 디버깅 안정화 후 바이너리 컴파일러 추가
+> 개발·검사에는 `.mskl` JSON을 사용하고 프로덕션에는 같은 runtime document의 `.mbin` binary export를 사용할 수 있다.
 > `.mskl` / `.matl` 루트에는 정수 `version` 필드가 포함되며, 현재 런타임은 `version: 1`만 로드한다.
 > `.matl.atlas.premultiplied_alpha` 불리언으로 straight alpha와 PMA 텍스처를 구분하며, 렌더러는 이 값을 기준으로 셰이더/블렌드 경로를 전환한다.
 > `.matl.regions[].rotate`는 선택적인 아틀라스 내 회전 각도(도 단위)를 보존하며, Spine `.atlas` 멀티페이지 import는 페이지당 하나의 `.matl` 파일로 변환한다.
-> `.mbin`은 검증된 런타임 문서를 그대로 보존하면서 회전/이동 키프레임에 대해 16-bit 시간/채널 인덱스 + 양자화 payload를 추가 저장해, 내보내기 시 키 감소와 런타임 quantized playback을 지원한다.
+> 현재 `.mbin` wire version은 v2다. 검증된 런타임 문서를 그대로 보존하면서 회전/이동 키프레임에 대해 16-bit 시간/채널 인덱스 + 양자화 payload를 추가 저장해, 내보내기 시 키 감소와 런타임 quantized playback을 지원한다.
+> `.marrow`와 exported `.mskl` JSON은 finite rotation degree를 정규화하지 않아 360도를 넘는 값을 보존한다. `.mbin` v2 canonical generic payload도 raw key를 보존하며, optional AKEY가 continuous multi-turn rotate channel을 허용 오차 안에서 표현하지 못하면 그 channel만 packed section에서 생략한다. Runtime JSON-MBIN acceptance는 360도 동치 orientation을 보장하며 segment winding playback은 MAR-161 계약이 아니다.
+> Scale key는 finite signed value와 exact zero를 `.marrow`, exported `.mskl`, `.mbin` v2 canonical generic payload에 그대로 보존한다. MAR-162는 기존 transform overlay와 wire schema를 재사용하므로 포맷 version을 변경하지 않는다.
 
 ---
 
@@ -155,8 +240,8 @@ void main() {
 - [ ] **Attachment Timeline** - 애니메이션 중 슬롯의 어태치먼트 전환
 - [ ] **Bone Scale/Shear Timeline** - 본 스케일·전단 키프레임
 - [ ] **Linked Mesh** - 다른 메시의 버텍스/가중치를 참조하는 메시 (스킨 간 공유)
-- [ ] **Inherit Timeline** - 애니메이션 중 본의 상속 속성 동적 변경 (회전/스케일/반전 상속 on/off)
-- [ ] **Shortest Rotation** - 회전 보간 시 최단 경로 선택 (360도 이상 회전 방지)
+- [x] **Inherit Timeline runtime/read-only** - 5개 inherit mode의 stepped runtime timeline 구현 완료; project overlay와 editor parity는 MAR-184~185
+- [ ] **Shortest Rotation playback policy** - MAR-161의 raw multi-turn authoring/storage와 별개로 runtime segment의 shortest-path/winding playback 정책은 후속 범위
 
 ### 추가 기능
 - [ ] **Clipping** - 메시 마스킹 (다각형으로 렌더 영역 제한)
@@ -171,7 +256,7 @@ void main() {
 - [ ] **Skin Constraints** - 특정 스킨 활성 시에만 적용되는 조건부 Constraint
 - [ ] **SkeletonBounds** - Bounding Box 기반 히트 판정 유틸리티 클래스
 - [ ] **Setup Pose Reset** - 스켈레톤을 초기 설정 포즈로 복원
-- [ ] **Binary Export** - JSON 외 바이너리 포맷 내보내기 (용량↓ 로딩속도↑)
+- [x] **Binary Export** - `.mskl`과 동등한 `.mbin` v2 export·quantized playback 구현 완료
 
 ---
 
@@ -560,7 +645,7 @@ slot: "explosion"
 |---|---|
 | **parent** | 참조할 원본 메시 이름 |
 | **skin** | 원본 메시가 속한 스킨 (default skin이면 생략) |
-| **deform** | false면 부모 메시의 FFD만 따름, true면 독립 FFD 가능 |
+| **deform** | `true`면 immediate parent 메시의 FFD timeline을 상속·공유하고, `false`면 linked child 자체의 deform identity를 사용 |
 
 > 같은 본 구조에 외형만 다른 캐릭터를 만들 때, 메시 구조를 중복 정의할 필요 없음
 
@@ -568,20 +653,28 @@ slot: "explosion"
 
 ### Inherit Timeline
 
-애니메이션 중 **본의 상속 속성을 동적으로 변경**한다. Spine 4.2에서 `spInheritTimeline`으로 추가.
+애니메이션 중 **본의 상속 mode를 동적으로 변경**한다. Runtime과 export는 아래 5개 enum 값을 사용하고,
+timeline sampling은 값 사이를 보간하지 않는 stepped-only다.
 
 ```
-프레임 0: arm_bone → inherit rotation = true  (부모 회전 따라감)
-프레임 5: arm_bone → inherit rotation = false (독립 회전)
+프레임 0: arm_bone → inherit = normal
+프레임 5: arm_bone → inherit = noRotationOrReflection
 ```
 
-| 제어 가능한 상속 속성 | 설명 |
+| mode | 설명 |
 |---|---|
-| **rotation** | 부모 본의 회전 상속 여부 |
-| **scale** | 부모 본의 스케일 상속 여부 |
-| **reflectX / reflectY** | 부모 본의 반전 상속 여부 |
+| **normal** | 부모 transform을 정상적으로 상속 |
+| **onlyTranslation** | 부모 translation만 상속 |
+| **noRotationOrReflection** | 부모 rotation/reflection 영향을 제거 |
+| **noScale** | 부모 scale 영향을 제거 |
+| **noScaleOrReflection** | 부모 scale/reflection 영향을 제거 |
 
-> 캐릭터가 방향 전환할 때 특정 본만 반전에서 제외하거나, 무기가 항상 월드 기준 회전을 유지하도록 할 때 사용
+Runtime timeline과 read-only inspector는 이미 이 mode를 사용한다. MAR-184는 optional project overlay와
+materialization/merge/export를 추가하고, MAR-185는 Add/Edit/Remove·selection·retime·scale·clipboard와 agent/MCP parity를 연결한다.
+
+다섯 inherit mode의 runtime 지원과 MAR-161/162 authoring basis 지원 범위는 별개다. Rotation과 scale
+gizmo는 `normal`과 `onlyTranslation`만 지원하며 나머지 세 mode는 잘못된 raw-parent basis를 적용하지
+않고 gizmo 숨김과 viewport hint로 처리한다.
 
 ---
 
@@ -754,13 +847,13 @@ JSON 외에 **바이너리 포맷**으로 내보내기. 프로덕션 배포용.
 ```
 [Marrow Editor]
       ↓ export
-  .mskl / .matl / .png (.mbin 바이너리 추후)
+  .mskl / .matl / .png (.mbin v2 binary 선택)
       ↓ import
 [molga-engine]
   ├── AtlasLoader        → .matl 파싱, 텍스처 로드
   ├── SkeletonLoader     → .mskl 파싱, 본 트리 구성
-  ├── SkeletonData       → 공유 가능한 정적 스켈레톤 데이터 (본/슬롯/스킨/애니메이션)
-  ├── Skeleton           → 인스턴스별 상태 (현재 포즈, 활성 스킨, 드로우 오더)
+  ├── SkeletonData       → 공유 가능한 정적 데이터 (본/슬롯/스킨/애니메이션, immutable parameter 정의)
+  ├── Skeleton           → 인스턴스별 상태 (현재 포즈, 활성 스킨, 드로우 오더, direct/final parameter 값)
   ├── AnimationState     → 트랙 기반 애니메이션 재생, 믹싱, 큐, 콜백
   ├── ConstraintSolver   → IK / Path / Transform / Physics Constraint 해결
   ├── SkinManager        → 스킨 교체, 합성, 조건부 Constraint 관리
@@ -773,17 +866,24 @@ JSON 외에 **바이너리 포맷**으로 내보내기. 프로덕션 배포용.
 
 ## 10. 개발 순서 (권장)
 
-1. **molga-engine 렌더러 확장** - 아틀라스 + 동적 메시 지원
-2. **런타임 먼저** - `.mskl` 하드코딩으로 파싱/렌더링 테스트
-3. **Marrow 에디터** - 런타임 동작 확인 후 시작
+초기 렌더러/런타임 우선 단계, 에디터 아키텍처 리팩터링, 편집 P0와 파라미터 트랙은 완료됐다. 현재 실행 순서는 다음과 같다.
 
-> 에디터 먼저 만들면 결과 확인이 안 돼서 동기부여 저하 위험
+1. **완료: 편집 P0 (MAR-141~153)** - Setup Pose 읽기 전용화, Animation auto-key, 안정적 카메라/이동 기즈모, 도프시트 조작, 슬롯 타임라인, 애니메이션 CRUD와 E2E guardrail
+2. **완료: 파라미터 트랙 (MAR-122~128)** - MAR-121의 런타임 기반을 MAR-122에 통합하고 정의·export·shape/deformer·ArtPath·expression/lip-sync·editor·agent surface를 검증
+3. **진행 중: 편집 P1 (MAR-154~191)** - MAR-154 runtime explicit duration부터 MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation gizmo, MAR-162 signed local scale gizmo, behavior-preserving Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD와 MAR-164 attachment-local multi-vertex FFD까지 완료됐다. 다음 MAR-165부터 shared/FFD snap, graph·retime·preview, weight·constraint lifecycle, atomic file workflow·inherit, structured Problems, staged/atomic PSD 재임포트와 E2E를 순서대로 닫는다. MAR-192~210 qualification은 open 병렬 보류 backlog다.
+4. **보류: 자체 리그 저작 재검토** - canonical `.marrow` authoring graph와 stable ID 전환 설계가 승인된 뒤에만 리그/메시 topology 저작을 시작
+
+P1 시작 gate인 MAR-128 완료 checkpoint는 2026-07-16에, MAR-154 runtime duration과 MAR-155 editor duration checkpoint는 2026-07-17에, MAR-156 user preference, MAR-157 typed selection 및 MAR-158 selection migration checkpoint는 2026-07-18에, MAR-159 hierarchy multi-selection과 MAR-160 viewport multi-selection 및 MAR-161 parent-space rotation checkpoint는 2026-07-21에, MAR-162 signed local scale checkpoint는 2026-07-25에, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD와 MAR-164 attachment-local multi-vertex FFD checkpoint는 2026-08-16에 통과했다. 다음 제품 milestone은 MAR-165다. MAR-165~191은 각각 바로 앞 번호의 스토리에 의존하는 선형 dependency chain이다. 각 milestone checkpoint는 기능·검증 경계이며 자동 커밋 단위가 아니다. 38개 story의 title과 수직 scope는
+[`editing-gap-analysis.md`](editing-gap-analysis.md)의 P1 표를 따른다.
+
+> 새 포맷이나 평가 기능은 계속 런타임에서 먼저 검증한다. 편집 P0는 이미 구현된 런타임 위의 데이터 유실·직접 조작·타임라인 UX 갭을 먼저 닫은 예외적인 제품 완성도 단계였다. P1도 `.mskl` v1/`.mbin` v2/C ABI v1 compatibility를 유지한다.
 
 ---
 
 ## 11. 미결정 사항
 
-- [ ] `.matl` 텍스처 아틀라스 포맷 상세 설계
-- [ ] 본 계층 런타임 자료구조 설계
-- [ ] 에디터 타임라인 UI 설계
-- [ ] 마일스톤 단계별 계획
+- [x] `.matl` 텍스처 아틀라스 포맷 상세 설계
+- [x] 본 계층 런타임 자료구조 설계
+- [x] 편집 P0와 MAR-128 완료 checkpoint 뒤 MAR-154~191 선형 P1 마일스톤·타임라인 우선순위
+- [ ] canonical `.marrow` authoring graph의 version/stable-ID/migration 설계
+- [ ] 자체 리그·메시 topology 저작 재개 조건과 범위

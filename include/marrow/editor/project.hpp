@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -18,6 +20,34 @@ enum class TransformTimelineChannel {
     Translate,
     Scale,
     Shear,
+};
+
+enum class AnimationEditKind {
+    Create,
+    Rename,
+    Delete,
+    SetDuration,
+    Unknown,
+};
+
+/**
+ * @brief One ordered animation-catalog mutation applied to the referenced runtime skeleton.
+ *
+ * Create stores a complete animation JSON object so duplicates preserve timeline
+ * families that the current editor does not understand. Rename moves the
+ * effective animation object, Delete hides it from the authored runtime, and
+ * SetDuration authors the optional runtime duration. Unknown operations remain
+ * opaque editor data and are ignored by this version during materialization.
+ */
+struct AnimationEdit {
+    AnimationEditKind kind{AnimationEditKind::Create};
+    std::string name;
+    std::string new_name;
+    double duration{0.0};
+    runtime::json::Value animation{runtime::json::Value::Object{}, {}};
+    // Original edit object. Known fields are overlaid during serialization so
+    // additive fields survive; Unknown edits serialize from this value exactly.
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
 };
 
 enum class OnionSkinMode {
@@ -57,6 +87,49 @@ struct TransformTimelineEdit {
     TransformTimelineChannel channel{TransformTimelineChannel::Rotate};
     std::vector<TransformKeyframeEdit> keyframes;
 };
+
+/**
+ * @brief Partial value update for one transform keyframe.
+ *
+ * Rotate timelines consume `angle`; translate, scale, and shear timelines
+ * consume `x` and `y`. Omitted values preserve an existing key's value and
+ * use the default-initialized value when a key is inserted.
+ */
+struct TransformKeyframePatch {
+    // Absolute local rotation as displayed by the inspector/agent surface.
+    // The project-domain upsert converts it to the runtime format's
+    // setup-relative rotate-key angle.
+    std::optional<double> angle;
+    std::optional<double> x;
+    std::optional<double> y;
+};
+
+/** Finds a sorted key within a symmetric time tolerance. */
+template <typename Keyframe>
+typename std::vector<Keyframe>::iterator find_keyframe_near_time(
+    std::vector<Keyframe>& keyframes,
+    double time,
+    double epsilon = 1e-6) {
+    auto iterator = std::lower_bound(
+        keyframes.begin(),
+        keyframes.end(),
+        time,
+        [](const Keyframe& keyframe, double key_time) {
+            return keyframe.time < key_time;
+        });
+    if (iterator != keyframes.end() &&
+        std::abs(iterator->time - time) <= epsilon) {
+        return iterator;
+    }
+    if (iterator != keyframes.begin()) {
+        auto previous = iterator;
+        --previous;
+        if (std::abs(previous->time - time) <= epsilon) {
+            return previous;
+        }
+    }
+    return keyframes.end();
+}
 
 struct DeformKeyframeEdit {
     double time{0.0};
@@ -113,6 +186,29 @@ struct EventKeyframeEdit {
 struct EventTimelineEdit {
     std::string animation_name;
     std::vector<EventKeyframeEdit> keyframes;
+};
+
+struct SlotColorKeyframeEdit {
+    double time{0.0};
+    runtime::SlotColor color{};
+    runtime::Interpolation interpolation{};
+};
+
+struct SlotColorTimelineEdit {
+    std::string animation_name;
+    std::string slot_name;
+    std::vector<SlotColorKeyframeEdit> keyframes;
+};
+
+struct SlotAttachmentKeyframeEdit {
+    double time{0.0};
+    std::optional<std::string> attachment_name;
+};
+
+struct SlotAttachmentTimelineEdit {
+    std::string animation_name;
+    std::string slot_name;
+    std::vector<SlotAttachmentKeyframeEdit> keyframes;
 };
 
 struct IkConstraintEdit {
@@ -202,6 +298,155 @@ struct ViewportState {
     DebugOverlaySettings debug_overlay{};
 };
 
+struct TimelineSettings {
+    double frames_per_second{60.0};
+};
+
+enum class ParameterAuthoringType {
+    Continuous,
+    Discrete,
+};
+
+/**
+ * @brief Editor-owned parameter definition before runtime index resolution.
+ *
+ * The source document remains ID based. Runtime loaders resolve parameter and
+ * target indices only after project export, so those derived indices never
+ * enter the `.marrow` authoring graph.
+ */
+struct ParameterAuthoringDefinition {
+    std::string id;
+    std::string name;
+    double min_value{0.0};
+    double max_value{1.0};
+    double default_value{0.0};
+    ParameterAuthoringType type{ParameterAuthoringType::Continuous};
+    bool clamp{true};
+    std::optional<double> ui_step;
+    std::optional<std::string> units;
+};
+
+struct ParameterGroupAuthoringDefinition {
+    std::string id;
+    std::string name;
+    std::vector<std::string> parameter_ids;
+    bool collapsed{false};
+    std::optional<std::string> color_tag;
+    std::optional<std::string> exclusive_mode;
+};
+
+/**
+ * @brief Lossless, ID-based project form of one runtime parameter shape.
+ *
+ * Runtime-only resolved indices inherited from the runtime definition remain
+ * unset in project data. `preserved_source` retains additive fields unknown to this
+ * editor version, including unknown fields on nested keyforms.
+ */
+struct ParameterShapeAuthoringDefinition : runtime::ParameterShapeDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one warp or rotation deformer. */
+struct ParameterDeformerAuthoringDefinition : runtime::ParameterDeformerDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one skeleton-local ArtPath. */
+struct ArtPathAuthoringDefinition : runtime::ArtPathDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one expression preset. */
+struct ExpressionAuthoringDefinition : runtime::ExpressionDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Lossless project form of one lip-sync target mapping. */
+struct LipSyncMappingAuthoringDefinition : runtime::LipSyncMappingDefinition {
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
+/** @brief Typed `.marrow.parameter_model.lip_sync` section. */
+struct LipSyncAuthoringDefinition {
+    std::vector<LipSyncMappingAuthoringDefinition> mappings;
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+
+    bool empty() const noexcept;
+};
+
+// These conversion helpers are shared by project loading, the UI-free
+// authoring primitives, and the editor shell. Known fields are rebuilt from
+// typed data while unknown additive fields are retained from `preserved_source`.
+bool parse_parameter_shape_authoring_value(
+    const runtime::json::Value& value,
+    ParameterShapeAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_parameter_shape_authoring_value(
+    const ParameterShapeAuthoringDefinition& definition);
+
+bool parse_parameter_deformer_authoring_value(
+    const runtime::json::Value& value,
+    ParameterDeformerAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_parameter_deformer_authoring_value(
+    const ParameterDeformerAuthoringDefinition& definition);
+
+bool parse_art_path_authoring_value(
+    const runtime::json::Value& value,
+    ArtPathAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_art_path_authoring_value(
+    const ArtPathAuthoringDefinition& definition);
+
+bool parse_expression_authoring_value(
+    const runtime::json::Value& value,
+    ExpressionAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_expression_authoring_value(
+    const ExpressionAuthoringDefinition& definition);
+
+bool parse_lip_sync_authoring_value(
+    const runtime::json::Value& value,
+    LipSyncAuthoringDefinition* definition_out,
+    std::string* error_out = nullptr);
+runtime::json::Value build_lip_sync_authoring_value(
+    const LipSyncAuthoringDefinition& definition);
+
+/**
+ * @brief Optional `.marrow.parameter_model` authoring source.
+ *
+ * Every milestone-owned family is typed. `source` values preserve unknown
+ * additive fields at section, entry, and nested-entry levels when known fields
+ * are rewritten.
+ */
+struct ParameterModel {
+    std::vector<ParameterAuthoringDefinition> parameters;
+    std::vector<ParameterGroupAuthoringDefinition> groups;
+    std::vector<ParameterDeformerAuthoringDefinition> deformers;
+    std::vector<ParameterShapeAuthoringDefinition> blend_shapes;
+    std::vector<ArtPathAuthoringDefinition> art_paths;
+    std::vector<ExpressionAuthoringDefinition> expressions;
+    LipSyncAuthoringDefinition lip_sync;
+    runtime::json::Value source{runtime::json::Value::Object{}, {}};
+
+    bool empty() const noexcept;
+    const ParameterAuthoringDefinition* find_parameter(std::string_view id) const;
+    ParameterAuthoringDefinition* find_parameter(std::string_view id);
+    const ParameterGroupAuthoringDefinition* find_group(std::string_view id) const;
+    ParameterGroupAuthoringDefinition* find_group(std::string_view id);
+    const ParameterShapeAuthoringDefinition* find_shape(std::string_view id) const;
+    ParameterShapeAuthoringDefinition* find_shape(std::string_view id);
+    const ParameterDeformerAuthoringDefinition* find_deformer(std::string_view id) const;
+    ParameterDeformerAuthoringDefinition* find_deformer(std::string_view id);
+    const ArtPathAuthoringDefinition* find_art_path(std::string_view id) const;
+    ArtPathAuthoringDefinition* find_art_path(std::string_view id);
+    const ExpressionAuthoringDefinition* find_expression(std::string_view id) const;
+    ExpressionAuthoringDefinition* find_expression(std::string_view id);
+    const LipSyncMappingAuthoringDefinition* find_lip_mapping(
+        std::string_view parameter_id) const;
+    LipSyncMappingAuthoringDefinition* find_lip_mapping(std::string_view parameter_id);
+};
+
 struct ProjectMetadata {
     std::string name;
     std::string active_animation;
@@ -209,22 +454,31 @@ struct ProjectMetadata {
     std::filesystem::path export_directory{"exports"};
     std::string notes;
     ViewportState viewport{};
+    TimelineSettings timeline{};
 };
 
 struct ProjectData {
     std::string marrow_version{"1.0"};
     RuntimeAssetReferences runtime_assets;
     ProjectMetadata editor_metadata;
+    std::vector<AnimationEdit> animation_edits;
     std::vector<TransformTimelineEdit> transform_timeline_edits;
     std::vector<MeshDeformTimelineEdit> mesh_deform_timeline_edits;
     std::vector<MeshWeightAttachmentEdit> mesh_weight_attachment_edits;
     std::vector<DrawOrderTimelineEdit> draw_order_timeline_edits;
     std::vector<EventTimelineEdit> event_timeline_edits;
+    std::vector<SlotColorTimelineEdit> slot_color_timeline_edits;
+    std::vector<SlotAttachmentTimelineEdit> slot_attachment_timeline_edits;
     std::vector<IkConstraintEdit> ik_constraint_edits;
     std::vector<PathConstraintEdit> path_constraint_edits;
     std::vector<TransformConstraintEdit> transform_constraint_edits;
     std::vector<PhysicsConstraintEdit> physics_constraint_edits;
+    std::optional<ParameterModel> parameter_model;
     std::vector<AtlasPackDefinition> atlas_pack_definitions;
+    // Unknown top-level additive fields from the loaded `.marrow` document.
+    // Known fields are overlaid during serialization; this value is never
+    // exported into the runtime document.
+    runtime::json::Value preserved_root{runtime::json::Value::Object{}, {}};
     std::filesystem::path source_path;
 
     /**
@@ -339,6 +593,18 @@ struct ProjectData {
      */
     EventTimelineEdit* find_event_timeline_edit(
         std::string_view animation_name);
+    const SlotColorTimelineEdit* find_slot_color_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name) const;
+    SlotColorTimelineEdit* find_slot_color_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name);
+    const SlotAttachmentTimelineEdit* find_slot_attachment_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name) const;
+    SlotAttachmentTimelineEdit* find_slot_attachment_timeline_edit(
+        std::string_view animation_name,
+        std::string_view slot_name);
     /**
      * @brief Finds an IK constraint edit by name.
      * @param name Constraint name to search.
@@ -402,6 +668,68 @@ struct ProjectData {
     AtlasPackDefinition* find_atlas_pack_definition(
         const std::filesystem::path& atlas_path);
 };
+
+TransformTimelineEdit* ensure_transform_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    TransformTimelineChannel channel);
+
+MeshDeformTimelineEdit* ensure_mesh_deform_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name,
+    std::string_view attachment_name);
+
+DrawOrderTimelineEdit* ensure_draw_order_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name);
+
+EventTimelineEdit* ensure_event_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name);
+
+SlotColorTimelineEdit* ensure_slot_color_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name);
+
+SlotAttachmentTimelineEdit* ensure_slot_attachment_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name);
+
+double setup_relative_rotation_key(
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view bone_name,
+    double absolute_local_rotation);
+
+/**
+ * @brief Inserts or updates one project-owned transform keyframe.
+ *
+ * The timeline and key are created when absent. When the project has not yet
+ * materialized that channel, all effective runtime keys are copied first so a
+ * first edit cannot replace the imported track. Keys remain time-sorted and a
+ * key within 1e-6 seconds of `time` is updated in place. Inputs are absolute
+ * local values; rotate angles are converted to setup-relative runtime keys.
+ * Newly inserted keys use linear interpolation.
+ *
+ * @return The inserted or updated keyframe.
+ */
+TransformKeyframeEdit& upsert_transform_keyframe(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    TransformTimelineChannel channel,
+    double time,
+    const TransformKeyframePatch& patch);
 
 struct ProjectLoadResult {
     std::shared_ptr<ProjectData> project;
@@ -474,51 +802,6 @@ struct ProjectExportResult {
     }
 };
 
-struct ProjectCommand {
-    std::string label;
-    ProjectData before_project;
-    ProjectData after_project;
-    std::string before_serialized;
-    std::string after_serialized;
-};
-
-class ProjectCommandStack {
-public:
-    /// @brief Reports whether an undo command is available.
-    /// @return `true` when the undo stack is not empty.
-    bool can_undo() const;
-    /// @brief Reports whether a redo command is available.
-    /// @return `true` when the redo stack is not empty.
-    bool can_redo() const;
-    /// @brief Returns the number of queued undo commands.
-    /// @return Undo stack depth.
-    std::size_t undo_count() const;
-    /// @brief Returns the number of queued redo commands.
-    /// @return Redo stack depth.
-    std::size_t redo_count() const;
-    /// @brief Clears both undo and redo stacks.
-    void clear();
-    /// @brief Peeks at the next undo command without consuming it.
-    /// @return Pointer to the pending undo command, or `nullptr` when none exists.
-    const ProjectCommand* peek_undo() const;
-    /// @brief Peeks at the next redo command without consuming it.
-    /// @return Pointer to the pending redo command, or `nullptr` when none exists.
-    const ProjectCommand* peek_redo() const;
-    /**
-     * @brief Pushes a new command and clears redo history.
-     * @param command Command snapshot to append.
-     */
-    void push(ProjectCommand command);
-    /// @brief Moves the top undo command onto the redo stack.
-    void commit_undo();
-    /// @brief Moves the top redo command back onto the undo stack.
-    void commit_redo();
-
-private:
-    std::vector<ProjectCommand> undo_commands_;
-    std::vector<ProjectCommand> redo_commands_;
-};
-
 struct ProjectExportOptions {
     std::filesystem::path skeleton_output_path;
     std::optional<std::filesystem::path> binary_output_path;
@@ -563,22 +846,20 @@ ProjectRuntimeResult build_project_runtime(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document);
 /**
+ * @brief Builds the effective runtime JSON document before typed runtime parsing.
+ * @param project Project containing editor-side overrides.
+ * @param base_skeleton_document Referenced runtime skeleton document.
+ * @return A deep-copied document with animation, timeline, mesh, and constraint edits applied.
+ */
+runtime::json::Document build_project_runtime_document(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document);
+/**
  * @brief Serializes a project into `.marrow` JSON text.
  * @param project Project to serialize.
  * @return Pretty-printed `.marrow` JSON text.
  */
 std::string serialize_project(const ProjectData& project);
-/**
- * @brief Creates an undoable command from two project snapshots.
- * @param label User-facing command label.
- * @param before_project Project state before the edit.
- * @param after_project Project state after the edit.
- * @return Command snapshot, or `std::nullopt` when the edit produces no serialized change.
- */
-std::optional<ProjectCommand> make_project_command(
-    std::string label,
-    const ProjectData& before_project,
-    const ProjectData& after_project);
 /**
  * @brief Saves a project to disk.
  * @param project Project to serialize and save.

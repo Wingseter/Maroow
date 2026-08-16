@@ -2,6 +2,7 @@
 #include "atlas_packer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -301,6 +302,471 @@ std::optional<LoadError> parse_runtime_assets(
     return std::nullopt;
 }
 
+std::optional<LoadError> read_required_boolean(
+    const Document& document,
+    const Value& object,
+    std::string_view key,
+    std::string_view json_path,
+    bool* value_out) {
+    const Value* member = nullptr;
+    if (const auto error = marrow::runtime::json::require_member(
+            document, object, key, Value::Type::Boolean, json_path, &member)) {
+        return error;
+    }
+    *value_out = member->as_boolean();
+    return std::nullopt;
+}
+
+template <typename Definition, typename Parse>
+std::optional<LoadError> parse_parameter_model_typed_array(
+    const Document& document,
+    const Value& model,
+    std::string_view key,
+    std::vector<Definition>* values_out,
+    Parse&& parse) {
+    const Value* array = find_optional_member(model, key);
+    if (array == nullptr) {
+        values_out->clear();
+        return std::nullopt;
+    }
+    const std::string path = "$.parameter_model." + std::string(key);
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *array, Value::Type::Array, path)) {
+        return error;
+    }
+    std::vector<Definition> values;
+    values.reserve(array->as_array().size());
+    std::vector<std::string> ids;
+    for (std::size_t index = 0U; index < array->as_array().size(); ++index) {
+        const Value& value = array->as_array()[index];
+        const std::string entry_path = path + "[" + std::to_string(index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, value, Value::Type::Object, entry_path)) {
+            return error;
+        }
+        Definition definition;
+        std::string message;
+        if (!parse(value, &definition, &message)) {
+            return validation_error(
+                document,
+                value.location(),
+                entry_path,
+                message.empty() ? "invalid typed parameter-model definition" : message);
+        }
+        if (definition.id.empty()) {
+            return validation_error(
+                document, value.location(), entry_path + ".id", "id must not be empty");
+        }
+        if (std::find(ids.begin(), ids.end(), definition.id) != ids.end()) {
+            return validation_error(
+                document, value.location(), entry_path + ".id", "ids must be unique");
+        }
+        ids.push_back(definition.id);
+        values.push_back(std::move(definition));
+    }
+    *values_out = std::move(values);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_parameter_model(
+    const Document& document,
+    const Value& root,
+    std::optional<ParameterModel>* model_out) {
+    const Value* model_value = find_optional_member(root, "parameter_model");
+    if (model_value == nullptr) {
+        model_out->reset();
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *model_value, Value::Type::Object, "$.parameter_model")) {
+        return error;
+    }
+
+    ParameterModel model;
+    model.source = *model_value;
+
+    if (const Value* parameters = find_optional_member(*model_value, "parameters")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document,
+                *parameters,
+                Value::Type::Array,
+                "$.parameter_model.parameters")) {
+            return error;
+        }
+        std::vector<std::string> ids;
+        model.parameters.reserve(parameters->as_array().size());
+        for (std::size_t index = 0U; index < parameters->as_array().size(); ++index) {
+            const Value& value = parameters->as_array()[index];
+            const std::string path =
+                "$.parameter_model.parameters[" + std::to_string(index) + "]";
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, value, Value::Type::Object, path)) {
+                return error;
+            }
+            ParameterAuthoringDefinition parameter;
+            std::string type;
+            if (const auto error = read_required_string(
+                    document, value, "id", path, &parameter.id)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, value, "name", path, &parameter.name)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, value, "min", path, &parameter.min_value)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, value, "max", path, &parameter.max_value)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, value, "default", path, &parameter.default_value)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, value, "type", path, &type)) {
+                return error;
+            }
+            if (const auto error = read_required_boolean(
+                    document, value, "clamp", path, &parameter.clamp)) {
+                return error;
+            }
+            if (parameter.id.empty() || parameter.name.empty()) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path,
+                    "parameter id and name must not be empty");
+            }
+            if (!std::isfinite(parameter.min_value) ||
+                !std::isfinite(parameter.max_value) ||
+                !std::isfinite(parameter.default_value) ||
+                parameter.min_value > parameter.max_value ||
+                (parameter.clamp &&
+                 (parameter.default_value < parameter.min_value ||
+                  parameter.default_value > parameter.max_value))) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path,
+                    "parameter range and default must be finite and ordered");
+            }
+            if (type == "continuous") {
+                parameter.type = ParameterAuthoringType::Continuous;
+            } else if (type == "discrete") {
+                parameter.type = ParameterAuthoringType::Discrete;
+            } else {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path + ".type",
+                    "type must be continuous or discrete");
+            }
+            double ui_step = 0.0;
+            if (const auto error = read_optional_number(
+                    document, value, "ui_step", path, &ui_step)) {
+                return error;
+            }
+            if (find_optional_member(value, "ui_step") != nullptr) {
+                if (!std::isfinite(ui_step) || ui_step <= 0.0) {
+                    return validation_error(
+                        document,
+                        value.location(),
+                        path + ".ui_step",
+                        "ui_step must be finite and greater than zero");
+                }
+                parameter.ui_step = ui_step;
+            }
+            std::string units;
+            if (const auto error = read_optional_string(
+                    document, value, "units", path, &units)) {
+                return error;
+            }
+            if (find_optional_member(value, "units") != nullptr) {
+                parameter.units = std::move(units);
+            }
+            if (std::find(ids.begin(), ids.end(), parameter.id) != ids.end()) {
+                return validation_error(
+                    document, value.location(), path + ".id", "parameter ids must be unique");
+            }
+            ids.push_back(parameter.id);
+            model.parameters.push_back(std::move(parameter));
+        }
+    }
+
+    if (const Value* groups = find_optional_member(*model_value, "groups")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document,
+                *groups,
+                Value::Type::Array,
+                "$.parameter_model.groups")) {
+            return error;
+        }
+        std::vector<std::string> ids;
+        model.groups.reserve(groups->as_array().size());
+        for (std::size_t index = 0U; index < groups->as_array().size(); ++index) {
+            const Value& value = groups->as_array()[index];
+            const std::string path =
+                "$.parameter_model.groups[" + std::to_string(index) + "]";
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, value, Value::Type::Object, path)) {
+                return error;
+            }
+            ParameterGroupAuthoringDefinition group;
+            if (const auto error = read_required_string(
+                    document, value, "id", path, &group.id)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, value, "name", path, &group.name)) {
+                return error;
+            }
+            const Value* parameter_ids = nullptr;
+            if (const auto error = marrow::runtime::json::require_member(
+                    document,
+                    value,
+                    "parameters",
+                    Value::Type::Array,
+                    path,
+                    &parameter_ids)) {
+                return error;
+            }
+            if (const auto error = parse_string_array(
+                    document,
+                    *parameter_ids,
+                    path + ".parameters",
+                    &group.parameter_ids)) {
+                return error;
+            }
+            if (const auto error = read_optional_boolean(
+                    document, value, "collapsed", path, &group.collapsed)) {
+                return error;
+            }
+            std::string color_tag;
+            if (const auto error = read_optional_string(
+                    document, value, "color_tag", path, &color_tag)) {
+                return error;
+            }
+            if (find_optional_member(value, "color_tag") != nullptr) {
+                group.color_tag = std::move(color_tag);
+            }
+            std::string exclusive_mode;
+            if (const auto error = read_optional_string(
+                    document, value, "exclusive_mode", path, &exclusive_mode)) {
+                return error;
+            }
+            if (find_optional_member(value, "exclusive_mode") != nullptr) {
+                group.exclusive_mode = std::move(exclusive_mode);
+            }
+            if (group.id.empty() || group.name.empty()) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path,
+                    "group id and name must not be empty");
+            }
+            if (std::find(ids.begin(), ids.end(), group.id) != ids.end()) {
+                return validation_error(
+                    document, value.location(), path + ".id", "group ids must be unique");
+            }
+            std::vector<std::string> sorted_ids = group.parameter_ids;
+            std::sort(sorted_ids.begin(), sorted_ids.end());
+            if (std::adjacent_find(sorted_ids.begin(), sorted_ids.end()) != sorted_ids.end()) {
+                return validation_error(
+                    document,
+                    value.location(),
+                    path + ".parameters",
+                    "group parameter ids must be unique");
+            }
+            for (const std::string& parameter_id : group.parameter_ids) {
+                if (model.find_parameter(parameter_id) == nullptr) {
+                    return validation_error(
+                        document,
+                        value.location(),
+                        path + ".parameters",
+                        "group references an unknown parameter id");
+                }
+            }
+            ids.push_back(group.id);
+            model.groups.push_back(std::move(group));
+        }
+    }
+
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "deformers",
+            &model.deformers,
+            parse_parameter_deformer_authoring_value)) {
+        return error;
+    }
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "blend_shapes",
+            &model.blend_shapes,
+            parse_parameter_shape_authoring_value)) {
+        return error;
+    }
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "art_paths",
+            &model.art_paths,
+            parse_art_path_authoring_value)) {
+        return error;
+    }
+    if (const auto error = parse_parameter_model_typed_array(
+            document,
+            *model_value,
+            "expressions",
+            &model.expressions,
+            parse_expression_authoring_value)) {
+        return error;
+    }
+    if (const Value* lip_sync = find_optional_member(*model_value, "lip_sync")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document,
+                *lip_sync,
+                Value::Type::Object,
+                "$.parameter_model.lip_sync")) {
+            return error;
+        }
+        std::string message;
+        if (!parse_lip_sync_authoring_value(*lip_sync, &model.lip_sync, &message)) {
+            return validation_error(
+                document,
+                lip_sync->location(),
+                "$.parameter_model.lip_sync",
+                message.empty() ? "invalid typed lip-sync definition" : message);
+        }
+    }
+
+    *model_out = model.empty()
+        ? std::optional<ParameterModel>{}
+        : std::optional<ParameterModel>{std::move(model)};
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_animation_edits(
+    const Document& document,
+    const Value& root,
+    std::vector<AnimationEdit>* edits_out) {
+    const Value* edits_value = find_optional_member(root, "animation_edits");
+    if (edits_value == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *edits_value, Value::Type::Array, "$.animation_edits")) {
+        return error;
+    }
+
+    std::vector<AnimationEdit> edits;
+    edits.reserve(edits_value->as_array().size());
+    for (std::size_t index = 0; index < edits_value->as_array().size(); ++index) {
+        const Value& edit_value = edits_value->as_array()[index];
+        const std::string edit_path = "$.animation_edits[" + std::to_string(index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, edit_value, Value::Type::Object, edit_path)) {
+            return error;
+        }
+
+        std::string operation;
+        if (const auto error = read_required_string(
+                document, edit_value, "op", edit_path, &operation)) {
+            return error;
+        }
+        if (operation.empty()) {
+            return validation_error(
+                document,
+                edit_value.location(),
+                edit_path + ".op",
+                "operation must not be empty");
+        }
+
+        AnimationEdit edit;
+        edit.preserved_source = edit_value;
+        if (operation == "create") {
+            edit.kind = AnimationEditKind::Create;
+            if (const auto error = read_required_string(
+                    document, edit_value, "name", edit_path, &edit.name)) {
+                return error;
+            }
+            const Value* animation_value = nullptr;
+            if (const auto error = marrow::runtime::json::require_member(
+                    document,
+                    edit_value,
+                    "animation",
+                    Value::Type::Object,
+                    edit_path,
+                    &animation_value)) {
+                return error;
+            }
+            edit.animation = *animation_value;
+        } else if (operation == "rename") {
+            edit.kind = AnimationEditKind::Rename;
+            if (const auto error = read_required_string(
+                    document, edit_value, "from", edit_path, &edit.name)) {
+                return error;
+            }
+            if (const auto error = read_required_string(
+                    document, edit_value, "to", edit_path, &edit.new_name)) {
+                return error;
+            }
+        } else if (operation == "delete") {
+            edit.kind = AnimationEditKind::Delete;
+            if (const auto error = read_required_string(
+                    document, edit_value, "name", edit_path, &edit.name)) {
+                return error;
+            }
+        } else if (operation == "set_duration") {
+            edit.kind = AnimationEditKind::SetDuration;
+            if (const auto error = read_required_string(
+                    document, edit_value, "name", edit_path, &edit.name)) {
+                return error;
+            }
+            if (const auto error = read_required_number(
+                    document, edit_value, "duration", edit_path, &edit.duration)) {
+                return error;
+            }
+            if (!std::isfinite(edit.duration) || edit.duration < 0.0 ||
+                edit.duration > static_cast<double>(
+                    std::numeric_limits<runtime::AnimationScalar>::max())) {
+                return validation_error(
+                    document,
+                    edit_value.location(),
+                    edit_path + ".duration",
+                    "duration must be finite, non-negative, and within the runtime float32 range");
+            }
+        } else {
+            edit.kind = AnimationEditKind::Unknown;
+        }
+
+        if (edit.kind != AnimationEditKind::Unknown &&
+            (edit.name.empty() ||
+             (edit.kind == AnimationEditKind::Rename && edit.new_name.empty()))) {
+            return validation_error(
+                document,
+                edit_value.location(),
+                edit_path,
+                "animation names must not be empty");
+        }
+        if (edit.kind == AnimationEditKind::Rename && edit.name == edit.new_name) {
+            return validation_error(
+                document,
+                edit_value.location(),
+                edit_path,
+                "rename source and destination must differ");
+        }
+        edits.push_back(std::move(edit));
+    }
+
+    *edits_out = std::move(edits);
+    return std::nullopt;
+}
+
 std::optional<LoadError> parse_editor_metadata(
     const Document& document,
     const Value& root,
@@ -345,6 +811,29 @@ std::optional<LoadError> parse_editor_metadata(
         if (const auto error = parse_string_array(
                 document, *preview_skins, "$.editor.preview_skins", &metadata.preview_skins)) {
             return error;
+        }
+    }
+
+    if (const Value* timeline = find_optional_member(*editor, "timeline")) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document, *timeline, Value::Type::Object, "$.editor.timeline")) {
+            return error;
+        }
+        if (const auto error = read_optional_number(
+                document,
+                *timeline,
+                "fps",
+                "$.editor.timeline",
+                &metadata.timeline.frames_per_second)) {
+            return error;
+        }
+        if (!std::isfinite(metadata.timeline.frames_per_second) ||
+            metadata.timeline.frames_per_second <= 0.0) {
+            return validation_error(
+                document,
+                timeline->location(),
+                "$.editor.timeline.fps",
+                "timeline fps must be finite and greater than zero");
         }
     }
 
@@ -1932,6 +2421,232 @@ std::optional<LoadError> parse_event_timeline_edits(
     return std::nullopt;
 }
 
+std::optional<LoadError> parse_slot_color_keyframes(
+    const Document& document,
+    const Value& timeline_value,
+    std::string_view json_path,
+    std::vector<SlotColorKeyframeEdit>* keyframes_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, timeline_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+    if (timeline_value.as_array().empty()) {
+        return validation_error(
+            document,
+            timeline_value.location(),
+            std::string(json_path),
+            "slot color timeline edits must contain at least one keyframe");
+    }
+
+    std::vector<SlotColorKeyframeEdit> keyframes;
+    keyframes.reserve(timeline_value.as_array().size());
+    double previous_time = 0.0;
+    bool has_previous_time = false;
+    for (std::size_t keyframe_index = 0;
+         keyframe_index < timeline_value.as_array().size();
+         ++keyframe_index) {
+        const Value& keyframe_value = timeline_value.as_array()[keyframe_index];
+        const std::string keyframe_path =
+            std::string(json_path) + "[" + std::to_string(keyframe_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, keyframe_value, Value::Type::Object, keyframe_path)) {
+            return error;
+        }
+
+        SlotColorKeyframeEdit keyframe;
+        if (const auto error = read_required_number(
+                document, keyframe_value, "time", keyframe_path, &keyframe.time)) {
+            return error;
+        }
+        const Value* color_value = nullptr;
+        if (const auto error = marrow::runtime::json::require_member(
+                document,
+                keyframe_value,
+                "color",
+                Value::Type::Object,
+                keyframe_path,
+                &color_value)) {
+            return error;
+        }
+        double r = 1.0;
+        double g = 1.0;
+        double b = 1.0;
+        double a = 1.0;
+        if (const auto error = read_required_number(document, *color_value, "r", keyframe_path + ".color", &r)) {
+            return error;
+        }
+        if (const auto error = read_required_number(document, *color_value, "g", keyframe_path + ".color", &g)) {
+            return error;
+        }
+        if (const auto error = read_required_number(document, *color_value, "b", keyframe_path + ".color", &b)) {
+            return error;
+        }
+        if (const auto error = read_required_number(document, *color_value, "a", keyframe_path + ".color", &a)) {
+            return error;
+        }
+        keyframe.color = runtime::SlotColor{r, g, b, a};
+        if (const auto error = parse_interpolation(
+                document, keyframe_value, keyframe_path, &keyframe.interpolation)) {
+            return error;
+        }
+        if (has_previous_time && keyframe.time <= previous_time) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".time",
+                "slot color timeline edit keyframe times must be strictly increasing");
+        }
+        previous_time = keyframe.time;
+        has_previous_time = true;
+        keyframes.push_back(std::move(keyframe));
+    }
+
+    *keyframes_out = std::move(keyframes);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_slot_attachment_keyframes(
+    const Document& document,
+    const Value& timeline_value,
+    std::string_view json_path,
+    std::vector<SlotAttachmentKeyframeEdit>* keyframes_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, timeline_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+    if (timeline_value.as_array().empty()) {
+        return validation_error(
+            document,
+            timeline_value.location(),
+            std::string(json_path),
+            "slot attachment timeline edits must contain at least one keyframe");
+    }
+
+    std::vector<SlotAttachmentKeyframeEdit> keyframes;
+    keyframes.reserve(timeline_value.as_array().size());
+    double previous_time = 0.0;
+    bool has_previous_time = false;
+    for (std::size_t keyframe_index = 0;
+         keyframe_index < timeline_value.as_array().size();
+         ++keyframe_index) {
+        const Value& keyframe_value = timeline_value.as_array()[keyframe_index];
+        const std::string keyframe_path =
+            std::string(json_path) + "[" + std::to_string(keyframe_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, keyframe_value, Value::Type::Object, keyframe_path)) {
+            return error;
+        }
+
+        SlotAttachmentKeyframeEdit keyframe;
+        if (const auto error = read_required_number(
+                document, keyframe_value, "time", keyframe_path, &keyframe.time)) {
+            return error;
+        }
+        const Value* attachment_value = find_optional_member(keyframe_value, "attachment");
+        if (attachment_value == nullptr) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".attachment",
+                "slot attachment keyframes require attachment string or null");
+        }
+        if (attachment_value->is_string()) {
+            keyframe.attachment_name = attachment_value->as_string();
+        } else if (!attachment_value->is_null()) {
+            return validation_error(
+                document,
+                attachment_value->location(),
+                keyframe_path + ".attachment",
+                "attachment must be a string or null");
+        }
+        if (has_previous_time && keyframe.time <= previous_time) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".time",
+                "slot attachment timeline edit keyframe times must be strictly increasing");
+        }
+        previous_time = keyframe.time;
+        has_previous_time = true;
+        keyframes.push_back(std::move(keyframe));
+    }
+
+    *keyframes_out = std::move(keyframes);
+    return std::nullopt;
+}
+
+std::optional<LoadError> parse_slot_timeline_edits(
+    const Document& document,
+    const Value& root,
+    std::vector<SlotColorTimelineEdit>* color_edits_out,
+    std::vector<SlotAttachmentTimelineEdit>* attachment_edits_out) {
+    color_edits_out->clear();
+    attachment_edits_out->clear();
+
+    const Value* timeline_edits = find_optional_member(root, "timeline_edits");
+    if (timeline_edits == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *timeline_edits, Value::Type::Object, "$.timeline_edits")) {
+        return error;
+    }
+    const Value* animations = find_optional_member(*timeline_edits, "animations");
+    if (animations == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *animations, Value::Type::Object, "$.timeline_edits.animations")) {
+        return error;
+    }
+
+    for (const auto& [animation_name, animation_value] : animations->as_object()) {
+        const std::string animation_path =
+            "$.timeline_edits.animations." + animation_name;
+        if (const auto error = marrow::runtime::json::require_type(
+                document, animation_value, Value::Type::Object, animation_path)) {
+            return error;
+        }
+        const Value* slots = find_optional_member(animation_value, "slots");
+        if (slots == nullptr) {
+            continue;
+        }
+        if (const auto error = marrow::runtime::json::require_type(
+                document, *slots, Value::Type::Object, animation_path + ".slots")) {
+            return error;
+        }
+        for (const auto& [slot_name, slot_value] : slots->as_object()) {
+            const std::string slot_path = animation_path + ".slots." + slot_name;
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, slot_value, Value::Type::Object, slot_path)) {
+                return error;
+            }
+            if (const Value* color = find_optional_member(slot_value, "color")) {
+                SlotColorTimelineEdit edit;
+                edit.animation_name = animation_name;
+                edit.slot_name = slot_name;
+                if (const auto error = parse_slot_color_keyframes(
+                        document, *color, slot_path + ".color", &edit.keyframes)) {
+                    return error;
+                }
+                color_edits_out->push_back(std::move(edit));
+            }
+            if (const Value* attachment = find_optional_member(slot_value, "attachment")) {
+                SlotAttachmentTimelineEdit edit;
+                edit.animation_name = animation_name;
+                edit.slot_name = slot_name;
+                if (const auto error = parse_slot_attachment_keyframes(
+                        document, *attachment, slot_path + ".attachment", &edit.keyframes)) {
+                    return error;
+                }
+                attachment_edits_out->push_back(std::move(edit));
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
 std::optional<LoadError> parse_ik_constraint_edits(
     const Document& document,
     const Value& root,
@@ -2788,6 +3503,56 @@ Value build_event_keyframes_value(const EventTimelineEdit& edit) {
     return make_array_value(std::move(keyframes));
 }
 
+Value build_slot_color_keyframes_value(const SlotColorTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const SlotColorKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        Value::Object color_object;
+        color_object.emplace("r", make_number_value(keyframe.color.r));
+        color_object.emplace("g", make_number_value(keyframe.color.g));
+        color_object.emplace("b", make_number_value(keyframe.color.b));
+        color_object.emplace("a", make_number_value(keyframe.color.a));
+        keyframe_object.emplace("color", make_object_value(std::move(color_object)));
+        keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
+Value build_runtime_slot_color_keyframes_value(const SlotColorTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const SlotColorKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        keyframe_object.emplace("r", make_number_value(keyframe.color.r));
+        keyframe_object.emplace("g", make_number_value(keyframe.color.g));
+        keyframe_object.emplace("b", make_number_value(keyframe.color.b));
+        keyframe_object.emplace("a", make_number_value(keyframe.color.a));
+        keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
+Value build_slot_attachment_keyframes_value(const SlotAttachmentTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const SlotAttachmentKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        if (keyframe.attachment_name.has_value()) {
+            keyframe_object.emplace("attachment", make_string_value(*keyframe.attachment_name));
+        } else {
+            keyframe_object.emplace("attachment", make_null_value());
+        }
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
 Value build_ik_constraint_edits_value(const std::vector<IkConstraintEdit>& edits) {
     Value::Array constraints;
     constraints.reserve(edits.size());
@@ -2912,7 +3677,9 @@ Value build_timeline_edits_value(
     const std::vector<TransformTimelineEdit>& transform_edits,
     const std::vector<MeshDeformTimelineEdit>& mesh_deform_edits,
     const std::vector<DrawOrderTimelineEdit>& draw_order_edits,
-    const std::vector<EventTimelineEdit>& event_edits) {
+    const std::vector<EventTimelineEdit>& event_edits,
+    const std::vector<SlotColorTimelineEdit>& slot_color_edits,
+    const std::vector<SlotAttachmentTimelineEdit>& slot_attachment_edits) {
     Value::Object animations_object;
     for (const TransformTimelineEdit& edit : transform_edits) {
         auto& animation_value = animations_object[edit.animation_name];
@@ -2958,6 +3725,31 @@ Value build_timeline_edits_value(
         }
 
         animation_value.as_object()["events"] = build_event_keyframes_value(edit);
+    }
+
+    for (const SlotColorTimelineEdit& edit : slot_color_edits) {
+        auto& animation_value = animations_object[edit.animation_name];
+        if (!animation_value.is_object()) {
+            animation_value = make_object_value();
+        }
+        Value* slots_value = ensure_object_member(&animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["color"] = build_slot_color_keyframes_value(edit);
+        }
+    }
+
+    for (const SlotAttachmentTimelineEdit& edit : slot_attachment_edits) {
+        auto& animation_value = animations_object[edit.animation_name];
+        if (!animation_value.is_object()) {
+            animation_value = make_object_value();
+        }
+        Value* slots_value = ensure_object_member(&animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["attachment"] =
+                build_slot_attachment_keyframes_value(edit);
+        }
     }
 
     Value::Object timeline_edits;
@@ -3050,120 +3842,304 @@ Value build_mesh_weight_edits_value(
     return make_object_value(std::move(mesh_edits));
 }
 
-Value build_project_value(const ProjectData& project) {
-    Value::Object root;
-    root.emplace("marrow", make_string_value(project.marrow_version));
+Value build_animation_edits_value(const std::vector<AnimationEdit>& edits) {
+    Value::Array values;
+    values.reserve(edits.size());
+    for (const AnimationEdit& edit : edits) {
+        if (edit.kind == AnimationEditKind::Unknown) {
+            values.push_back(edit.preserved_source);
+            continue;
+        }
+        Value::Object object = edit.preserved_source.is_object()
+            ? edit.preserved_source.as_object()
+            : Value::Object{};
+        switch (edit.kind) {
+        case AnimationEditKind::Create:
+            object["op"] = make_string_value("create");
+            object["name"] = make_string_value(edit.name);
+            object["animation"] = edit.animation;
+            break;
+        case AnimationEditKind::Rename:
+            object["op"] = make_string_value("rename");
+            object["from"] = make_string_value(edit.name);
+            object["to"] = make_string_value(edit.new_name);
+            break;
+        case AnimationEditKind::Delete:
+            object["op"] = make_string_value("delete");
+            object["name"] = make_string_value(edit.name);
+            break;
+        case AnimationEditKind::SetDuration:
+            object["op"] = make_string_value("set_duration");
+            object["name"] = make_string_value(edit.name);
+            object["duration"] = make_number_value(edit.duration);
+            break;
+        case AnimationEditKind::Unknown:
+            break;
+        }
+        values.push_back(make_object_value(std::move(object)));
+    }
+    return make_array_value(std::move(values));
+}
 
-    Value::Object runtime_object;
-    runtime_object.emplace(
-        "skeleton",
-        make_string_value(project.runtime_assets.skeleton_path.generic_string()));
+const Value* find_source_entry_by_id(
+    const Value& source,
+    std::string_view collection,
+    std::string_view id) {
+    const Value* values = find_optional_member(source, collection);
+    if (values == nullptr || !values->is_array()) {
+        return nullptr;
+    }
+    for (const Value& value : values->as_array()) {
+        const Value* value_id = find_optional_member(value, "id");
+        if (value_id != nullptr && value_id->is_string() && value_id->as_string() == id) {
+            return &value;
+        }
+    }
+    return nullptr;
+}
+
+Value build_parameter_definition_value(
+    const ParameterModel& model,
+    const ParameterAuthoringDefinition& parameter) {
+    Value::Object object;
+    if (const Value* source = find_source_entry_by_id(
+            model.source, "parameters", parameter.id);
+        source != nullptr && source->is_object()) {
+        object = source->as_object();
+    }
+    object["id"] = make_string_value(parameter.id);
+    object["name"] = make_string_value(parameter.name);
+    object["min"] = make_number_value(parameter.min_value);
+    object["max"] = make_number_value(parameter.max_value);
+    object["default"] = make_number_value(parameter.default_value);
+    object["type"] = make_string_value(
+        parameter.type == ParameterAuthoringType::Continuous ? "continuous" : "discrete");
+    object["clamp"] = make_boolean_value(parameter.clamp);
+    if (parameter.ui_step.has_value()) {
+        object["ui_step"] = make_number_value(*parameter.ui_step);
+    } else {
+        object.erase("ui_step");
+    }
+    if (parameter.units.has_value()) {
+        object["units"] = make_string_value(*parameter.units);
+    } else {
+        object.erase("units");
+    }
+    return make_object_value(std::move(object));
+}
+
+Value build_parameter_group_value(
+    const ParameterModel& model,
+    const ParameterGroupAuthoringDefinition& group) {
+    Value::Object object;
+    if (const Value* source = find_source_entry_by_id(model.source, "groups", group.id);
+        source != nullptr && source->is_object()) {
+        object = source->as_object();
+    }
+    object["id"] = make_string_value(group.id);
+    object["name"] = make_string_value(group.name);
+    Value::Array parameter_ids;
+    parameter_ids.reserve(group.parameter_ids.size());
+    for (const std::string& parameter_id : group.parameter_ids) {
+        parameter_ids.push_back(make_string_value(parameter_id));
+    }
+    object["parameters"] = make_array_value(std::move(parameter_ids));
+    object["collapsed"] = make_boolean_value(group.collapsed);
+    if (group.color_tag.has_value()) {
+        object["color_tag"] = make_string_value(*group.color_tag);
+    } else {
+        object.erase("color_tag");
+    }
+    if (group.exclusive_mode.has_value()) {
+        object["exclusive_mode"] = make_string_value(*group.exclusive_mode);
+    } else {
+        object.erase("exclusive_mode");
+    }
+    return make_object_value(std::move(object));
+}
+
+Value build_parameter_model_value(const ParameterModel& model) {
+    Value::Object object = model.source.is_object()
+        ? model.source.as_object()
+        : Value::Object{};
+
+    Value::Array parameters;
+    parameters.reserve(model.parameters.size());
+    for (const ParameterAuthoringDefinition& parameter : model.parameters) {
+        parameters.push_back(build_parameter_definition_value(model, parameter));
+    }
+    object["parameters"] = make_array_value(std::move(parameters));
+
+    Value::Array groups;
+    groups.reserve(model.groups.size());
+    for (const ParameterGroupAuthoringDefinition& group : model.groups) {
+        groups.push_back(build_parameter_group_value(model, group));
+    }
+    object["groups"] = make_array_value(std::move(groups));
+
+    const auto typed_array = [](const auto& values, const auto& build) {
+        Value::Array array;
+        array.reserve(values.size());
+        for (const auto& value : values) {
+            array.push_back(build(value));
+        }
+        return make_array_value(std::move(array));
+    };
+    object["deformers"] = typed_array(
+        model.deformers, build_parameter_deformer_authoring_value);
+    object["blend_shapes"] = typed_array(
+        model.blend_shapes, build_parameter_shape_authoring_value);
+    object["art_paths"] = typed_array(
+        model.art_paths, build_art_path_authoring_value);
+    object["expressions"] = typed_array(
+        model.expressions, build_expression_authoring_value);
+    object["lip_sync"] = build_lip_sync_authoring_value(model.lip_sync);
+    return make_object_value(std::move(object));
+}
+
+Value::Object preserved_object_member(const Value& root, std::string_view key) {
+    const Value* member = find_optional_member(root, key);
+    return member != nullptr && member->is_object()
+        ? member->as_object()
+        : Value::Object{};
+}
+
+Value build_project_value(const ProjectData& project) {
+    Value::Object root = project.preserved_root.is_object()
+        ? project.preserved_root.as_object()
+        : Value::Object{};
+    root["marrow"] = make_string_value(project.marrow_version);
+
+    Value::Object runtime_object = preserved_object_member(project.preserved_root, "runtime");
+    runtime_object["skeleton"] =
+        make_string_value(project.runtime_assets.skeleton_path.generic_string());
     Value::Array atlas_paths;
     atlas_paths.reserve(project.runtime_assets.atlas_paths.size());
     for (const auto& atlas_path : project.runtime_assets.atlas_paths) {
         atlas_paths.push_back(make_string_value(atlas_path.generic_string()));
     }
-    runtime_object.emplace("atlases", make_array_value(std::move(atlas_paths)));
-    root.emplace("runtime", make_object_value(std::move(runtime_object)));
+    runtime_object["atlases"] = make_array_value(std::move(atlas_paths));
+    root["runtime"] = make_object_value(std::move(runtime_object));
 
-    Value::Object editor_object;
-    editor_object.emplace("name", make_string_value(project.editor_metadata.name));
-    editor_object.emplace(
-        "active_animation",
-        make_string_value(project.editor_metadata.active_animation));
+    Value::Object editor_object = preserved_object_member(project.preserved_root, "editor");
+    editor_object["name"] = make_string_value(project.editor_metadata.name);
+    editor_object["active_animation"] =
+        make_string_value(project.editor_metadata.active_animation);
     Value::Array preview_skins;
     preview_skins.reserve(project.editor_metadata.preview_skins.size());
     for (const std::string& preview_skin : project.editor_metadata.preview_skins) {
         preview_skins.push_back(make_string_value(preview_skin));
     }
-    editor_object.emplace("preview_skins", make_array_value(std::move(preview_skins)));
-    editor_object.emplace(
-        "export_directory",
-        make_string_value(project.editor_metadata.export_directory.generic_string()));
-    editor_object.emplace("notes", make_string_value(project.editor_metadata.notes));
+    editor_object["preview_skins"] = make_array_value(std::move(preview_skins));
+    editor_object["export_directory"] =
+        make_string_value(project.editor_metadata.export_directory.generic_string());
+    editor_object["notes"] = make_string_value(project.editor_metadata.notes);
+    Value::Object timeline_object;
+    if (const auto timeline = editor_object.find("timeline");
+        timeline != editor_object.end() && timeline->second.is_object()) {
+        timeline_object = timeline->second.as_object();
+    }
+    timeline_object["fps"] =
+        make_number_value(project.editor_metadata.timeline.frames_per_second);
+    editor_object["timeline"] = make_object_value(std::move(timeline_object));
     Value::Object viewport_object;
-    viewport_object.emplace("pan_x", make_number_value(project.editor_metadata.viewport.pan_x));
-    viewport_object.emplace("pan_y", make_number_value(project.editor_metadata.viewport.pan_y));
-    viewport_object.emplace("zoom", make_number_value(project.editor_metadata.viewport.zoom));
+    if (const auto viewport = editor_object.find("viewport");
+        viewport != editor_object.end() && viewport->second.is_object()) {
+        viewport_object = viewport->second.as_object();
+    }
+    viewport_object["pan_x"] = make_number_value(project.editor_metadata.viewport.pan_x);
+    viewport_object["pan_y"] = make_number_value(project.editor_metadata.viewport.pan_y);
+    viewport_object["zoom"] = make_number_value(project.editor_metadata.viewport.zoom);
     Value::Object onion_skin_object;
-    onion_skin_object.emplace(
-        "enabled",
-        make_boolean_value(project.editor_metadata.viewport.onion_skin.enabled));
-    onion_skin_object.emplace(
-        "mode",
-        make_string_value(
-            std::string(onion_skin_mode_json_key(project.editor_metadata.viewport.onion_skin.mode))));
-    onion_skin_object.emplace(
-        "anchor",
-        make_boolean_value(project.editor_metadata.viewport.onion_skin.anchor_to_zero));
-    onion_skin_object.emplace(
-        "before",
-        make_number_value(project.editor_metadata.viewport.onion_skin.before_count));
-    onion_skin_object.emplace(
-        "after",
-        make_number_value(project.editor_metadata.viewport.onion_skin.after_count));
-    onion_skin_object.emplace(
-        "step",
-        make_number_value(project.editor_metadata.viewport.onion_skin.step));
-    viewport_object.emplace("onion_skin", make_object_value(std::move(onion_skin_object)));
+    if (const auto onion_skin = viewport_object.find("onion_skin");
+        onion_skin != viewport_object.end() && onion_skin->second.is_object()) {
+        onion_skin_object = onion_skin->second.as_object();
+    }
+    onion_skin_object["enabled"] =
+        make_boolean_value(project.editor_metadata.viewport.onion_skin.enabled);
+    onion_skin_object["mode"] = make_string_value(
+        std::string(onion_skin_mode_json_key(project.editor_metadata.viewport.onion_skin.mode)));
+    onion_skin_object["anchor"] =
+        make_boolean_value(project.editor_metadata.viewport.onion_skin.anchor_to_zero);
+    onion_skin_object["before"] =
+        make_number_value(project.editor_metadata.viewport.onion_skin.before_count);
+    onion_skin_object["after"] =
+        make_number_value(project.editor_metadata.viewport.onion_skin.after_count);
+    onion_skin_object["step"] =
+        make_number_value(project.editor_metadata.viewport.onion_skin.step);
+    viewport_object["onion_skin"] = make_object_value(std::move(onion_skin_object));
     Value::Object debug_overlay_object;
-    debug_overlay_object.emplace(
-        "bones",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bones));
-    debug_overlay_object.emplace(
-        "ik",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.ik_constraints));
-    debug_overlay_object.emplace(
-        "path",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.path_constraints));
-    debug_overlay_object.emplace(
-        "physics",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.physics_constraints));
-    debug_overlay_object.emplace(
-        "meshes",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.mesh_wireframes));
-    debug_overlay_object.emplace(
-        "bounds",
-        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bounding_boxes));
-    viewport_object.emplace(
-        "debug_overlay",
-        make_object_value(std::move(debug_overlay_object)));
-    editor_object.emplace("viewport", make_object_value(std::move(viewport_object)));
-    root.emplace("editor", make_object_value(std::move(editor_object)));
+    if (const auto debug_overlay = viewport_object.find("debug_overlay");
+        debug_overlay != viewport_object.end() && debug_overlay->second.is_object()) {
+        debug_overlay_object = debug_overlay->second.as_object();
+    }
+    debug_overlay_object["bones"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bones);
+    debug_overlay_object["ik"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.ik_constraints);
+    debug_overlay_object["path"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.path_constraints);
+    debug_overlay_object["physics"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.physics_constraints);
+    debug_overlay_object["meshes"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.mesh_wireframes);
+    debug_overlay_object["bounds"] =
+        make_boolean_value(project.editor_metadata.viewport.debug_overlay.bounding_boxes);
+    viewport_object["debug_overlay"] = make_object_value(std::move(debug_overlay_object));
+    editor_object["viewport"] = make_object_value(std::move(viewport_object));
+    root["editor"] = make_object_value(std::move(editor_object));
+
+    if (!project.animation_edits.empty()) {
+        root["animation_edits"] = build_animation_edits_value(project.animation_edits);
+    } else {
+        root.erase("animation_edits");
+    }
 
     if (!project.transform_timeline_edits.empty() ||
         !project.mesh_deform_timeline_edits.empty() ||
         !project.draw_order_timeline_edits.empty() ||
-        !project.event_timeline_edits.empty()) {
-        root.emplace(
-            "timeline_edits",
+        !project.event_timeline_edits.empty() ||
+        !project.slot_color_timeline_edits.empty() ||
+        !project.slot_attachment_timeline_edits.empty()) {
+        root["timeline_edits"] =
             build_timeline_edits_value(
                 project.transform_timeline_edits,
                 project.mesh_deform_timeline_edits,
                 project.draw_order_timeline_edits,
-                project.event_timeline_edits));
+                project.event_timeline_edits,
+                project.slot_color_timeline_edits,
+                project.slot_attachment_timeline_edits);
+    } else {
+        root.erase("timeline_edits");
     }
     if (!project.mesh_weight_attachment_edits.empty()) {
-        root.emplace(
-            "mesh_edits",
-            build_mesh_weight_edits_value(project.mesh_weight_attachment_edits));
+        root["mesh_edits"] =
+            build_mesh_weight_edits_value(project.mesh_weight_attachment_edits);
+    } else {
+        root.erase("mesh_edits");
     }
     if (!project.ik_constraint_edits.empty() ||
         !project.path_constraint_edits.empty() ||
         !project.transform_constraint_edits.empty() ||
         !project.physics_constraint_edits.empty()) {
-        root.emplace(
-            "constraint_edits",
-            build_constraint_edits_value(
+        root["constraint_edits"] = build_constraint_edits_value(
                 project.ik_constraint_edits,
                 project.path_constraint_edits,
                 project.transform_constraint_edits,
-                project.physics_constraint_edits));
+                project.physics_constraint_edits);
+    } else {
+        root.erase("constraint_edits");
+    }
+    if (project.parameter_model.has_value() && !project.parameter_model->empty()) {
+        root["parameter_model"] = build_parameter_model_value(*project.parameter_model);
+    } else {
+        root.erase("parameter_model");
     }
     if (!project.atlas_pack_definitions.empty()) {
-        root.emplace(
-            "atlas_packs",
-            build_atlas_pack_definitions_value(project.atlas_pack_definitions));
+        root["atlas_packs"] =
+            build_atlas_pack_definitions_value(project.atlas_pack_definitions);
+    } else {
+        root.erase("atlas_packs");
     }
 
     return make_object_value(std::move(root));
@@ -3217,6 +4193,217 @@ void merge_named_object_array_member(
             existing_member->as_array().push_back(std::move(edit_value));
         }
     }
+}
+
+void rename_animation_mixing_references(
+    Value* root,
+    std::string_view from,
+    std::string_view to) {
+    if (root == nullptr || !root->is_object()) {
+        return;
+    }
+    Value* mixing = marrow::runtime::json::find_member(*root, "mixing");
+    Value* entries = mixing != nullptr && mixing->is_object()
+        ? marrow::runtime::json::find_member(*mixing, "entries")
+        : nullptr;
+    if (entries == nullptr || !entries->is_array()) {
+        return;
+    }
+    for (Value& entry : entries->as_array()) {
+        if (!entry.is_object()) {
+            continue;
+        }
+        for (const char* key : {"from", "to"}) {
+            Value* name = marrow::runtime::json::find_member(entry, key);
+            if (name != nullptr && name->is_string() && name->as_string() == from) {
+                name->as_string() = std::string(to);
+            }
+        }
+    }
+}
+
+void remove_animation_mixing_references(Value* root, std::string_view animation_name) {
+    if (root == nullptr || !root->is_object()) {
+        return;
+    }
+    Value* mixing = marrow::runtime::json::find_member(*root, "mixing");
+    Value* entries = mixing != nullptr && mixing->is_object()
+        ? marrow::runtime::json::find_member(*mixing, "entries")
+        : nullptr;
+    if (entries == nullptr || !entries->is_array()) {
+        return;
+    }
+    auto& values = entries->as_array();
+    values.erase(
+        std::remove_if(
+            values.begin(),
+            values.end(),
+            [&](const Value& entry) {
+                if (!entry.is_object()) {
+                    return false;
+                }
+                const Value* from = find_optional_member(entry, "from");
+                const Value* to = find_optional_member(entry, "to");
+                return (from != nullptr && from->is_string() &&
+                        from->as_string() == animation_name) ||
+                    (to != nullptr && to->is_string() &&
+                     to->as_string() == animation_name);
+            }),
+        values.end());
+    if (values.empty()) {
+        mixing->as_object().erase("entries");
+    }
+}
+
+void apply_animation_edits(Value* root, const std::vector<AnimationEdit>& edits) {
+    if (root == nullptr || !root->is_object() || edits.empty()) {
+        return;
+    }
+    Value* animations = marrow::runtime::json::find_member(*root, "animations");
+    if (animations == nullptr) {
+        root->as_object().emplace("animations", make_object_value());
+        animations = marrow::runtime::json::find_member(*root, "animations");
+    }
+    if (animations == nullptr) {
+        return;
+    }
+    if (!animations->is_object()) {
+        *animations = make_object_value();
+    }
+
+    for (const AnimationEdit& edit : edits) {
+        switch (edit.kind) {
+        case AnimationEditKind::Create:
+            animations->as_object()[edit.name] = edit.animation.is_object()
+                ? edit.animation
+                : make_object_value();
+            break;
+        case AnimationEditKind::Rename: {
+            auto source = animations->as_object().find(edit.name);
+            if (source == animations->as_object().end()) {
+                break;
+            }
+            Value animation_value = std::move(source->second);
+            animations->as_object().erase(source);
+            animations->as_object()[edit.new_name] = std::move(animation_value);
+            rename_animation_mixing_references(root, edit.name, edit.new_name);
+            break;
+        }
+        case AnimationEditKind::Delete:
+            animations->as_object().erase(edit.name);
+            remove_animation_mixing_references(root, edit.name);
+            break;
+        case AnimationEditKind::SetDuration: {
+            Value* animation = marrow::runtime::json::find_member(*animations, edit.name);
+            if (animation != nullptr && animation->is_object()) {
+                animation->as_object()["duration"] = make_number_value(edit.duration);
+            }
+            break;
+        }
+        case AnimationEditKind::Unknown:
+            break;
+        }
+    }
+}
+
+std::optional<LoadError> validate_animation_edit_sequence(
+    const ProjectData& project,
+    const Document& base_skeleton_document) {
+    if (project.animation_edits.empty()) {
+        return std::nullopt;
+    }
+    const Value* animations = find_optional_member(base_skeleton_document.root, "animations");
+    if (animations == nullptr || !animations->is_object()) {
+        return validation_error(
+            base_skeleton_document,
+            base_skeleton_document.root.location(),
+            "$.animation_edits",
+            "the base skeleton has no animation catalog");
+    }
+    std::vector<std::string> names;
+    names.reserve(animations->as_object().size() + project.animation_edits.size());
+    for (const auto& [name, unused] : animations->as_object()) {
+        (void)unused;
+        names.push_back(name);
+    }
+    const auto contains = [&](std::string_view name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+    for (std::size_t index = 0; index < project.animation_edits.size(); ++index) {
+        const AnimationEdit& edit = project.animation_edits[index];
+        const std::string path = "$.animation_edits[" + std::to_string(index) + "]";
+        switch (edit.kind) {
+        case AnimationEditKind::Create:
+            if (contains(edit.name)) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "create destination already exists: " + edit.name);
+            }
+            names.push_back(edit.name);
+            break;
+        case AnimationEditKind::Rename: {
+            const auto source = std::find(names.begin(), names.end(), edit.name);
+            if (source == names.end()) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "rename source does not exist: " + edit.name);
+            }
+            if (contains(edit.new_name)) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "rename destination already exists: " + edit.new_name);
+            }
+            *source = edit.new_name;
+            break;
+        }
+        case AnimationEditKind::Delete: {
+            const auto target = std::find(names.begin(), names.end(), edit.name);
+            if (target == names.end()) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "delete target does not exist: " + edit.name);
+            }
+            if (names.size() <= 1U) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "the last animation cannot be deleted");
+            }
+            names.erase(target);
+            break;
+        }
+        case AnimationEditKind::SetDuration:
+            if (!contains(edit.name)) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path,
+                    "set_duration target does not exist: " + edit.name);
+            }
+            if (!std::isfinite(edit.duration) || edit.duration < 0.0 ||
+                edit.duration > static_cast<double>(
+                    std::numeric_limits<runtime::AnimationScalar>::max())) {
+                return validation_error(
+                    base_skeleton_document,
+                    base_skeleton_document.root.location(),
+                    path + ".duration",
+                    "duration must be finite, non-negative, and within the runtime float32 range");
+            }
+            break;
+        case AnimationEditKind::Unknown:
+            break;
+        }
+    }
+    return std::nullopt;
 }
 
 Value* find_skin_attachment_value(
@@ -3290,6 +4477,57 @@ Document build_runtime_document(
         return document;
     }
 
+    if (project.parameter_model.has_value()) {
+        const ParameterModel& model = *project.parameter_model;
+        const auto replace_array = [&](std::string_view key, const Value::Array& values) {
+            document.root.as_object().erase(std::string(key));
+            if (!values.empty()) {
+                document.root.as_object()[std::string(key)] = make_array_value(values);
+            }
+        };
+
+        Value::Array parameters;
+        parameters.reserve(model.parameters.size());
+        for (const ParameterAuthoringDefinition& parameter : model.parameters) {
+            parameters.push_back(build_parameter_definition_value(model, parameter));
+        }
+        replace_array("parameters", parameters);
+
+        Value::Array groups;
+        groups.reserve(model.groups.size());
+        for (const ParameterGroupAuthoringDefinition& group : model.groups) {
+            groups.push_back(build_parameter_group_value(model, group));
+        }
+        replace_array("parameterGroups", groups);
+
+        const auto build_typed_array = [](const auto& values, const auto& build) {
+            Value::Array array;
+            array.reserve(values.size());
+            for (const auto& value : values) array.push_back(build(value));
+            return array;
+        };
+        replace_array(
+            "parameterShapes",
+            build_typed_array(model.blend_shapes, build_parameter_shape_authoring_value));
+        replace_array(
+            "parameterDeformers",
+            build_typed_array(model.deformers, build_parameter_deformer_authoring_value));
+        replace_array(
+            "artPaths",
+            build_typed_array(model.art_paths, build_art_path_authoring_value));
+        replace_array(
+            "expressions",
+            build_typed_array(model.expressions, build_expression_authoring_value));
+
+        document.root.as_object().erase("lipSync");
+        if (!model.lip_sync.empty()) {
+            document.root.as_object()["lipSync"] =
+                build_lip_sync_authoring_value(model.lip_sync);
+        }
+    }
+
+    apply_animation_edits(&document.root, project.animation_edits);
+
     for (const MeshWeightAttachmentEdit& edit : project.mesh_weight_attachment_edits) {
         Value* attachment_value = find_skin_attachment_value(
             &document.root,
@@ -3349,6 +4587,25 @@ Document build_runtime_document(
         }
     }
 
+    for (const SlotColorTimelineEdit& edit : project.slot_color_timeline_edits) {
+        Value* animation_value = ensure_object_member(animations, edit.animation_name);
+        Value* slots_value = ensure_object_member(animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["color"] = build_runtime_slot_color_keyframes_value(edit);
+        }
+    }
+
+    for (const SlotAttachmentTimelineEdit& edit : project.slot_attachment_timeline_edits) {
+        Value* animation_value = ensure_object_member(animations, edit.animation_name);
+        Value* slots_value = ensure_object_member(animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["attachment"] =
+                build_slot_attachment_keyframes_value(edit);
+        }
+    }
+
     merge_named_object_array_member(
         &document.root,
         "ik",
@@ -3394,6 +4651,11 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
         error_out->message = "editor viewport zoom must be greater than zero";
         return false;
     }
+    if (!std::isfinite(project.editor_metadata.timeline.frames_per_second) ||
+        project.editor_metadata.timeline.frames_per_second <= 0.0) {
+        error_out->message = "editor timeline fps must be finite and greater than zero";
+        return false;
+    }
     if (project.editor_metadata.viewport.onion_skin.before_count < 0 ||
         project.editor_metadata.viewport.onion_skin.before_count > 6) {
         error_out->message = "editor onion-skin before count must stay within [0, 6]";
@@ -3418,6 +4680,130 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
     for (const std::string& preview_skin : project.editor_metadata.preview_skins) {
         if (preview_skin.empty()) {
             error_out->message = "preview skin names must not be empty";
+            return false;
+        }
+    }
+
+    if (project.parameter_model.has_value()) {
+        const ParameterModel& model = *project.parameter_model;
+        std::vector<std::string> parameter_ids;
+        parameter_ids.reserve(model.parameters.size());
+        for (const ParameterAuthoringDefinition& parameter : model.parameters) {
+            if (parameter.id.empty() || parameter.name.empty()) {
+                error_out->message = "parameter definitions require non-empty ids and names";
+                return false;
+            }
+            if (!std::isfinite(parameter.min_value) ||
+                !std::isfinite(parameter.max_value) ||
+                !std::isfinite(parameter.default_value) ||
+                parameter.min_value > parameter.max_value ||
+                (parameter.clamp &&
+                 (parameter.default_value < parameter.min_value ||
+                  parameter.default_value > parameter.max_value))) {
+                error_out->message =
+                    "parameter ranges and defaults must be finite and ordered";
+                return false;
+            }
+            if (parameter.ui_step.has_value() &&
+                (!std::isfinite(*parameter.ui_step) || *parameter.ui_step <= 0.0)) {
+                error_out->message = "parameter ui_step must be finite and positive";
+                return false;
+            }
+            if (std::find(parameter_ids.begin(), parameter_ids.end(), parameter.id) !=
+                parameter_ids.end()) {
+                error_out->message = "parameter ids must be unique";
+                return false;
+            }
+            parameter_ids.push_back(parameter.id);
+        }
+
+        std::vector<std::string> group_ids;
+        for (const ParameterGroupAuthoringDefinition& group : model.groups) {
+            if (group.id.empty() || group.name.empty()) {
+                error_out->message = "parameter groups require non-empty ids and names";
+                return false;
+            }
+            if (std::find(group_ids.begin(), group_ids.end(), group.id) != group_ids.end()) {
+                error_out->message = "parameter group ids must be unique";
+                return false;
+            }
+            group_ids.push_back(group.id);
+            std::vector<std::string> group_parameter_ids;
+            for (const std::string& parameter_id : group.parameter_ids) {
+                if (std::find(parameter_ids.begin(), parameter_ids.end(), parameter_id) ==
+                    parameter_ids.end()) {
+                    error_out->message =
+                        "parameter groups may only reference existing parameter ids";
+                    return false;
+                }
+                if (std::find(
+                        group_parameter_ids.begin(),
+                        group_parameter_ids.end(),
+                        parameter_id) != group_parameter_ids.end()) {
+                    error_out->message = "parameter group references must be unique";
+                    return false;
+                }
+                group_parameter_ids.push_back(parameter_id);
+            }
+        }
+
+        const auto validate_typed_ids = [&](const auto& values, std::string_view family) {
+            std::vector<std::string> ids;
+            for (const auto& value : values) {
+                if (value.id.empty()) {
+                    error_out->message = std::string(family) +
+                        " definitions require non-empty string ids";
+                    return false;
+                }
+                if (std::find(ids.begin(), ids.end(), value.id) != ids.end()) {
+                    error_out->message = std::string(family) + " ids must be unique";
+                    return false;
+                }
+                ids.push_back(value.id);
+            }
+            return true;
+        };
+        if (!validate_typed_ids(model.blend_shapes, "blend shape") ||
+            !validate_typed_ids(model.deformers, "deformer") ||
+            !validate_typed_ids(model.art_paths, "art path") ||
+            !validate_typed_ids(model.expressions, "expression")) {
+            return false;
+        }
+    }
+
+    for (const AnimationEdit& edit : project.animation_edits) {
+        if (edit.kind == AnimationEditKind::Unknown) {
+            const Value* operation = edit.preserved_source.is_object()
+                ? find_optional_member(edit.preserved_source, "op")
+                : nullptr;
+            if (operation == nullptr || !operation->is_string() ||
+                operation->as_string().empty()) {
+                error_out->message =
+                    "unknown animation edits require a preserved non-empty operation";
+                return false;
+            }
+            continue;
+        }
+        if (edit.name.empty()) {
+            error_out->message = "animation edits require non-empty animation names";
+            return false;
+        }
+        if (edit.kind == AnimationEditKind::Create && !edit.animation.is_object()) {
+            error_out->message = "animation create edits require an animation object";
+            return false;
+        }
+        if (edit.kind == AnimationEditKind::Rename &&
+            (edit.new_name.empty() || edit.name == edit.new_name)) {
+            error_out->message =
+                "animation rename edits require distinct non-empty names";
+            return false;
+        }
+        if (edit.kind == AnimationEditKind::SetDuration &&
+            (!std::isfinite(edit.duration) || edit.duration < 0.0 ||
+             edit.duration > static_cast<double>(
+                 std::numeric_limits<runtime::AnimationScalar>::max()))) {
+            error_out->message =
+                "animation duration edits require finite non-negative float32 values";
             return false;
         }
     }
@@ -4091,79 +5477,136 @@ bool export_packed_atlas_asset(
 
 } // namespace
 
+runtime::json::Document build_project_runtime_document(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document) {
+    return build_runtime_document(project, base_skeleton_document);
+}
+
 std::string serialize_project(const ProjectData& project) {
     return serialize_project_snapshot(project);
 }
 
-std::optional<ProjectCommand> make_project_command(
-    std::string label,
-    const ProjectData& before_project,
-    const ProjectData& after_project) {
-    const std::string before_serialized = serialize_project_snapshot(before_project);
-    const std::string after_serialized = serialize_project_snapshot(after_project);
-    if (before_serialized == after_serialized) {
-        return std::nullopt;
+bool ParameterModel::empty() const noexcept {
+    if (!parameters.empty() || !groups.empty() || !deformers.empty() ||
+        !blend_shapes.empty() || !art_paths.empty() || !expressions.empty()) {
+        return false;
     }
-
-    ProjectCommand command;
-    command.label = std::move(label);
-    command.before_project = before_project;
-    command.after_project = after_project;
-    command.before_serialized = before_serialized;
-    command.after_serialized = after_serialized;
-    return command;
-}
-
-bool ProjectCommandStack::can_undo() const {
-    return !undo_commands_.empty();
-}
-
-bool ProjectCommandStack::can_redo() const {
-    return !redo_commands_.empty();
-}
-
-std::size_t ProjectCommandStack::undo_count() const {
-    return undo_commands_.size();
-}
-
-std::size_t ProjectCommandStack::redo_count() const {
-    return redo_commands_.size();
-}
-
-void ProjectCommandStack::clear() {
-    undo_commands_.clear();
-    redo_commands_.clear();
-}
-
-const ProjectCommand* ProjectCommandStack::peek_undo() const {
-    return undo_commands_.empty() ? nullptr : &undo_commands_.back();
-}
-
-const ProjectCommand* ProjectCommandStack::peek_redo() const {
-    return redo_commands_.empty() ? nullptr : &redo_commands_.back();
-}
-
-void ProjectCommandStack::push(ProjectCommand command) {
-    undo_commands_.push_back(std::move(command));
-    redo_commands_.clear();
-}
-
-void ProjectCommandStack::commit_undo() {
-    if (undo_commands_.empty()) {
-        return;
+    if (!lip_sync.empty()) {
+        return false;
     }
-
-    redo_commands_.push_back(std::move(undo_commands_.back()));
-    undo_commands_.pop_back();
+    if (source.is_object()) {
+        static constexpr std::array<std::string_view, 7U> kKnownKeys{
+            "parameters",
+            "groups",
+            "deformers",
+            "blend_shapes",
+            "art_paths",
+            "expressions",
+            "lip_sync",
+        };
+        for (const auto& [key, unused] : source.as_object()) {
+            (void)unused;
+            if (std::find(kKnownKeys.begin(), kKnownKeys.end(), key) == kKnownKeys.end()) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
-void ProjectCommandStack::commit_redo() {
-    if (redo_commands_.empty()) {
-        return;
-    }
+const ParameterAuthoringDefinition* ParameterModel::find_parameter(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        parameters.begin(), parameters.end(),
+        [&](const ParameterAuthoringDefinition& parameter) { return parameter.id == id; });
+    return found == parameters.end() ? nullptr : &*found;
+}
 
-    undo_commands_.push_back(std::move(redo_commands_.back()));
-    redo_commands_.pop_back();
+ParameterAuthoringDefinition* ParameterModel::find_parameter(std::string_view id) {
+    return const_cast<ParameterAuthoringDefinition*>(
+        std::as_const(*this).find_parameter(id));
+}
+
+const ParameterGroupAuthoringDefinition* ParameterModel::find_group(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        groups.begin(), groups.end(),
+        [&](const ParameterGroupAuthoringDefinition& group) { return group.id == id; });
+    return found == groups.end() ? nullptr : &*found;
+}
+
+ParameterGroupAuthoringDefinition* ParameterModel::find_group(std::string_view id) {
+    return const_cast<ParameterGroupAuthoringDefinition*>(std::as_const(*this).find_group(id));
+}
+
+const ParameterShapeAuthoringDefinition* ParameterModel::find_shape(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        blend_shapes.begin(), blend_shapes.end(),
+        [&](const ParameterShapeAuthoringDefinition& shape) { return shape.id == id; });
+    return found == blend_shapes.end() ? nullptr : &*found;
+}
+
+ParameterShapeAuthoringDefinition* ParameterModel::find_shape(std::string_view id) {
+    return const_cast<ParameterShapeAuthoringDefinition*>(std::as_const(*this).find_shape(id));
+}
+
+const ParameterDeformerAuthoringDefinition* ParameterModel::find_deformer(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        deformers.begin(), deformers.end(),
+        [&](const ParameterDeformerAuthoringDefinition& deformer) {
+            return deformer.id == id;
+        });
+    return found == deformers.end() ? nullptr : &*found;
+}
+
+ParameterDeformerAuthoringDefinition* ParameterModel::find_deformer(std::string_view id) {
+    return const_cast<ParameterDeformerAuthoringDefinition*>(
+        std::as_const(*this).find_deformer(id));
+}
+
+const ArtPathAuthoringDefinition* ParameterModel::find_art_path(std::string_view id) const {
+    const auto found = std::find_if(
+        art_paths.begin(), art_paths.end(),
+        [&](const ArtPathAuthoringDefinition& art_path) { return art_path.id == id; });
+    return found == art_paths.end() ? nullptr : &*found;
+}
+
+ArtPathAuthoringDefinition* ParameterModel::find_art_path(std::string_view id) {
+    return const_cast<ArtPathAuthoringDefinition*>(std::as_const(*this).find_art_path(id));
+}
+
+const ExpressionAuthoringDefinition* ParameterModel::find_expression(
+    std::string_view id) const {
+    const auto found = std::find_if(
+        expressions.begin(), expressions.end(),
+        [&](const ExpressionAuthoringDefinition& expression) {
+            return expression.id == id;
+        });
+    return found == expressions.end() ? nullptr : &*found;
+}
+
+ExpressionAuthoringDefinition* ParameterModel::find_expression(std::string_view id) {
+    return const_cast<ExpressionAuthoringDefinition*>(
+        std::as_const(*this).find_expression(id));
+}
+
+const LipSyncMappingAuthoringDefinition* ParameterModel::find_lip_mapping(
+    std::string_view parameter_id) const {
+    const auto found = std::find_if(
+        lip_sync.mappings.begin(), lip_sync.mappings.end(),
+        [&](const LipSyncMappingAuthoringDefinition& mapping) {
+            return mapping.parameter == parameter_id;
+        });
+    return found == lip_sync.mappings.end() ? nullptr : &*found;
+}
+
+LipSyncMappingAuthoringDefinition* ParameterModel::find_lip_mapping(
+    std::string_view parameter_id) {
+    return const_cast<LipSyncMappingAuthoringDefinition*>(
+        std::as_const(*this).find_lip_mapping(parameter_id));
 }
 
 std::filesystem::path ProjectData::resolve_path(const std::filesystem::path& referenced_path) const {
@@ -4228,6 +5671,128 @@ TransformTimelineEdit* ProjectData::find_transform_timeline_edit(
                 edit.channel == channel;
         });
     return iterator == transform_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+TransformTimelineEdit* ensure_transform_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    TransformTimelineChannel channel) {
+    if (TransformTimelineEdit* existing = project.find_transform_timeline_edit(
+            animation_name, bone_name, channel)) {
+        return existing;
+    }
+    const auto bone_index = effective_skeleton.find_bone_index(bone_name);
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (!bone_index.has_value() || animation == nullptr) {
+        return nullptr;
+    }
+
+    TransformTimelineEdit materialized{
+        std::string(animation_name), std::string(bone_name), channel, {}};
+    const auto copy_rotate = [&](const auto* timeline) {
+        if (timeline == nullptr) return;
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const runtime::RotateKeyframe& source : timeline->keyframes) {
+            materialized.keyframes.push_back(TransformKeyframeEdit{
+                static_cast<double>(source.time),
+                static_cast<double>(source.angle),
+                0.0,
+                0.0,
+                source.interpolation});
+        }
+    };
+    const auto copy_vector = [&](const auto* timeline) {
+        if (timeline == nullptr) return;
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const runtime::VectorKeyframe& source : timeline->keyframes) {
+            materialized.keyframes.push_back(TransformKeyframeEdit{
+                static_cast<double>(source.time),
+                0.0,
+                static_cast<double>(source.x),
+                static_cast<double>(source.y),
+                source.interpolation});
+        }
+    };
+    switch (channel) {
+    case TransformTimelineChannel::Rotate:
+        copy_rotate(animation->find_rotate_timeline(*bone_index));
+        break;
+    case TransformTimelineChannel::Translate:
+        copy_vector(animation->find_translate_timeline(*bone_index));
+        break;
+    case TransformTimelineChannel::Scale:
+        copy_vector(animation->find_scale_timeline(*bone_index));
+        break;
+    case TransformTimelineChannel::Shear:
+        copy_vector(animation->find_shear_timeline(*bone_index));
+        break;
+    }
+    project.transform_timeline_edits.push_back(std::move(materialized));
+    return &project.transform_timeline_edits.back();
+}
+
+TransformKeyframeEdit& upsert_transform_keyframe(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    TransformTimelineChannel channel,
+    double time,
+    const TransformKeyframePatch& patch) {
+    constexpr double kKeyTimeEpsilon = 1e-6;
+
+    TransformTimelineEdit* edit = ensure_transform_timeline_edit(
+        project, effective_skeleton, animation_name, bone_name, channel);
+    // Callers validate animation and bone targets before reaching this shared
+    // authoring primitive. Keep a defensive fallback for direct project use.
+    if (edit == nullptr) {
+        project.transform_timeline_edits.push_back(TransformTimelineEdit{
+            std::string(animation_name), std::string(bone_name), channel, {}});
+        edit = &project.transform_timeline_edits.back();
+    }
+
+    auto key_it = find_keyframe_near_time(
+        edit->keyframes, time, kKeyTimeEpsilon);
+    if (key_it == edit->keyframes.end()) {
+        const auto insertion = std::lower_bound(
+            edit->keyframes.begin(),
+            edit->keyframes.end(),
+            time,
+            [](const TransformKeyframeEdit& keyframe, double key_time) {
+                return keyframe.time < key_time;
+            });
+        TransformKeyframeEdit inserted;
+        inserted.time = time;
+        inserted.interpolation = runtime::Interpolation::linear();
+        key_it = edit->keyframes.insert(insertion, std::move(inserted));
+    }
+
+    if (patch.angle.has_value()) {
+        key_it->angle = setup_relative_rotation_key(
+            effective_skeleton, bone_name, *patch.angle);
+    }
+    if (patch.x.has_value()) {
+        key_it->x = *patch.x;
+    }
+    if (patch.y.has_value()) {
+        key_it->y = *patch.y;
+    }
+    return *key_it;
+}
+
+double setup_relative_rotation_key(
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view bone_name,
+    double absolute_local_rotation) {
+    const auto bone_index = effective_skeleton.find_bone_index(bone_name);
+    const double setup_rotation = bone_index.has_value()
+        ? static_cast<double>(
+              effective_skeleton.bones()[*bone_index].setup_pose.rotation)
+        : 0.0;
+    return absolute_local_rotation - setup_rotation;
 }
 
 const MeshDeformTimelineEdit* ProjectData::find_mesh_deform_timeline_edit(
@@ -4332,6 +5897,226 @@ EventTimelineEdit* ProjectData::find_event_timeline_edit(
             return edit.animation_name == animation_name;
         });
     return iterator == event_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+const SlotColorTimelineEdit* ProjectData::find_slot_color_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) const {
+    const auto iterator = std::find_if(
+        slot_color_timeline_edits.begin(),
+        slot_color_timeline_edits.end(),
+        [&](const SlotColorTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_color_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+SlotColorTimelineEdit* ProjectData::find_slot_color_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) {
+    const auto iterator = std::find_if(
+        slot_color_timeline_edits.begin(),
+        slot_color_timeline_edits.end(),
+        [&](const SlotColorTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_color_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+const SlotAttachmentTimelineEdit* ProjectData::find_slot_attachment_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) const {
+    const auto iterator = std::find_if(
+        slot_attachment_timeline_edits.begin(),
+        slot_attachment_timeline_edits.end(),
+        [&](const SlotAttachmentTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_attachment_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+SlotAttachmentTimelineEdit* ProjectData::find_slot_attachment_timeline_edit(
+    std::string_view animation_name,
+    std::string_view slot_name) {
+    const auto iterator = std::find_if(
+        slot_attachment_timeline_edits.begin(),
+        slot_attachment_timeline_edits.end(),
+        [&](const SlotAttachmentTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.slot_name == slot_name;
+        });
+    return iterator == slot_attachment_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+MeshDeformTimelineEdit* ensure_mesh_deform_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name,
+    std::string_view attachment_name) {
+    if (MeshDeformTimelineEdit* existing = project.find_mesh_deform_timeline_edit(
+            animation_name, slot_name, attachment_name)) {
+        return existing;
+    }
+    const auto slot_index = effective_skeleton.find_slot_index(slot_name);
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (!slot_index.has_value() || animation == nullptr) return nullptr;
+
+    MeshDeformTimelineEdit materialized{
+        std::string(animation_name),
+        std::string(slot_name),
+        std::string(attachment_name),
+        {}};
+    const auto* timeline =
+        animation->find_deform_timeline(*slot_index, attachment_name);
+    if (timeline != nullptr) {
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const runtime::DeformKeyframe& source : timeline->keyframes) {
+            DeformKeyframeEdit keyframe;
+            keyframe.time = static_cast<double>(source.time);
+            keyframe.interpolation = source.interpolation;
+            keyframe.vertex_offsets.reserve(source.vertex_offsets.size());
+            for (const runtime::AnimationScalar value : source.vertex_offsets) {
+                keyframe.vertex_offsets.push_back(static_cast<double>(value));
+            }
+            materialized.keyframes.push_back(std::move(keyframe));
+        }
+    }
+    project.mesh_deform_timeline_edits.push_back(std::move(materialized));
+    return &project.mesh_deform_timeline_edits.back();
+}
+
+DrawOrderTimelineEdit* ensure_draw_order_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name) {
+    if (DrawOrderTimelineEdit* existing =
+            project.find_draw_order_timeline_edit(animation_name)) {
+        return existing;
+    }
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (animation == nullptr) return nullptr;
+
+    DrawOrderTimelineEdit materialized{std::string(animation_name), {}};
+    const auto* timeline = animation->find_draw_order_timeline();
+    if (timeline != nullptr) {
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const auto& source : timeline->keyframes) {
+            DrawOrderKeyframeEdit keyframe;
+            keyframe.time = static_cast<double>(source.time);
+            keyframe.slot_names.reserve(source.slot_indices.size());
+            for (const std::size_t slot_index : source.slot_indices) {
+                if (slot_index >= effective_skeleton.slots().size()) return nullptr;
+                keyframe.slot_names.push_back(
+                    effective_skeleton.slots()[slot_index].name);
+            }
+            materialized.keyframes.push_back(std::move(keyframe));
+        }
+    }
+    project.draw_order_timeline_edits.push_back(std::move(materialized));
+    return &project.draw_order_timeline_edits.back();
+}
+
+EventTimelineEdit* ensure_event_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name) {
+    if (EventTimelineEdit* existing = project.find_event_timeline_edit(animation_name)) {
+        return existing;
+    }
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (animation == nullptr) return nullptr;
+
+    EventTimelineEdit materialized{std::string(animation_name), {}};
+    const auto* timeline = animation->find_event_timeline();
+    if (timeline != nullptr) {
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        const auto widen = [](const auto& value) -> std::optional<double> {
+            return value.has_value()
+                ? std::optional<double>(static_cast<double>(*value))
+                : std::nullopt;
+        };
+        for (const auto& source : timeline->keyframes) {
+            if (source.event_index >= effective_skeleton.events().size()) return nullptr;
+            EventKeyframeEdit keyframe;
+            keyframe.time = static_cast<double>(source.time);
+            keyframe.event_name =
+                effective_skeleton.events()[source.event_index].name;
+            keyframe.int_value = source.int_value;
+            keyframe.float_value = widen(source.float_value);
+            keyframe.string_value = source.string_value;
+            keyframe.audio_path = source.audio_path;
+            keyframe.volume = widen(source.volume);
+            keyframe.balance = widen(source.balance);
+            materialized.keyframes.push_back(std::move(keyframe));
+        }
+    }
+    project.event_timeline_edits.push_back(std::move(materialized));
+    return &project.event_timeline_edits.back();
+}
+
+SlotColorTimelineEdit* ensure_slot_color_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name) {
+    if (SlotColorTimelineEdit* existing =
+            project.find_slot_color_timeline_edit(animation_name, slot_name)) {
+        return existing;
+    }
+    const auto slot_index = effective_skeleton.find_slot_index(slot_name);
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (!slot_index.has_value() || animation == nullptr) return nullptr;
+
+    SlotColorTimelineEdit materialized{
+        std::string(animation_name), std::string(slot_name), {}};
+    const auto* timeline = animation->find_color_timeline(*slot_index);
+    if (timeline != nullptr) {
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const auto& source : timeline->keyframes) {
+            materialized.keyframes.push_back(SlotColorKeyframeEdit{
+                static_cast<double>(source.time),
+                source.color,
+                source.interpolation});
+        }
+    }
+    project.slot_color_timeline_edits.push_back(std::move(materialized));
+    return &project.slot_color_timeline_edits.back();
+}
+
+SlotAttachmentTimelineEdit* ensure_slot_attachment_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view slot_name) {
+    if (SlotAttachmentTimelineEdit* existing =
+            project.find_slot_attachment_timeline_edit(animation_name, slot_name)) {
+        return existing;
+    }
+    const auto slot_index = effective_skeleton.find_slot_index(slot_name);
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (!slot_index.has_value() || animation == nullptr) return nullptr;
+
+    SlotAttachmentTimelineEdit materialized{
+        std::string(animation_name), std::string(slot_name), {}};
+    const auto* timeline = animation->find_attachment_timeline(*slot_index);
+    if (timeline != nullptr) {
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const auto& source : timeline->keyframes) {
+            materialized.keyframes.push_back(SlotAttachmentKeyframeEdit{
+                static_cast<double>(source.time), source.attachment_name});
+        }
+    }
+    project.slot_attachment_timeline_edits.push_back(std::move(materialized));
+    return &project.slot_attachment_timeline_edits.back();
 }
 
 const IkConstraintEdit* ProjectData::find_ik_constraint_edit(std::string_view name) const {
@@ -4517,6 +6302,11 @@ ProjectLoadResult load_project(const Document& document) {
         result.error = error;
         return result;
     }
+    if (const auto error = parse_animation_edits(
+            document, document.root, &project.animation_edits)) {
+        result.error = error;
+        return result;
+    }
     if (const auto error = parse_transform_timeline_edits(
             document, document.root, &project.transform_timeline_edits)) {
         result.error = error;
@@ -4542,6 +6332,14 @@ ProjectLoadResult load_project(const Document& document) {
         result.error = error;
         return result;
     }
+    if (const auto error = parse_slot_timeline_edits(
+            document,
+            document.root,
+            &project.slot_color_timeline_edits,
+            &project.slot_attachment_timeline_edits)) {
+        result.error = error;
+        return result;
+    }
     if (const auto error = parse_ik_constraint_edits(
             document, document.root, &project.ik_constraint_edits)) {
         result.error = error;
@@ -4559,6 +6357,11 @@ ProjectLoadResult load_project(const Document& document) {
     }
     if (const auto error = parse_physics_constraint_edits(
             document, document.root, &project.physics_constraint_edits)) {
+        result.error = error;
+        return result;
+    }
+    if (const auto error = parse_parameter_model(
+            document, document.root, &project.parameter_model)) {
         result.error = error;
         return result;
     }
@@ -4589,6 +6392,8 @@ ProjectLoadResult load_project(const Document& document) {
             return result;
         }
     }
+
+    project.preserved_root = document.root;
 
     auto project_ptr = std::make_shared<ProjectData>(std::move(project));
     const auto document_result =
@@ -4638,6 +6443,11 @@ ProjectRuntimeResult build_project_runtime(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document) {
     ProjectRuntimeResult result;
+    if (const auto animation_error =
+            validate_animation_edit_sequence(project, base_skeleton_document)) {
+        result.error = animation_error;
+        return result;
+    }
     const Document runtime_document = build_runtime_document(project, base_skeleton_document);
     const auto skeleton_result = marrow::runtime::load_skeleton_data(runtime_document);
     if (!skeleton_result) {
@@ -4699,6 +6509,13 @@ ProjectExportResult export_runtime_assets(
 
     ProjectExportError export_error;
     export_error.path = result.path;
+
+    if (const auto animation_error =
+            validate_animation_edit_sequence(project, base_skeleton_document)) {
+        export_error.message = animation_error->format();
+        result.error = std::move(export_error);
+        return result;
+    }
 
     const Document runtime_document = build_runtime_document(project, base_skeleton_document);
     const auto skeleton_result = marrow::runtime::load_skeleton_data(runtime_document);

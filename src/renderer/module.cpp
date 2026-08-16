@@ -29,6 +29,9 @@ constexpr std::array<std::uint32_t, 6> kQuadIndices{{0, 1, 2, 0, 2, 3}};
 constexpr std::array<std::uint8_t, 4> kWhiteTexel{{255, 255, 255, 255}};
 constexpr std::size_t kIdentityBoneCount = 1U;
 constexpr std::size_t kMaxRendererBoneUniforms = 128U;
+constexpr std::size_t kRoundSegmentsPerSemicircle = 8U;
+constexpr double kStrokePointEpsilon = 1e-12;
+constexpr std::string_view kSolidWhiteTextureName = "__marrow_solid_white";
 
 struct SceneBounds {
     double min_x{0.0};
@@ -99,6 +102,9 @@ void apply_region_mask_geometry(
 std::optional<std::string> evaluate_dynamic_mesh_bounds(
     DynamicMeshDrawCommand* attachment,
     const std::vector<runtime::BoneWorldTransform>& bone_palette);
+std::optional<std::string> append_art_path_strokes(
+    PreparedScene* scene,
+    const runtime::Skeleton& skeleton);
 
 TextureImage fallback_white_texture() {
     TextureImage image;
@@ -694,6 +700,319 @@ std::optional<std::string> decode_png_rgba8(
     return std::nullopt;
 }
 
+RenderPoint add_points(const RenderPoint& lhs, const RenderPoint& rhs) {
+    return {lhs.x + rhs.x, lhs.y + rhs.y};
+}
+
+RenderPoint subtract_points(const RenderPoint& lhs, const RenderPoint& rhs) {
+    return {lhs.x - rhs.x, lhs.y - rhs.y};
+}
+
+RenderPoint scale_point(const RenderPoint& point, double scale) {
+    return {point.x * scale, point.y * scale};
+}
+
+double point_length(const RenderPoint& point) {
+    return std::hypot(point.x, point.y);
+}
+
+double point_cross(const RenderPoint& lhs, const RenderPoint& rhs) {
+    return (lhs.x * rhs.y) - (lhs.y * rhs.x);
+}
+
+double point_dot(const RenderPoint& lhs, const RenderPoint& rhs) {
+    return (lhs.x * rhs.x) + (lhs.y * rhs.y);
+}
+
+std::size_t append_stroke_vertex(
+    PreparedStrokeCommand* command,
+    const RenderPoint& point) {
+    command->vertices.push_back(point);
+    return command->vertices.size() - 1U;
+}
+
+void append_stroke_triangle(
+    PreparedStrokeCommand* command,
+    std::size_t first,
+    std::size_t second,
+    std::size_t third) {
+    command->indices.push_back(first);
+    command->indices.push_back(second);
+    command->indices.push_back(third);
+}
+
+void append_round_fan(
+    PreparedStrokeCommand* command,
+    const RenderPoint& center,
+    double start_angle,
+    double sweep,
+    std::size_t segment_count,
+    double radius) {
+    if (command == nullptr || segment_count == 0U) {
+        return;
+    }
+
+    const std::size_t center_index = append_stroke_vertex(command, center);
+    std::size_t previous_index = append_stroke_vertex(
+        command,
+        {center.x + std::cos(start_angle) * radius,
+         center.y + std::sin(start_angle) * radius});
+    for (std::size_t segment = 1U; segment <= segment_count; ++segment) {
+        const double alpha = static_cast<double>(segment) /
+            static_cast<double>(segment_count);
+        const double angle = start_angle + (sweep * alpha);
+        const std::size_t current_index = append_stroke_vertex(
+            command,
+            {center.x + std::cos(angle) * radius,
+             center.y + std::sin(angle) * radius});
+        if (sweep >= 0.0) {
+            append_stroke_triangle(command, center_index, previous_index, current_index);
+        } else {
+            append_stroke_triangle(command, center_index, current_index, previous_index);
+        }
+        previous_index = current_index;
+    }
+}
+
+struct StrokeSegmentGeometry {
+    RenderPoint start;
+    RenderPoint end;
+    RenderPoint tangent;
+    RenderPoint normal;
+};
+
+std::optional<std::string> tessellate_art_path(
+    const runtime::EvaluatedArtPath& path,
+    PreparedStrokeCommand* command_out) {
+    if (command_out == nullptr) {
+        return "ArtPath stroke output must not be null.";
+    }
+    if (!std::isfinite(path.width) || path.width <= 0.0) {
+        return "ArtPath '" + path.id + "' width must be positive and finite.";
+    }
+
+    std::vector<RenderPoint> points;
+    points.reserve(path.points.size());
+    for (const runtime::AttachmentVertex& source : path.points) {
+        const RenderPoint point{source.x, source.y};
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
+            return "ArtPath '" + path.id + "' contains a non-finite point.";
+        }
+        if (!points.empty()) {
+            const RenderPoint delta = subtract_points(point, points.back());
+            if (point_length(delta) <= kStrokePointEpsilon) {
+                continue;
+            }
+        }
+        points.push_back(point);
+    }
+    if (points.size() < 2U) {
+        return "ArtPath '" + path.id +
+            "' requires at least two distinct points after zero-length segments are removed.";
+    }
+
+    const double half_width = path.width * 0.5;
+    std::vector<StrokeSegmentGeometry> segments;
+    segments.reserve(points.size() - 1U);
+    for (std::size_t index = 0U; index + 1U < points.size(); ++index) {
+        const RenderPoint delta = subtract_points(points[index + 1U], points[index]);
+        const double length = point_length(delta);
+        if (length <= kStrokePointEpsilon) {
+            continue;
+        }
+        const RenderPoint tangent{delta.x / length, delta.y / length};
+        segments.push_back({
+            points[index],
+            points[index + 1U],
+            tangent,
+            {-tangent.y, tangent.x},
+        });
+    }
+    if (segments.empty()) {
+        return "ArtPath '" + path.id + "' has no tessellatable segments.";
+    }
+
+    if (path.cap == runtime::ArtPathCap::Square) {
+        segments.front().start = subtract_points(
+            segments.front().start,
+            scale_point(segments.front().tangent, half_width));
+        segments.back().end = add_points(
+            segments.back().end,
+            scale_point(segments.back().tangent, half_width));
+    }
+
+    PreparedStrokeCommand command;
+    command.art_path_id = path.id;
+    command.art_path_name = path.name;
+    command.texture_name = std::string(kSolidWhiteTextureName);
+    command.blend_mode = runtime::BlendMode::Normal;
+    command.color = path.color;
+
+    for (const StrokeSegmentGeometry& segment : segments) {
+        const RenderPoint offset = scale_point(segment.normal, half_width);
+        const std::size_t left_start = append_stroke_vertex(
+            &command, add_points(segment.start, offset));
+        const std::size_t right_start = append_stroke_vertex(
+            &command, subtract_points(segment.start, offset));
+        const std::size_t left_end = append_stroke_vertex(
+            &command, add_points(segment.end, offset));
+        const std::size_t right_end = append_stroke_vertex(
+            &command, subtract_points(segment.end, offset));
+        append_stroke_triangle(&command, left_start, right_start, left_end);
+        append_stroke_triangle(&command, left_end, right_start, right_end);
+    }
+
+    for (std::size_t index = 0U; index + 1U < segments.size(); ++index) {
+        const StrokeSegmentGeometry& previous = segments[index];
+        const StrokeSegmentGeometry& next = segments[index + 1U];
+        const double turn = point_cross(previous.tangent, next.tangent);
+        if (std::abs(turn) <= kStrokePointEpsilon) {
+            continue;
+        }
+
+        // For a left turn the right-hand side is outer; for a right turn the
+        // left-hand side is outer.
+        const double outer_sign = turn > 0.0 ? -1.0 : 1.0;
+        const RenderPoint center = previous.end;
+        const RenderPoint previous_outer_normal = scale_point(previous.normal, outer_sign);
+        const RenderPoint next_outer_normal = scale_point(next.normal, outer_sign);
+        const RenderPoint previous_outer = add_points(
+            center, scale_point(previous_outer_normal, half_width));
+        const RenderPoint next_outer = add_points(
+            center, scale_point(next_outer_normal, half_width));
+
+        if (path.join == runtime::ArtPathJoin::Round) {
+            const double start_angle = std::atan2(
+                previous_outer_normal.y, previous_outer_normal.x);
+            double end_angle = std::atan2(next_outer_normal.y, next_outer_normal.x);
+            double sweep = end_angle - start_angle;
+            if (turn > 0.0) {
+                while (sweep < 0.0) {
+                    sweep += 2.0 * 3.14159265358979323846;
+                }
+            } else {
+                while (sweep > 0.0) {
+                    sweep -= 2.0 * 3.14159265358979323846;
+                }
+            }
+            const std::size_t round_segments = std::max<std::size_t>(
+                1U,
+                static_cast<std::size_t>(std::ceil(
+                    std::abs(sweep) / 3.14159265358979323846 *
+                    static_cast<double>(kRoundSegmentsPerSemicircle))));
+            append_round_fan(
+                &command,
+                center,
+                start_angle,
+                sweep,
+                round_segments,
+                half_width);
+            continue;
+        }
+
+        std::optional<RenderPoint> miter_point;
+        if (path.join == runtime::ArtPathJoin::Miter) {
+            RenderPoint miter = add_points(previous_outer_normal, next_outer_normal);
+            const double miter_length = point_length(miter);
+            if (miter_length > kStrokePointEpsilon) {
+                miter = scale_point(miter, 1.0 / miter_length);
+                const double denominator = point_dot(miter, next_outer_normal);
+                if (std::abs(denominator) > kStrokePointEpsilon) {
+                    const double distance = half_width / denominator;
+                    if (std::isfinite(distance) &&
+                        std::abs(distance) <= half_width * 4.0) {
+                        miter_point = add_points(center, scale_point(miter, distance));
+                    }
+                }
+            }
+        }
+
+        const std::size_t previous_index = append_stroke_vertex(&command, previous_outer);
+        const std::size_t next_index = append_stroke_vertex(&command, next_outer);
+        if (miter_point.has_value()) {
+            const std::size_t miter_index = append_stroke_vertex(&command, *miter_point);
+            if (turn > 0.0) {
+                append_stroke_triangle(&command, previous_index, miter_index, next_index);
+            } else {
+                append_stroke_triangle(&command, previous_index, next_index, miter_index);
+            }
+        } else {
+            const std::size_t center_index = append_stroke_vertex(&command, center);
+            if (turn > 0.0) {
+                append_stroke_triangle(&command, center_index, previous_index, next_index);
+            } else {
+                append_stroke_triangle(&command, center_index, next_index, previous_index);
+            }
+        }
+    }
+
+    if (path.cap == runtime::ArtPathCap::Round) {
+        constexpr double kPi = 3.14159265358979323846;
+        const StrokeSegmentGeometry& first = segments.front();
+        const StrokeSegmentGeometry& last = segments.back();
+        append_round_fan(
+            &command,
+            first.start,
+            std::atan2(first.normal.y, first.normal.x),
+            kPi,
+            kRoundSegmentsPerSemicircle,
+            half_width);
+        append_round_fan(
+            &command,
+            last.end,
+            std::atan2(-last.normal.y, -last.normal.x),
+            kPi,
+            kRoundSegmentsPerSemicircle,
+            half_width);
+    }
+
+    if (command.vertices.empty() || command.indices.empty()) {
+        return "ArtPath '" + path.id + "' produced no triangle geometry.";
+    }
+    command.bounds_min = command.bounds_max = command.vertices.front();
+    for (const RenderPoint& vertex : command.vertices) {
+        command.bounds_min.x = std::min(command.bounds_min.x, vertex.x);
+        command.bounds_min.y = std::min(command.bounds_min.y, vertex.y);
+        command.bounds_max.x = std::max(command.bounds_max.x, vertex.x);
+        command.bounds_max.y = std::max(command.bounds_max.y, vertex.y);
+    }
+    command.has_bounds = true;
+    *command_out = std::move(command);
+    return std::nullopt;
+}
+
+std::optional<std::string> append_art_path_strokes(
+    PreparedScene* scene,
+    const runtime::Skeleton& skeleton) {
+    if (scene == nullptr) {
+        return "Prepared scene output must not be null while appending ArtPaths.";
+    }
+    for (const runtime::EvaluatedArtPath& path : skeleton.current_art_paths()) {
+        PreparedStrokeCommand command;
+        if (const std::optional<std::string> error = tessellate_art_path(path, &command)) {
+            return error;
+        }
+        for (RenderPoint& vertex : command.vertices) {
+            vertex.x *= skeleton.scale_x();
+            vertex.y *= skeleton.scale_y();
+        }
+        command.bounds_min = command.bounds_max = command.vertices.front();
+        for (const RenderPoint& vertex : command.vertices) {
+            command.bounds_min.x = std::min(command.bounds_min.x, vertex.x);
+            command.bounds_min.y = std::min(command.bounds_min.y, vertex.y);
+            command.bounds_max.x = std::max(command.bounds_max.x, vertex.x);
+            command.bounds_max.y = std::max(command.bounds_max.y, vertex.y);
+        }
+        command.draw_order_index = scene->draw_commands.size();
+        scene->draw_commands.push_back(std::move(command));
+        scene->ordered_events.push_back({
+            PreparedSceneEventKind::Draw,
+            scene->draw_commands.size() - 1U,
+        });
+    }
+    return std::nullopt;
+}
+
 SceneBounds attachment_bounds(const RegionAttachmentDrawCommand& attachment) {
     const bool use_masked_geometry =
         !attachment.masked_vertices.empty() && !attachment.masked_indices.empty();
@@ -731,6 +1050,15 @@ SceneBounds attachment_bounds(const DynamicMeshDrawCommand& attachment) {
     return bounds;
 }
 
+SceneBounds attachment_bounds(const PreparedStrokeCommand& attachment) {
+    SceneBounds bounds;
+    bounds.min_x = attachment.bounds_min.x;
+    bounds.min_y = attachment.bounds_min.y;
+    bounds.max_x = attachment.bounds_max.x;
+    bounds.max_y = attachment.bounds_max.y;
+    return bounds;
+}
+
 SceneBounds scene_bounds(const PreparedScene& scene) {
     SceneBounds bounds;
     bool initialized = false;
@@ -739,7 +1067,9 @@ SceneBounds scene_bounds(const PreparedScene& scene) {
         std::visit(
             [&](const auto& attachment) {
                 using Attachment = std::decay_t<decltype(attachment)>;
-                if constexpr (std::is_same_v<Attachment, DynamicMeshDrawCommand>) {
+                if constexpr (
+                    std::is_same_v<Attachment, DynamicMeshDrawCommand> ||
+                    std::is_same_v<Attachment, PreparedStrokeCommand>) {
                     if (!attachment.has_bounds) {
                         return;
                     }
@@ -939,6 +1269,12 @@ runtime::BlendMode command_blend_mode(const PreparedDrawCommand& command) {
         command);
 }
 
+TextureHandle command_texture_handle(const PreparedDrawCommand& command) {
+    return std::holds_alternative<PreparedStrokeCommand>(command)
+        ? kSolidWhiteTextureHandle
+        : kAtlasTextureHandle;
+}
+
 std::optional<std::string> append_region_stream_geometry(
     const RegionAttachmentDrawCommand& attachment,
     std::size_t identity_bone_index,
@@ -1077,6 +1413,39 @@ std::optional<std::string> append_dynamic_mesh_stream_geometry(
     return std::nullopt;
 }
 
+std::optional<std::string> append_stroke_stream_geometry(
+    const PreparedStrokeCommand& attachment,
+    std::size_t identity_bone_index,
+    std::vector<RenderCommandVertex>* vertices_out,
+    std::vector<std::uint32_t>* indices_out) {
+    const std::size_t base_vertex = vertices_out->size();
+    if (base_vertex > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        return "Renderer stroke vertex offset exceeded 32-bit index space.";
+    }
+    vertices_out->reserve(vertices_out->size() + attachment.vertices.size());
+    for (const RenderPoint& point : attachment.vertices) {
+        vertices_out->push_back(rigid_stream_vertex(
+            point,
+            {0.5, 0.5},
+            identity_bone_index,
+            attachment.color,
+            std::nullopt));
+    }
+    indices_out->reserve(indices_out->size() + attachment.indices.size());
+    for (const std::size_t index : attachment.indices) {
+        if (index >= attachment.vertices.size()) {
+            return "ArtPath '" + attachment.art_path_id +
+                "' produced an index outside its tessellated vertex range.";
+        }
+        if (base_vertex + index >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+            return "Renderer stroke index exceeded 32-bit index space.";
+        }
+        indices_out->push_back(static_cast<std::uint32_t>(base_vertex + index));
+    }
+    return std::nullopt;
+}
+
 StreamBuildResult build_stream_batches(
     const PreparedScene& scene,
     GeometryClipMode geometry_clip_mode) {
@@ -1111,12 +1480,18 @@ StreamBuildResult build_stream_batches(
                         geometry_clip_mode,
                         &result.vertices,
                         &result.indices);
-                } else {
+                } else if constexpr (std::is_same_v<Attachment, DynamicMeshDrawCommand>) {
                     return append_dynamic_mesh_stream_geometry(
                         attachment,
                         identity_bone_index,
                         bone_count,
                         geometry_clip_mode,
+                        &result.vertices,
+                        &result.indices);
+                } else {
+                    return append_stroke_stream_geometry(
+                        attachment,
+                        identity_bone_index,
                         &result.vertices,
                         &result.indices);
                 }
@@ -1203,12 +1578,18 @@ std::optional<std::string> append_draw_command_stream_geometry(
                     geometry_clip_mode,
                     vertices_out,
                     indices_out);
-            } else {
+            } else if constexpr (std::is_same_v<Attachment, DynamicMeshDrawCommand>) {
                 return append_dynamic_mesh_stream_geometry(
                     attachment,
                     identity_bone_index,
                     bone_count,
                     geometry_clip_mode,
+                    vertices_out,
+                    indices_out);
+            } else {
+                return append_stroke_stream_geometry(
+                    attachment,
+                    identity_bone_index,
                     vertices_out,
                     indices_out);
             }
@@ -1218,6 +1599,7 @@ std::optional<std::string> append_draw_command_stream_geometry(
 
 bool render_batch_matches(const RenderCommand& batch, const PreparedDrawCommand& command) {
     return batch.texture_name == command_texture_name(command) &&
+        batch.texture_handle == command_texture_handle(command) &&
         batch.blend_mode == command_blend_mode(command) &&
         batch.shader_variant == command_shader_variant(command);
 }
@@ -1347,7 +1729,7 @@ RenderCommandListResult build_render_command_list_impl(
                 flush_pending_batch();
                 RenderCommand batch;
                 batch.texture_name = command_texture_name(source_command);
-                batch.texture_handle = kAtlasTextureHandle;
+                batch.texture_handle = command_texture_handle(source_command);
                 batch.blend_mode = command_blend_mode(source_command);
                 batch.shader_variant = command_shader_variant(source_command);
                 batch.source_draw_command_offset = event.index;
@@ -1355,7 +1737,10 @@ RenderCommandListResult build_render_command_list_impl(
                 pending_batch = std::move(batch);
             } else if (!render_batch_matches(*pending_batch, source_command)) {
                 command_list.batch_break_reasons.texture_changes +=
-                    pending_batch->texture_name != command_texture_name(source_command) ? 1U : 0U;
+                    (pending_batch->texture_name != command_texture_name(source_command) ||
+                     pending_batch->texture_handle != command_texture_handle(source_command))
+                        ? 1U
+                        : 0U;
                 command_list.batch_break_reasons.blend_changes +=
                     pending_batch->blend_mode != command_blend_mode(source_command) ? 1U : 0U;
                 command_list.batch_break_reasons.shader_changes +=
@@ -1363,7 +1748,7 @@ RenderCommandListResult build_render_command_list_impl(
                 flush_pending_batch();
                 RenderCommand batch;
                 batch.texture_name = command_texture_name(source_command);
-                batch.texture_handle = kAtlasTextureHandle;
+                batch.texture_handle = command_texture_handle(source_command);
                 batch.blend_mode = command_blend_mode(source_command);
                 batch.shader_variant = command_shader_variant(source_command);
                 batch.source_draw_command_offset = event.index;
@@ -1531,7 +1916,7 @@ PreparedSceneCache::SlotSnapshot build_slot_snapshot(
             skeleton.mesh_deform_states()[slot_index];
         snapshot.mesh_deform_attachment_name = mesh_deform.attachment_name;
         if (const std::vector<double>* vertex_offsets =
-                skeleton.current_mesh_vertex_offsets(slot_index)) {
+                skeleton.current_final_mesh_vertex_offsets(slot_index)) {
             snapshot.mesh_vertex_offsets = *vertex_offsets;
         }
     }
@@ -1641,7 +2026,7 @@ std::optional<std::string> build_slot_record(
                     slot_state,
                     0U,
                     slot_index,
-                    skeleton.current_mesh_vertex_offsets(slot_index),
+                    skeleton.current_final_mesh_vertex_offsets(slot_index),
                     *region,
                     atlas,
                     bone_world_transforms,
@@ -1668,7 +2053,7 @@ std::optional<std::string> build_slot_record(
             reusable_mesh->masked_indices.clear();
 
             const std::vector<double>* vertex_offsets =
-                skeleton.current_mesh_vertex_offsets(slot_index);
+                skeleton.current_final_mesh_vertex_offsets(slot_index);
             reusable_mesh->deform_offsets.clear();
             if (vertex_offsets != nullptr) {
                 reusable_mesh->deform_offsets.reserve(reusable_mesh->vertex_payloads.size());
@@ -1733,12 +2118,12 @@ std::optional<std::string> build_slot_record(
     return std::nullopt;
 }
 
-void rebuild_cached_scene(
+std::optional<std::string> rebuild_cached_scene(
     PreparedSceneCache* cache,
     const runtime::Skeleton& skeleton,
     const runtime::AtlasData& atlas) {
     if (cache == nullptr) {
-        return;
+        return "Prepared scene cache must not be null.";
     }
 
     PreparedScene scene;
@@ -1810,7 +2195,7 @@ void rebuild_cached_scene(
                         prepared_attachment.masked_vertices.clear();
                         prepared_attachment.masked_indices.clear();
                     }
-                } else {
+                } else if constexpr (std::is_same_v<Attachment, DynamicMeshDrawCommand>) {
                     prepared_attachment.masked_vertices.clear();
                     prepared_attachment.masked_indices.clear();
                 }
@@ -1832,9 +2217,14 @@ void rebuild_cached_scene(
         active_clips.pop_back();
     }
 
+    if (const std::optional<std::string> error = append_art_path_strokes(&scene, skeleton)) {
+        return error;
+    }
+
     cache->scene_ = std::move(scene);
     cache->has_scene_ = true;
     cache->has_batch_summary_ = false;
+    return std::nullopt;
 }
 
 std::string_view mesh_buffer_usage_name(MeshBufferUsage usage) {
@@ -2598,6 +2988,10 @@ const DynamicMeshDrawCommand* dynamic_mesh_attachment_command(const PreparedDraw
     return std::get_if<DynamicMeshDrawCommand>(&command);
 }
 
+const PreparedStrokeCommand* stroke_command(const PreparedDrawCommand& command) {
+    return std::get_if<PreparedStrokeCommand>(&command);
+}
+
 TextureImageLoadResult load_png_texture_or_white(const std::filesystem::path& image_path) {
     if (image_path.empty()) {
         return fallback_texture_result(
@@ -2753,7 +3147,7 @@ PreparedSceneResult prepare_setup_pose_scene(
 
         if (attachment != nullptr && attachment->mesh_geometry != nullptr) {
             const std::vector<double>* vertex_offsets =
-                skeleton.current_mesh_vertex_offsets(slot_index);
+                skeleton.current_final_mesh_vertex_offsets(slot_index);
             if (const std::optional<std::string> error = append_dynamic_mesh_attachment(
                     &scene,
                     *attachment,
@@ -2827,6 +3221,60 @@ PreparedSceneResult prepare_setup_pose_scene(
         active_clips.pop_back();
     }
 
+    if (const std::optional<std::string> error = append_art_path_strokes(&scene, skeleton)) {
+        result.error_message = *error;
+        return result;
+    }
+
+    result.scene = std::move(scene);
+    return result;
+}
+
+PreparedSceneResult prepare_setup_pose_scene(const runtime::Skeleton& skeleton) {
+    PreparedSceneResult result;
+    PreparedScene scene;
+    scene.skeleton_name = skeleton.data()->info().name;
+    scene.skeleton_count = 1U;
+
+    if (!skeleton.visible()) {
+        result.scene = std::move(scene);
+        return result;
+    }
+
+    const auto& slots = skeleton.data()->slots();
+    if (skeleton.slot_states().size() != slots.size()) {
+        result.error_message = "slot state count does not match SkeletonData slots";
+        return result;
+    }
+    if (skeleton.draw_order().size() != slots.size()) {
+        result.error_message = "draw order count does not match SkeletonData slots";
+        return result;
+    }
+
+    for (std::size_t slot_index = 0U; slot_index < slots.size(); ++slot_index) {
+        const runtime::AttachmentData* attachment = skeleton.current_attachment(slot_index);
+        if (attachment == nullptr) {
+            continue;
+        }
+        if (attachment->kind == runtime::AttachmentKind::Region ||
+            attachment->kind == runtime::AttachmentKind::Mesh ||
+            attachment->kind == runtime::AttachmentKind::LinkedMesh) {
+            result.error_message = slot_error(
+                slot_index,
+                "attachment '" + attachment->name +
+                    "' requires atlas metadata; use the atlas-backed prepare overload");
+            return result;
+        }
+    }
+
+    scene.bone_palette = skeleton.bone_world_transforms();
+    scene.draw_commands.reserve(skeleton.current_art_paths().size());
+    scene.ordered_events.reserve(skeleton.current_art_paths().size());
+    if (const std::optional<std::string> error = append_art_path_strokes(&scene, skeleton)) {
+        result.error_message = *error;
+        return result;
+    }
+
     result.scene = std::move(scene);
     return result;
 }
@@ -2847,17 +3295,26 @@ PreparedSceneCacheResult prepare_setup_pose_scene_cached(
     cache->skin_swap_dirty_ = false;
     cache->last_update_ = {};
 
+    const bool parameter_changed =
+        cache->cached_parameter_revision_ != skeleton.parameter_revision();
+    const bool scale_changed =
+        cache->cached_scale_x_ != skeleton.scale_x() ||
+        cache->cached_scale_y_ != skeleton.scale_y();
     const bool force_full_rebuild =
         !cache->has_scene_ ||
         cache->skeleton_data_ != skeleton.data().get() ||
         cache->atlas_data_ != &atlas ||
         cache->cached_visible_ != skeleton.visible() ||
+        scale_changed ||
         cache->slot_snapshots_.size() != slot_count ||
         cache->slot_records_.size() != slot_count;
 
     cache->skeleton_data_ = skeleton.data().get();
     cache->atlas_data_ = &atlas;
     cache->cached_visible_ = skeleton.visible();
+    cache->cached_parameter_revision_ = skeleton.parameter_revision();
+    cache->cached_scale_x_ = skeleton.scale_x();
+    cache->cached_scale_y_ = skeleton.scale_y();
 
     if (!skeleton.visible()) {
         if (force_full_rebuild || cache->scene_.skeleton_count != 1U) {
@@ -2915,6 +3372,8 @@ PreparedSceneCacheResult prepare_setup_pose_scene_cached(
                 skeleton,
                 atlas,
                 slot_index)) {
+            cache->has_scene_ = false;
+            cache->has_batch_summary_ = false;
             result.error_message = *error;
             return result;
         }
@@ -2924,7 +3383,9 @@ PreparedSceneCacheResult prepare_setup_pose_scene_cached(
 
     if (!force_full_rebuild &&
         !cache->draw_order_dirty_ &&
-        cache->last_update_.dirty_slot_count == 0U) {
+        cache->last_update_.dirty_slot_count == 0U &&
+        !parameter_changed &&
+        !scale_changed) {
         cache->scene_.bone_palette = skeleton.bone_world_transforms();
         cache->last_update_.cache_hit = true;
         cache->last_update_.bone_palette_only = true;
@@ -2938,7 +3399,91 @@ PreparedSceneCacheResult prepare_setup_pose_scene_cached(
         skeleton.draw_order().end());
     cache->last_update_.draw_order_dirty = cache->draw_order_dirty_;
     cache->last_update_.skin_swap_dirty = cache->skin_swap_dirty_;
-    rebuild_cached_scene(cache, skeleton, atlas);
+    if (const std::optional<std::string> error = rebuild_cached_scene(cache, skeleton, atlas)) {
+        cache->has_scene_ = false;
+        cache->has_batch_summary_ = false;
+        result.error_message = *error;
+        return result;
+    }
+
+    result.scene = &cache->scene_;
+    result.update_info = &cache->last_update_;
+    return result;
+}
+
+PreparedSceneCacheResult prepare_setup_pose_scene_cached(
+    PreparedSceneCache* cache,
+    const runtime::Skeleton& skeleton) {
+    PreparedSceneCacheResult result;
+    if (cache == nullptr) {
+        result.error_message = "Prepared scene cache must not be null.";
+        return result;
+    }
+
+    const std::size_t slot_count = skeleton.data()->slots().size();
+    std::vector<PreparedSceneCache::SlotSnapshot> slot_snapshots;
+    slot_snapshots.reserve(slot_count);
+    bool slots_changed = cache->slot_snapshots_.size() != slot_count;
+    for (std::size_t slot_index = 0U; slot_index < slot_count; ++slot_index) {
+        PreparedSceneCache::SlotSnapshot snapshot =
+            build_slot_snapshot(skeleton, slot_index);
+        if (!slots_changed &&
+            !slot_snapshot_matches(cache->slot_snapshots_[slot_index], snapshot)) {
+            slots_changed = true;
+        }
+        slot_snapshots.push_back(std::move(snapshot));
+    }
+    const bool draw_order_changed =
+        cache->draw_order_snapshot_ != skeleton.draw_order();
+    const bool rebuild =
+        !cache->has_scene_ ||
+        cache->skeleton_data_ != skeleton.data().get() ||
+        cache->atlas_data_ != nullptr ||
+        cache->cached_visible_ != skeleton.visible() ||
+        cache->cached_parameter_revision_ != skeleton.parameter_revision() ||
+        cache->cached_scale_x_ != skeleton.scale_x() ||
+        cache->cached_scale_y_ != skeleton.scale_y() ||
+        slots_changed ||
+        draw_order_changed;
+
+    cache->slot_dirty_flags_.assign(slot_count, false);
+    for (std::size_t slot_index = 0U; slot_index < slot_count; ++slot_index) {
+        cache->slot_dirty_flags_[slot_index] =
+            cache->slot_snapshots_.size() != slot_count ||
+            !slot_snapshot_matches(cache->slot_snapshots_[slot_index], slot_snapshots[slot_index]);
+    }
+    cache->draw_order_dirty_ = draw_order_changed;
+    cache->skin_swap_dirty_ = false;
+    cache->last_update_ = {};
+
+    if (rebuild) {
+        PreparedSceneResult prepared = prepare_setup_pose_scene(skeleton);
+        if (!prepared) {
+            result.error_message = std::move(prepared.error_message);
+            return result;
+        }
+        cache->scene_ = std::move(*prepared.scene);
+        cache->has_scene_ = true;
+        cache->has_batch_summary_ = false;
+        cache->skeleton_data_ = skeleton.data().get();
+        cache->atlas_data_ = nullptr;
+        cache->cached_visible_ = skeleton.visible();
+        cache->cached_parameter_revision_ = skeleton.parameter_revision();
+        cache->cached_scale_x_ = skeleton.scale_x();
+        cache->cached_scale_y_ = skeleton.scale_y();
+        cache->draw_order_snapshot_.assign(
+            skeleton.draw_order().begin(), skeleton.draw_order().end());
+        cache->slot_snapshots_ = std::move(slot_snapshots);
+        cache->slot_records_.clear();
+        cache->last_update_.draw_order_dirty = draw_order_changed;
+        cache->last_update_.dirty_slot_count = static_cast<std::size_t>(
+            std::count(cache->slot_dirty_flags_.begin(), cache->slot_dirty_flags_.end(), true));
+        cache->last_update_.rebuilt_slot_count = slot_count;
+    } else {
+        cache->scene_.bone_palette = skeleton.bone_world_transforms();
+        cache->last_update_.cache_hit = true;
+        cache->last_update_.bone_palette_only = true;
+    }
 
     result.scene = &cache->scene_;
     result.update_info = &cache->last_update_;
@@ -3015,6 +3560,61 @@ PreparedSceneBatchSummary summarize_render_command_list(
     return summary;
 }
 
+namespace internal {
+
+std::optional<std::string> render_demo_frame(
+    const PreparedScene& scene,
+    bool hud_overlay_enabled,
+    Backend* backend,
+    const BackendFrameInfo& frame_info) {
+    if (backend == nullptr) {
+        return "Renderer backend was null.";
+    }
+
+    const SceneBounds framed_bounds = fit_bounds_to_aspect(
+        scene_bounds(scene),
+        frame_info.framebuffer_width,
+        frame_info.framebuffer_height);
+    runtime::ProfilerCapture profiler(hud_overlay_enabled);
+    if (hud_overlay_enabled) {
+        profiler.begin_frame();
+    }
+
+    const RenderCommandListResult command_list_result =
+        runtime::profile_phase(&profiler, runtime::ProfilerPhase::Render, [&]() {
+            return build_render_command_list_impl(
+                scene,
+                orthographic_projection(framed_bounds));
+        });
+    if (!command_list_result) {
+        return command_list_result.error_message;
+    }
+
+    RenderCommandList command_list = std::move(*command_list_result.command_list);
+    if (hud_overlay_enabled) {
+        const PreparedSceneBatchSummary batch_summary =
+            summarize_render_command_list(scene, command_list);
+        profiler.add_draw_stats(profiler_draw_stats(batch_summary));
+        profiler.end_frame();
+
+        if (const auto hud_command = build_profiler_hud_overlay_command(
+                runtime::marrow_profiler_frame(profiler),
+                framed_bounds,
+                frame_info.framebuffer_width,
+                frame_info.framebuffer_height,
+                scene.bone_palette.size())) {
+            const std::size_t draw_index = command_list.commands.size();
+            command_list.commands.push_back(*hud_command);
+            command_list.ordered_events.push_back(
+                {RenderCommandEventKind::Draw, draw_index});
+        }
+    }
+
+    return backend->submit_commands(command_list);
+}
+
+} // namespace internal
+
 DemoShell::DemoShell(
     SampleAppWindow window,
     PreparedScene scene,
@@ -3028,6 +3628,7 @@ DemoShell::DemoShell(
 std::string DemoShell::launch_report() const {
     std::size_t region_attachment_count = 0;
     std::size_t dynamic_mesh_attachment_count = 0;
+    std::size_t stroke_count = 0;
     for (const PreparedDrawCommand& command : scene_.draw_commands) {
         if (region_attachment_command(command) != nullptr) {
             ++region_attachment_count;
@@ -3035,6 +3636,10 @@ std::string DemoShell::launch_report() const {
         }
         if (dynamic_mesh_attachment_command(command) != nullptr) {
             ++dynamic_mesh_attachment_count;
+            continue;
+        }
+        if (stroke_command(command) != nullptr) {
+            ++stroke_count;
         }
     }
 
@@ -3058,6 +3663,7 @@ std::string DemoShell::launch_report() const {
            << "clip attachments: " << scene_.clip_attachments.size() << '\n'
            << "region attachments: " << region_attachment_count << '\n'
            << "dynamic mesh attachments: " << dynamic_mesh_attachment_count << '\n'
+           << "art path strokes: " << stroke_count << '\n'
            << "draw commands: " << scene_.draw_commands.size() << '\n'
            << "hud overlay: " << (hud_overlay_enabled_ ? "enabled" : "disabled");
     if (batch_summary) {
@@ -3123,8 +3729,25 @@ std::string DemoShell::launch_report() const {
             continue;
         }
 
-        const DynamicMeshDrawCommand& attachment =
-            *dynamic_mesh_attachment_command(command);
+        if (const PreparedStrokeCommand* stroke = stroke_command(command)) {
+            stream << '\n'
+                   << "artPath " << stroke->art_path_id
+                   << " -> name=" << stroke->art_path_name
+                   << ", vertices=" << stroke->vertices.size()
+                   << ", triangles=" << (stroke->indices.size() / 3U)
+                   << ", boundsMin=(" << stroke->bounds_min.x << ", "
+                   << stroke->bounds_min.y << ")"
+                   << ", boundsMax=(" << stroke->bounds_max.x << ", "
+                   << stroke->bounds_max.y << ")";
+            continue;
+        }
+
+        const DynamicMeshDrawCommand* dynamic_attachment =
+            dynamic_mesh_attachment_command(command);
+        if (dynamic_attachment == nullptr) {
+            continue;
+        }
+        const DynamicMeshDrawCommand& attachment = *dynamic_attachment;
         const GpuSkinningEvaluationResult skinned_result =
             evaluate_gpu_skinned_vertices(attachment, scene_.bone_palette);
         const std::vector<SkinnedMeshVertex>& skinned_vertices = skinned_result.vertices;
@@ -3176,96 +3799,6 @@ std::string DemoShell::launch_report() const {
     }
 
     return stream.str();
-}
-
-std::optional<std::string> DemoShell::run(std::optional<int> auto_close_frames) const {
-    if (scene_.draw_commands.empty()) {
-        return "Prepared scene does not contain any attachments to render.";
-    }
-
-    const TextureImageLoadResult texture_image = load_png_texture_or_white(atlas_image_path_);
-    if (!texture_image.loaded_from_file && !texture_image.message.empty()) {
-        std::cerr << texture_image.message << '\n';
-    }
-
-    BackendCreateInfo create_info;
-    create_info.window = window_;
-    create_info.atlas_texture = texture_image.image;
-    create_info.atlas_filter_min = scene_.atlas_filter_min;
-    create_info.atlas_filter_mag = scene_.atlas_filter_mag;
-    create_info.atlas_wrap_x = scene_.atlas_wrap_x;
-    create_info.atlas_wrap_y = scene_.atlas_wrap_y;
-    create_info.hidden_window = auto_close_frames.has_value();
-
-    std::unique_ptr<Backend> backend = internal::make_sokol_backend();
-
-    const SceneBounds base_bounds = scene_bounds(scene_);
-    const auto render_frame = [&](const BackendFrameInfo& frame_info) -> std::optional<std::string> {
-        const SceneBounds framed_bounds = fit_bounds_to_aspect(
-            base_bounds,
-            frame_info.framebuffer_width,
-            frame_info.framebuffer_height);
-        runtime::ProfilerCapture profiler(hud_overlay_enabled_);
-        if (hud_overlay_enabled_) {
-            profiler.begin_frame();
-        }
-
-        const RenderCommandListResult command_list_result =
-            runtime::profile_phase(&profiler, runtime::ProfilerPhase::Render, [&]() {
-                return build_render_command_list(scene_, orthographic_projection(framed_bounds));
-            });
-        if (!command_list_result) {
-            return command_list_result.error_message;
-        }
-
-        RenderCommandList command_list = std::move(*command_list_result.command_list);
-        if (hud_overlay_enabled_) {
-            const PreparedSceneBatchSummary batch_summary =
-                summarize_render_command_list(scene_, command_list);
-            profiler.add_draw_stats(profiler_draw_stats(batch_summary));
-            profiler.end_frame();
-
-            if (const auto hud_command = build_profiler_hud_overlay_command(
-                    runtime::marrow_profiler_frame(profiler),
-                    framed_bounds,
-                    frame_info.framebuffer_width,
-                    frame_info.framebuffer_height,
-                    scene_.bone_palette.size())) {
-                const std::size_t draw_index = command_list.commands.size();
-                command_list.commands.push_back(*hud_command);
-                command_list.ordered_events.push_back({RenderCommandEventKind::Draw, draw_index});
-            }
-        }
-
-        return backend->submit_commands(command_list);
-    };
-
-#if defined(__APPLE__)
-    if (auto_close_frames.has_value()) {
-        if (const std::optional<std::string> error = backend->create(create_info)) {
-            backend->destroy();
-            return error;
-        }
-
-        for (int frame_index = 0; frame_index < *auto_close_frames; ++frame_index) {
-            BackendFrameInfo frame_info;
-            if (const std::optional<std::string> error = backend->begin_frame(&frame_info)) {
-                backend->destroy();
-                return error;
-            }
-            if (const std::optional<std::string> error = render_frame(frame_info)) {
-                backend->destroy();
-                return error;
-            }
-            backend->end_frame();
-        }
-
-        backend->destroy();
-        return std::nullopt;
-    }
-#endif
-
-    return internal::run_sokol_app(create_info, backend.get(), render_frame, auto_close_frames);
 }
 
 RenderCommandListResult build_render_command_list(

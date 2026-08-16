@@ -3,15 +3,50 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "marrow/runtime/json.hpp"
 
 namespace marrow::runtime {
 
+enum class SpineImportStatus {
+    Accepted,
+    AcceptedWithWarnings,
+    Rejected,
+};
+
+enum class SpineImportDiagnosticSeverity {
+    Warning,
+    Unsupported,
+};
+
+struct SpineImportDiagnostic {
+    SpineImportDiagnosticSeverity severity{SpineImportDiagnosticSeverity::Warning};
+    std::string code;
+    std::string path;
+    std::string message;
+};
+
+struct SpineImportReportError {
+    std::string message;
+    std::size_t line{1};
+    std::size_t column{1};
+};
+
+struct SpineImportReport {
+    std::string source_format{"spine_json"};
+    std::filesystem::path source_path;
+    std::string spine_version;
+    SpineImportStatus status{SpineImportStatus::Rejected};
+    std::vector<SpineImportDiagnostic> diagnostics;
+    std::optional<SpineImportReportError> error;
+};
+
 struct SpineImportResult {
     std::optional<json::Document> document;
     std::optional<json::LoadError> error;
+    SpineImportReport report;
     std::vector<std::string> warnings;
 
     /// @brief Reports whether Spine JSON import succeeded.
@@ -20,6 +55,11 @@ struct SpineImportResult {
         return document.has_value();
     }
 };
+
+std::string_view spine_import_status_name(SpineImportStatus status);
+std::string_view spine_import_diagnostic_severity_name(
+    SpineImportDiagnosticSeverity severity);
+json::Value spine_import_report_to_json(const SpineImportReport& report);
 
 struct SpineAtlasImportResult {
     std::vector<json::Document> documents;

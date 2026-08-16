@@ -8,6 +8,7 @@ Marrow splits imported animation content into immutable setup data, mutable inst
 .mskl or .mbin  ->  SkeletonData  ->  Skeleton  ->  PreparedScene / RenderCommandList
                                   \
                                    ->  AnimationState
+                                   ->  ParameterState (MAR-126 implemented)
 
 .matl           ->  AtlasData     -------------------------------------------^
 .marrow         ->  editor-only source that exports .mskl/.mbin + .matl
@@ -23,6 +24,8 @@ It owns:
 - Bone hierarchy and setup-pose transforms.
 - Slots, skins, attachments, constraints, events, and animations.
 - Mix definitions used by `AnimationState`.
+- Optional parameter, parameter group, parameter shape, deformer, art path, expression, and lip-sync definitions implemented by MAR-122~128. Absent roots behave as an empty model.
+- Derived parameter id lookup, dependency bitsets, affected-slot lookup, and deformer graph indices; these caches are not serialized.
 
 Why it exists:
 
@@ -47,6 +50,7 @@ It owns:
 - Current mesh deform state.
 - Current draw order.
 - Skin selection, attachment playback time, visibility, and update-throttling state.
+- Separate per-instance direct and final parameter buffers, parameter revision/dirty state, and evaluated parameter/deformer final-offset caches implemented by MAR-122~128.
 
 Use a `Skeleton` when you need one character instance in the world. If you spawn ten enemies that all use the same rig, you normally create ten `Skeleton` objects that all point at one shared `SkeletonData`.
 
@@ -69,6 +73,21 @@ It owns:
 
 `AnimationState` does not store bone transforms itself. Instead, it evaluates timelines against `SkeletonData` and applies the results onto a `Skeleton`.
 
+Parameter modeling follows the same ownership rule: `SkeletonData` stores immutable definitions, while `Skeleton` owns mutable direct and final parameter buffers. `set_parameter_value()` preserves finite raw direct preview input, including fractional discrete and out-of-range clamped input; `parameter_values()` exposes the final value after composition, discrete rounding, and optional clamping. `AnimationState` and the C ABI do not own parameter state.
+
+`ParameterState` is separate from timeline playback. It owns expression activation order, amplitude/phoneme input, and attack/release/smoothing filter state. Its active contract is:
+
+```cpp
+parameter_state.update(delta_seconds);
+parameter_state.apply(skeleton);
+```
+
+Composition order is fixed:
+
+```text
+direct preview -> lip mapping override -> expressions by priority/activation order -> discrete round -> optional clamp
+```
+
 Typical per-frame flow:
 
 ```cpp
@@ -86,6 +105,21 @@ Threading model:
 
 - `AnimationState` is also not internally synchronized.
 - Keep one `AnimationState` paired with one `Skeleton` on one thread.
+
+## Editor interaction boundaries
+
+Task #28 keeps viewport and timeline calculations separate from shell input and
+session mutation. `viewport_interaction_kernel` and `timeline_model` are private,
+data-only targets with no ImGui, Sokol, or `ShellState` dependency. Their focused
+tests lock down coordinate/gesture math and timeline identity, collision, retime,
+snap, duration, and completion decisions.
+
+The shell-private controllers own effective-track materialization, live runtime
+refresh, transactions, rollback, and zero-or-one history entry. The existing
+ImGui files interpret input and draw the result. Normal timeline presentation
+uses the runtime-revision/identity keyed cache; add-key and live retime rebuild
+tracks directly after mutation so the current frame never reuses invalid row
+references.
 
 ## Renderer handoff
 
@@ -109,6 +143,16 @@ The renderer layer does not load animation files directly. It consumes the curre
 - Clip attachments and ordered clip/draw events.
 - Bone palette data and atlas presentation metadata.
 
+The implemented parameter contract preserves animation FFD as a separately observable layer and gives renderer preparation a final attachment-local accessor. The fixed mesh order is:
+
+```text
+setup/linked-mesh resolution -> animation FFD -> normalized_override -> additive_clamped -> deformer -> GPU skinning
+```
+
+`current_mesh_vertex_offsets(slot)` stays animation-FFD-only. `current_final_mesh_vertex_offsets(slot)` supplies the attachment-local result used for mesh preparation and the existing weighted GPU skinning path.
+
+ArtPaths are skeleton-local root overlays, distinct from constraint paths. Preparation applies the instance's global x/y scale (including mirroring), then appends them in JSON declaration order after slot draw and clipping events. Stroke-only skeletons use the atlas-free `prepare_setup_pose_scene(skeleton)` overload; a document with atlas-backed attachments still requires atlas data, including after a cached attachment or skin change.
+
 ### `RenderCommandList`
 
 `build_render_command_list()` converts a `PreparedScene` into a more compact GPU submission package:
@@ -121,6 +165,24 @@ The renderer layer does not load animation files directly. It consumes the curre
 
 This split lets you choose how far down the renderer stack you want to integrate. Tools and debug UIs may stop at `PreparedScene`; engine backends usually consume `RenderCommandList`.
 
+### GPU host ownership
+
+`RenderCommandList` does not own a window, main pass, or presentation. The
+pass-free Sokol scene renderer preflights all current/onion command lists,
+grows streaming buffers deterministically, and submits only inside an already
+open pass. `marrow_renderer_core` owns the one `sokol_gfx` implementation per
+executable.
+
+The standalone `DemoShell` adapter obtains its window, swapchain, pass, and
+commit from `sokol_app`/`sokol_glue`. The editor instead obtains a Metal or
+GLCORE swapchain from its private SDL3 host, renders its 1x offscreen viewport,
+then submits `sokol_imgui` to the main pass. Consequently `marrow_editor` stays
+UI-free, and the editor executable must contain no `sapp_*` or `sglue_*` symbols.
+
+Editor pointer coordinates are logical SDL coordinates. Offscreen attachments
+and swapchains use drawable pixels, and texture presentation uses the active
+backend's `origin_top_left` feature rather than a GL-specific UV assumption.
+
 ## Why `.marrow` is separate
 
 `.marrow` is the editor project format, not the runtime playback format.
@@ -130,8 +192,12 @@ It keeps:
 - References to runtime assets.
 - Authoring-only viewport and note state.
 - Unexported timeline, mesh-weight, constraint, and atlas-pack edits.
+- Optional `parameter_model` source data for parameters, groups, blend shapes, deformers, art paths, expressions, and lip-sync mappings.
+- Lossless unknown additive fields inside `parameter_model`; a completely empty model is omitted on save.
 
 The editor export step merges that authoring data into runtime-ready `.mskl` or `.mbin` plus `.matl` outputs.
+
+Direct parameter preview is not authoring source. Slider/numeric preview and agent `parameter.set` are undoable but non-dirty and are never serialized or exported.
 
 ## Rule of thumb
 
@@ -139,3 +205,4 @@ The editor export step merges that authoring data into runtime-ready `.mskl` or 
 - Instantiate `Skeleton` and `AnimationState`.
 - Rebuild renderer input from the current `Skeleton` pose every frame.
 - Treat `.marrow` as source and `.mskl`/`.mbin` + `.matl` as shipped runtime assets.
+- Keep parameter/deformer data Maroow-native; do not represent it as Live2D Core compatibility or proprietary Live2D file loading.

@@ -98,6 +98,9 @@ unsigned least_significant_bit_index(std::uint64_t word) {
 #endif
 }
 
+constexpr float kPiF = 3.14159265358979323846f;
+constexpr float kRadiansToDegreesScaleF = 180.0f / kPiF;
+
 } // namespace
 
 namespace detail {
@@ -626,8 +629,6 @@ void Skeleton::update_world_transforms(
     };
     constexpr float kEpsilonF = 1e-8f;
     constexpr float kIkEpsilonF = 1e-4f;
-    constexpr float kPiF = 3.14159265358979323846f;
-    constexpr float kRadiansToDegreesScaleF = 180.0f / kPiF;
     const float skeleton_scale_x = scale_x_;
     const float skeleton_scale_y = scale_y_;
 

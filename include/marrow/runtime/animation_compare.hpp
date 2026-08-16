@@ -144,6 +144,28 @@ inline AnimationRoundtripComparison compare_animation_roundtrip(
             return comparison;
         }
 
+        if (animation.explicit_duration.has_value() !=
+            roundtrip_animation->explicit_duration.has_value()) {
+            comparison.error =
+                "explicit duration presence mismatch for animation '" + animation.name + "'";
+            return comparison;
+        }
+        if (animation.explicit_duration.has_value()) {
+            constexpr double kDurationRelativeTolerance = 1e-6;
+            const double scale = std::max(
+                {1.0,
+                 std::abs(*animation.explicit_duration),
+                 std::abs(*roundtrip_animation->explicit_duration)});
+            if (std::abs(
+                    *animation.explicit_duration -
+                    *roundtrip_animation->explicit_duration) >
+                kDurationRelativeTolerance * scale) {
+                comparison.error =
+                    "explicit duration value mismatch for animation '" + animation.name + "'";
+                return comparison;
+            }
+        }
+
         comparison.metrics.roundtrip_rotation_keyframes +=
             detail::count_timeline_keyframes(roundtrip_animation->bone_rotate_timelines);
         comparison.metrics.roundtrip_translation_keyframes +=

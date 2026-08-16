@@ -64,6 +64,15 @@ public:
      */
     Value(std::string string_value, SourceLocation location);
     /**
+     * @brief Constructs a string JSON value from a C string.
+     *
+     * Without this overload a string literal binds to the boolean
+     * constructor via pointer-to-bool conversion.
+     * @param string_value Null-terminated string payload to copy.
+     * @param location Source location associated with the value.
+     */
+    Value(const char* string_value, SourceLocation location);
+    /**
      * @brief Constructs an array JSON value.
      * @param array_value Array payload to store.
      * @param location Source location associated with the value.
@@ -202,6 +211,15 @@ Value* find_member(Value& object, std::string_view key);
  * @return Pretty-printed JSON text.
  */
 std::string serialize_pretty(const Value& value, int indent_size = 2);
+
+/**
+ * @brief Serializes JSON with indentation and round-trip-safe number spelling.
+ *
+ * Unlike the human-oriented serializer, this preserves every parsed double
+ * value exactly when the result is parsed again. It is intended for opaque
+ * additive payloads whose numeric values must survive load/save unchanged.
+ */
+std::string serialize_pretty_round_trip(const Value& value, int indent_size = 2);
 
 /**
  * @brief Serializes a JSON value compactly onto a single line.

@@ -1,0 +1,90 @@
+{
+  "marrow": "1.0",
+  "runtime": {
+    "skeleton": "parameter_face_basic.mskl",
+    "atlases": [
+      "parameter_face_basic.matl"
+    ]
+  },
+  "editor": {
+    "name": "Parameter Face Basic",
+    "active_animation": "idle",
+    "preview_skins": [
+      "default"
+    ],
+    "export_directory": "exports",
+    "notes": "Parameter modeling fixture with lossless additive metadata.",
+    "timeline": {
+      "fps": 60
+    },
+    "viewport": {
+      "pan_x": 0,
+      "pan_y": 0,
+      "zoom": 1
+    }
+  },
+  "parameter_model": {
+    "parameters": [
+      {
+        "id": "mouth.open",
+        "name": "Mouth Open",
+        "min": 0,
+        "max": 1,
+        "default": 0,
+        "type": "continuous",
+        "clamp": true,
+        "ui_step": 0.01,
+        "units": "ratio",
+        "authoring_hint": "vertical"
+      },
+      {
+        "id": "face.variant",
+        "name": "Face Variant",
+        "min": 0,
+        "max": 3,
+        "default": 0,
+        "type": "discrete",
+        "clamp": false,
+        "ui_step": 1
+      }
+    ],
+    "groups": [
+      {
+        "id": "face",
+        "name": "Face",
+        "parameters": [
+          "mouth.open",
+          "face.variant"
+        ],
+        "collapsed": false,
+        "color_tag": "rose"
+      }
+    ],
+    "blend_shapes": [
+      {
+        "id": "mouth.open.shape",
+        "target_slot": "face",
+        "target_attachment": "face_mesh",
+        "parameter": "mouth.open",
+        "blend_mode": "normalized_override",
+        "keyforms": [
+          {
+            "value": 0,
+            "vertices": [0, 0, 0, 0, 0, 0, 0, 0]
+          },
+          {
+            "value": 1,
+            "vertices": [0, -4, 0, -4, 0, 8, 0, 8]
+          }
+        ]
+      }
+    ],
+    "deformers": [],
+    "art_paths": [],
+    "expressions": [],
+    "lip_sync": {},
+    "future_metadata": {
+      "preserve_me": true
+    }
+  }
+}

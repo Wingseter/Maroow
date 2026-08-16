@@ -53,6 +53,7 @@ struct ImportContext {
     std::vector<std::string> setup_draw_order;
     std::vector<AttachmentRecord> attachment_records;
     std::optional<std::string> default_skin_name;
+    SpineImportReport* report{nullptr};
     std::vector<std::string>* warnings{nullptr};
 };
 
@@ -112,10 +113,51 @@ LoadError validation_error(
 }
 
 void append_import_warning(const ImportContext& context, std::string message) {
+    if (context.report != nullptr) {
+        context.report->diagnostics.push_back(SpineImportDiagnostic{
+            SpineImportDiagnosticSeverity::Warning,
+            "warning",
+            "",
+            message});
+    }
     if (context.warnings == nullptr) {
         return;
     }
     context.warnings->push_back(std::move(message));
+}
+
+void append_import_diagnostic(
+    const ImportContext& context,
+    SpineImportDiagnosticSeverity severity,
+    std::string code,
+    std::string path,
+    std::string message) {
+    if (context.report != nullptr) {
+        context.report->diagnostics.push_back(SpineImportDiagnostic{
+            severity,
+            code,
+            path,
+            message});
+    }
+    if (context.warnings != nullptr) {
+        context.warnings->push_back(path.empty() ? message : path + ": " + message);
+    }
+}
+
+void finalize_import_result(SpineImportResult* result) {
+    if (result->error.has_value()) {
+        result->report.status = SpineImportStatus::Rejected;
+        result->report.error = SpineImportReportError{
+            result->error->message,
+            result->error->location.line,
+            result->error->location.column};
+        return;
+    }
+
+    result->report.error.reset();
+    result->report.status = result->report.diagnostics.empty()
+        ? SpineImportStatus::Accepted
+        : SpineImportStatus::AcceptedWithWarnings;
 }
 
 Value make_null_value() {
@@ -644,10 +686,12 @@ std::optional<LoadError> parse_path_points(
                 "weighted path vertices contained trailing data after decoding");
         }
 
-        append_import_warning(
+        append_import_diagnostic(
             context,
-            std::string(json_path) +
-                ": flattened weighted path attachment to static setup-pose points");
+            SpineImportDiagnosticSeverity::Warning,
+            "weighted_path_flattened",
+            std::string(json_path),
+            "flattened weighted path attachment to static setup-pose points");
     }
 
     return std::nullopt;
@@ -891,10 +935,12 @@ Value build_curve_value(
                 }
                 if (control_points_fit_segment(control_points, segments[0])) {
                     if (warning_context != nullptr) {
-                        append_import_warning(
+                        append_import_diagnostic(
                             *warning_context,
-                            curve_path +
-                                ": clamped bezier control point times into the keyframe segment");
+                            SpineImportDiagnosticSeverity::Warning,
+                            "bezier_control_points_clamped",
+                            curve_path,
+                            "clamped bezier control point times into the keyframe segment");
                     }
                     const auto normalized_curve =
                         normalize_spine_curve_segment(control_points, segments[0]);
@@ -936,10 +982,12 @@ Value build_curve_value(
                         "multi-component bezier control point times must stay within the keyframe segment");
                 }
                 if (warning_context != nullptr) {
-                    append_import_warning(
+                    append_import_diagnostic(
                         *warning_context,
-                        curve_path +
-                            ": clamped multi-component bezier control point times into the keyframe segment");
+                        SpineImportDiagnosticSeverity::Warning,
+                        "bezier_control_points_clamped",
+                        curve_path,
+                        "clamped multi-component bezier control point times into the keyframe segment");
                 }
             }
 
@@ -977,10 +1025,12 @@ Value build_curve_value(
                     accumulated_curve[index] / static_cast<double>(accumulated_curve_count);
             }
             if (warning_context != nullptr) {
-                append_import_warning(
+                append_import_diagnostic(
                     *warning_context,
-                    curve_path +
-                        ": approximated multi-component bezier curves to a shared interpolation curve");
+                    SpineImportDiagnosticSeverity::Warning,
+                    "multi_component_curve_approximated",
+                    curve_path,
+                    "approximated multi-component bezier curves to a shared interpolation curve");
             }
             return make_curve_array_value(sanitize_normalized_curve(averaged_curve));
         }
@@ -1082,7 +1132,10 @@ std::string derive_skeleton_name(const Document& document) {
     return "spine_import";
 }
 
-std::optional<LoadError> parse_spine_version(const Document& document, const Value& root) {
+std::optional<LoadError> parse_spine_version(
+    const Document& document,
+    const Value& root,
+    std::string* spine_version_out) {
     const Value* skeleton_value = nullptr;
     if (const auto error = json::require_member(
             document,
@@ -1111,6 +1164,9 @@ std::optional<LoadError> parse_spine_version(const Document& document, const Val
             "Spine JSON imports require a skeleton.spine version string");
     }
 
+    if (spine_version_out != nullptr) {
+        *spine_version_out = *spine_version;
+    }
     const std::string_view version = *spine_version;
     if (version.empty() || version.front() != '4') {
         return validation_error(
@@ -1889,10 +1945,12 @@ std::optional<LoadError> build_mesh_attachment(
                 "weighted mesh vertices contained trailing data after decoding");
         }
         if (pruned_weighted_vertex_count > 0U) {
-            append_import_warning(
+            append_import_diagnostic(
                 context,
-                std::string(json_path) +
-                    ".vertices: pruned weighted mesh influences to the strongest 4 on " +
+                SpineImportDiagnosticSeverity::Warning,
+                "weighted_mesh_pruned",
+                std::string(json_path) + ".vertices",
+                "pruned weighted mesh influences to the strongest 4 on " +
                     std::to_string(pruned_weighted_vertex_count) + " " +
                     (pruned_weighted_vertex_count == 1U ? "vertex" : "vertices"));
         }
@@ -2062,10 +2120,12 @@ std::optional<LoadError> build_polygon_attachment(
                 "weighted polygon vertices contained trailing data after decoding");
         }
 
-        append_import_warning(
+        append_import_diagnostic(
             context,
-            std::string(json_path) +
-                ".vertices: flattened weighted clipping polygon to static setup-pose vertices");
+            SpineImportDiagnosticSeverity::Warning,
+            "weighted_polygon_flattened",
+            std::string(json_path) + ".vertices",
+            "flattened weighted clipping polygon to static setup-pose vertices");
     } else {
         return validation_error(
             document,
@@ -2322,10 +2382,12 @@ std::optional<LoadError> convert_spine_attachment(
         }
         if (closed && !points.empty() && (points.size() % 3U) == 0U) {
             points.push_back(points.front());
-            append_import_warning(
+            append_import_diagnostic(
                 *context,
-                std::string(json_path) +
-                    ": approximated closed path attachment by duplicating the first control point");
+                SpineImportDiagnosticSeverity::Warning,
+                "closed_path_approximated",
+                std::string(json_path),
+                "approximated closed path attachment by duplicating the first control point");
         }
         if (points.size() < 4U || ((points.size() - 1U) % 3U) != 0U) {
             return validation_error(
@@ -2371,6 +2433,12 @@ std::optional<LoadError> convert_spine_attachment(
         }
         result.record = std::move(record);
     } else {
+        append_import_diagnostic(
+            *context,
+            SpineImportDiagnosticSeverity::Unsupported,
+            "unsupported_attachment_type",
+            std::string(json_path) + ".type",
+            "unsupported Spine attachment type '" + type_name.value_or("region") + "'");
         return validation_error(
             document,
             attachment_value.location(),
@@ -3066,10 +3134,12 @@ std::optional<LoadError> parse_path_constraints(
             }
             if (previous_bone_index.has_value() &&
                 context.bones[*bone_index].parent_index != previous_bone_index) {
-                append_import_warning(
+                append_import_diagnostic(
                     context,
-                    constraint_path +
-                        ".bones: skipped path constraint because the targeted bones do not form a direct parent-child chain");
+                    SpineImportDiagnosticSeverity::Warning,
+                    "path_constraint_skipped_invalid_chain",
+                    constraint_path + ".bones",
+                    "skipped path constraint because the targeted bones do not form a direct parent-child chain");
                 invalid_bone_chain = true;
                 break;
             }
@@ -3162,10 +3232,12 @@ std::optional<LoadError> parse_path_constraints(
         }
         if (rotate_mix > 0.0 && rotate_mode.has_value() &&
             *rotate_mode != "tangent") {
-            append_import_warning(
+            append_import_diagnostic(
                 context,
-                constraint_path + ".rotateMode: approximated unsupported path rotate mode '" +
-                    *rotate_mode + "' as tangent");
+                SpineImportDiagnosticSeverity::Warning,
+                "path_rotate_mode_approximated",
+                constraint_path + ".rotateMode",
+                "approximated unsupported path rotate mode '" + *rotate_mode + "' as tangent");
         }
 
         const std::string_view resolved_position_mode =
@@ -4011,11 +4083,12 @@ std::optional<LoadError> parse_animations(
                 }
 
                 if (find_optional_member(tracks_value, "twoColor") != nullptr) {
-                    return validation_error(
-                        document,
-                        tracks_value.location(),
+                    append_import_diagnostic(
+                        context,
+                        SpineImportDiagnosticSeverity::Unsupported,
+                        "two_color_timeline_unsupported",
                         slot_path + ".twoColor",
-                        "twoColor timelines are not supported by the Marrow importer");
+                        "skipped unsupported Spine twoColor timeline");
                 }
 
                 Value::Object output_tracks;
@@ -4422,15 +4495,19 @@ std::optional<LoadError> parse_animations(
             skipped_constraint_timeline_types.push_back("physics");
         }
         if (!skipped_constraint_timeline_types.empty()) {
-            std::string warning =
-                animation_path + ": skipped unsupported Spine constraint timelines: ";
+            std::string message = "skipped unsupported Spine constraint timelines: ";
             for (std::size_t index = 0; index < skipped_constraint_timeline_types.size(); ++index) {
                 if (index > 0U) {
-                    warning += ", ";
+                    message += ", ";
                 }
-                warning += skipped_constraint_timeline_types[index];
+                message += skipped_constraint_timeline_types[index];
             }
-            append_import_warning(context, std::move(warning));
+            append_import_diagnostic(
+                context,
+                SpineImportDiagnosticSeverity::Unsupported,
+                "constraint_timelines_skipped",
+                animation_path,
+                std::move(message));
         }
 
         animations.emplace(animation_name, make_object_value(std::move(output_animation)));
@@ -5062,74 +5139,97 @@ SpineAtlasImportResult import_spine_atlas_text_impl(
 
 SpineImportResult import_spine_json_document_impl(const Document& spine_document) {
     SpineImportResult result;
+    result.report.source_path = spine_document.source_path;
     if (const auto error = json::require_type(
             spine_document,
             spine_document.root,
             Value::Type::Object,
             "$")) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
-    if (const auto error = parse_spine_version(spine_document, spine_document.root)) {
+    if (const auto error =
+            parse_spine_version(spine_document, spine_document.root, &result.report.spine_version)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     ImportContext context{spine_document};
     context.skeleton_name = derive_skeleton_name(spine_document);
+    context.report = &result.report;
     context.warnings = &result.warnings;
+
+    if (find_optional_member(spine_document.root, "physics") != nullptr) {
+        append_import_diagnostic(
+            context,
+            SpineImportDiagnosticSeverity::Unsupported,
+            "physics_constraints_unsupported",
+            "$.physics",
+            "skipped unsupported Spine physics constraints");
+    }
 
     Value skeleton_value;
     if (const auto error = parse_skeleton_metadata(&context, &skeleton_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value bones_value;
     if (const auto error = parse_bones(&context, &bones_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value slots_value;
     if (const auto error = parse_slots(&context, &slots_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value skins_value;
     if (const auto error = parse_skins(&context, &skins_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value ik_value;
     if (const auto error = parse_ik_constraints(context, &ik_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value path_value;
     if (const auto error = parse_path_constraints(context, &path_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value transform_value;
     if (const auto error = parse_transform_constraints(context, &transform_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value events_value;
     if (const auto error = parse_events(context, &events_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
     Value animations_value;
     if (const auto error = parse_animations(context, &animations_value)) {
         result.error = *error;
+        finalize_import_result(&result);
         return result;
     }
 
@@ -5162,14 +5262,74 @@ SpineImportResult import_spine_json_document_impl(const Document& spine_document
     const SkeletonDataResult validation = load_skeleton_data(marrow_document);
     if (!validation) {
         result.error = validation.error;
+        finalize_import_result(&result);
         return result;
     }
 
     result.document = std::move(marrow_document);
+    finalize_import_result(&result);
     return result;
 }
 
 } // namespace
+
+std::string_view spine_import_status_name(SpineImportStatus status) {
+    switch (status) {
+    case SpineImportStatus::Accepted:
+        return "accepted";
+    case SpineImportStatus::AcceptedWithWarnings:
+        return "accepted_with_warnings";
+    case SpineImportStatus::Rejected:
+        return "rejected";
+    }
+    return "rejected";
+}
+
+std::string_view spine_import_diagnostic_severity_name(
+    SpineImportDiagnosticSeverity severity) {
+    switch (severity) {
+    case SpineImportDiagnosticSeverity::Warning:
+        return "warning";
+    case SpineImportDiagnosticSeverity::Unsupported:
+        return "unsupported";
+    }
+    return "warning";
+}
+
+json::Value spine_import_report_to_json(const SpineImportReport& report) {
+    json::Value::Array diagnostics;
+    diagnostics.reserve(report.diagnostics.size());
+    for (const SpineImportDiagnostic& diagnostic : report.diagnostics) {
+        json::Value::Object diagnostic_object;
+        diagnostic_object.emplace(
+            "severity",
+            make_string_value(
+                std::string(spine_import_diagnostic_severity_name(diagnostic.severity))));
+        diagnostic_object.emplace("code", make_string_value(diagnostic.code));
+        diagnostic_object.emplace("path", make_string_value(diagnostic.path));
+        diagnostic_object.emplace("message", make_string_value(diagnostic.message));
+        diagnostics.push_back(make_object_value(std::move(diagnostic_object)));
+    }
+
+    json::Value::Object root;
+    root.emplace("source_format", make_string_value(report.source_format));
+    root.emplace("source_path", make_string_value(report.source_path.generic_string()));
+    root.emplace("spine_version", make_string_value(report.spine_version));
+    root.emplace("status", make_string_value(std::string(spine_import_status_name(report.status))));
+    root.emplace("diagnostics", make_array_value(std::move(diagnostics)));
+    if (report.error.has_value()) {
+        json::Value::Object error_object;
+        error_object.emplace("message", make_string_value(report.error->message));
+        error_object.emplace("line", make_number_value(static_cast<double>(report.error->line)));
+        error_object.emplace(
+            "column",
+            make_number_value(static_cast<double>(report.error->column)));
+        root.emplace("error", make_object_value(std::move(error_object)));
+    } else {
+        root.emplace("error", make_null_value());
+    }
+    return make_object_value(std::move(root));
+}
 
 SpineImportResult import_spine_json_document(const json::Document& spine_document) {
     return import_spine_json_document_impl(spine_document);
@@ -5179,7 +5339,9 @@ SpineImportResult import_spine_json_file(const std::filesystem::path& spine_json
     const auto load_result = json::load_document(spine_json_path);
     if (!load_result) {
         SpineImportResult result;
+        result.report.source_path = spine_json_path;
         result.error = load_result.error;
+        finalize_import_result(&result);
         return result;
     }
 

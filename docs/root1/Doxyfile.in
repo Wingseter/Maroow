@@ -29,10 +29,10 @@ FILE_PATTERNS          = *.h \
                          *.hpp \
                          *.md
 RECURSIVE              = YES
-USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/docs/quick-start.md
+USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/docs/root1/quick-start.md
 INPUT                  = @PROJECT_SOURCE_DIR@/include \
-                         @PROJECT_SOURCE_DIR@/docs/quick-start.md \
-                         @PROJECT_SOURCE_DIR@/docs/concepts.md \
-                         @PROJECT_SOURCE_DIR@/docs/format-spec.md \
-                         @PROJECT_SOURCE_DIR@/docs/fixtures.md
+                         @PROJECT_SOURCE_DIR@/docs/root1/quick-start.md \
+                         @PROJECT_SOURCE_DIR@/docs/root1/concepts.md \
+                         @PROJECT_SOURCE_DIR@/docs/root1/format-spec.md \
+                         @PROJECT_SOURCE_DIR@/docs/root1/fixtures.md
 EXCLUDE_SYMBOLS        = detail

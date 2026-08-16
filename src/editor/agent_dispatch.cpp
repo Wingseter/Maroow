@@ -1,372 +1,1028 @@
 #include "marrow/editor/agent_dispatch.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <initializer_list>
+#include <iterator>
+#include <optional>
+#include <set>
 #include <string_view>
+#include <system_error>
+#include <vector>
 
-#include "shell_types.hpp"
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/session.hpp"
+#include "agent_dispatch_internal.hpp"
 
-namespace marrow::editor::shell {
+namespace marrow::editor {
 
 namespace json = marrow::runtime::json;
 
-namespace {
+namespace agent_detail {
 
-AgentDispatchResult make_error(std::string message) {
-    return {false, std::move(message), json::Value()};
-}
+constexpr double kKeyTimeEpsilon = 1e-6;
+constexpr std::size_t kMaxAgentActivityEntries = 200;
 
-AgentDispatchResult make_success(std::string message, json::Value delta = json::Value()) {
-    return {true, std::move(message), std::move(delta)};
-}
+constexpr OperationSpec kOperationSpecs[] = {
+    {"operations.list", "inspection", false, false, false, false, &handle_management_operation},
+    {"scene.describe", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"bones.list", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"animation.list", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"slots.list", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"skins.list", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"attachments.list", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"constraints.list", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"parameters.list", "inspection", false, false, false, true, &handle_parameter_operation},
+    {"timeline.describe", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"mesh.describe", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"project.diagnostics", "inspection", false, false, false, true, &handle_inspection_operation},
+    {"export.preview", "validation", false, false, false, true, &handle_inspection_operation},
+    {"runtime.validate", "validation", false, false, false, true, &handle_inspection_operation},
+    {"compare_runtime_export", "validation", false, false, false, true, &handle_inspection_operation},
+    {"agent.permissions.describe", "management", false, false, false, false, &handle_management_operation},
+    {"agent.pause", "management", false, false, false, false, &handle_management_operation},
+    {"agent.resume", "management", false, false, false, false, &handle_management_operation},
+    {"agent.terminate", "management", false, false, false, false, &handle_management_operation},
+    {"undo", "edit", true, false, false, true, &handle_editing_operation},
+    {"redo", "edit", true, false, false, true, &handle_editing_operation},
+    {"parameter.set", "edit", true, false, true, true, &handle_parameter_operation},
+    {"deformer.create", "edit", true, false, true, true, &handle_parameter_operation},
+    {"keyform.capture", "edit", true, false, true, true, &handle_parameter_operation},
+    {"expression.create", "edit", true, false, true, true, &handle_parameter_operation},
+    {"lip_sync.map", "edit", true, false, true, true, &handle_parameter_operation},
+    {"animation.create", "edit", true, false, true, true, &handle_editing_operation},
+    {"animation.duplicate", "edit", true, false, true, true, &handle_editing_operation},
+    {"animation.rename", "edit", true, false, true, true, &handle_editing_operation},
+    {"animation.delete", "edit", true, false, true, true, &handle_editing_operation},
+    {"animation.set_duration", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.retime_keyframes", "edit", true, false, true, true, &handle_editing_operation},
+    {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    {"set_event_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_event_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    {"set_deform_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_deform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    {"set_vertex_weights", "edit", true, false, true, true, &handle_editing_operation},
+    {"normalize_weights", "edit", true, false, true, true, &handle_editing_operation},
+    {"edit_ik_constraint", "edit", true, false, true, true, &handle_constraint_operation},
+    {"edit_path_constraint", "edit", true, false, true, true, &handle_constraint_operation},
+    {"edit_transform_constraint", "edit", true, false, true, true, &handle_constraint_operation},
+    {"edit_physics_constraint", "edit", true, false, true, true, &handle_constraint_operation},
+    {"set_slot_color_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_slot_color_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    {"set_attachment_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_attachment_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    {"set_draw_order_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_draw_order_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    {"save", "management", true, true, false, true, &handle_management_operation},
+    {"export_runtime", "management", true, true, false, true, &handle_management_operation},
+    {"import.spine_json", "management", true, true, true, true, &handle_management_operation},
+    {"import.spine_atlas", "management", true, true, true, true, &handle_management_operation},
+    {"import.psd_layers", "management", true, true, true, true, &handle_management_operation},
+    {"atlas.pack", "management", true, true, true, true, &handle_management_operation},
+};
 
-} // namespace
-
-AgentDispatchResult AgentCommandDispatcher::dispatch(ShellState* state, const json::Value& cmd) {
-    if (state == nullptr) {
-        return make_error("Shell state is null.");
+const OperationSpec* find_operation(std::string_view op) {
+    for (const OperationSpec& spec : kOperationSpecs) {
+        if (spec.name == op) {
+            return &spec;
+        }
     }
+    return nullptr;
+}
+
+bool op_allowed_while_paused(const OperationSpec& spec) {
+    return !spec.mutating;
+}
+
+json::Value object_value(json::Value::Object object) {
+    return json::Value(std::move(object), {});
+}
+
+json::Value array_value(json::Value::Array array) {
+    return json::Value(std::move(array), {});
+}
+
+json::Value string_value(std::string value) {
+    return json::Value(std::move(value), {});
+}
+
+json::Value number_value(std::size_t value) {
+    return json::Value(static_cast<double>(value), {});
+}
+
+json::Value number_value(double value) {
+    return json::Value(value, {});
+}
+
+json::Value bool_value(bool value) {
+    return json::Value(value, {});
+}
+
+AgentDispatchResult make_result(
+    bool ok,
+    std::string message,
+    std::string_view op,
+    const OperationSpec* spec,
+    json::Value scene_delta = json::Value(),
+    std::string error_code = {}) {
+    AgentDispatchResult result;
+    result.ok = ok;
+    result.message = std::move(message);
+    result.scene_delta = std::move(scene_delta);
+    result.op = std::string(op);
+    if (spec != nullptr) {
+        result.category = std::string(spec->category);
+        result.mutating = spec->mutating;
+        result.requires_review = spec->requires_review;
+    }
+    result.error_code = std::move(error_code);
+    return result;
+}
+
+AgentDispatchResult make_error(
+    std::string message,
+    std::string_view op,
+    const OperationSpec* spec,
+    std::string error_code) {
+    return make_result(false, std::move(message), op, spec, json::Value(), std::move(error_code));
+}
+
+AgentDispatchResult make_error_with_delta(
+    std::string message,
+    std::string_view op,
+    const OperationSpec* spec,
+    json::Value delta,
+    std::string error_code) {
+    return make_result(false, std::move(message), op, spec, std::move(delta), std::move(error_code));
+}
+
+AgentDispatchResult make_success(
+    std::string message,
+    std::string_view op,
+    const OperationSpec* spec,
+    json::Value delta) {
+    return make_result(true, std::move(message), op, spec, std::move(delta));
+}
+
+std::optional<AgentDispatchResult> commit_or_error(
+    EditorSession::EditTransaction& transaction,
+    std::string_view op,
+    const OperationSpec* spec,
+    const CommitPolicy& policy) {
+    const SessionResult commit_result = transaction.commit();
+    if (!commit_result) {
+        return make_error(
+            std::string(policy.failure_prefix) + commit_result.error->format(),
+            op,
+            spec,
+            std::string(policy.failure_error_code));
+    }
+    if (commit_result.changed) {
+        return std::nullopt;
+    }
+    if (policy.no_change_result == NoChangeResult::Success) {
+        return make_success(std::string(policy.no_change_message), op, spec);
+    }
+    return make_error(
+        std::string(policy.no_change_message),
+        op,
+        spec,
+        std::string(policy.no_change_error_code));
+}
+
+const json::Value* command_args(const json::Value& cmd) {
+    const json::Value* args = json::find_member(cmd, "args");
+    return args != nullptr && args->is_object() ? args : nullptr;
+}
+
+bool bool_arg(const json::Value* args, std::string_view name, bool default_value) {
+    if (args == nullptr) {
+        return default_value;
+    }
+    const json::Value* value = json::find_member(*args, name);
+    return value != nullptr && value->is_boolean() ? value->as_boolean() : default_value;
+}
+
+std::optional<std::string_view> string_arg(const json::Value& args, std::string_view name) {
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || !value->is_string()) {
+        return std::nullopt;
+    }
+    return std::string_view(value->as_string());
+}
+
+std::optional<std::string_view> string_arg_any(
+    const json::Value& args,
+    std::initializer_list<std::string_view> names) {
+    for (std::string_view name : names) {
+        if (const auto value = string_arg(args, name)) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> path_arg_any(
+    const json::Value& args,
+    std::initializer_list<std::string_view> names) {
+    if (const auto value = string_arg_any(args, names)) {
+        return std::filesystem::path(std::string(*value));
+    }
+    return std::nullopt;
+}
+
+std::optional<double> number_arg(const json::Value& args, std::string_view name) {
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || !value->is_number()) {
+        return std::nullopt;
+    }
+    return value->as_number();
+}
+
+std::optional<int> integer_arg(const json::Value& args, std::string_view name) {
+    const std::optional<double> value = number_arg(args, name);
+    if (!value.has_value() || std::abs(*value - std::round(*value)) > 1e-6) {
+        return std::nullopt;
+    }
+    return static_cast<int>(std::round(*value));
+}
+
+std::optional<marrow::runtime::Interpolation> interpolation_arg(
+    const json::Value& args,
+    std::string_view name,
+    std::string* error_out) {
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || value->is_null()) {
+        return marrow::runtime::Interpolation::linear();
+    }
+    if (value->is_string()) {
+        if (value->as_string() == "linear") {
+            return marrow::runtime::Interpolation::linear();
+        }
+        if (value->as_string() == "stepped") {
+            return marrow::runtime::Interpolation::stepped();
+        }
+        *error_out = "interpolation must be linear, stepped, or a 4-number bezier array.";
+        return std::nullopt;
+    }
+    if (!value->is_array() || value->as_array().size() != 4U) {
+        *error_out = "interpolation must be linear, stepped, or a 4-number bezier array.";
+        return std::nullopt;
+    }
+    double coordinates[4] = {};
+    for (std::size_t index = 0; index < 4U; ++index) {
+        const json::Value& coordinate = value->as_array()[index];
+        if (!coordinate.is_number()) {
+            *error_out = "bezier interpolation values must be numbers.";
+            return std::nullopt;
+        }
+        coordinates[index] = coordinate.as_number();
+    }
+    return marrow::runtime::Interpolation::cubic_bezier(
+        coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+}
+
+bool parse_number_array(
+    const json::Value& args,
+    std::string_view name,
+    std::size_t max_count,
+    std::vector<double>* values_out,
+    std::string* error_out) {
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || !value->is_array()) {
+        *error_out = std::string(name) + " must be an array of numbers.";
+        return false;
+    }
+    if (value->as_array().size() > max_count) {
+        *error_out = std::string(name) + " exceeds the maximum allowed length.";
+        return false;
+    }
+    std::vector<double> values;
+    values.reserve(value->as_array().size());
+    for (const json::Value& entry : value->as_array()) {
+        if (!entry.is_number()) {
+            *error_out = std::string(name) + " must be an array of numbers.";
+            return false;
+        }
+        values.push_back(entry.as_number());
+    }
+    *values_out = std::move(values);
+    return true;
+}
+
+std::optional<marrow::runtime::SlotColor> color_arg(
+    const json::Value& args,
+    std::string_view name,
+    std::string* error_out) {
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || !value->is_object()) {
+        *error_out = std::string(name) + " must be a color object.";
+        return std::nullopt;
+    }
+    const auto r = number_arg(*value, "r");
+    const auto g = number_arg(*value, "g");
+    const auto b = number_arg(*value, "b");
+    const auto a = number_arg(*value, "a");
+    if (!r.has_value() || !g.has_value() || !b.has_value() || !a.has_value()) {
+        *error_out = "color requires r, g, b, and a numbers.";
+        return std::nullopt;
+    }
+    return marrow::runtime::SlotColor{*r, *g, *b, *a};
+}
+
+bool ensure_project_loaded(const EditorSession& session) {
+    return session.has_project() && session.project() != nullptr &&
+        session.runtime_data() != nullptr;
+}
+
+std::vector<std::string> names_from_indices(
+    const std::vector<marrow::runtime::BoneData>& bones,
+    const std::vector<std::size_t>& indices) {
+    std::vector<std::string> names;
+    names.reserve(indices.size());
+    for (const std::size_t index : indices) {
+        if (index < bones.size()) {
+            names.push_back(bones[index].name);
+        }
+    }
+    return names;
+}
+
+json::Value string_array_value(const std::vector<std::string>& values) {
+    json::Value::Array array;
+    array.reserve(values.size());
+    for (const std::string& value : values) {
+        array.push_back(string_value(value));
+    }
+    return array_value(std::move(array));
+}
+
+std::string attachment_kind_name(marrow::runtime::AttachmentKind kind) {
+    switch (kind) {
+    case marrow::runtime::AttachmentKind::Region:
+        return "region";
+    case marrow::runtime::AttachmentKind::Mesh:
+        return "mesh";
+    case marrow::runtime::AttachmentKind::LinkedMesh:
+        return "linked_mesh";
+    case marrow::runtime::AttachmentKind::Point:
+        return "point";
+    case marrow::runtime::AttachmentKind::BoundingBox:
+        return "bounding_box";
+    case marrow::runtime::AttachmentKind::Clipping:
+        return "clipping";
+    case marrow::runtime::AttachmentKind::Path:
+        return "path";
+    }
+    return "unknown";
+}
+
+std::filesystem::path absolute_normalized(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::path absolute_path = std::filesystem::absolute(path, ec);
+    if (ec) {
+        absolute_path = path;
+    }
+    return absolute_path.lexically_normal();
+}
+
+bool path_is_within(
+    const std::filesystem::path& candidate,
+    const std::filesystem::path& root) {
+    const std::filesystem::path normalized_candidate = absolute_normalized(candidate);
+    const std::filesystem::path normalized_root = absolute_normalized(root);
+    auto root_it = normalized_root.begin();
+    auto candidate_it = normalized_candidate.begin();
+    for (; root_it != normalized_root.end(); ++root_it, ++candidate_it) {
+        if (candidate_it == normalized_candidate.end() || *root_it != *candidate_it) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool agent_path_allowed(
+    const EditorSession& session,
+    const std::filesystem::path& target_path) {
+    if (!session.has_project() || session.project() == nullptr) {
+        return false;
+    }
+
+    const std::filesystem::path project_dir =
+        session.project()->source_path.empty()
+            ? std::filesystem::current_path()
+            : session.project()->source_path.parent_path();
+    const std::filesystem::path export_dir =
+        session.project()->resolved_export_skeleton_path().parent_path();
+
+    return path_is_within(target_path, project_dir) ||
+        path_is_within(target_path, export_dir) ||
+        path_is_within(target_path, "/tmp") ||
+        path_is_within(target_path, "/private/tmp");
+}
+
+json::Value review_to_json(const AgentReviewRequest& request) {
+    json::Value::Object review;
+    review.emplace("required", bool_value(true));
+    review.emplace("id", number_value(static_cast<double>(request.id)));
+    review.emplace(
+        "kind",
+        string_value(
+            request.kind == AgentReviewKind::SaveProject
+                ? "save"
+                : request.kind == AgentReviewKind::ExportRuntime ? "export_runtime"
+                                                                  : "import_or_pack"));
+    review.emplace("op", string_value(request.op));
+    review.emplace("label", string_value(request.label));
+    review.emplace("target_path", string_value(request.target_path.string()));
+    json::Value::Array targets;
+    if (!request.target_paths.empty()) {
+        targets.reserve(request.target_paths.size());
+        for (const auto& target : request.target_paths) {
+            targets.push_back(string_value(target.string()));
+        }
+    } else if (!request.target_path.empty()) {
+        targets.push_back(string_value(request.target_path.string()));
+    }
+    review.emplace("targets", array_value(std::move(targets)));
+    review.emplace("args_summary", string_value(request.args_summary));
+    review.emplace("binary", bool_value(request.binary_output));
+    review.emplace("allowed", bool_value(request.allowed));
+    review.emplace("message", string_value(request.message));
+    return object_value(std::move(review));
+}
+
+AgentDispatchResult enqueue_review(
+    AgentCommandContext& context,
+    std::string_view op,
+    const OperationSpec* spec,
+    AgentReviewKind kind,
+    std::string label,
+    std::filesystem::path target_path,
+    bool binary_output,
+    std::vector<std::filesystem::path> target_paths,
+    std::string args_summary) {
+    AgentReviewRequest request;
+    request.id = context.control.next_review_id++;
+    request.kind = kind;
+    request.op = std::string(op);
+    request.label = std::move(label);
+    if (target_paths.empty() && !target_path.empty()) {
+        target_paths.push_back(target_path);
+    }
+    request.target_paths.reserve(target_paths.size());
+    for (const auto& path : target_paths) {
+        request.target_paths.push_back(absolute_normalized(path));
+    }
+    request.target_path = request.target_paths.empty()
+        ? absolute_normalized(target_path)
+        : request.target_paths.front();
+    request.binary_output = binary_output;
+    request.args_summary = std::move(args_summary);
+    request.allowed = !request.target_paths.empty();
+    for (const auto& path : request.target_paths) {
+        request.allowed = request.allowed && agent_path_allowed(context.session, path);
+    }
+    request.message = request.allowed
+        ? "Waiting for editor approval."
+        : "Rejected by path whitelist.";
+
+    context.control.review_queue.push_back(request);
+
+    AgentDispatchResult result = make_success(
+        request.allowed ? "Agent request queued for review." : "Agent request requires review but target path is not allowed.",
+        op,
+        spec);
+    result.requires_review = true;
+    result.review = review_to_json(request);
+    return result;
+}
+
+void append_activity(AgentControlState& control, AgentDispatchResult* result) {
+    if (result == nullptr) {
+        return;
+    }
+    result->activity_id = control.next_activity_id++;
+
+    AgentActivityEntry entry;
+    entry.id = result->activity_id;
+    entry.op = result->op;
+    entry.category = result->category;
+    entry.ok = result->ok;
+    entry.mutating = result->mutating;
+    entry.requires_review = result->requires_review;
+    entry.message = result->message;
+    control.activity_log.push_back(std::move(entry));
+    control.current_operation.clear();
+    control.last_result = result->message;
+
+    if (control.activity_log.size() > kMaxAgentActivityEntries) {
+        const std::size_t overflow =
+            control.activity_log.size() - kMaxAgentActivityEntries;
+        control.activity_log.erase(
+            control.activity_log.begin(),
+            control.activity_log.begin() + static_cast<std::ptrdiff_t>(overflow));
+    }
+}
+
+json::Value operation_specs_value() {
+    json::Value::Array operations;
+    operations.reserve(std::size(kOperationSpecs));
+    for (const OperationSpec& spec : kOperationSpecs) {
+        json::Value::Object object;
+        object.emplace("name", string_value(std::string(spec.name)));
+        object.emplace("category", string_value(std::string(spec.category)));
+        object.emplace("mutating", bool_value(spec.mutating));
+        object.emplace("requires_review", bool_value(spec.requires_review));
+        object.emplace("dry_run_supported", bool_value(spec.dry_run_supported));
+        operations.push_back(object_value(std::move(object)));
+    }
+    return array_value(std::move(operations));
+}
+
+json::Value slots_value(const marrow::runtime::SkeletonData& skeleton) {
+    json::Value::Array slots;
+    const auto& bones = skeleton.bones();
+    const auto& source_slots = skeleton.slots();
+    slots.reserve(source_slots.size());
+    for (std::size_t index = 0; index < source_slots.size(); ++index) {
+        const auto& slot = source_slots[index];
+        json::Value::Object object;
+        object.emplace("index", number_value(index));
+        object.emplace("name", string_value(slot.name));
+        object.emplace(
+            "bone",
+            string_value(slot.bone_index < bones.size() ? bones[slot.bone_index].name : ""));
+        object.emplace("setup_attachment", string_value(slot.setup_attachment));
+        slots.push_back(object_value(std::move(object)));
+    }
+    return array_value(std::move(slots));
+}
+
+json::Value skins_value(const marrow::runtime::SkeletonData& skeleton) {
+    json::Value::Array skins;
+    for (const auto& skin : skeleton.skins()) {
+        json::Value::Object object;
+        object.emplace("name", string_value(skin.name));
+        object.emplace("attachment_count", number_value(skin.slot_attachments.size()));
+        object.emplace("bone_count", number_value(skin.bone_indices.size()));
+        object.emplace("ik_constraint_count", number_value(skin.ik_constraint_indices.size()));
+        object.emplace("path_constraint_count", number_value(skin.path_constraint_indices.size()));
+        object.emplace(
+            "transform_constraint_count",
+            number_value(skin.transform_constraint_indices.size()));
+        object.emplace(
+            "physics_constraint_count",
+            number_value(skin.physics_constraint_indices.size()));
+        skins.push_back(object_value(std::move(object)));
+    }
+    return array_value(std::move(skins));
+}
+
+json::Value attachment_object(
+    const marrow::runtime::SkeletonData& skeleton,
+    const marrow::runtime::SkinData& skin,
+    const marrow::runtime::SkinSlotData& slot_attachment) {
+    json::Value::Object object;
+    const auto& attachment = slot_attachment.attachment;
+    object.emplace("skin", string_value(skin.name));
+    object.emplace(
+        "slot",
+        string_value(
+            slot_attachment.slot_index < skeleton.slots().size()
+                ? skeleton.slots()[slot_attachment.slot_index].name
+                : ""));
+    object.emplace("name", string_value(attachment.name));
+    object.emplace("kind", string_value(attachment_kind_name(attachment.kind)));
+    if (attachment.mesh_geometry != nullptr) {
+        object.emplace(
+            "vertex_count",
+            number_value(attachment.mesh_geometry->vertices.size() / 2U));
+        object.emplace(
+            "triangle_count",
+            number_value(attachment.mesh_geometry->triangles.size() / 3U));
+    }
+    if (attachment.linked_mesh.has_value()) {
+        object.emplace("parent_attachment", string_value(attachment.linked_mesh->parent_attachment));
+    }
+    return object_value(std::move(object));
+}
+
+json::Value attachments_value(
+    const marrow::runtime::SkeletonData& skeleton,
+    const json::Value* args) {
+    const std::optional<std::string_view> skin_filter =
+        args != nullptr ? string_arg(*args, "skin") : std::nullopt;
+    const std::optional<std::string_view> slot_filter =
+        args != nullptr ? string_arg(*args, "slot") : std::nullopt;
+
+    json::Value::Array attachments;
+    for (const auto& skin : skeleton.skins()) {
+        if (skin_filter.has_value() && skin.name != *skin_filter) {
+            continue;
+        }
+        for (const auto& slot_attachment : skin.slot_attachments) {
+            const std::string slot_name =
+                slot_attachment.slot_index < skeleton.slots().size()
+                    ? skeleton.slots()[slot_attachment.slot_index].name
+                    : "";
+            if (slot_filter.has_value() && slot_name != *slot_filter) {
+                continue;
+            }
+            attachments.push_back(attachment_object(skeleton, skin, slot_attachment));
+        }
+    }
+    return array_value(std::move(attachments));
+}
+
+json::Value constraints_value(const marrow::runtime::SkeletonData& skeleton) {
+    json::Value::Array constraints;
+    const auto& bones = skeleton.bones();
+    for (const auto& constraint : skeleton.ik_constraints()) {
+        json::Value::Object object;
+        object.emplace("type", string_value("ik"));
+        object.emplace("name", string_value(constraint.name));
+        object.emplace("bones", string_array_value(names_from_indices(bones, constraint.bone_indices)));
+        if (constraint.target_bone_index < bones.size()) {
+            object.emplace("target", string_value(bones[constraint.target_bone_index].name));
+        }
+        constraints.push_back(object_value(std::move(object)));
+    }
+    for (const auto& constraint : skeleton.path_constraints()) {
+        json::Value::Object object;
+        object.emplace("type", string_value("path"));
+        object.emplace("name", string_value(constraint.name));
+        object.emplace("bones", string_array_value(names_from_indices(bones, constraint.bone_indices)));
+        if (constraint.slot_index < skeleton.slots().size()) {
+            object.emplace("slot", string_value(skeleton.slots()[constraint.slot_index].name));
+        }
+        constraints.push_back(object_value(std::move(object)));
+    }
+    for (const auto& constraint : skeleton.transform_constraints()) {
+        json::Value::Object object;
+        object.emplace("type", string_value("transform"));
+        object.emplace("name", string_value(constraint.name));
+        object.emplace(
+            "bones",
+            string_array_value(names_from_indices(bones, constraint.target_bone_indices)));
+        if (constraint.source_bone_index < bones.size()) {
+            object.emplace("source", string_value(bones[constraint.source_bone_index].name));
+        }
+        constraints.push_back(object_value(std::move(object)));
+    }
+    for (const auto& constraint : skeleton.physics_constraints()) {
+        json::Value::Object object;
+        object.emplace("type", string_value("physics"));
+        object.emplace("name", string_value(constraint.name));
+        object.emplace("bones", string_array_value(names_from_indices(bones, constraint.bone_indices)));
+        constraints.push_back(object_value(std::move(object)));
+    }
+    return array_value(std::move(constraints));
+}
+
+std::optional<marrow::editor::DrawOrderTimelineEdit> draw_order_edit_from_runtime(
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view animation_name) {
+    const marrow::runtime::AnimationData* animation = skeleton.find_animation(animation_name);
+    if (animation == nullptr) {
+        return std::nullopt;
+    }
+
+    marrow::editor::DrawOrderTimelineEdit edit;
+    edit.animation_name = std::string(animation_name);
+    const marrow::runtime::DrawOrderTimeline* timeline = animation->find_draw_order_timeline();
+    if (timeline == nullptr) {
+        return edit;
+    }
+
+    for (const auto& keyframe : timeline->keyframes) {
+        marrow::editor::DrawOrderKeyframeEdit copied;
+        copied.time = static_cast<double>(keyframe.time);
+        copied.slot_names.reserve(keyframe.slot_indices.size());
+        for (const std::size_t slot_index : keyframe.slot_indices) {
+            if (slot_index >= skeleton.slots().size()) {
+                return std::nullopt;
+            }
+            copied.slot_names.push_back(skeleton.slots()[slot_index].name);
+        }
+        edit.keyframes.push_back(std::move(copied));
+    }
+    return edit;
+}
+
+bool parse_complete_slot_order(
+    const marrow::runtime::SkeletonData& skeleton,
+    const json::Value& args,
+    std::vector<std::string>* slots_out,
+    std::string* error_out) {
+    const json::Value* slots_value_arg = json::find_member(args, "slots");
+    if (slots_value_arg == nullptr || !slots_value_arg->is_array()) {
+        *error_out = "set_draw_order_keyframe requires slots array.";
+        return false;
+    }
+
+    std::vector<std::string> slot_names;
+    slot_names.reserve(slots_value_arg->as_array().size());
+    std::set<std::string> seen;
+    for (const json::Value& value : slots_value_arg->as_array()) {
+        if (!value.is_string()) {
+            *error_out = "draw-order slots must be strings.";
+            return false;
+        }
+        const std::string& slot_name = value.as_string();
+        if (!seen.insert(slot_name).second) {
+            *error_out = "draw-order slots must not contain duplicates.";
+            return false;
+        }
+        if (!skeleton.find_slot_index(slot_name).has_value()) {
+            *error_out = "draw-order slot not found: " + slot_name;
+            return false;
+        }
+        slot_names.push_back(slot_name);
+    }
+
+    if (slot_names.size() != skeleton.slots().size()) {
+        *error_out = "draw-order slots must include every skeleton slot exactly once.";
+        return false;
+    }
+
+    for (const auto& slot : skeleton.slots()) {
+        if (seen.find(slot.name) == seen.end()) {
+            *error_out = "draw-order slots missing skeleton slot: " + slot.name;
+            return false;
+        }
+    }
+
+    *slots_out = std::move(slot_names);
+    return true;
+}
+
+const marrow::runtime::AttachmentData* find_mesh_attachment(
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view skin_name,
+    std::string_view slot_name,
+    std::string_view attachment_name,
+    std::optional<std::size_t>* slot_index_out) {
+    const auto slot_index = skeleton.find_slot_index(slot_name);
+    const auto* skin = skeleton.find_skin(skin_name);
+    if (!slot_index.has_value() || skin == nullptr) {
+        return nullptr;
+    }
+    if (slot_index_out != nullptr) {
+        *slot_index_out = *slot_index;
+    }
+    const auto* attachment = skin->find_attachment(*slot_index, attachment_name);
+    if (attachment == nullptr || attachment->mesh_geometry == nullptr) {
+        return nullptr;
+    }
+    return attachment;
+}
+
+marrow::editor::MeshWeightAttachmentEdit mesh_weight_edit_from_runtime(
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view skin_name,
+    std::string_view slot_name,
+    std::string_view attachment_name,
+    const marrow::runtime::AttachmentData& attachment) {
+    marrow::editor::MeshWeightAttachmentEdit edit;
+    edit.skin_name = std::string(skin_name);
+    edit.slot_name = std::string(slot_name);
+    edit.attachment_name = std::string(attachment_name);
+    if (attachment.mesh_geometry == nullptr) {
+        return edit;
+    }
+    edit.vertices.reserve(attachment.mesh_geometry->weights.size());
+    for (const auto& runtime_vertex : attachment.mesh_geometry->weights) {
+        marrow::editor::MeshWeightVertexEdit vertex;
+        vertex.influences.reserve(runtime_vertex.influences.size());
+        for (const auto& influence : runtime_vertex.influences) {
+            if (influence.bone_index >= skeleton.bones().size()) {
+                continue;
+            }
+            vertex.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
+                skeleton.bones()[influence.bone_index].name,
+                influence.x,
+                influence.y,
+                influence.weight});
+        }
+        edit.vertices.push_back(std::move(vertex));
+    }
+    return edit;
+}
+
+void normalize_weight_vertex(marrow::editor::MeshWeightVertexEdit* vertex) {
+    if (vertex == nullptr) {
+        return;
+    }
+    double total = 0.0;
+    for (const auto& influence : vertex->influences) {
+        total += std::max(0.0, influence.weight);
+    }
+    if (total <= 0.0) {
+        return;
+    }
+    for (auto& influence : vertex->influences) {
+        influence.weight = std::max(0.0, influence.weight) / total;
+    }
+}
+
+marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
+    marrow::editor::ProjectData& project,
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view skin_name,
+    std::string_view slot_name,
+    std::string_view attachment_name,
+    const marrow::runtime::AttachmentData& attachment) {
+    if (auto* existing = project.find_mesh_weight_attachment_edit(
+            skin_name, slot_name, attachment_name)) {
+        return existing;
+    }
+    project.mesh_weight_attachment_edits.push_back(
+        mesh_weight_edit_from_runtime(skeleton, skin_name, slot_name, attachment_name, attachment));
+    return &project.mesh_weight_attachment_edits.back();
+}
+
+json::Value timeline_description_value(
+    const marrow::runtime::SkeletonData& skeleton,
+    const marrow::editor::ProjectData& project,
+    std::string_view animation_name) {
+    const auto* animation = skeleton.find_animation(animation_name);
+    json::Value::Object object;
+    object.emplace("animation", string_value(std::string(animation_name)));
+    if (animation == nullptr) {
+        object.emplace("exists", bool_value(false));
+        return object_value(std::move(object));
+    }
+
+    object.emplace("exists", bool_value(true));
+    object.emplace("duration", number_value(animation->duration()));
+    object.emplace("inferred_duration", number_value(animation->inferred_duration()));
+    object.emplace(
+        "has_explicit_duration",
+        bool_value(animation->explicit_duration.has_value()));
+    if (animation->explicit_duration.has_value()) {
+        object.emplace(
+            "explicit_duration",
+            number_value(*animation->explicit_duration));
+    }
+    object.emplace("bone_rotate_timelines", number_value(animation->bone_rotate_timelines.size()));
+    object.emplace("bone_translate_timelines", number_value(animation->bone_translate_timelines.size()));
+    object.emplace("bone_scale_timelines", number_value(animation->bone_scale_timelines.size()));
+    object.emplace("bone_shear_timelines", number_value(animation->bone_shear_timelines.size()));
+    object.emplace("slot_attachment_timelines", number_value(animation->slot_attachment_timelines.size()));
+    object.emplace("slot_color_timelines", number_value(animation->slot_color_timelines.size()));
+    object.emplace("mesh_deform_timelines", number_value(animation->mesh_deform_timelines.size()));
+    const auto* runtime_draw_order = animation->find_draw_order_timeline();
+    const auto* project_draw_order = project.find_draw_order_timeline_edit(animation_name);
+    object.emplace(
+        "draw_order_keyframes",
+        number_value(
+            project_draw_order != nullptr
+                ? project_draw_order->keyframes.size()
+                : (runtime_draw_order != nullptr ? runtime_draw_order->keyframes.size() : 0U)));
+    object.emplace("event_timeline", bool_value(animation->find_event_timeline() != nullptr));
+    return object_value(std::move(object));
+}
+
+} // namespace agent_detail
+
+using namespace agent_detail;
+
+AgentDispatchResult AgentCommandDispatcher::dispatch(
+    AgentCommandContext& context,
+    const json::Value& cmd) {
+    AgentDispatchResult result;
+    const json::Value* op_value =
+        cmd.is_object() ? json::find_member(cmd, "op") : nullptr;
+    const OperationSpec* spec = nullptr;
 
     if (!cmd.is_object()) {
-        return make_error("Command must be an object.");
-    }
-
-    const json::Value* op_val = json::find_member(cmd, "op");
-    if (!op_val || !op_val->is_string()) {
-        return make_error("Command must have a string 'op' field.");
-    }
-
-    const std::string_view op = op_val->as_string();
-
-    if (op == "undo") {
-        std::string label;
-        if (state->command_stack.undo(state, &label)) {
-            update_project_dirty_state(state);
-            state->status_message = "Undone: " + label;
-            return make_success(state->status_message);
-        }
-        return make_error("Nothing to undo.");
-    }
-
-    if (op == "redo") {
-        std::string label;
-        if (state->command_stack.redo(state, &label)) {
-            update_project_dirty_state(state);
-            state->status_message = "Redone: " + label;
-            return make_success(state->status_message);
-        }
-        return make_error("Nothing to redo.");
-    }
-
-    if (op == "save") {
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-        if (save_project_file(state, false)) {
-            state->status_message = "Project saved successfully.";
-            return make_success(state->status_message);
+        result = make_error("Command must be an object.");
+    } else if (op_value == nullptr || !op_value->is_string()) {
+        result = make_error("Command must have a string 'op' field.");
+    } else {
+        const std::string_view op = op_value->as_string();
+        spec = find_operation(op);
+        if (spec == nullptr) {
+            result = make_error(
+                "Unknown operation: " + std::string(op),
+                op,
+                nullptr,
+                "unknown_operation");
+        } else if (context.control.paused && !op_allowed_while_paused(*spec)) {
+            result = make_error(
+                "Agent is paused; mutating operation blocked.",
+                op,
+                spec,
+                "blocked");
+        } else if (!spec->dry_run_supported &&
+                   bool_arg(command_args(cmd), "dry_run", false)) {
+            result = make_error(
+                std::string(op) + " does not support dry_run.",
+                op,
+                spec,
+                "dry_run_unsupported");
         } else {
-            return make_error("Failed to save project: " + state->error_message);
-        }
-    }
-
-    if (op == "export_runtime") {
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-        
-        const json::Value* args = json::find_member(cmd, "args");
-        if (args && args->is_object()) {
-            const json::Value* binary_val = json::find_member(*args, "binary");
-            if (binary_val && binary_val->is_boolean()) {
-                state->export_binary_output = binary_val->as_boolean();
+            if (spec->requires_project) {
+                context.control.current_operation = std::string(op);
+            }
+            if (spec->requires_project && !ensure_project_loaded(context.session)) {
+                result = make_error(
+                    "No project loaded.",
+                    op,
+                    spec,
+                    "project_not_loaded");
+            } else if (spec->handler == nullptr) {
+                result = make_error(
+                    "Operation has no registered handler: " + std::string(op),
+                    op,
+                    spec,
+                    "unknown_operation");
+            } else {
+                result = spec->handler(context, cmd, *spec);
             }
         }
-
-        if (export_runtime_assets_file(state, false)) {
-            state->status_message = "Project exported successfully to " + state->load_result.project->editor_metadata.export_directory.string();
-            return make_success(state->status_message);
-        } else {
-            return make_error("Failed to export project: " + state->error_message);
-        }
     }
-
-    if (op == "set_transform") {
-        const json::Value* args = json::find_member(cmd, "args");
-        if (!args || !args->is_object()) return make_error("set_transform requires 'args' object.");
-
-        const json::Value* anim_val = json::find_member(*args, "animation");
-        const json::Value* bone_val = json::find_member(*args, "bone");
-        const json::Value* channel_val = json::find_member(*args, "channel");
-        const json::Value* time_val = json::find_member(*args, "time");
-        
-        if (!anim_val || !anim_val->is_string() || 
-            !bone_val || !bone_val->is_string() ||
-            !channel_val || !channel_val->is_string() ||
-            !time_val || !time_val->is_number()) {
-            return make_error("set_transform requires animation(str), bone(str), channel(str), time(num).");
-        }
-
-        std::string_view anim_name = anim_val->as_string();
-        std::string_view bone_name = bone_val->as_string();
-        std::string_view channel_str = channel_val->as_string();
-        double time = time_val->as_number();
-
-        TransformTimelineChannel channel;
-        if (channel_str == "rotate") channel = TransformTimelineChannel::Rotate;
-        else if (channel_str == "translate") channel = TransformTimelineChannel::Translate;
-        else if (channel_str == "scale") channel = TransformTimelineChannel::Scale;
-        else if (channel_str == "shear") channel = TransformTimelineChannel::Shear;
-        else return make_error("Invalid channel. Must be rotate, translate, scale, or shear.");
-
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-
-        const EditorHistorySnapshot before = capture_history_snapshot(*state, true);
-        
-        // Find bone index to verify
-        auto bone_index_opt = state->load_result.skeleton_data->find_bone_index(bone_name);
-        if (!bone_index_opt) {
-            return make_error("Bone not found: " + std::string(bone_name));
-        }
-
-        // Find or create the edit
-        TransformTimelineEdit* edit = state->load_result.project->find_transform_timeline_edit(anim_name, bone_name, channel);
-        if (!edit) {
-            state->load_result.project->transform_timeline_edits.push_back({
-                std::string(anim_name), std::string(bone_name), channel, {}
-            });
-            edit = &state->load_result.project->transform_timeline_edits.back();
-        }
-
-        // Find or create keyframe at exact time (or insert)
-        auto key_it = std::lower_bound(edit->keyframes.begin(), edit->keyframes.end(), time,
-            [](const TransformKeyframeEdit& k, double t) { return k.time < t; });
-        
-        TransformKeyframeEdit* key = nullptr;
-        if (key_it != edit->keyframes.end() && std::abs(key_it->time - time) < 1e-6) {
-            key = &(*key_it);
-        } else {
-            key_it = edit->keyframes.insert(key_it, TransformKeyframeEdit{});
-            key = &(*key_it);
-            key->time = time;
-            key->interpolation = marrow::runtime::Interpolation::linear();
-        }
-
-        if (channel == TransformTimelineChannel::Rotate) {
-            const json::Value* angle_val = json::find_member(*args, "angle");
-            if (angle_val && angle_val->is_number()) {
-                key->angle = angle_val->as_number();
-            } else return make_error("rotate channel requires 'angle' number.");
-        } else {
-            const json::Value* x_val = json::find_member(*args, "x");
-            const json::Value* y_val = json::find_member(*args, "y");
-            if (x_val && x_val->is_number()) key->x = x_val->as_number();
-            if (y_val && y_val->is_number()) key->y = y_val->as_number();
-        }
-
-        if (!rebuild_project_runtime(state)) {
-            restore_history_snapshot(state, before);
-            return make_error("Failed to apply transform: " + state->error_message);
-        }
-
-        if (!record_action_from_snapshots(
-                state, before, EditActionKind::AddKeyframe, 
-                "Set transform keyframe via Agent", "Agent", 
-                json::find_member(*args, "merge") ? json::find_member(*args, "merge")->as_boolean() : false)) {
-            return make_error("No changes made.");
-        }
-
-        return make_success("Set transform keyframe successfully.");
-    }
-
-    if (op == "remove_transform_keyframe") {
-        const json::Value* args = json::find_member(cmd, "args");
-        if (!args || !args->is_object()) return make_error("remove_transform_keyframe requires 'args' object.");
-
-        const json::Value* anim_val = json::find_member(*args, "animation");
-        const json::Value* bone_val = json::find_member(*args, "bone");
-        const json::Value* channel_val = json::find_member(*args, "channel");
-        const json::Value* time_val = json::find_member(*args, "time");
-
-        if (!anim_val || !anim_val->is_string() || 
-            !bone_val || !bone_val->is_string() ||
-            !channel_val || !channel_val->is_string() ||
-            !time_val || !time_val->is_number()) {
-            return make_error("remove_transform_keyframe requires animation, bone, channel, time.");
-        }
-
-        std::string_view anim_name = anim_val->as_string();
-        std::string_view bone_name = bone_val->as_string();
-        std::string_view channel_str = channel_val->as_string();
-        double time = time_val->as_number();
-
-        TransformTimelineChannel channel;
-        if (channel_str == "rotate") channel = TransformTimelineChannel::Rotate;
-        else if (channel_str == "translate") channel = TransformTimelineChannel::Translate;
-        else if (channel_str == "scale") channel = TransformTimelineChannel::Scale;
-        else if (channel_str == "shear") channel = TransformTimelineChannel::Shear;
-        else return make_error("Invalid channel.");
-
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-
-        const EditorHistorySnapshot before = capture_history_snapshot(*state, true);
-        
-        TransformTimelineEdit* edit = state->load_result.project->find_transform_timeline_edit(anim_name, bone_name, channel);
-        if (!edit) return make_error("Timeline edit not found.");
-
-        auto key_it = std::find_if(edit->keyframes.begin(), edit->keyframes.end(),
-            [&](const TransformKeyframeEdit& k) { return std::abs(k.time - time) < 1e-6; });
-        
-        if (key_it == edit->keyframes.end()) return make_error("Keyframe not found at that time.");
-
-        edit->keyframes.erase(key_it);
-
-        if (!rebuild_project_runtime(state)) {
-            restore_history_snapshot(state, before);
-            return make_error("Failed to rebuild runtime: " + state->error_message);
-        }
-
-        if (!record_action_from_snapshots(
-                state, before, EditActionKind::RemoveKeyframe, 
-                "Remove transform keyframe via Agent", "Agent", false)) {
-            return make_error("No changes made.");
-        }
-
-        return make_success("Removed transform keyframe successfully.");
-    }
-    
-    if (op == "edit_ik_constraint") {
-        const json::Value* args = json::find_member(cmd, "args");
-        if (!args || !args->is_object()) return make_error("edit_ik_constraint requires 'args' object.");
-
-        const json::Value* name_val = json::find_member(*args, "name");
-        if (!name_val || !name_val->is_string()) return make_error("edit_ik_constraint requires 'name' string.");
-
-        std::string_view name = name_val->as_string();
-
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-
-        const EditorHistorySnapshot before = capture_history_snapshot(*state, true);
-        
-        IkConstraintEdit* edit = state->load_result.project->find_ik_constraint_edit(name);
-        if (!edit) {
-            // Find runtime constraint to populate defaults
-            const marrow::runtime::IkConstraintData* runtime_constraint = nullptr;
-            for (const auto& c : state->load_result.skeleton_data->ik_constraints()) {
-                if (c.name == name) {
-                    runtime_constraint = &c;
-                    break;
-                }
-            }
-            if (!runtime_constraint) {
-                return make_error("IK constraint not found in runtime skeleton.");
-            }
-
-            IkConstraintEdit new_edit;
-            new_edit.name = std::string(name);
-            for (const std::size_t bone_index : runtime_constraint->bone_indices) {
-                if (bone_index < state->load_result.skeleton_data->bones().size()) {
-                    new_edit.bone_names.push_back(state->load_result.skeleton_data->bones()[bone_index].name);
-                }
-            }
-            if (runtime_constraint->target_bone_index < state->load_result.skeleton_data->bones().size()) {
-                new_edit.target_bone_name = state->load_result.skeleton_data->bones()[runtime_constraint->target_bone_index].name;
-            }
-            new_edit.mix = runtime_constraint->mix;
-            new_edit.bend_positive = runtime_constraint->bend_positive;
-            new_edit.softness = runtime_constraint->softness;
-            new_edit.compress = runtime_constraint->compress;
-            new_edit.stretch = runtime_constraint->stretch;
-
-            state->load_result.project->ik_constraint_edits.push_back(std::move(new_edit));
-            edit = &state->load_result.project->ik_constraint_edits.back();
-        }
-
-        if (const json::Value* target_val = json::find_member(*args, "target")) {
-            if (target_val->is_string()) edit->target_bone_name = target_val->as_string();
-            else if (target_val->type() != json::Value::Type::Null) return make_error("target must be string or null.");
-        }
-
-        if (const json::Value* bones_val = json::find_member(*args, "bone_names")) {
-            if (bones_val->is_array()) {
-                edit->bone_names.clear();
-                for (const auto& b : bones_val->as_array()) {
-                    if (b.is_string()) edit->bone_names.push_back(std::string(b.as_string()));
-                }
-            } else return make_error("bone_names must be an array of strings.");
-        }
-
-        if (const json::Value* mix_val = json::find_member(*args, "mix")) {
-            if (mix_val->is_number()) edit->mix = mix_val->as_number();
-            else if (mix_val->type() != json::Value::Type::Null) return make_error("mix must be number or null.");
-        }
-
-        if (const json::Value* bend_val = json::find_member(*args, "bend_positive")) {
-            if (bend_val->type() == json::Value::Type::Boolean) edit->bend_positive = bend_val->as_boolean();
-            else if (bend_val->type() != json::Value::Type::Null) return make_error("bend_positive must be bool or null.");
-        }
-
-        if (!rebuild_project_runtime(state)) {
-            restore_history_snapshot(state, before);
-            return make_error("Failed to apply IK constraint edit: " + state->error_message);
-        }
-
-        if (!record_action_from_snapshots(
-                state, before, EditActionKind::EditProperty, 
-                "Edit IK Constraint via Agent", "Agent", 
-                json::find_member(*args, "merge") ? json::find_member(*args, "merge")->as_boolean() : false)) {
-            return make_error("No changes made.");
-        }
-
-        return make_success("Edited IK constraint successfully.");
-    }
-    
-    if (op == "scene.describe") {
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-        
-        json::Value::Object scene_desc;
-        scene_desc.emplace("path", json::Value(state->project_path.string(), {}));
-        scene_desc.emplace("name", json::Value(state->load_result.project->editor_metadata.name, {}));
-        scene_desc.emplace("bone_count", json::Value(static_cast<double>(state->load_result.skeleton_data->bones().size()), {}));
-        scene_desc.emplace("animation_count", json::Value(static_cast<double>(state->load_result.skeleton_data->animations().size()), {}));
-        
-        return make_success("Scene described", json::Value(std::move(scene_desc), {}));
-    }
-
-    if (op == "bones.list") {
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-        
-        json::Value::Array bones_arr;
-        for (const auto& bone : state->load_result.skeleton_data->bones()) {
-            bones_arr.push_back(json::Value(bone.name, {}));
-        }
-        
-        return make_success("Bones listed", json::Value(std::move(bones_arr), {}));
-    }
-
-    if (op == "animation.list") {
-        if (!state->load_result || state->load_result.project == nullptr) {
-            return make_error("No project loaded.");
-        }
-        
-        json::Value::Array anim_arr;
-        for (const auto& anim : state->load_result.skeleton_data->animations()) {
-            anim_arr.push_back(json::Value(anim.name, {}));
-        }
-        
-        return make_success("Animations listed", json::Value(std::move(anim_arr), {}));
-    }
-    
-    return make_error("Unknown operation: " + std::string(op));
+    append_activity(context.control, &result);
+    return result;
 }
 
-} // namespace marrow::editor::shell
+json::Value AgentCommandDispatcher::result_to_json(AgentDispatchResult result) {
+    json::Value::Object result_obj;
+    result_obj.emplace("ok", json::Value(result.ok, {}));
+    result_obj.emplace("message", json::Value(std::move(result.message), {}));
+    result_obj.emplace("scene_delta", std::move(result.scene_delta));
+    if (!result.op.empty()) {
+        result_obj.emplace("op", json::Value(std::move(result.op), {}));
+    }
+    if (!result.category.empty()) {
+        result_obj.emplace("category", json::Value(std::move(result.category), {}));
+    }
+    result_obj.emplace("mutating", json::Value(result.mutating, {}));
+    if (!result.error_code.empty()) {
+        json::Value::Object error;
+        error.emplace("code", json::Value(std::move(result.error_code), {}));
+        result_obj.emplace("error", json::Value(std::move(error), {}));
+    }
+    if (result.requires_review || !result.review.is_null()) {
+        result_obj.emplace("review", std::move(result.review));
+    }
+    if (result.activity_id != 0U) {
+        result_obj.emplace("activity_id", json::Value(static_cast<double>(result.activity_id), {}));
+    }
+    return json::Value(std::move(result_obj), {});
+}
+
+const AgentOperationDescriptor* agent_operation_descriptors() noexcept {
+    static const std::vector<AgentOperationDescriptor> descriptors = [] {
+        std::vector<AgentOperationDescriptor> result;
+        result.reserve(std::size(kOperationSpecs));
+        for (const OperationSpec& spec : kOperationSpecs) {
+            result.push_back({
+                spec.name,
+                spec.category,
+                spec.mutating,
+                spec.requires_review,
+                spec.dry_run_supported,
+                spec.handler != nullptr});
+        }
+        return result;
+    }();
+    return descriptors.data();
+}
+
+std::size_t agent_operation_descriptor_count() noexcept {
+    return std::size(kOperationSpecs);
+}
+
+bool validate_agent_operation_registry(std::string* error_out) {
+    std::set<std::string_view> names;
+    for (const OperationSpec& spec : kOperationSpecs) {
+        if (spec.name.empty()) {
+            if (error_out != nullptr) {
+                *error_out = "Agent operation registry contains an empty name.";
+            }
+            return false;
+        }
+        if (spec.handler == nullptr) {
+            if (error_out != nullptr) {
+                *error_out = "Agent operation has no handler: " + std::string(spec.name);
+            }
+            return false;
+        }
+        if (!names.insert(spec.name).second) {
+            if (error_out != nullptr) {
+                *error_out = "Duplicate agent operation: " + std::string(spec.name);
+            }
+            return false;
+        }
+    }
+    if (error_out != nullptr) {
+        error_out->clear();
+    }
+    return true;
+}
+
+} // namespace marrow::editor
