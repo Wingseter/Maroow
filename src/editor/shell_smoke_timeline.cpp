@@ -354,7 +354,8 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     const double expected_snapped =
         std::round((snap_anchor + 0.021) / frame_seconds) * frame_seconds -
         snap_anchor;
-    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
+    if (!begin_timeline_retime_gesture(
+            &state, 0U, ImGui::GetIO().MousePos.x, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 0.021, true) ||
         !state.timeline_editor.retime_gesture.has_value() ||
         std::abs(
@@ -374,7 +375,8 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     state.timeline_editor.selected_keys = {timeline_key_ref(*color_track, 0U)};
     const double expected_clamped =
         color_track->key_times[1] - 0.001 - color_track->key_times[0];
-    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
+    if (!begin_timeline_retime_gesture(
+            &state, 0U, ImGui::GetIO().MousePos.x, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 1.0, false) ||
         !state.timeline_editor.retime_gesture.has_value() ||
         std::abs(
@@ -395,7 +397,8 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     state.timeline_editor.selected_keys = {
         timeline_key_ref(*color_track, 0U),
         timeline_key_ref(*attachment_track, 0U)};
-    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
+    if (!begin_timeline_retime_gesture(
+            &state, 0U, ImGui::GetIO().MousePos.x, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 0.02, false) ||
         marrow::editor::serialize_project(*state.session.project()) == retime_baseline) {
         std::cerr << "Timeline P0 live retime did not update the project preview.\n";
@@ -414,7 +417,8 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     state.timeline_editor.selected_keys = {
         timeline_key_ref(*color_track, 0U),
         timeline_key_ref(*attachment_track, 0U)};
-    if (!begin_timeline_retime_gesture(&state, ImGuiID{0}, tracks) ||
+    if (!begin_timeline_retime_gesture(
+            &state, 0U, ImGui::GetIO().MousePos.x, tracks) ||
         !apply_timeline_retime_delta(&state, tracks, 0.02, false)) {
         std::cerr << "Timeline P0 committed retime could not start.\n";
         return false;

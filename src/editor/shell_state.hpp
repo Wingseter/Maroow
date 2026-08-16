@@ -15,6 +15,7 @@
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
+#include "timeline_model.hpp"
 #include "viewport_interaction_kernel.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/editor/project.hpp"
@@ -305,17 +306,6 @@ struct DebugOverlayGeometry {
     DebugOverlayStats stats{};
 };
 
-struct TimelineTrackRow {
-    std::string id;
-    std::string label;
-    std::string animation_name;
-    std::vector<double> key_times;
-    std::optional<std::size_t> bone_index;
-    std::optional<std::size_t> slot_index;
-    std::optional<marrow::editor::TransformTimelineChannel> transform_channel;
-    std::optional<std::string> deform_attachment_name;
-};
-
 struct TimelineTrackCache {
     std::uint64_t runtime_revision{0U};
     const marrow::runtime::SkeletonData* skeleton_identity{nullptr};
@@ -479,33 +469,6 @@ struct ViewportBoxSelectionGesture {
     bool dragged{false};
 };
 
-struct TimelineKeyRef {
-    std::string track_id;
-    // Indices are presentation details and shift whenever a key is inserted or
-    // removed. Keep a quantized time identity instead, plus enough same-time
-    // context to distinguish event keys and invalidate ambiguous identities
-    // when the same-time population changes.
-    std::int64_t time_microseconds{0};
-    std::size_t same_time_ordinal{0U};
-    std::size_t same_time_count{1U};
-
-    friend bool operator==(const TimelineKeyRef& left, const TimelineKeyRef& right) {
-        return left.track_id == right.track_id &&
-            left.time_microseconds == right.time_microseconds &&
-            left.same_time_ordinal == right.same_time_ordinal &&
-            left.same_time_count == right.same_time_count;
-    }
-};
-
-struct TimelineClipboard {
-    bool has_data{false};
-    std::string animation_name;
-    double earliest_time{0.0};
-    // A typed project fragment keeps every supported key payload intact while
-    // remaining independent from the operating-system text clipboard.
-    marrow::editor::ProjectData project_fragment;
-};
-
 struct TimelineBoxSelection {
     std::string track_id;
     double start_time{0.0};
@@ -514,7 +477,7 @@ struct TimelineBoxSelection {
 };
 
 struct TimelineRetimeGesture {
-    ImGuiID item_id{0};
+    std::uint32_t item_id{0U};
     float start_mouse_x{0.0f};
     std::vector<TimelineKeyRef> keys;
     std::vector<double> original_times;

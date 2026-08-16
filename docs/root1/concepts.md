@@ -106,6 +106,21 @@ Threading model:
 - `AnimationState` is also not internally synchronized.
 - Keep one `AnimationState` paired with one `Skeleton` on one thread.
 
+## Editor interaction boundaries
+
+Task #28 keeps viewport and timeline calculations separate from shell input and
+session mutation. `viewport_interaction_kernel` and `timeline_model` are private,
+data-only targets with no ImGui, Sokol, or `ShellState` dependency. Their focused
+tests lock down coordinate/gesture math and timeline identity, collision, retime,
+snap, duration, and completion decisions.
+
+The shell-private controllers own effective-track materialization, live runtime
+refresh, transactions, rollback, and zero-or-one history entry. The existing
+ImGui files interpret input and draw the result. Normal timeline presentation
+uses the runtime-revision/identity keyed cache; add-key and live retime rebuild
+tracks directly after mutation so the current frame never reuses invalid row
+references.
+
 ## Renderer handoff
 
 The renderer layer does not load animation files directly. It consumes the current `Skeleton` pose plus atlas metadata.

@@ -38,6 +38,7 @@
 - Sokol ImGui setup/frame/shutdown lifecycle probe: `./build/marrow_sokol_imgui_runtime_probe`
 - Typed transient entity selection model: `./build/marrow_selection_tests`
 - Viewport interaction data-kernel tests: `./build/marrow_viewport_interaction_tests`
+- Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`

@@ -277,6 +277,19 @@ ordering, and zero-or-one history disposition. The existing editor smoke still
 validates actual cancel/no-op/one-undo session behavior and preserved error
 messages.
 
+The timeline checkpoint was locally validated on 2026-08-16. The private
+`timeline_model` owns track/key identity including same-time ordinal and
+population, selection reconciliation, clipboard collision/order, retime
+bounds and 60 FPS snapping, duration maxima, and completion disposition without
+ImGui or `ShellState`. The shell-private `timeline_controller` owns imported
+curve materialization, project/runtime mutation, live preview refresh,
+transactions, rollback, and zero-or-one history entry; `shell_timeline.cpp`
+retains input interpretation and drawing. The focused model test passed all six
+cases, the editor shell smoke retained imported-curve, atomic rollback, no-op,
+and one-undo coverage, and the complete default CTest passed 20/20. The two
+Task #27 direct uncached track rebuilds after add-key and live retime remain in
+the controller while the normal revision-keyed cache path is unchanged.
+
 Broad `project.cpp`/session decomposition, GPU surface/resource RAII, SDL host
 decomposition, and a full CMake reorganization remain follow-up analysis. Task
 #28 changes no public `include/marrow/**` interface, file-format version, C ABI,

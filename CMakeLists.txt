@@ -325,6 +325,16 @@ target_include_directories(marrow_runtime
         ${PROJECT_SOURCE_DIR}/include
 )
 
+add_library(marrow_timeline_model STATIC
+    src/editor/timeline_model.cpp
+)
+
+target_include_directories(marrow_timeline_model
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/src/editor
+        ${PROJECT_SOURCE_DIR}/include
+)
+
 add_library(marrow_constraint_warning_check STATIC EXCLUDE_FROM_ALL
     src/runtime/skeleton_constraints.cpp
 )
@@ -514,6 +524,7 @@ target_link_libraries(marrow_editor
     PUBLIC
         marrow_runtime
     PRIVATE
+        marrow_timeline_model
         ZLIB::ZLIB
 )
 
@@ -613,6 +624,20 @@ add_executable(marrow_viewport_interaction_tests
 target_link_libraries(marrow_viewport_interaction_tests
     PRIVATE
         marrow_viewport_interaction_kernel
+)
+
+add_executable(marrow_timeline_model_tests
+    src/tests/timeline_model_tests.cpp
+)
+
+target_include_directories(marrow_timeline_model_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_timeline_model_tests
+    PRIVATE
+        marrow_editor
 )
 
 add_executable(marrow_preference_tests
@@ -815,6 +840,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_preview.cpp
     src/editor/shell_asset_watch.cpp
     src/editor/shell_derived_cache.cpp
+    src/editor/timeline_controller.cpp
     src/editor/shell_timeline.cpp
     src/editor/shell_constraints.cpp
     src/editor/shell_selection.cpp
@@ -850,6 +876,7 @@ target_link_libraries(marrow_editor_shell
     PRIVATE
         marrow_editor
         marrow_renderer_core
+        marrow_timeline_model
         marrow_viewport_interaction_kernel
         marrow_imgui_sdl3
         marrow_window_host
@@ -1117,6 +1144,15 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.viewport_interaction_kernel PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;viewport;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.timeline_model
+        COMMAND marrow_timeline_model_tests
+    )
+    set_tests_properties(marrow.timeline_model PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;timeline;unit;noninteractive"
     )
 
     add_test(

@@ -59,15 +59,15 @@ auto-key를 2026-07-25에 완료했다. 현재 실행 checkpoint는 behavior-pre
 | 영역 | 내용 | 위치 |
 |---|---|---|
 | 웨이트 페인팅 | Paint/Erase/Smooth 브러시, 반경/강도, 히트맵, 기존 자동 바인딩, 브러시별 top-4 정규화, 스트로크 단위 언두 | `shell_weight_paint.cpp` |
-| 키프레임 편집 | 본 R/T/S/shear, 슬롯 light RGBA/attachment, 메시 디폼, 드로우오더, 이벤트 — 추가/삭제/시간·값·보간 수정 | `shell_timeline.cpp` |
-| 보간 | 키별 Linear/Stepped/Bezier + 베지어 제어점 4개 숫자 입력 | `shell_timeline.cpp` |
-| 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `shell_timeline.cpp` |
+| 키프레임 편집 | 본 R/T/S/shear, 슬롯 light RGBA/attachment, 메시 디폼, 드로우오더, 이벤트 — 추가/삭제/시간·값·보간 수정 | `timeline_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp` |
+| 보간 | 키별 Linear/Stepped/Bezier + 베지어 제어점 4개 숫자 입력 | `timeline_controller.cpp`, `shell_timeline.cpp` |
+| 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `timeline_controller.cpp`, `shell_timeline.cpp` |
 | Clip duration | runtime authored/inferred/effective 경계, ordered `.marrow set_duration`, live UI·undo, key auto-grow, tail/queue/playhead 재구성, JSON↔MBIN 보존 | `authoring.cpp`, `session.cpp`, `shell_project_panels.cpp` |
 | User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, macOS/Linux/Windows resolver, Windows UTF-16 AppData와 durable atomic replace, unknown-field 보존, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
 | Platform/GPU shell | SDL3 window/input/IME/pen, macOS Metal 및 Windows/Linux GLCORE 4.1 Sokol surface, pass-free scene renderer, official sokol_imgui; 현재 qualification은 macOS arm64와 Windows 11 x64만 대상으로 MAR-210까지 open | `sdl_window_host.cpp`, `sokol_graphics_device.cpp`, `viewport_renderer.cpp` |
 | Entity selection | 이름 기반 typed Bone/Slot/Attachment/Constraint 집합, 단일 active invariant, stable-order primitives, hierarchy replace/toggle/range/additive-range와 viewport typed point/bone-only box gesture, transient anchor, selected/active 구분 | `selection.cpp`, `shell_selection.cpp`, `selection_set_tests.cpp` |
-| 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale auto-key | `shell_viewport.cpp`, `shell_viewport_ui.cpp` |
-| 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `shell_timeline.cpp` |
+| 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale auto-key | `viewport_interaction_kernel.cpp`, `viewport_interaction_controller.cpp`, `shell_viewport_ui.cpp` |
+| 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `timeline_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
 | 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두 | `shell_constraints.cpp` |
 | 언두/트랜잭션 | 스냅샷 100개 캡, 머지 키 그룹핑, 원자적 런타임 리빌드+실패 롤백 | `session.cpp` |
@@ -75,7 +75,7 @@ auto-key를 2026-07-25에 완료했다. 현재 실행 checkpoint는 behavior-pre
 | 임포트/익스포트 | PSD→리그 생성, Spine JSON/atlas 임포트, 아틀라스 패킹, `.mskl`/`.mbin`/`.matl` 익스포트 | `psd_import.cpp` 등 |
 | Parameter modeling | raw direct/final preview, 1D shape, 2D warp/rotation, full lattice·pivot gesture, expression/lip-sync, ArtPath runtime/render | `shell_parameters.cpp`, `parameter_project_model.cpp`, `parameter_model.cpp` |
 | 에이전트 표면 | 56개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 31). Animation CRUD·duration·atomic timeline retime·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
-| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 56-op registry와 Parameter shell을 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke.cpp`, `agent_dispatch_smoke.cpp` |
+| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 56-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
 
 ### 남아 있는 의도적 제한/부분 구현
 

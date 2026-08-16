@@ -1,5 +1,7 @@
 #include "marrow/editor/authoring.hpp"
 
+#include "timeline_model.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -54,14 +56,8 @@ void include_animation_timeline_maximum(
     const std::vector<TimelineEdit>& edits,
     std::string_view animation_name,
     double* maximum_time) {
-    for (const TimelineEdit& edit : edits) {
-        if (edit.animation_name != animation_name) {
-            continue;
-        }
-        for (const auto& keyframe : edit.keyframes) {
-            *maximum_time = std::max(*maximum_time, keyframe.time);
-        }
-    }
+    marrow::editor::timeline_model::include_animation_timeline_maximum(
+        edits, animation_name, maximum_time);
 }
 
 template <typename Edit>
@@ -275,24 +271,17 @@ void include_retime_bounds(
     double spacing,
     double* minimum_delta,
     double* maximum_delta) {
-    *minimum_delta = std::max(*minimum_delta, -resolved.original_time);
-    for (std::size_t index = resolved.key_index; index > 0U; --index) {
-        const std::size_t neighbor = index - 1U;
-        if (selected_indices.find(neighbor) != selected_indices.end()) continue;
-        *minimum_delta = std::max(
-            *minimum_delta,
-            keyframes[neighbor].time + spacing - resolved.original_time);
-        break;
-    }
-    for (std::size_t neighbor = resolved.key_index + 1U;
-         neighbor < keyframes.size();
-         ++neighbor) {
-        if (selected_indices.find(neighbor) != selected_indices.end()) continue;
-        *maximum_delta = std::min(
-            *maximum_delta,
-            keyframes[neighbor].time - spacing - resolved.original_time);
-        break;
-    }
+    marrow::editor::timeline_model::RetimeBounds bounds{
+        *minimum_delta, *maximum_delta};
+    marrow::editor::timeline_model::include_retime_bounds(
+        keyframes,
+        resolved.key_index,
+        resolved.original_time,
+        selected_indices,
+        spacing,
+        &bounds);
+    *minimum_delta = bounds.minimum_delta;
+    *maximum_delta = bounds.maximum_delta;
 }
 
 template <typename Timeline>
@@ -1618,11 +1607,8 @@ TimelineRetimeResult retime_keyframes(
             return left.original_time < right.original_time;
         })->original_time;
     if (snap_to_frames) {
-        const double frame_seconds = 1.0 / frames_per_second;
-        applied_delta =
-            std::round((earliest_original_time + applied_delta) / frame_seconds) *
-                frame_seconds -
-            earliest_original_time;
+        applied_delta = *timeline_model::snap_delta_to_frames(
+            earliest_original_time, applied_delta, frames_per_second);
     }
 
     double minimum_delta = -std::numeric_limits<double>::infinity();
