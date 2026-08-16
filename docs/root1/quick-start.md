@@ -27,6 +27,10 @@ context is a startup error rather than a GL 3.2 fallback. Current qualification
 and support claims cover macOS arm64 and Windows 11 x64 only; Linux/Ubuntu and
 Windows 10 are `NOT REQUIRED` and unqualified.
 
+MAR-192 through MAR-210 remain an open, parallel deferred qualification
+backlog. They do not grant support credit and do not block the Task #28 then
+MAR-163 product sequence.
+
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
 

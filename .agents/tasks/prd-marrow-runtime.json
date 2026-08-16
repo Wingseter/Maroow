@@ -3335,7 +3335,7 @@
         "platform-validation.md records dirty state, OS/build, hardware/driver, display server/scale, compiler/CMake, dependency hashes, commands, exit codes, logs, pen, and artifact hashes.",
         "discription.md, PRD, AGENTS.md, quick-start, concepts, editing-gap-analysis, and the research decision match the final implementation.",
         "Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, multi-viewport, and untested backends are not described as supported.",
-        "MAR-210 remains open and MAR-163 remains blocked until every physical evidence gate passes."
+        "MAR-210 remains open until every physical evidence gate passes."
       ],
       "validationCommands": [
         "cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON",
@@ -3360,7 +3360,7 @@
         "Shell and project smokes cover weighted, unweighted, linked, and sparse-deform cases plus one-transaction auto-key, undo/redo, and JSON/MBIN export."
       ],
       "dependsOn": [
-        "MAR-210"
+        "MAR-162"
       ],
       "status": "open"
     },

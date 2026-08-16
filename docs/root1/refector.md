@@ -192,3 +192,81 @@ results are macOS-local evidence only. Ubuntu X11, Windows 10/11, physical
 Windows Ink, fixed legacy/Sokol A/B, and clean portable-folder qualification
 remain open exactly as recorded elsewhere; Task #27 grants none of that
 qualification credit.
+
+## Task #28 core-boundary refactor checkpoint (active 2026-08-16)
+
+Task #28 is a behavior-preserving implementation checkpoint between completed
+MAR-162 and MAR-163. It is not a PRD story and does not close or qualify any
+platform story. The execution order is `Task #28 -> MAR-163`; MAR-163 depends
+directly on MAR-162. MAR-192 through MAR-210 keep their existing `open` states,
+acceptance criteria, evidence requirements, and internal dependency chain as a
+parallel deferred qualification backlog.
+
+### Frozen baseline and legacy evidence boundary
+
+- Branch `agent-control-remaining` was clean at
+  `8894013e3ec3d38f2f2cc3a789832165abf86e24` before Task #28 edits.
+- `cmake -S . -B build`, `cmake --build build -j4`, and the default
+  `ctest --test-dir build --output-on-failure` passed; CTest was 17/17.
+- The initial hot spots were `shell_smoke.cpp` 7,280 lines,
+  `shell_viewport.cpp` plus `shell_viewport_ui.cpp` 5,363 lines, and
+  `shell_timeline.cpp` 4,422 lines. `shell_parameters.cpp` was 2,825 lines and
+  still contained the approximately 812-line parameter smoke scenario.
+- `sokol_backend.cpp` was compiled into both `marrow_renderer_core` with
+  `MARROW_RENDERER_SCENE_ONLY` and the `marrow_renderer` compatibility target.
+  `marrow_c_smoke`, Agent dispatch smoke, runtime unit tests, and the CPU
+  benchmark therefore inherited `marrow_renderer_sapp_host` plus
+  Cocoa/Foundation/QuartzCore/Metal link dependencies on macOS.
+- The retained pre-platform source anchor is
+  `0e0539e633e9a5227fd44e9e003cda68d27fc40f`; its tracked binary diff was
+  recorded before platform work as
+  `d15ae2de2f4a85c2285a9988deee151b03ff1f775f5883f56d1a84e4fc5314e6`.
+  The integrated SDL3/Sokol transition is
+  `80b494fde00b45a3a8fb89c2324baec9fdac547c`. Those artifacts preserve
+  provenance, but there is no buildable legacy comparator at the current
+  feature revision, so fixed like-for-like legacy/Sokol A/B evidence is still
+  unavailable and receives no qualification credit.
+
+### Checkpoint boundaries
+
+Task #28 is implemented and committed as independently verifiable checkpoints:
+
+1. Synchronize authority, the frozen baseline, and the MAR-163 dependency.
+2. Leave `run_headless_smoke` with orchestration and shared fixture lifetime;
+   move parameter, viewport/selection, and timeline/project scenarios into
+   feature test translation units without changing CTest names, labels, CLI
+   exit status, diagnostics, or the single `ShellState` mutation order.
+3. Make `marrow_renderer_commands` own CPU scene preparation, cache, command
+   packing, PNG/geometry, and software-stencil work; compile the Sokol scene
+   executor exactly once in `marrow_renderer_core`; keep app/glue and window
+   adaptation in `marrow_renderer_sapp_host`. The public `marrow_renderer`
+   compatibility umbrella remains available, while C ABI, Agent, runtime tests,
+   fixture tests, and CPU benchmarks link only the CPU boundary.
+4. Extract ImGui/Sokol/`ShellState`-free viewport rotation, signed-scale, and hit
+   precedence math into a private kernel with focused table-driven tests. A
+   shell-private controller retains materialization, transaction, rollback,
+   begin/update/finish, and one-undo behavior.
+5. Extract ImGui-free timeline identity, reconciliation, clipboard, retime,
+   collision, and snap calculations into a private model. A shell-private
+   controller retains session mutation, materialization, and transaction
+   ownership. The direct uncached rebuild after add-key and retime remains.
+
+Broad `project.cpp`/session decomposition, GPU surface/resource RAII, SDL host
+decomposition, and a full CMake reorganization remain follow-up analysis. Task
+#28 changes no public `include/marrow/**` interface, file-format version, C ABI,
+CLI, or 56-operation Agent/MCP request/response contract.
+
+### Completion gate
+
+Each checkpoint must pass configure/build, complete default CTest, its focused
+tests and related smoke targets, plus `git diff --check` before the next starts.
+The renderer checkpoint additionally requires the macOS display-enabled suite
+and source/link guards proving CPU-only binaries do not inherit app/glue or host
+frameworks. Final macOS Debug and Release display, third-party, project/export,
+C ABI, Agent, and MCP socket evidence is required.
+
+Task #28 is not complete until the same Task #28 revision also passes the final
+Windows 11 VS2022 x64 Debug and Release build/CTest matrix, third-party
+verification, and same-host portable staging/manifest checks. Windows 11
+high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain deferred
+MAR-192 through MAR-210 qualification evidence and are not Task #28 gates.

@@ -14,8 +14,8 @@ PASS and do not satisfy a dependency.
 | Windows 10 x64 | Retained Windows x64 implementation | No qualification run; excluded from the current support matrix by the 2026-08-12 scope decision | NOT REQUIRED — unqualified, no support claim |
 | Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Debug and Release build plus 20/20 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop and physical Ink evidence remain open |
 
-MAR-192 through MAR-210 therefore remain `open`, and MAR-163 remains blocked by
-MAR-210. Current qualification targets macOS arm64 and Windows 11 x64 only.
+MAR-192 through MAR-210 remain `open` as a parallel deferred qualification
+backlog and do not block MAR-163. Current qualification targets macOS arm64 and Windows 11 x64 only.
 Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, and
 ImGui OS multi-viewport support are not claimed.
 

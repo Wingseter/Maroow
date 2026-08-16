@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 and MAR-154 through MAR-162 are complete. The platform program MAR-192 through MAR-210 now runs before product work; MAR-192 is the next open milestone and MAR-163 depends on MAR-210.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128 and MAR-154 through MAR-162 are complete. Task #28 is the active behavior-preserving refactor checkpoint; MAR-163 follows it and depends on MAR-162. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 

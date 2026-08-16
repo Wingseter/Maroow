@@ -1,10 +1,11 @@
 # Maroow 편집 기능 갭 분석 (vs Spine 4.2/4.3, Live2D Cubism 5.x)
 
-최종 갱신: 2026-08-12. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
+최종 갱신: 2026-08-16. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
 Preference Store, MAR-157 Typed SelectionSet, MAR-158 Selection Migration, MAR-159 Hierarchy
 Multi-Selection, MAR-160 Viewport Multi-Selection, MAR-161 Parent-Space Rotation Gizmo 및
-MAR-162 Signed Local Scale Gizmo 완료 checkpoint, MAR-192~210 platform program 결정과
+MAR-162 Signed Local Scale Gizmo 완료 checkpoint, Task #28 핵심 경계 리팩터 실행 결정,
+MAR-192~210 platform program 보류 결정과
 `.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
 
@@ -35,9 +36,9 @@ identity reconciliation을 같은 날 완료했다. MAR-159는 실제 visible hi
 platform-correct replace/toggle/range/additive-range gesture와 transient anchor를 2026-07-21에 완료했다.
 같은 날 MAR-160은 viewport point/box multi-selection을, MAR-161은 frozen parent-space rotation과 raw
 multi-turn auto-key를 완료했다. MAR-162는 frozen scale-free local axis와 signed/exact-zero scale
-auto-key를 2026-07-25에 완료했다. 다음 제품 milestone은 single-vertex FFD를 담당하는
-MAR-163이지만, 플랫폼 프로그램이 선행하도록 dependency가 MAR-210으로 바뀌었다. 현재 실행
-milestone은 MAR-192이며 MAR-210 qualification 전에는 MAR-163을 시작하지 않는다.
+auto-key를 2026-07-25에 완료했다. 현재 실행 checkpoint는 behavior-preserving Task #28 핵심
+경계 리팩터다. 다음 제품 milestone은 single-vertex FFD를 담당하는 MAR-163이며 dependency는
+완료된 MAR-162다. MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
 
 ---
 
@@ -262,12 +263,12 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 
 이 순서는 기능 선행관계다. 각 checkpoint는 focused 구현·검증 경계다.
 
-### Platform program — MAR-192~210 (MAR-163 선행 gate)
+### Platform program — MAR-192~210 (병렬 보류 qualification backlog)
 
-플랫폼 전환은 P1 제품 기능의 병렬 roadmap이 아니라 활성 PRD에 물리적으로 삽입된 선행
-dependency chain이다. 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
+플랫폼 전환 코드의 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
 raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
-revision 최종 로컬 매트릭스(MAR-210)다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
+revision 최종 로컬 매트릭스(MAR-210)다. 이 story들은 상태와 내부 dependency를 유지한 채 별도
+재개 결정 전까지 open 병렬 보류 backlog이며 MAR-163을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
 `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate에서 제외됐다. 코드·단위 테스트가 구현돼도
 macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/resource/package 증거가
 모두 없으면 story를 done으로 표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는
@@ -275,7 +276,7 @@ macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/res
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation 및 MAR-162 signed local scale checkpoint는 통과했다. 제품 chain은 MAR-163~191 순서를 유지하지만 MAR-163의 dependency는 MAR-210이다. 따라서 현재 next open execution milestone은 MAR-192이고, 플랫폼 qualification 뒤에만 기존 P1 제품 chain이 재개된다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation 및 MAR-162 signed local scale checkpoint는 통과했다. 현재 실행 checkpoint는 Task #28이고, 이후 제품 chain은 MAR-162에 의존하는 MAR-163부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
 
 #### 기반·선택
 
