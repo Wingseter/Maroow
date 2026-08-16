@@ -782,6 +782,11 @@ add_executable(marrow_editor_shell
     src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
+    src/editor/shell_smoke_project.cpp
+    src/editor/shell_smoke_viewport.cpp
+    src/editor/shell_smoke_timeline.cpp
+    src/editor/shell_smoke_frames.cpp
+    src/editor/shell_smoke_parameters.cpp
     src/editor/shell_widgets.cpp
     src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
