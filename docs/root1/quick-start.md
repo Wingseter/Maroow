@@ -14,8 +14,11 @@ cmake --build build
 
 That command loads `player_idle.mskl`, resolves `player_idle.matl`, applies the fixture animation coverage, prepares renderer commands, and opens the sample window.
 
-The standalone `DemoShell` uses the Sokol-app adapter. The editor has a separate
-SDL3 host and does not link `sokol_app` or `sokol_glue`:
+CPU scene preparation is owned by the internal `marrow_renderer_commands`
+boundary. The public `marrow_renderer` target remains a compatibility umbrella;
+its standalone `DemoShell` adds the Sokol-app adapter. The editor uses the same
+single-compiled Sokol scene executor through a separate SDL3 host and does not
+link `sokol_app` or `sokol_glue`:
 
 ```sh
 ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow

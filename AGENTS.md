@@ -45,6 +45,7 @@
 - Display qualification build: `cmake --build build-display`
 - Windowing display tests: `ctest --test-dir build-display --output-on-failure -L windowing`
 - Renderer/display tests: `ctest --test-dir build-display --output-on-failure -L display`
+- Renderer CPU/GPU link-boundary guard: `ctest --test-dir build --output-on-failure -R marrow.renderer_link_boundary`
 - Release platform qualification configure: `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON`
 - Release platform qualification build: `cmake --build build-platform-release`
 - Release platform qualification suite: `ctest --test-dir build-platform-release --output-on-failure`

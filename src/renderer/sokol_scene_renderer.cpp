@@ -1,0 +1,972 @@
+#include "module_internal.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#if defined(__APPLE__)
+#define SOKOL_METAL
+#else
+#define SOKOL_GLCORE
+#endif
+
+#include "sokol_gfx.h"
+#include "sokol_log.h"
+
+#if defined(SOKOL_METAL)
+#include "marrow_renderer_shader_metal.h"
+#elif defined(SOKOL_GLCORE)
+#include "marrow_renderer_shader_gl.h"
+#else
+#error "Marrow renderer shaders require Metal or GLCORE."
+#endif
+
+namespace marrow::renderer::internal {
+
+namespace {
+
+constexpr std::size_t kStreamingVertexBufferBytes = 2U * 1024U * 1024U;
+constexpr std::size_t kStreamingIndexBufferBytes = 512U * 1024U;
+constexpr std::size_t kBonePayloadFloatsPerEntry = 6U;
+constexpr std::size_t kPackedBoneVec4Count = 192U;
+constexpr int kVsUniformSlot = 0;
+constexpr int kFsUniformSlot = 1;
+constexpr int kAtlasTextureSlot = 0;
+constexpr int kAtlasSamplerSlot = 0;
+constexpr std::array<std::uint8_t, 4> kSolidWhiteRgba{{255, 255, 255, 255}};
+
+std::optional<std::size_t> next_power_of_two(std::size_t value) {
+    if (value <= 1U) {
+        return 1U;
+    }
+    std::size_t result = 1U;
+    while (result < value) {
+        if (result > (std::numeric_limits<std::size_t>::max() / 2U)) {
+            return std::nullopt;
+        }
+        result *= 2U;
+    }
+    return result;
+}
+
+std::optional<std::string> validate_atlas_texture(const TextureImage& texture) {
+    if (texture.width <= 0 || texture.height <= 0) {
+        return "Atlas texture image data was invalid.";
+    }
+
+    const std::size_t expected_rgba_bytes =
+        static_cast<std::size_t>(texture.width) *
+        static_cast<std::size_t>(texture.height) * 4U;
+    if (texture.rgba8.size() != expected_rgba_bytes) {
+        return "Atlas texture image data was invalid.";
+    }
+    return std::nullopt;
+}
+
+sg_filter sokol_filter(std::string_view filter_name) {
+    return filter_name == "nearest" ? SG_FILTER_NEAREST : SG_FILTER_LINEAR;
+}
+
+sg_wrap sokol_wrap(std::string_view wrap_name) {
+    if (wrap_name == "repeat") {
+        return SG_WRAP_REPEAT;
+    }
+    if (wrap_name == "mirrored_repeat") {
+        return SG_WRAP_MIRRORED_REPEAT;
+    }
+    return SG_WRAP_CLAMP_TO_EDGE;
+}
+
+sg_blend_factor sokol_blend_factor(BlendFactor factor) {
+    switch (factor) {
+    case BlendFactor::Zero:
+        return SG_BLENDFACTOR_ZERO;
+    case BlendFactor::One:
+        return SG_BLENDFACTOR_ONE;
+    case BlendFactor::SrcAlpha:
+        return SG_BLENDFACTOR_SRC_ALPHA;
+    case BlendFactor::OneMinusSrcAlpha:
+        return SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    case BlendFactor::DstColor:
+        return SG_BLENDFACTOR_DST_COLOR;
+    case BlendFactor::OneMinusSrcColor:
+        return SG_BLENDFACTOR_ONE_MINUS_SRC_COLOR;
+    }
+
+    return SG_BLENDFACTOR_ZERO;
+}
+
+float pma_uniform_value(bool premultiplied_alpha) {
+    return premultiplied_alpha ? 0.0f : 1.0f;
+}
+
+std::optional<std::string> resource_state_error(
+    std::string_view label,
+    sg_resource_state resource_state) {
+    if (resource_state == SG_RESOURCESTATE_VALID) {
+        return std::nullopt;
+    }
+
+    std::string error_message = "Failed to create ";
+    error_message += label;
+    error_message += " (state=";
+    switch (resource_state) {
+    case SG_RESOURCESTATE_INVALID:
+        error_message += "invalid";
+        break;
+    case SG_RESOURCESTATE_ALLOC:
+        error_message += "alloc";
+        break;
+    case SG_RESOURCESTATE_FAILED:
+        error_message += "failed";
+        break;
+    default:
+        error_message += "unknown";
+        break;
+    }
+    error_message += ").";
+    return error_message;
+}
+
+marrow_renderer_vs_params_t make_vs_params(const RenderCommandList& command_list) {
+    marrow_renderer_vs_params_t params{};
+    std::memcpy(
+        params.projection,
+        command_list.projection.data(),
+        sizeof(params.projection));
+
+    const std::size_t bone_count =
+        command_list.bone_palette.size() / kBonePayloadFloatsPerEntry;
+    for (std::size_t bone_index = 0; bone_index < bone_count; bone_index += 2U) {
+        const std::size_t packed_index = (bone_index / 2U) * 3U;
+        const std::size_t first_bone_offset = bone_index * kBonePayloadFloatsPerEntry;
+        params.bones[packed_index][0] = command_list.bone_palette[first_bone_offset + 0U];
+        params.bones[packed_index][1] = command_list.bone_palette[first_bone_offset + 1U];
+        params.bones[packed_index][2] = command_list.bone_palette[first_bone_offset + 2U];
+        params.bones[packed_index][3] = command_list.bone_palette[first_bone_offset + 3U];
+        params.bones[packed_index + 1U][0] = command_list.bone_palette[first_bone_offset + 4U];
+        params.bones[packed_index + 1U][1] = command_list.bone_palette[first_bone_offset + 5U];
+
+        if (bone_index + 1U >= bone_count) {
+            continue;
+        }
+
+        const std::size_t second_bone_offset =
+            (bone_index + 1U) * kBonePayloadFloatsPerEntry;
+        params.bones[packed_index + 1U][2] =
+            command_list.bone_palette[second_bone_offset + 0U];
+        params.bones[packed_index + 1U][3] =
+            command_list.bone_palette[second_bone_offset + 1U];
+        params.bones[packed_index + 2U][0] =
+            command_list.bone_palette[second_bone_offset + 2U];
+        params.bones[packed_index + 2U][1] =
+            command_list.bone_palette[second_bone_offset + 3U];
+        params.bones[packed_index + 2U][2] =
+            command_list.bone_palette[second_bone_offset + 4U];
+        params.bones[packed_index + 2U][3] =
+            command_list.bone_palette[second_bone_offset + 5U];
+    }
+
+    return params;
+}
+
+marrow_renderer_fs_params_t make_fs_params(bool premultiplied_alpha) {
+    marrow_renderer_fs_params_t params{};
+    params.pma_control[0] = pma_uniform_value(premultiplied_alpha);
+    return params;
+}
+
+void configure_common_pipeline_state(
+    sg_pipeline_desc* pipeline_desc,
+    sg_shader shader,
+    sg_pixel_format color_format,
+    int sample_count,
+    BlendState blend_state) {
+    pipeline_desc->shader = shader;
+    pipeline_desc->layout.buffers[0].stride = static_cast<int>(sizeof(RenderCommandVertex));
+    pipeline_desc->color_count = 1;
+    pipeline_desc->colors[0].pixel_format = color_format;
+    pipeline_desc->colors[0].blend.enabled = true;
+    pipeline_desc->colors[0].blend.src_factor_rgb = sokol_blend_factor(blend_state.src_factor);
+    pipeline_desc->colors[0].blend.dst_factor_rgb = sokol_blend_factor(blend_state.dst_factor);
+    pipeline_desc->colors[0].blend.op_rgb = SG_BLENDOP_ADD;
+    pipeline_desc->colors[0].blend.src_factor_alpha = sokol_blend_factor(blend_state.src_factor);
+    pipeline_desc->colors[0].blend.dst_factor_alpha = sokol_blend_factor(blend_state.dst_factor);
+    pipeline_desc->colors[0].blend.op_alpha = SG_BLENDOP_ADD;
+    pipeline_desc->primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    pipeline_desc->index_type = SG_INDEXTYPE_UINT32;
+    pipeline_desc->cull_mode = SG_CULLMODE_NONE;
+    pipeline_desc->sample_count = sample_count;
+}
+
+void configure_single_color_layout(sg_pipeline_desc* pipeline_desc) {
+    pipeline_desc->layout.attrs[0].format = SG_VERTEXFORMAT_FLOAT2;
+    pipeline_desc->layout.attrs[0].offset = offsetof(RenderCommandVertex, local_positions);
+    pipeline_desc->layout.attrs[1].format = SG_VERTEXFORMAT_FLOAT2;
+    pipeline_desc->layout.attrs[1].offset =
+        offsetof(RenderCommandVertex, local_positions) + (sizeof(float) * 2U);
+    pipeline_desc->layout.attrs[2].format = SG_VERTEXFORMAT_FLOAT2;
+    pipeline_desc->layout.attrs[2].offset =
+        offsetof(RenderCommandVertex, local_positions) + (sizeof(float) * 4U);
+    pipeline_desc->layout.attrs[3].format = SG_VERTEXFORMAT_FLOAT2;
+    pipeline_desc->layout.attrs[3].offset =
+        offsetof(RenderCommandVertex, local_positions) + (sizeof(float) * 6U);
+    pipeline_desc->layout.attrs[4].format = SG_VERTEXFORMAT_FLOAT2;
+    pipeline_desc->layout.attrs[4].offset = offsetof(RenderCommandVertex, uv);
+    pipeline_desc->layout.attrs[5].format = SG_VERTEXFORMAT_FLOAT4;
+    pipeline_desc->layout.attrs[5].offset = offsetof(RenderCommandVertex, bone_indices);
+    pipeline_desc->layout.attrs[6].format = SG_VERTEXFORMAT_FLOAT4;
+    pipeline_desc->layout.attrs[6].offset = offsetof(RenderCommandVertex, bone_weights);
+    pipeline_desc->layout.attrs[7].format = SG_VERTEXFORMAT_FLOAT4;
+    pipeline_desc->layout.attrs[7].offset = offsetof(RenderCommandVertex, light_color);
+}
+
+void configure_two_color_layout(sg_pipeline_desc* pipeline_desc) {
+    configure_single_color_layout(pipeline_desc);
+    pipeline_desc->layout.attrs[8].format = SG_VERTEXFORMAT_UBYTE4N;
+    pipeline_desc->layout.attrs[8].offset = offsetof(RenderCommandVertex, dark_color);
+}
+
+struct DrawPipelineCacheEntry {
+    runtime::BlendMode blend_mode{runtime::BlendMode::Normal};
+    ColorShaderVariant shader_variant{ColorShaderVariant::SingleColor};
+    bool premultiplied_alpha{false};
+    bool stencil_enabled{false};
+    std::uint8_t stencil_reference{0};
+    sg_pipeline pipeline{};
+};
+
+struct ClipPipelineCacheEntry {
+    std::uint8_t compare_reference{0};
+    std::uint8_t write_mask{0};
+    sg_pipeline pipeline{};
+};
+
+struct ActiveStencilClip {
+    std::size_t clip_attachment_index{0};
+    std::uint8_t reference_value{0};
+    std::uint8_t parent_reference_value{0};
+    std::uint8_t invert_mask{0};
+};
+
+class SokolSceneRendererImpl final
+    : public SokolSceneRenderer {
+public:
+    ~SokolSceneRendererImpl() override {
+        destroy_scene_resources();
+    }
+
+
+    std::optional<std::string> create_scene_resources(
+        const BackendCreateInfo& create_info,
+        const SokolSceneTargetInfo& target_info) override {
+        if (!sg_isvalid()) {
+            return "Cannot create scene resources before sokol_gfx is initialized.";
+        }
+        if (const std::optional<std::string> error =
+                validate_atlas_texture(create_info.atlas_texture)) {
+            return error;
+        }
+
+        destroy_scene_resources();
+        swapchain_color_format_ = static_cast<sg_pixel_format>(target_info.color_format);
+        swapchain_depth_format_ = static_cast<sg_pixel_format>(target_info.depth_format);
+        swapchain_sample_count_ = std::max(target_info.sample_count, 1);
+        if (swapchain_color_format_ == SG_PIXELFORMAT_NONE) {
+            return "Scene renderer requires an explicit color format.";
+        }
+        if (swapchain_depth_format_ == SG_PIXELFORMAT_NONE) {
+            // Stencil-based clipping builds pipelines against this format;
+            // silently accepting NONE surfaces as a pipeline/pass mismatch
+            // (or clips that stop clipping) far from the actual mistake.
+            return "Scene renderer requires an explicit depth-stencil format.";
+        }
+        if (const std::optional<std::string> error = create_render_resources(create_info)) {
+            destroy_scene_resources();
+            return error;
+        }
+        created_ = true;
+        return std::nullopt;
+    }
+
+    void destroy_scene_resources() override {
+        if (sg_isvalid()) {
+            destroy_cached_pipelines();
+
+            if (two_color_shader_.id != SG_INVALID_ID) {
+                sg_destroy_shader(two_color_shader_);
+            }
+            if (single_color_shader_.id != SG_INVALID_ID) {
+                sg_destroy_shader(single_color_shader_);
+            }
+            if (atlas_sampler_.id != SG_INVALID_ID) {
+                sg_destroy_sampler(atlas_sampler_);
+            }
+            if (white_view_.id != SG_INVALID_ID) {
+                sg_destroy_view(white_view_);
+            }
+            if (white_image_.id != SG_INVALID_ID) {
+                sg_destroy_image(white_image_);
+            }
+            if (atlas_view_.id != SG_INVALID_ID) {
+                sg_destroy_view(atlas_view_);
+            }
+            if (atlas_image_.id != SG_INVALID_ID) {
+                sg_destroy_image(atlas_image_);
+            }
+            if (stream_index_buffer_.id != SG_INVALID_ID) {
+                sg_destroy_buffer(stream_index_buffer_);
+            }
+            if (stream_vertex_buffer_.id != SG_INVALID_ID) {
+                sg_destroy_buffer(stream_vertex_buffer_);
+            }
+        }
+
+        created_ = false;
+        stream_vertex_buffer_ = {};
+        stream_index_buffer_ = {};
+        stream_vertex_buffer_bytes_ = 0U;
+        stream_index_buffer_bytes_ = 0U;
+        atlas_image_ = {};
+        atlas_view_ = {};
+        atlas_sampler_ = {};
+        white_image_ = {};
+        white_view_ = {};
+        single_color_shader_ = {};
+        two_color_shader_ = {};
+        draw_pipelines_.clear();
+        clip_pipelines_.clear();
+    }
+
+
+    std::optional<std::string> prepare_command_lists(
+        const std::vector<const RenderCommandList*>& command_lists) override {
+        if (!created_) {
+            return "Sokol scene renderer was not created.";
+        }
+
+        std::size_t vertex_bytes = 0U;
+        std::size_t index_bytes = 0U;
+        for (const RenderCommandList* command_list : command_lists) {
+            if (command_list == nullptr) {
+                return "Sokol scene preflight received a null command list.";
+            }
+            for (const RenderCommandEventRef& event : command_list->ordered_events) {
+                if (event.kind == RenderCommandEventKind::Draw) {
+                    if (event.index >= command_list->commands.size()) {
+                        return "Render command preflight referenced a missing draw command.";
+                    }
+                    const RenderCommand& command = command_list->commands[event.index];
+                    vertex_bytes += command.vertices.size() * sizeof(RenderCommandVertex);
+                    index_bytes += command.indices.size() * sizeof(std::uint32_t);
+                } else {
+                    if (event.index >= command_list->clip_commands.size()) {
+                        return "Render command preflight referenced a missing clip command.";
+                    }
+                    const RenderClipCommand& command = command_list->clip_commands[event.index];
+                    vertex_bytes += command.vertices.size() * sizeof(RenderCommandVertex);
+                    index_bytes += command.indices.size() * sizeof(std::uint32_t);
+                }
+            }
+        }
+
+        return ensure_stream_capacity(vertex_bytes, index_bytes);
+    }
+
+    std::optional<std::string> submit_commands_to_active_pass(
+        const RenderCommandList& command_list) override {
+        if (!created_) {
+            return "Sokol scene renderer was not created.";
+        }
+        if (command_list.commands.empty() && command_list.ordered_events.empty()) {
+            return std::nullopt;
+        }
+        if (command_list.bone_palette.empty() ||
+            (command_list.bone_palette.size() % kBonePayloadFloatsPerEntry) != 0U) {
+            return "Render command list did not contain a valid bone palette.";
+        }
+        if ((command_list.bone_palette.size() / kBonePayloadFloatsPerEntry) > 128U) {
+            return "Render command list exceeded the supported bone uniform budget.";
+        }
+
+        const marrow_renderer_vs_params_t vs_params = make_vs_params(command_list);
+        const marrow_renderer_fs_params_t fs_params =
+            make_fs_params(command_list.premultiplied_alpha);
+
+        std::vector<ActiveStencilClip> active_clips;
+        for (const RenderCommandEventRef& event : command_list.ordered_events) {
+            switch (event.kind) {
+            case RenderCommandEventKind::ClipStart: {
+                if (event.index >= command_list.clip_commands.size()) {
+                    return "Render command list clip start event referenced a missing clip command.";
+                }
+                if (active_clips.size() >= 255U) {
+                    return "Clip nesting exceeded the 8-bit stencil reference range.";
+                }
+
+                const std::optional<SoftwareStencilClipState> stencil_state =
+                    stencil_clip_state_for_depth(active_clips.size() + 1U);
+                if (!stencil_state.has_value()) {
+                    return "Failed to allocate a valid stencil reference for the clip stack.";
+                }
+
+                ActiveStencilClip active_clip;
+                active_clip.clip_attachment_index = event.index;
+                active_clip.reference_value = stencil_state->reference_value;
+                active_clip.parent_reference_value = stencil_state->parent_reference_value;
+                active_clip.invert_mask = stencil_state->invert_mask;
+                active_clips.push_back(active_clip);
+
+                if (const std::optional<std::string> error = submit_clip_command(
+                        command_list.clip_commands[event.index],
+                        active_clips.back(),
+                        false,
+                        vs_params,
+                        fs_params)) {
+                    return error;
+                }
+                break;
+            }
+            case RenderCommandEventKind::Draw: {
+                if (event.index >= command_list.commands.size()) {
+                    return "Render command list draw event referenced a missing draw batch.";
+                }
+                const std::optional<std::uint8_t> stencil_reference =
+                    active_clips.empty()
+                        ? std::nullopt
+                        : std::optional<std::uint8_t>{active_clips.back().reference_value};
+                if (const std::optional<std::string> error = submit_draw_command(
+                        command_list.commands[event.index],
+                        command_list.premultiplied_alpha,
+                        stencil_reference,
+                        vs_params,
+                        fs_params)) {
+                    return error;
+                }
+                break;
+            }
+            case RenderCommandEventKind::ClipEnd: {
+                if (event.index >= command_list.clip_commands.size()) {
+                    return "Render command list clip end event referenced a missing clip command.";
+                }
+                if (active_clips.empty()) {
+                    return "Render command list clip end event underflowed the clip stack.";
+                }
+
+                const ActiveStencilClip active_clip = active_clips.back();
+                active_clips.pop_back();
+                if (active_clip.clip_attachment_index != event.index) {
+                    return "Render command list clip end event did not match the active clip stack.";
+                }
+
+                if (const std::optional<std::string> error = submit_clip_command(
+                        command_list.clip_commands[event.index],
+                        active_clip,
+                        true,
+                        vs_params,
+                        fs_params)) {
+                    return error;
+                }
+                break;
+            }
+            }
+        }
+
+        if (!active_clips.empty()) {
+            return "Render command list finished with an unterminated clip stack.";
+        }
+        return std::nullopt;
+    }
+
+
+private:
+
+    std::optional<std::string> create_render_resources(const BackendCreateInfo& create_info) {
+        sg_image_desc image_desc{};
+        image_desc.width = create_info.atlas_texture.width;
+        image_desc.height = create_info.atlas_texture.height;
+        image_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+        image_desc.data.mip_levels[0].ptr = create_info.atlas_texture.rgba8.data();
+        image_desc.data.mip_levels[0].size = create_info.atlas_texture.rgba8.size();
+        image_desc.label = "marrow-atlas-image";
+        atlas_image_ = sg_make_image(&image_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("atlas image", sg_query_image_state(atlas_image_))) {
+            return error;
+        }
+
+        sg_view_desc view_desc{};
+        view_desc.texture.image = atlas_image_;
+        view_desc.label = "marrow-atlas-view";
+        atlas_view_ = sg_make_view(&view_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("atlas texture view", sg_query_view_state(atlas_view_))) {
+            return error;
+        }
+
+        sg_sampler_desc sampler_desc{};
+        sampler_desc.min_filter = sokol_filter(create_info.atlas_filter_min);
+        sampler_desc.mag_filter = sokol_filter(create_info.atlas_filter_mag);
+        sampler_desc.mipmap_filter = sokol_filter(create_info.atlas_filter_min);
+        sampler_desc.wrap_u = sokol_wrap(create_info.atlas_wrap_x);
+        sampler_desc.wrap_v = sokol_wrap(create_info.atlas_wrap_y);
+        sampler_desc.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
+        sampler_desc.label = "marrow-atlas-sampler";
+        atlas_sampler_ = sg_make_sampler(&sampler_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("atlas sampler", sg_query_sampler_state(atlas_sampler_))) {
+            return error;
+        }
+
+        sg_image_desc white_image_desc{};
+        white_image_desc.width = 1;
+        white_image_desc.height = 1;
+        white_image_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+        white_image_desc.data.mip_levels[0].ptr = kSolidWhiteRgba.data();
+        white_image_desc.data.mip_levels[0].size = kSolidWhiteRgba.size();
+        white_image_desc.label = "marrow-white-image";
+        white_image_ = sg_make_image(&white_image_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("white image", sg_query_image_state(white_image_))) {
+            return error;
+        }
+
+        sg_view_desc white_view_desc{};
+        white_view_desc.texture.image = white_image_;
+        white_view_desc.label = "marrow-white-view";
+        white_view_ = sg_make_view(&white_view_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("white texture view", sg_query_view_state(white_view_))) {
+            return error;
+        }
+
+        sg_buffer_desc vertex_buffer_desc{};
+        vertex_buffer_desc.size = kStreamingVertexBufferBytes;
+        vertex_buffer_desc.usage.vertex_buffer = true;
+        vertex_buffer_desc.usage.immutable = false;
+        vertex_buffer_desc.usage.stream_update = true;
+        vertex_buffer_desc.label = "marrow-stream-vertices";
+        stream_vertex_buffer_ = sg_make_buffer(&vertex_buffer_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error(
+                    "stream vertex buffer",
+                    sg_query_buffer_state(stream_vertex_buffer_))) {
+            return error;
+        }
+        stream_vertex_buffer_bytes_ = kStreamingVertexBufferBytes;
+
+        sg_buffer_desc index_buffer_desc{};
+        index_buffer_desc.size = kStreamingIndexBufferBytes;
+        index_buffer_desc.usage.vertex_buffer = false;
+        index_buffer_desc.usage.index_buffer = true;
+        index_buffer_desc.usage.immutable = false;
+        index_buffer_desc.usage.stream_update = true;
+        index_buffer_desc.label = "marrow-stream-indices";
+        stream_index_buffer_ = sg_make_buffer(&index_buffer_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error(
+                    "stream index buffer",
+                    sg_query_buffer_state(stream_index_buffer_))) {
+            return error;
+        }
+        stream_index_buffer_bytes_ = kStreamingIndexBufferBytes;
+
+        const sg_shader_desc* single_color_desc =
+            marrow_renderer_single_color_shader_desc(sg_query_backend());
+        if (single_color_desc == nullptr) {
+            return "Failed to build the single-color shader description for the active backend.";
+        }
+        single_color_shader_ = sg_make_shader(single_color_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error(
+                    "single-color shader",
+                    sg_query_shader_state(single_color_shader_))) {
+            return error;
+        }
+
+        const sg_shader_desc* two_color_desc =
+            marrow_renderer_two_color_shader_desc(sg_query_backend());
+        if (two_color_desc == nullptr) {
+            return "Failed to build the two-color shader description for the active backend.";
+        }
+        two_color_shader_ = sg_make_shader(two_color_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error(
+                    "two-color shader",
+                    sg_query_shader_state(two_color_shader_))) {
+            return error;
+        }
+
+        return std::nullopt;
+    }
+
+
+    void destroy_cached_pipelines() {
+        if (!sg_isvalid()) {
+            draw_pipelines_.clear();
+            clip_pipelines_.clear();
+            return;
+        }
+
+        for (DrawPipelineCacheEntry& entry : draw_pipelines_) {
+            if (entry.pipeline.id != SG_INVALID_ID) {
+                sg_destroy_pipeline(entry.pipeline);
+            }
+        }
+        for (ClipPipelineCacheEntry& entry : clip_pipelines_) {
+            if (entry.pipeline.id != SG_INVALID_ID) {
+                sg_destroy_pipeline(entry.pipeline);
+            }
+        }
+        draw_pipelines_.clear();
+        clip_pipelines_.clear();
+    }
+
+    void configure_depth_stencil_format(sg_pipeline_desc* pipeline_desc) const {
+        if (swapchain_depth_format_ != SG_PIXELFORMAT_NONE) {
+            pipeline_desc->depth.pixel_format = swapchain_depth_format_;
+        }
+    }
+
+    std::optional<std::string> ensure_stream_capacity(
+        std::size_t required_vertex_bytes,
+        std::size_t required_index_bytes) {
+        if (required_vertex_bytes <= stream_vertex_buffer_bytes_ &&
+            required_index_bytes <= stream_index_buffer_bytes_) {
+            return std::nullopt;
+        }
+
+        const auto vertex_capacity = next_power_of_two(std::max(
+            required_vertex_bytes,
+            std::max(stream_vertex_buffer_bytes_, kStreamingVertexBufferBytes)));
+        const auto index_capacity = next_power_of_two(std::max(
+            required_index_bytes,
+            std::max(stream_index_buffer_bytes_, kStreamingIndexBufferBytes)));
+        if (!vertex_capacity.has_value() || !index_capacity.has_value()) {
+            return "Sokol scene stream capacity overflowed addressable memory.";
+        }
+
+        sg_buffer_desc vertex_desc{};
+        vertex_desc.size = *vertex_capacity;
+        vertex_desc.usage.vertex_buffer = true;
+        vertex_desc.usage.immutable = false;
+        vertex_desc.usage.stream_update = true;
+        vertex_desc.label = "marrow-stream-vertices-grown";
+        const sg_buffer replacement_vertex = sg_make_buffer(&vertex_desc);
+        if (const std::optional<std::string> error = resource_state_error(
+                "grown stream vertex buffer",
+                sg_query_buffer_state(replacement_vertex))) {
+            if (replacement_vertex.id != SG_INVALID_ID) {
+                sg_destroy_buffer(replacement_vertex);
+            }
+            return error;
+        }
+
+        sg_buffer_desc index_desc{};
+        index_desc.size = *index_capacity;
+        index_desc.usage.index_buffer = true;
+        index_desc.usage.immutable = false;
+        index_desc.usage.stream_update = true;
+        index_desc.label = "marrow-stream-indices-grown";
+        const sg_buffer replacement_index = sg_make_buffer(&index_desc);
+        if (const std::optional<std::string> error = resource_state_error(
+                "grown stream index buffer",
+                sg_query_buffer_state(replacement_index))) {
+            if (replacement_index.id != SG_INVALID_ID) {
+                sg_destroy_buffer(replacement_index);
+            }
+            sg_destroy_buffer(replacement_vertex);
+            return error;
+        }
+
+        const sg_buffer previous_vertex = stream_vertex_buffer_;
+        const sg_buffer previous_index = stream_index_buffer_;
+        stream_vertex_buffer_ = replacement_vertex;
+        stream_index_buffer_ = replacement_index;
+        stream_vertex_buffer_bytes_ = *vertex_capacity;
+        stream_index_buffer_bytes_ = *index_capacity;
+        if (previous_vertex.id != SG_INVALID_ID) {
+            sg_destroy_buffer(previous_vertex);
+        }
+        if (previous_index.id != SG_INVALID_ID) {
+            sg_destroy_buffer(previous_index);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::string> append_stream_data(
+        const std::vector<RenderCommandVertex>& vertices,
+        const std::vector<std::uint32_t>& indices,
+        int* vertex_offset_out,
+        int* index_offset_out) {
+        const sg_range vertex_range{
+            vertices.data(),
+            vertices.size() * sizeof(RenderCommandVertex),
+        };
+        const int vertex_offset = sg_append_buffer(stream_vertex_buffer_, &vertex_range);
+        if (sg_query_buffer_overflow(stream_vertex_buffer_)) {
+            return "Sokol vertex stream buffer overflowed while appending a render command.";
+        }
+
+        const sg_range index_range{
+            indices.data(),
+            indices.size() * sizeof(std::uint32_t),
+        };
+        const int index_offset = sg_append_buffer(stream_index_buffer_, &index_range);
+        if (sg_query_buffer_overflow(stream_index_buffer_)) {
+            return "Sokol index stream buffer overflowed while appending a render command.";
+        }
+
+        *vertex_offset_out = vertex_offset;
+        *index_offset_out = index_offset;
+        return std::nullopt;
+    }
+
+    sg_bindings make_stream_bindings(
+        int vertex_offset,
+        int index_offset,
+        TextureHandle texture_handle) const {
+        sg_bindings bindings{};
+        bindings.vertex_buffers[0] = stream_vertex_buffer_;
+        bindings.vertex_buffer_offsets[0] = vertex_offset;
+        bindings.index_buffer = stream_index_buffer_;
+        bindings.index_buffer_offset = index_offset;
+        bindings.views[kAtlasTextureSlot] =
+            texture_handle == kSolidWhiteTextureHandle ? white_view_ : atlas_view_;
+        bindings.samplers[kAtlasSamplerSlot] = atlas_sampler_;
+        return bindings;
+    }
+
+    std::optional<std::string> ensure_draw_pipeline(
+        runtime::BlendMode blend_mode,
+        ColorShaderVariant shader_variant,
+        bool premultiplied_alpha,
+        std::optional<std::uint8_t> stencil_reference,
+        sg_pipeline* pipeline_out) {
+        for (const DrawPipelineCacheEntry& entry : draw_pipelines_) {
+            if (entry.blend_mode == blend_mode &&
+                entry.shader_variant == shader_variant &&
+                entry.premultiplied_alpha == premultiplied_alpha &&
+                entry.stencil_enabled == stencil_reference.has_value() &&
+                entry.stencil_reference == stencil_reference.value_or(0U)) {
+                *pipeline_out = entry.pipeline;
+                return std::nullopt;
+            }
+        }
+
+        const BlendState blend_state = blend_state_for(blend_mode, premultiplied_alpha);
+        sg_pipeline_desc pipeline_desc{};
+        configure_common_pipeline_state(
+            &pipeline_desc,
+            shader_variant == ColorShaderVariant::SingleColor ? single_color_shader_ : two_color_shader_,
+            swapchain_color_format_,
+            swapchain_sample_count_,
+            blend_state);
+        configure_depth_stencil_format(&pipeline_desc);
+        if (shader_variant == ColorShaderVariant::SingleColor) {
+            configure_single_color_layout(&pipeline_desc);
+            pipeline_desc.label = "marrow-single-color-pipeline";
+        } else {
+            configure_two_color_layout(&pipeline_desc);
+            pipeline_desc.label = "marrow-two-color-pipeline";
+        }
+        if (stencil_reference.has_value()) {
+            pipeline_desc.stencil.enabled = true;
+            pipeline_desc.stencil.front.compare = SG_COMPAREFUNC_EQUAL;
+            pipeline_desc.stencil.front.fail_op = SG_STENCILOP_KEEP;
+            pipeline_desc.stencil.front.depth_fail_op = SG_STENCILOP_KEEP;
+            pipeline_desc.stencil.front.pass_op = SG_STENCILOP_KEEP;
+            pipeline_desc.stencil.back = pipeline_desc.stencil.front;
+            pipeline_desc.stencil.read_mask = 0xFFU;
+            pipeline_desc.stencil.write_mask = 0x00U;
+            pipeline_desc.stencil.ref = *stencil_reference;
+        }
+
+        sg_pipeline pipeline = sg_make_pipeline(&pipeline_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("draw pipeline", sg_query_pipeline_state(pipeline))) {
+            if (pipeline.id != SG_INVALID_ID) {
+                sg_destroy_pipeline(pipeline);
+            }
+            return error;
+        }
+
+        draw_pipelines_.push_back({
+            blend_mode,
+            shader_variant,
+            premultiplied_alpha,
+            stencil_reference.has_value(),
+            stencil_reference.value_or(0U),
+            pipeline,
+        });
+        *pipeline_out = pipeline;
+        return std::nullopt;
+    }
+
+    std::optional<std::string> ensure_clip_pipeline(
+        std::uint8_t compare_reference,
+        std::uint8_t write_mask,
+        sg_pipeline* pipeline_out) {
+        for (const ClipPipelineCacheEntry& entry : clip_pipelines_) {
+            if (entry.compare_reference == compare_reference &&
+                entry.write_mask == write_mask) {
+                *pipeline_out = entry.pipeline;
+                return std::nullopt;
+            }
+        }
+
+        sg_pipeline_desc pipeline_desc{};
+        configure_common_pipeline_state(
+            &pipeline_desc,
+            single_color_shader_,
+            swapchain_color_format_,
+            swapchain_sample_count_,
+            BlendState{BlendFactor::One, BlendFactor::Zero});
+        configure_depth_stencil_format(&pipeline_desc);
+        configure_single_color_layout(&pipeline_desc);
+        pipeline_desc.colors[0].write_mask = static_cast<sg_color_mask>(0);
+        pipeline_desc.colors[0].blend.enabled = false;
+        pipeline_desc.stencil.enabled = true;
+        pipeline_desc.stencil.front.compare = SG_COMPAREFUNC_EQUAL;
+        pipeline_desc.stencil.front.fail_op = SG_STENCILOP_KEEP;
+        pipeline_desc.stencil.front.depth_fail_op = SG_STENCILOP_KEEP;
+        pipeline_desc.stencil.front.pass_op = SG_STENCILOP_INVERT;
+        pipeline_desc.stencil.back = pipeline_desc.stencil.front;
+        pipeline_desc.stencil.read_mask = 0xFFU;
+        pipeline_desc.stencil.write_mask = write_mask;
+        pipeline_desc.stencil.ref = compare_reference;
+        pipeline_desc.label = "marrow-clip-pipeline";
+
+        sg_pipeline pipeline = sg_make_pipeline(&pipeline_desc);
+        if (const std::optional<std::string> error =
+                resource_state_error("clip pipeline", sg_query_pipeline_state(pipeline))) {
+            if (pipeline.id != SG_INVALID_ID) {
+                sg_destroy_pipeline(pipeline);
+            }
+            return error;
+        }
+
+        clip_pipelines_.push_back({compare_reference, write_mask, pipeline});
+        *pipeline_out = pipeline;
+        return std::nullopt;
+    }
+
+    std::optional<std::string> submit_draw_command(
+        const RenderCommand& command,
+        bool premultiplied_alpha,
+        std::optional<std::uint8_t> stencil_reference,
+        const marrow_renderer_vs_params_t& vs_params,
+        const marrow_renderer_fs_params_t& fs_params) {
+        if (command.texture_handle != kAtlasTextureHandle &&
+            command.texture_handle != kSolidWhiteTextureHandle) {
+            return "Render command referenced an unknown texture handle.";
+        }
+        if (command.vertices.empty() || command.indices.empty()) {
+            return std::nullopt;
+        }
+
+        int vertex_offset = 0;
+        int index_offset = 0;
+        if (const std::optional<std::string> error = append_stream_data(
+                command.vertices,
+                command.indices,
+                &vertex_offset,
+                &index_offset)) {
+            return error;
+        }
+
+        sg_pipeline pipeline{};
+        if (const std::optional<std::string> error = ensure_draw_pipeline(
+                command.blend_mode,
+                command.shader_variant,
+                premultiplied_alpha,
+                stencil_reference,
+                &pipeline)) {
+            return error;
+        }
+
+        const sg_bindings bindings =
+            make_stream_bindings(vertex_offset, index_offset, command.texture_handle);
+        sg_apply_pipeline(pipeline);
+        sg_apply_bindings(&bindings);
+        sg_apply_uniforms(kVsUniformSlot, SG_RANGE(vs_params));
+        sg_apply_uniforms(kFsUniformSlot, SG_RANGE(fs_params));
+        sg_draw(0, static_cast<int>(command.indices.size()), 1);
+        return std::nullopt;
+    }
+
+    std::optional<std::string> submit_clip_command(
+        const RenderClipCommand& clip_command,
+        const ActiveStencilClip& stencil_clip,
+        bool restoring_parent_reference,
+        const marrow_renderer_vs_params_t& vs_params,
+        const marrow_renderer_fs_params_t& fs_params) {
+        if (clip_command.vertices.empty() || clip_command.indices.empty()) {
+            return std::nullopt;
+        }
+
+        int vertex_offset = 0;
+        int index_offset = 0;
+        if (const std::optional<std::string> error = append_stream_data(
+                clip_command.vertices,
+                clip_command.indices,
+                &vertex_offset,
+                &index_offset)) {
+            return error;
+        }
+
+        sg_pipeline pipeline{};
+        if (const std::optional<std::string> error = ensure_clip_pipeline(
+                restoring_parent_reference
+                    ? stencil_clip.reference_value
+                    : stencil_clip.parent_reference_value,
+                stencil_clip.invert_mask,
+                &pipeline)) {
+            return error;
+        }
+
+        const sg_bindings bindings =
+            make_stream_bindings(vertex_offset, index_offset, kSolidWhiteTextureHandle);
+        sg_apply_pipeline(pipeline);
+        sg_apply_bindings(&bindings);
+        sg_apply_uniforms(kVsUniformSlot, SG_RANGE(vs_params));
+        sg_apply_uniforms(kFsUniformSlot, SG_RANGE(fs_params));
+        sg_draw(0, static_cast<int>(clip_command.indices.size()), 1);
+        return std::nullopt;
+    }
+
+    bool created_{false};
+    sg_pixel_format swapchain_color_format_{SG_PIXELFORMAT_NONE};
+    sg_pixel_format swapchain_depth_format_{SG_PIXELFORMAT_NONE};
+    int swapchain_sample_count_{1};
+    sg_buffer stream_vertex_buffer_{};
+    sg_buffer stream_index_buffer_{};
+    std::size_t stream_vertex_buffer_bytes_{0U};
+    std::size_t stream_index_buffer_bytes_{0U};
+    sg_image atlas_image_{};
+    sg_view atlas_view_{};
+    sg_sampler atlas_sampler_{};
+    sg_image white_image_{};
+    sg_view white_view_{};
+    sg_shader single_color_shader_{};
+    sg_shader two_color_shader_{};
+    std::vector<DrawPipelineCacheEntry> draw_pipelines_{};
+    std::vector<ClipPipelineCacheEntry> clip_pipelines_{};
+};
+
+
+} // namespace
+
+std::unique_ptr<SokolSceneRenderer> make_sokol_scene_renderer() {
+    return std::make_unique<SokolSceneRendererImpl>();
+}
+
+} // namespace marrow::renderer::internal
+

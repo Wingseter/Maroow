@@ -234,16 +234,22 @@ if(MARROW_SOKOL_SHDC AND EXISTS ${MARROW_SOKOL_SHDC})
     )
 endif()
 
-add_library(marrow_renderer_core STATIC
-    src/renderer/sokol_gfx_impl.cpp
-    src/renderer/sokol_backend.cpp
+add_library(marrow_renderer_commands STATIC
     src/renderer/module.cpp
-    ${MARROW_RENDERER_SHADER_GL_HEADER}
-    ${MARROW_RENDERER_SHADER_METAL_HEADER}
 )
 
-target_compile_definitions(marrow_renderer_core PRIVATE
-    MARROW_RENDERER_SCENE_ONLY
+target_include_directories(marrow_renderer_commands
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/renderer
+)
+
+add_library(marrow_renderer_core STATIC
+    src/renderer/sokol_gfx_impl.cpp
+    src/renderer/sokol_scene_renderer.cpp
+    ${MARROW_RENDERER_SHADER_GL_HEADER}
+    ${MARROW_RENDERER_SHADER_METAL_HEADER}
 )
 
 target_include_directories(marrow_renderer_core
@@ -256,20 +262,17 @@ target_include_directories(marrow_renderer_core
 
 add_library(marrow_renderer_sapp_host STATIC
     src/renderer/sokol_sapp_impl.cpp
+    src/renderer/sokol_backend.cpp
 )
 
 target_include_directories(marrow_renderer_sapp_host
     PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/external
-)
-
-target_link_libraries(marrow_renderer_sapp_host
-    PUBLIC
-        marrow_renderer_core
+        ${PROJECT_SOURCE_DIR}/src/renderer/generated
 )
 
 add_library(marrow_renderer STATIC
-    src/renderer/sokol_backend.cpp
     src/renderer/demo_shell.cpp
 )
 
@@ -277,6 +280,7 @@ if(APPLE)
     set_source_files_properties(
         src/renderer/sokol_backend.cpp
         src/renderer/sokol_gfx_impl.cpp
+        src/renderer/sokol_scene_renderer.cpp
         src/renderer/sokol_sapp_impl.cpp
         PROPERTIES
             LANGUAGE OBJCXX
@@ -287,8 +291,7 @@ target_include_directories(marrow_renderer
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
     PRIVATE
-        ${PROJECT_SOURCE_DIR}/external
-        ${PROJECT_SOURCE_DIR}/src/renderer/generated
+        ${PROJECT_SOURCE_DIR}/src/renderer
 )
 
 set(MARROW_RUNTIME_SOURCES
@@ -380,19 +383,30 @@ target_include_directories(marrow_c
 
 target_link_libraries(marrow_c
     PUBLIC
-        marrow_renderer
+        marrow_renderer_commands
         marrow_editor
+)
+
+target_link_libraries(marrow_renderer_commands
+    PUBLIC
+        marrow_runtime
+    PRIVATE
+        ZLIB::ZLIB
 )
 
 target_link_libraries(marrow_renderer_core
     PUBLIC
-        marrow_runtime
-        ZLIB::ZLIB
+        marrow_renderer_commands
+)
+
+target_link_libraries(marrow_renderer_sapp_host
+    PUBLIC
+        marrow_renderer_core
 )
 
 target_link_libraries(marrow_renderer
     PUBLIC
-        marrow_renderer_core
+        marrow_renderer_commands
     PRIVATE
         marrow_renderer_sapp_host
 )
@@ -415,7 +429,7 @@ if(APPLE)
             ${MARROW_METAL_FRAMEWORK}
     )
 
-    target_link_libraries(marrow_renderer
+    target_link_libraries(marrow_renderer_sapp_host
         PRIVATE
             ${MARROW_FOUNDATION_FRAMEWORK}
             ${MARROW_COCOA_FRAMEWORK}
@@ -455,13 +469,13 @@ elseif(UNIX AND NOT APPLE)
             ${MARROW_OPENGL_LIBRARIES}
     )
 
-    target_link_libraries(marrow_renderer
+    target_link_libraries(marrow_renderer_sapp_host
         PRIVATE
             ${MARROW_SOKOL_PLATFORM_LIBRARIES}
     )
 elseif(WIN32)
     target_link_libraries(marrow_renderer_core PUBLIC opengl32)
-    target_link_libraries(marrow_renderer
+    target_link_libraries(marrow_renderer_sapp_host
         PRIVATE
             user32
             shell32
@@ -546,7 +560,7 @@ add_executable(marrow_fixture_smoke
 
 target_link_libraries(marrow_fixture_smoke
     PRIVATE
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_c_smoke
@@ -576,7 +590,11 @@ target_include_directories(marrow_unit_tests
 
 target_link_libraries(marrow_unit_tests
     PRIVATE
-        marrow_renderer
+        marrow_renderer_commands
+)
+
+add_executable(marrow_renderer_link_boundary_tests
+    src/tests/renderer_link_boundary_tests.cpp
 )
 
 add_executable(marrow_preference_tests
@@ -659,7 +677,7 @@ target_include_directories(marrow_benchmark
 
 target_link_libraries(marrow_benchmark
     PRIVATE
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_thread_stress
@@ -743,7 +761,7 @@ target_include_directories(marrow_atlas_packer_smoke
 target_link_libraries(marrow_atlas_packer_smoke
     PRIVATE
         marrow_editor
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_psd_import_smoke
@@ -753,7 +771,7 @@ add_executable(marrow_psd_import_smoke
 target_link_libraries(marrow_psd_import_smoke
     PRIVATE
         marrow_editor
-        marrow_renderer
+        marrow_renderer_commands
 )
 
 add_executable(marrow_agent_dispatch_smoke
@@ -763,6 +781,14 @@ add_executable(marrow_agent_dispatch_smoke
 target_link_libraries(marrow_agent_dispatch_smoke
     PRIVATE
         marrow_c
+)
+
+add_dependencies(marrow_renderer_link_boundary_tests
+    marrow_c_smoke
+    marrow_agent_dispatch_smoke
+    marrow_unit_tests
+    marrow_fixture_smoke
+    marrow_benchmark
 )
 
 add_executable(marrow_editor_shell
@@ -1048,6 +1074,20 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.runtime_unit PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "runtime;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.renderer_link_boundary
+        COMMAND marrow_renderer_link_boundary_tests
+            $<TARGET_FILE:marrow_c_smoke>
+            $<TARGET_FILE:marrow_agent_dispatch_smoke>
+            $<TARGET_FILE:marrow_unit_tests>
+            $<TARGET_FILE:marrow_fixture_smoke>
+            $<TARGET_FILE:marrow_benchmark>
+    )
+    set_tests_properties(marrow.renderer_link_boundary PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "renderer;guardrail;unit;noninteractive"
     )
 
     add_test(

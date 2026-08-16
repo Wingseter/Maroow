@@ -77,17 +77,26 @@ Marrow Editor  →  .mskl / .matl / .png  →  molga-engine Runtime
 Linux/Ubuntu, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer,
 ImGui OS multi-viewport는 현재 지원·qualification 범위가 아니다.
 
-렌더러는 세 경계로 나뉜다.
+렌더러는 네 내부 경계로 나뉜다.
 
-- `marrow_renderer_core`가 executable별 유일한 `SOKOL_GFX_IMPL`과 pass-free
-  scene renderer를 소유한다. Atlas, white fallback, sampler, shader, streaming
-  buffer와 format/depth/sample 기반 pipeline cache가 이 계층에 있다.
+- `marrow_renderer_commands`가 scene preparation, atlas/PNG decode, geometry,
+  command packing, CPU cache, software stencil을 소유하며 `marrow_runtime`과
+  zlib만 링크한다. C ABI, Agent smoke, runtime unit/fixture test, CPU benchmark는
+  이 경계까지만 사용한다.
+- `marrow_renderer_core`가 executable별 유일한 `SOKOL_GFX_IMPL`과 한 번만
+  컴파일되는 Sokol scene executor를 소유한다. White fallback, sampler,
+  shader, streaming buffer와 format/depth/sample 기반 GPU pipeline cache가 이
+  계층에 있다.
 - `marrow_renderer_sapp_host`만 `SOKOL_APP_IMPL`과 `SOKOL_GLUE_IMPL`을 소유하며
-  standalone renderer sample을 구동한다. Editor binary에는 `sapp_*`/`sglue_*`
-  심볼이 없어야 한다.
+  device/pass/window adapter에서 scene executor에 위임해 standalone renderer
+  sample을 구동한다. Editor와 CPU-only binary에는 `sapp_*`/`sglue_*` 심볼이
+  없어야 한다.
 - `marrow_editor_shell`만 SDL3, ImGui SDL3 platform backend, `sokol_imgui`,
   window surface와 main pass/commit을 소유한다. UI-free `marrow_editor`는
   SDL/Sokol/ImGui에 의존하지 않는다.
+
+기존 `marrow_renderer` 타깃 이름과 public renderer/C ABI 표면은 호환성
+umbrella로 유지하며 새 내부 타깃을 설치 API로 노출하지 않는다.
 
 Editor frame은 SDL event poll과 raw pen metadata 갱신, event당 한 번의
 `ImGui_ImplSDL3_ProcessEvent`, `ImGui_ImplSDL3_NewFrame`, `simgui_new_frame`,

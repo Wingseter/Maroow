@@ -251,6 +251,18 @@ Task #28 is implemented and committed as independently verifiable checkpoints:
    controller retains session mutation, materialization, and transaction
    ownership. The direct uncached rebuild after add-key and retime remains.
 
+The renderer checkpoint was locally validated on 2026-08-16. The default build
+uses one `sokol_scene_renderer.cpp` object in `marrow_renderer_core`, while
+`sokol_backend.cpp` is compiled only by `marrow_renderer_sapp_host` and delegates
+scene submission to that executor. `marrow_c_smoke`, Agent dispatch smoke,
+runtime unit/fixture tests, and the CPU benchmark link
+`marrow_renderer_commands` without `sokol_app`, `sokol_glue`, Cocoa, Metal,
+QuartzCore, or OpenGL host dependencies. The display-enabled macOS suite passed
+21/21, including the new `marrow.renderer_link_boundary` guard, and the
+standalone Sokol-app adapter completed its two-frame Metal auto-close smoke.
+This is implementation evidence only and does not change the `PARTIAL` platform
+qualification state.
+
 Broad `project.cpp`/session decomposition, GPU surface/resource RAII, SDL host
 decomposition, and a full CMake reorganization remain follow-up analysis. Task
 #28 changes no public `include/marrow/**` interface, file-format version, C ABI,
