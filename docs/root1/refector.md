@@ -193,7 +193,7 @@ Windows Ink, fixed legacy/Sokol A/B, and clean portable-folder qualification
 remain open exactly as recorded elsewhere; Task #27 grants none of that
 qualification credit.
 
-## Task #28 core-boundary refactor checkpoint (active 2026-08-16)
+## Task #28 core-boundary refactor checkpoint (completed 2026-08-16)
 
 Task #28 is a behavior-preserving implementation checkpoint between completed
 MAR-162 and MAR-163. It is not a PRD story and does not close or qualify any
@@ -251,6 +251,14 @@ Task #28 is implemented and committed as independently verifiable checkpoints:
    controller retains session mutation, materialization, and transaction
    ownership. The direct uncached rebuild after add-key and retime remains.
 
+| Checkpoint | Commit |
+| --- | --- |
+| Authority, baseline, and dependency synchronization | `8d4ac09` |
+| Feature-owned shell smoke translation units | `c6d9024` |
+| Renderer CPU/GPU/host ownership | `1af25e8` |
+| Viewport interaction kernel and controller | `d9f25c7` |
+| Timeline model and controller | `ea8931a` |
+
 The renderer checkpoint was locally validated on 2026-08-16. The default build
 uses one `sokol_scene_renderer.cpp` object in `marrow_renderer_core`, while
 `sokol_backend.cpp` is compiled only by `marrow_renderer_sapp_host` and delegates
@@ -291,8 +299,8 @@ Task #27 direct uncached track rebuilds after add-key and live retime remain in
 the controller while the normal revision-keyed cache path is unchanged.
 
 Broad `project.cpp`/session decomposition, GPU surface/resource RAII, SDL host
-decomposition, and a full CMake reorganization remain follow-up analysis. Task
-#28 changes no public `include/marrow/**` interface, file-format version, C ABI,
+decomposition, and a full CMake reorganization remain follow-up analysis.
+Task #28 changes no public `include/marrow/**` interface, file-format version, C ABI,
 CLI, or 56-operation Agent/MCP request/response contract.
 
 ### Completion gate
@@ -304,8 +312,23 @@ and source/link guards proving CPU-only binaries do not inherit app/glue or host
 frameworks. Final macOS Debug and Release display, third-party, project/export,
 C ABI, Agent, and MCP socket evidence is required.
 
-Task #28 is not complete until the same Task #28 revision also passes the final
-Windows 11 VS2022 x64 Debug and Release build/CTest matrix, third-party
-verification, and same-host portable staging/manifest checks. Windows 11
-high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain deferred
-MAR-192 through MAR-210 qualification evidence and are not Task #28 gates.
+The implementation revision `ea8931a6cec00766285abd7144a8c94b50a60e7d`
+passed this completion gate on both hosts:
+
+- macOS default CTest passed 20/20; Debug and Release display-enabled suites
+  each passed 23/23 in the real host session. Third-party hashes, project
+  export/runtime load and JSON/MBIN comparison, C ABI v1, all 56 Agent
+  operations, renderer link closure, and the live editor/MCP socket passed.
+- Windows 11 VS2022 x64 Debug and Release builds completed, and both complete
+  display-enabled CTest suites passed 23/23. Windows third-party hash
+  verification passed.
+- The Windows Release portable stage produced 119 manifest entries with zero
+  independent hash mismatches. Its 5,118,631-byte ZIP independently matched
+  SHA-256 `f0c24473e21f7f5b9efda18df48c5e42339a6d0f4fe6a0a4bb57cefd38238d9c`;
+  staged-folder and new-directory extracted runs both exited 0.
+
+Task #28 is therefore complete and MAR-163 is the next product milestone.
+Windows 11 high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain
+deferred MAR-192 through MAR-210 qualification evidence and received no
+Task #28 or platform-qualification credit. Those stories remain `open`, and
+macOS and Windows qualification remains `PARTIAL`.

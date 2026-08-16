@@ -9,10 +9,10 @@ PASS and do not satisfy a dependency.
 
 | Host | Required path | Current evidence | Status |
 |---|---|---|---|
-| macOS arm64 | SDL3 Metal + Sokol + sokol_imgui | Build, 17 noninteractive tests, three real-display tests, Metal RGBA8 readback, 20 device and 100 resource lifecycles | PARTIAL — manual focus/IME and fixed A/B performance remain open |
+| macOS arm64 | SDL3 Metal + Sokol + sokol_imgui | Task #28 Debug and Release 23/23 suites: 20 noninteractive tests plus three real-display tests, Metal RGBA8 readback, 20 device and 100 resource lifecycles | PARTIAL — manual focus/IME and fixed A/B performance remain open |
 | Ubuntu/Linux x64 | Retained SDL3 X11 GLCORE 4.1 implementation | No qualification run; excluded from the current support matrix by the 2026-08-12 scope decision | NOT REQUIRED — unqualified, no support claim |
 | Windows 10 x64 | Retained Windows x64 implementation | No qualification run; excluded from the current support matrix by the 2026-08-12 scope decision | NOT REQUIRED — unqualified, no support claim |
-| Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Debug and Release build plus 20/20 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop and physical Ink evidence remain open |
+| Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Task #28 Debug and Release build plus 23/23 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop and physical Ink evidence remain open |
 
 MAR-192 through MAR-210 remain `open` as a parallel deferred qualification
 backlog and do not block MAR-163. Current qualification targets macOS arm64 and Windows 11 x64 only.
@@ -22,6 +22,32 @@ ImGui OS multi-viewport support are not claimed.
 The same 2026-08-12 scope decision accepts extraction into a new directory on
 the qualified Windows 11 host as the current portable package gate. A separate
 clean PC is `NOT REQUIRED`; this waiver does not create clean-machine evidence.
+
+## Task #28 automated regression refresh
+
+Recorded 2026-08-16 in Asia/Seoul against the clean implementation revision
+`ea8931a6cec00766285abd7144a8c94b50a60e7d` on both hosts.
+
+- macOS default CTest passed 20/20. Debug and Release display-enabled suites
+  each passed 23/23 in the real host session, including loopback socket and the
+  three SDL/Metal display tests. Vendored hashes, C ABI v1, all 56 Agent
+  operations, project export/runtime load, JSON/MBIN v2 comparison, renderer
+  link closure, and live editor/MCP socket validation passed.
+- Windows 11 VS2022 x64 Debug and Release default builds completed and each
+  full display-enabled CTest passed 23/23. The Windows vendored dependency/hash
+  target also passed.
+- The Release portable stage produced 119 canonical manifest entries; an
+  independent PowerShell SHA-256 pass found zero mismatches. The
+  5,118,631-byte `Marrow-Release-x64.zip` independently matched its generated
+  SHA-256, `f0c24473e21f7f5b9efda18df48c5e42339a6d0f4fe6a0a4bb57cefd38238d9c`.
+  Both the staged folder and a new-directory extraction at
+  `E:\Workspace\2026\Maroow-portable-check-ea8931a-20260816\Marrow`
+  completed the two-frame editor/project run with exit code 0.
+
+This refresh closes only the Task #28 automated refactor gate. It does not run
+or satisfy Windows high-DPI manual UI, physical Windows Ink, or fixed
+legacy/Sokol A/B evidence. MAR-192 through MAR-210 therefore remain `open`, and
+macOS/Windows qualification remains `PARTIAL`.
 
 ## Source and dependency identity
 

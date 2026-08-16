@@ -4,7 +4,7 @@
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
 Preference Store, MAR-157 Typed SelectionSet, MAR-158 Selection Migration, MAR-159 Hierarchy
 Multi-Selection, MAR-160 Viewport Multi-Selection, MAR-161 Parent-Space Rotation Gizmo 및
-MAR-162 Signed Local Scale Gizmo 완료 checkpoint, Task #28 핵심 경계 리팩터 실행 결정,
+MAR-162 Signed Local Scale Gizmo 및 Task #28 핵심 경계 리팩터 완료 checkpoint,
 MAR-192~210 platform program 보류 결정과
 `.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
@@ -36,9 +36,9 @@ identity reconciliation을 같은 날 완료했다. MAR-159는 실제 visible hi
 platform-correct replace/toggle/range/additive-range gesture와 transient anchor를 2026-07-21에 완료했다.
 같은 날 MAR-160은 viewport point/box multi-selection을, MAR-161은 frozen parent-space rotation과 raw
 multi-turn auto-key를 완료했다. MAR-162는 frozen scale-free local axis와 signed/exact-zero scale
-auto-key를 2026-07-25에 완료했다. 현재 실행 checkpoint는 behavior-preserving Task #28 핵심
-경계 리팩터다. 다음 제품 milestone은 single-vertex FFD를 담당하는 MAR-163이며 dependency는
-완료된 MAR-162다. MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
+auto-key를 2026-07-25에 완료했고 behavior-preserving Task #28 핵심 경계 리팩터는
+2026-08-16에 완료했다. 다음 제품 milestone은 single-vertex FFD를 담당하는 MAR-163이며
+dependency는 완료된 MAR-162다. MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
 
 ---
 
@@ -276,7 +276,7 @@ macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/res
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation 및 MAR-162 signed local scale checkpoint는 통과했다. 현재 실행 checkpoint는 Task #28이고, 이후 제품 chain은 MAR-162에 의존하는 MAR-163부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale 및 Task #28 핵심 경계 리팩터 checkpoint는 통과했다. 다음 제품 chain은 MAR-162에 의존하는 MAR-163부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
 
 #### 기반·선택
 
