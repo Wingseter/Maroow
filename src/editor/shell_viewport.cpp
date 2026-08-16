@@ -21,6 +21,7 @@
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
 #include "viewport_renderer.hpp"
+#include "viewport_interaction_kernel.hpp"
 #include "marrow/allocator.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/renderer/module.hpp"
@@ -2483,23 +2484,21 @@ ViewportEntityHitGeometry build_viewport_entity_hit_geometry(
 
 std::optional<ViewportEntityHitCandidate> resolve_viewport_entity_hit_candidates(
     const std::vector<ViewportEntityHitCandidate>& candidates) {
-    if (candidates.empty()) {
-        return std::nullopt;
+    std::vector<marrow::editor::viewport_interaction_kernel::RankedHit> ranked;
+    ranked.reserve(candidates.size());
+    for (std::size_t index = 0U; index < candidates.size(); ++index) {
+        const auto& candidate = candidates[index];
+        ranked.push_back({
+            index,
+            candidate.priority,
+            static_cast<double>(candidate.distance_squared),
+            candidate.stable_order});
     }
-    const auto best = std::min_element(
-        candidates.begin(),
-        candidates.end(),
-        [](const ViewportEntityHitCandidate& left,
-           const ViewportEntityHitCandidate& right) {
-            if (left.priority != right.priority) {
-                return left.priority < right.priority;
-            }
-            if (left.distance_squared != right.distance_squared) {
-                return left.distance_squared < right.distance_squared;
-            }
-            return left.stable_order < right.stable_order;
-        });
-    return *best;
+    const auto best =
+        marrow::editor::viewport_interaction_kernel::resolve_hit_index(ranked);
+    return best.has_value()
+        ? std::optional<ViewportEntityHitCandidate>(candidates[*best])
+        : std::nullopt;
 }
 
 std::optional<ViewportEntityHitCandidate> pick_viewport_entity_at_position(

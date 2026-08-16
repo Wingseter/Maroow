@@ -597,6 +597,24 @@ add_executable(marrow_renderer_link_boundary_tests
     src/tests/renderer_link_boundary_tests.cpp
 )
 
+add_library(marrow_viewport_interaction_kernel STATIC
+    src/editor/viewport_interaction_kernel.cpp
+)
+
+target_include_directories(marrow_viewport_interaction_kernel
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+add_executable(marrow_viewport_interaction_tests
+    src/tests/viewport_interaction_kernel_tests.cpp
+)
+
+target_link_libraries(marrow_viewport_interaction_tests
+    PRIVATE
+        marrow_viewport_interaction_kernel
+)
+
 add_executable(marrow_preference_tests
     src/tests/preference_store_tests.cpp
 )
@@ -802,6 +820,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_selection.cpp
     src/editor/shell_inspector.cpp
     src/editor/shell_weight_paint.cpp
+    src/editor/viewport_interaction_controller.cpp
     src/editor/shell_viewport_ui.cpp
     src/editor/shell_project_panels.cpp
     src/editor/shell_parameters.cpp
@@ -831,6 +850,7 @@ target_link_libraries(marrow_editor_shell
     PRIVATE
         marrow_editor
         marrow_renderer_core
+        marrow_viewport_interaction_kernel
         marrow_imgui_sdl3
         marrow_window_host
 )
@@ -1088,6 +1108,15 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.renderer_link_boundary PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "renderer;guardrail;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.viewport_interaction_kernel
+        COMMAND marrow_viewport_interaction_tests
+    )
+    set_tests_properties(marrow.viewport_interaction_kernel PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;viewport;unit;noninteractive"
     )
 
     add_test(

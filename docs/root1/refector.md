@@ -263,6 +263,20 @@ standalone Sokol-app adapter completed its two-frame Metal auto-close smoke.
 This is implementation evidence only and does not change the `PARTIAL` platform
 qualification state.
 
+The viewport checkpoint was locally validated on 2026-08-16. The private
+`viewport_interaction_kernel` has no ImGui, Sokol, or `ShellState` dependency
+and owns parent/local basis math, rotation unwrap and pivot rebase, signed and
+exact-zero scale mapping, press/entity hit precedence, and completion decisions.
+The shell-private `viewport_interaction_controller` now owns transform and box
+gesture begin/update/finish, materialization, transaction, rollback, and commit;
+`shell_viewport_ui.cpp` retains drawing and input routing. The focused
+table-driven kernel test covers frozen/reflected/negative-determinant bases,
+singular and non-finite rejection, positive and negative 450-degree turns, the
+positive 180-degree tie, 2px pivot suspend/rebase, signed and zero scale, hit
+ordering, and zero-or-one history disposition. The existing editor smoke still
+validates actual cancel/no-op/one-undo session behavior and preserved error
+messages.
+
 Broad `project.cpp`/session decomposition, GPU surface/resource RAII, SDL host
 decomposition, and a full CMake reorganization remain follow-up analysis. Task
 #28 changes no public `include/marrow/**` interface, file-format version, C ABI,

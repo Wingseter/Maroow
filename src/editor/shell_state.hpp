@@ -15,6 +15,7 @@
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
+#include "viewport_interaction_kernel.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/agent_control.hpp"
@@ -88,13 +89,8 @@ struct ViewportLayout {
 // consulting this entity order. Within one category, the nearest screen-space
 // candidate wins, followed by stable authored order (or reverse draw order for
 // overlapping rendered attachments).
-enum class ViewportEntityHitPriority : std::uint8_t {
-    ConstraintTarget,
-    BoneJoint,
-    BoneBody,
-    SlotHandle,
-    AttachmentSurface,
-};
+using ViewportEntityHitPriority =
+    marrow::editor::viewport_interaction_kernel::HitPriority;
 
 struct ViewportEntityHitCandidate {
     marrow::editor::SelectionItem item;
