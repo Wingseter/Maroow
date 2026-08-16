@@ -334,11 +334,12 @@ public:
         animation_state_->restore_state(snapshot);
         skeleton_->set_to_setup_pose();
         skeleton_->set_attachment_playback_time(state_.time_seconds);
+        apply_slot_overrides();
         animation_state_->apply(*skeleton_);
+        apply_slot_overrides();
         if (!apply_parameter_preview(error_out)) {
             return false;
         }
-        apply_slot_overrides();
         return true;
     }
     const std::vector<runtime::AnimationEvent>& events() const noexcept { return events_; }
@@ -539,8 +540,13 @@ public:
         if (attachment_override_equal(state_.slot_overrides[slot_index], next_override)) {
             return true;
         }
+        const auto previous_override = state_.slot_overrides[slot_index];
         state_.slot_overrides[slot_index] = next_override;
-        apply_slot_overrides();
+        if (!refresh_pose(false, error_out)) {
+            state_.slot_overrides[slot_index] = previous_override;
+            refresh_pose(false, nullptr);
+            return false;
+        }
         return true;
     }
 
@@ -967,10 +973,10 @@ private:
             state_.time_seconds = 0.0;
             skeleton_->set_to_setup_pose();
             skeleton_->set_attachment_playback_time(0.0);
+            apply_slot_overrides();
             if (!apply_parameter_preview(error_out)) {
                 return false;
             }
-            apply_slot_overrides();
             if (!reset_root_motion) {
                 events_ = preserved_events;
                 root_motion_delta_ = preserved_delta;
@@ -1020,12 +1026,13 @@ private:
             accumulate_root_motion();
         }
         skeleton_->set_attachment_playback_time(state_.time_seconds);
+        apply_slot_overrides();
         animation_state_->apply(*skeleton_);
         animation_state_->set_listener({});
+        apply_slot_overrides();
         if (!apply_parameter_preview(error_out)) {
             return false;
         }
-        apply_slot_overrides();
         if (!reset_root_motion) {
             events_ = preserved_events;
             root_motion_delta_ = preserved_delta;
@@ -1059,10 +1066,44 @@ private:
             override_value->skin_index = resolved_skin;
             slots[slot_index].attachment_name = override_value->attachment_name;
             slots[slot_index].attachment_skin_index = resolved_skin;
-            if (slot_index < deforms.size() &&
-                deforms[slot_index].attachment_name != override_value->attachment_name) {
+            const runtime::AttachmentData* attachment = resolved_skin.has_value()
+                ? data_->find_attachment(
+                      *resolved_skin,
+                      slot_index,
+                      override_value->attachment_name)
+                : data_->find_attachment_source(
+                      slot_index,
+                      override_value->attachment_name);
+            const std::string_view deform_source =
+                attachment != nullptr && attachment->linked_mesh.has_value() &&
+                    attachment->linked_mesh->deform
+                ? std::string_view(attachment->linked_mesh->parent_attachment)
+                : attachment != nullptr
+                    ? std::string_view(attachment->name)
+                    : std::string_view{};
+            const std::size_t component_count =
+                attachment != nullptr && attachment->mesh_geometry != nullptr
+                ? attachment->mesh_geometry->vertices.size()
+                : 0U;
+            const bool keeps_deform = slot_index < deforms.size() &&
+                attachment != nullptr &&
+                component_count > 0U &&
+                deforms[slot_index].attachment_name == deform_source &&
+                deforms[slot_index].vertex_offsets.size() == component_count;
+            if (slot_index < deforms.size() && !keeps_deform) {
                 deforms[slot_index].attachment_name.clear();
                 deforms[slot_index].vertex_offsets.clear();
+                const auto* animation = data_->find_animation(state_.animation_name);
+                const auto sampled = animation != nullptr && component_count > 0U
+                    ? animation->sample_slot_deform(
+                          slot_index,
+                          deform_source,
+                          state_.time_seconds)
+                    : std::nullopt;
+                if (sampled.has_value() && sampled->size() == component_count) {
+                    deforms[slot_index].attachment_name = std::string(deform_source);
+                    deforms[slot_index].vertex_offsets = *sampled;
+                }
             }
         }
     }

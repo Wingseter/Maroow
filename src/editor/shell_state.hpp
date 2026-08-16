@@ -462,6 +462,57 @@ struct ViewportTransformGesture {
     ViewportTransformGesturePayload payload{};
 };
 
+struct ViewportFfdSelectionScope {
+    std::size_t slot_index{0U};
+    std::optional<std::size_t> display_skin_index;
+    std::string display_attachment_name;
+    std::string deform_attachment_name;
+    std::size_t vertex_count{0U};
+};
+
+struct ViewportFfdSelection {
+    ViewportFfdSelectionScope scope{};
+    std::vector<std::size_t> vertex_indices;
+};
+
+struct ViewportFfdVertexMapping {
+    std::size_t vertex_index{0U};
+    ViewportWorldPoint vertex_world_start{};
+    double inverse_a{1.0};
+    double inverse_b{0.0};
+    double inverse_c{0.0};
+    double inverse_d{1.0};
+};
+
+struct ViewportFfdGesture {
+    ViewportFfdSelectionScope scope{};
+    std::size_t pressed_vertex_index{0U};
+    std::vector<std::size_t> vertex_indices;
+    std::vector<ViewportFfdVertexMapping> vertex_mappings;
+    std::string animation_name;
+    double time_seconds{0.0};
+    std::vector<double> start_vertex_offsets;
+    ViewportWorldPoint pointer_world_start{};
+    ImVec2 pointer_screen_start{};
+    ImVec2 pointer_screen{};
+    marrow::editor::SelectionSet selection_before;
+    std::optional<ViewportFfdSelection> vertex_selection_before;
+    std::optional<marrow::editor::SelectionItem> hierarchy_anchor_before;
+    std::optional<std::string> timeline_focus_before;
+    bool collapse_to_pressed_on_click{false};
+    bool drag_started{false};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+struct ViewportFfdBoxSelectionGesture {
+    ViewportFfdSelectionScope scope{};
+    ImVec2 start{};
+    ImVec2 current{};
+    bool additive{false};
+    bool dragged{false};
+};
+
 struct ViewportBoxSelectionGesture {
     ImVec2 start{};
     ImVec2 current{};
@@ -541,6 +592,9 @@ struct ShellState {
     std::optional<AnimationDurationGesture> animation_duration_gesture;
     std::optional<InspectorTransformGesture> inspector_transform_gesture;
     std::optional<ViewportTransformGesture> viewport_transform_gesture;
+    std::optional<ViewportFfdSelection> viewport_ffd_selection;
+    std::optional<ViewportFfdGesture> viewport_ffd_gesture;
+    std::optional<ViewportFfdBoxSelectionGesture> viewport_ffd_box_selection;
     std::optional<ViewportBoxSelectionGesture> viewport_box_selection;
     std::optional<ParameterSliderGesture> parameter_slider_gesture;
     std::optional<ParameterGeometryGesture> parameter_geometry_gesture;
@@ -604,6 +658,7 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
         state.animation_duration_gesture.has_value() ||
         state.inspector_transform_gesture.has_value() ||
         state.viewport_transform_gesture.has_value() ||
+        state.viewport_ffd_gesture.has_value() ||
         state.parameter_slider_gesture.has_value() ||
         state.parameter_geometry_gesture.has_value() ||
         state.timeline_editor.retime_gesture.has_value() ||

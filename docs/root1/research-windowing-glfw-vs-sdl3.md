@@ -64,8 +64,8 @@ SDL3 전환은 격리가 잘 되어 있어 며칠 규모이며, Windows 출시 �
   Windows 11 editor, physical Windows Ink, portable folder를 검증한다.
 - MAR-210: 2026-08-12 범위 결정에 따라 macOS arm64 Metal과 Windows 11 x64의
   같은 source revision evidence를 모아야만 완료한다. Ubuntu/Linux와 Windows 10은
-  `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate가 아니다. 그 전에는 MAR-163이
-  열리지 않는다.
+  `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate가 아니다. 이 qualification
+  backlog는 2026-08-16에 완료된 MAR-163/MAR-164나 다음 MAR-165 제품 chain을 차단하지 않는다.
 
 현재 source tree에는 SDL3/Sokol 전환 코드, Linux X11 경로와 Windows compile-time 경계가
 반영되어 있지만, 실제 지원 status는 `platform-validation.md`를 따른다. Linux X11은

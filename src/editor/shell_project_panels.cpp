@@ -449,6 +449,13 @@ void apply_shell_mode(ShellState* state, ShellMode mode) {
     if (state == nullptr || authoring_gesture_active(*state)) {
         return;
     }
+    const bool mode_changed = state->shell_mode != mode;
+    const auto clear_ffd_context = [&]() {
+        if (mode_changed) {
+            state->viewport_ffd_selection.reset();
+            state->viewport_ffd_box_selection.reset();
+        }
+    };
     switch (mode) {
         case ShellMode::Setup:
             state->weight_paint.enabled = false;
@@ -464,6 +471,7 @@ void apply_shell_mode(ShellState* state, ShellMode mode) {
                 state->error_message.clear();
                 state->status_message = "Setup Pose is read-only";
                 state->shell_mode = ShellMode::Setup;
+                clear_ffd_context();
             }
             break;
         case ShellMode::Animation:
@@ -484,16 +492,19 @@ void apply_shell_mode(ShellState* state, ShellMode mode) {
                 }
             }
             state->shell_mode = ShellMode::Animation;
+            clear_ffd_context();
             break;
         case ShellMode::WeightPaint:
             state->weight_paint.enabled = true;
             state->shell_mode = ShellMode::WeightPaint;
+            clear_ffd_context();
             break;
         case ShellMode::Parameter:
             state->weight_paint.enabled = false;
             state->timeline_playing = false;
             state->session.set_playing(false);
             state->shell_mode = ShellMode::Parameter;
+            clear_ffd_context();
             state->error_message.clear();
             state->status_message = "Parameter Modeling preview";
             break;

@@ -10,6 +10,7 @@
 #include "imgui.h"
 
 #include "shell_selection.hpp"
+#include "viewport_ffd_controller.hpp"
 #include "shell_state.hpp"
 #include "shell_timeline.hpp"
 #include "shell_viewport_ui.hpp"
@@ -21,7 +22,8 @@ namespace marrow::editor::shell {
 
 void apply_preview_slot_overrides(
     const ShellState& state,
-    marrow::runtime::Skeleton* skeleton) {
+    marrow::runtime::Skeleton* skeleton,
+    std::optional<double> sample_time) {
     if (!state.load_result || skeleton == nullptr) {
         return;
     }
@@ -36,18 +38,42 @@ void apply_preview_slot_overrides(
             continue;
         }
 
-        if (!resolve_attachment_reference(
-                *state.load_result.skeleton_data,
-                *override_selection).has_value()) {
+        const auto reference = resolve_attachment_reference(
+            *state.load_result.skeleton_data,
+            *override_selection);
+        if (!reference.has_value() || reference->attachment == nullptr) {
             continue;
         }
 
         slot_states[slot_index].attachment_name = override_selection->attachment_name;
         slot_states[slot_index].attachment_skin_index = override_selection->skin_index;
-        if (slot_index < mesh_deforms.size() &&
-            mesh_deforms[slot_index].attachment_name != override_selection->attachment_name) {
+        const auto* attachment = reference->attachment;
+        const std::string_view deform_source =
+            attachment->linked_mesh.has_value() && attachment->linked_mesh->deform
+            ? std::string_view(attachment->linked_mesh->parent_attachment)
+            : std::string_view(attachment->name);
+        const std::size_t component_count = attachment->mesh_geometry != nullptr
+            ? attachment->mesh_geometry->vertices.size()
+            : 0U;
+        const bool keeps_deform = slot_index < mesh_deforms.size() &&
+            component_count > 0U &&
+            mesh_deforms[slot_index].attachment_name == deform_source &&
+            mesh_deforms[slot_index].vertex_offsets.size() == component_count;
+        if (slot_index < mesh_deforms.size() && !keeps_deform) {
             mesh_deforms[slot_index].attachment_name.clear();
             mesh_deforms[slot_index].vertex_offsets.clear();
+            const auto* animation = state.load_result.skeleton_data->find_animation(
+                state.selected_animation_name);
+            const auto sampled = animation != nullptr && component_count > 0U
+                ? animation->sample_slot_deform(
+                      slot_index,
+                      deform_source,
+                      sample_time.value_or(state.timeline_time_seconds))
+                : std::nullopt;
+            if (sampled.has_value() && sampled->size() == component_count) {
+                mesh_deforms[slot_index].attachment_name = std::string(deform_source);
+                mesh_deforms[slot_index].vertex_offsets = *sampled;
+            }
         }
     }
 }
@@ -137,6 +163,7 @@ bool undo_project_change(ShellState* state) {
         update_project_dirty_state(state);
         return false;
     }
+    viewport_ffd::reconcile_selection(state);
 
     update_project_dirty_state(state);
     state->status_message = "Undid " + label;
@@ -165,6 +192,7 @@ bool redo_project_change(ShellState* state) {
         update_project_dirty_state(state);
         return false;
     }
+    viewport_ffd::reconcile_selection(state);
 
     update_project_dirty_state(state);
     state->status_message = "Redid " + label;
@@ -399,7 +427,7 @@ std::optional<marrow::runtime::ProfilerFrame> build_preview_profiler_frame(
         &timing_breakdown);
     profiler.add_world_transform_timing(timing_breakdown);
 
-    apply_preview_slot_overrides(state, &scratch_skeleton);
+    apply_preview_slot_overrides(state, &scratch_skeleton, sampled_time);
 
     marrow::runtime::profile_phase(
         &profiler,

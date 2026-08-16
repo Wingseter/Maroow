@@ -667,16 +667,17 @@ bool sample_preview_pose_at_time(
         return false;
     }
 
+    double deform_sample_time = 0.0;
     if (const auto* animation = selected_animation(state)) {
-        const double sample_time = onion_skin_sample_time_for_preview(state, time_seconds);
-        skeleton->set_attachment_playback_time(sample_time);
-        skeleton->apply_animation(*animation, sample_time);
+        deform_sample_time = onion_skin_sample_time_for_preview(state, time_seconds);
+        skeleton->set_attachment_playback_time(deform_sample_time);
+        skeleton->apply_animation(*animation, deform_sample_time);
     } else {
         skeleton->set_to_setup_pose();
         skeleton->set_attachment_playback_time(0.0);
     }
 
-    apply_preview_slot_overrides(state, skeleton);
+    apply_preview_slot_overrides(state, skeleton, deform_sample_time);
     return true;
 }
 

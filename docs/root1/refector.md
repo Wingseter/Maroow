@@ -195,10 +195,10 @@ qualification credit.
 
 ## Task #28 core-boundary refactor checkpoint (completed 2026-08-16)
 
-Task #28 is a behavior-preserving implementation checkpoint between completed
-MAR-162 and MAR-163. It is not a PRD story and does not close or qualify any
-platform story. The execution order is `Task #28 -> MAR-163`; MAR-163 depends
-directly on MAR-162. MAR-192 through MAR-210 keep their existing `open` states,
+Task #28 was a behavior-preserving implementation checkpoint between completed
+MAR-162 and the now-completed MAR-163. It is not a PRD story and does not close
+or qualify any platform story. Its execution order was `Task #28 -> MAR-163`;
+MAR-163 depends directly on MAR-162. MAR-192 through MAR-210 keep their existing `open` states,
 acceptance criteria, evidence requirements, and internal dependency chain as a
 parallel deferred qualification backlog.
 
@@ -327,7 +327,7 @@ passed this completion gate on both hosts:
   SHA-256 `f0c24473e21f7f5b9efda18df48c5e42339a6d0f4fe6a0a4bb57cefd38238d9c`;
   staged-folder and new-directory extracted runs both exited 0.
 
-Task #28 is therefore complete and MAR-163 is the next product milestone.
+Task #28, MAR-163, and MAR-164 are therefore complete; MAR-165 is the next product milestone.
 Windows 11 high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain
 deferred MAR-192 through MAR-210 qualification evidence and received no
 Task #28 or platform-qualification credit. Those stories remain `open`, and

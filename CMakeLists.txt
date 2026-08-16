@@ -847,6 +847,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_inspector.cpp
     src/editor/shell_weight_paint.cpp
     src/editor/viewport_interaction_controller.cpp
+    src/editor/viewport_ffd_controller.cpp
     src/editor/shell_viewport_ui.cpp
     src/editor/shell_project_panels.cpp
     src/editor/shell_parameters.cpp
@@ -855,6 +856,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_smoke.cpp
     src/editor/shell_smoke_project.cpp
     src/editor/shell_smoke_viewport.cpp
+    src/editor/shell_smoke_ffd.cpp
     src/editor/shell_smoke_timeline.cpp
     src/editor/shell_smoke_frames.cpp
     src/editor/shell_smoke_parameters.cpp

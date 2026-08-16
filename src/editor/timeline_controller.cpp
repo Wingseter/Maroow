@@ -16,6 +16,7 @@
 #include "shell_derived_cache.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
+#include "viewport_ffd_controller.hpp"
 #include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor::shell {
@@ -688,6 +689,7 @@ bool set_selected_animation(
         return false;
     }
     sync_shell_from_editor_session(state);
+    viewport_ffd::reconcile_selection(state);
 
     if (update_status_message) {
         std::ostringstream stream;
@@ -731,6 +733,7 @@ bool scrub_timeline_time(
         return false;
     }
     sync_shell_from_editor_session(state);
+    viewport_ffd::reconcile_selection(state);
 
     if (update_status_message) {
         std::ostringstream stream;

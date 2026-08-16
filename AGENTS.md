@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-162, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-163 is the next product milestone and depends on MAR-162. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-164, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-165 is the next product milestone and depends on MAR-164. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -43,7 +43,7 @@
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
 - Editor-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L editor`
-- Display qualification configure: `cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON`
+- Debug display qualification configure: `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON`
 - Display qualification build: `cmake --build build-display`
 - Windowing display tests: `ctest --test-dir build-display --output-on-failure -L windowing`
 - Renderer/display tests: `ctest --test-dir build-display --output-on-failure -L display`
@@ -159,7 +159,7 @@
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
-- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
@@ -223,6 +223,72 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-164 Attachment-Local Multi-Vertex FFD Validation Results
+
+Validated 2026-08-16. Animation mode now keeps a shell-private, persistent vertex
+sub-selection under the exact active and currently displayed mesh Attachment. Selected
+vertices move by one common world-space delta through frozen per-vertex inverses; this
+does not add an entity `SelectionSet` group transform or persistent project state.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Selection and input | Scope is `{slot, skin, displayed attachment, deform target, vertex count}` with sorted unique indices; plain point replace/selected-click collapse, macOS Cmd/non-macOS Ctrl toggle-only, forward/reverse inclusive plain/additive FFD boxes, empty semantics, 4px threshold, and FFD-box priority over the Bone box are covered | PASS |
+| Atomic group solve | Single- and weighted-influence vertices use frozen inverses against one common world delta; selected pairs update from one gesture-start animation-only full vector while untouched pairs remain byte-equivalent, and duplicate/out-of-range/malformed/singular/non-finite members reject the complete candidate before mutation | PASS |
+| Target and materialization | Normal and linked `deform=false` meshes target themselves; linked `deform=true` keeps the displayed child as selection scope while editing one immediate-parent timeline; parameter-composed positions drive handles without baking parameter output, and topology, UVs, and weights remain read-only | PASS |
+| Transaction and lifecycle | Preflight completes before materialization; successful group drag creates one full-vector key and one undo entry, while click/no-movement, return-to-start, Escape, focus/context loss, refresh failure, and downstream override leave no partial candidate; selection survives time/animation/parameter preview/undo/redo and clears only on the documented context or successful-adoption boundaries | PASS |
+| Persistence and compatibility | `.marrow` save/reload and exported `.mskl`/MBIN v2 preserve selected and untouched pairs, imported curves, and linked parent identity while vertex selection reloads empty; public editor API, `SelectionSet`, `.marrow` schema, `.mskl` v1, `.mbin` v2, C ABI v1, GPU resources, and the 56-operation Agent/MCP surface remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j4` -> all default targets built
+- `./build/marrow_viewport_interaction_tests` -> point replace/toggle, sorted unique selection, forward/reverse/inclusive box semantics, atomic group update, mixed inverses, untouched-pair preservation, and invalid-candidate rejection passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> selected-click drag/collapse, toggle-only, FFD box priority, mixed-influence common delta, isolated singular rejection, linked child-to-parent targeting, lifecycle, rollback, parameter non-bake, save/reload, and JSON/MBIN smoke passed
+- `ctest --test-dir build --output-on-failure` -> 20/20 passed
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j4 && ctest --test-dir build-display --output-on-failure` -> Debug display-enabled suite 23/23 passed
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j4 && ctest --test-dir build-platform-release --output-on-failure` -> Release display-enabled suite 23/23 passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar164.mskl --export-binary /tmp/marrow_mar164.mbin` -> project/runtime export passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar164.mbin /tmp/marrow_mar164.mskl` -> match; `rotation_error=0.00274662deg`, `position_error=0.000811016px`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar164.mskl /tmp/player_idle.matl` -> exported runtime passed
+- `./build/marrow_agent_dispatch_smoke`, `./build/marrow_agent_socket_tests`, `./build/marrow_c_smoke`, and MCP schema `py_compile` -> unchanged surfaces and transports passed
+- `cmake --build build --target marrow_verify_third_party` and `git diff --check` -> passed
+
+This checkpoint adds no Windows qualification credit. MAR-192 through MAR-210 remain
+open, and macOS/Windows support qualification remains governed by
+`docs/root1/platform-validation.md`.
+
+## MAR-163 Single FFD Vertex Auto-Key Validation Results
+
+Validated 2026-08-16. At this checkpoint, Animation mode exposed every vertex of the
+exact active, currently displayed mesh Attachment as a fixed 6px hit target and a drag
+edited only that vertex pair in one full animation-FFD vector. Persistent point/toggle/box
+and multi-vertex behavior was deferred here and is completed by MAR-164 above.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Handles and input | Final parameter-composed mesh positions drive the overlay; nearest distance and lower vertex index resolve ties; arbitration is active gesture/brush, translate, rotation, scale, FFD vertex, entity, then box | PASS |
+| Frozen mapping | Single-influence and weighted `sum(weight * bone world 2x2)` inverses cover non-uniform and reflected transforms; empty, malformed, relative-singular, and non-finite mappings reject before mutation | PASS |
+| Target and materialization | Normal meshes target themselves; linked `deform=true` meshes target their immediate parent while shared topology/weights remain read-only; the selected animation is sampled into a geometry-sized full vector and imported keys/curves materialize intact | PASS |
+| Transaction and rollback | Playback pauses; only one X/Y pair changes from the gesture-start vector; click/no-movement creates no history, commit creates one undo entry, and Escape, focus/context loss, invalid payload, refresh failure, or downstream override cancel the whole transaction while preserving selection context | PASS |
+| Persistence and compatibility | `.marrow` save/reload and exported `.mskl`/MBIN v2 preserve the full vector and parent target identity; public editor API, `SelectionSet`, `.marrow` schema, `.mskl` v1, C ABI v1, GPU resources, and the 56-operation Agent/MCP surface remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j4` -> all default targets built
+- `./build/marrow_viewport_interaction_tests` -> nearest/tie, weighted/reflected/non-uniform inverse, full-vector isolation, invalid rejection, and press precedence passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> single/multi-influence, linked `warrior_body -> body_mesh`, sparse interpolation, no-op, undo/redo, rollback, save/reload, and JSON/MBIN smoke passed
+- `ctest --test-dir build --output-on-failure` -> 20/20 passed
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j4 && ctest --test-dir build-display --output-on-failure` -> Debug display-enabled suite 23/23 passed
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j4 && ctest --test-dir build-platform-release --output-on-failure` -> Release display-enabled suite 23/23 passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar163.mskl --export-binary /tmp/marrow_mar163.mbin` -> project/runtime export passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar163.mbin /tmp/marrow_mar163.mskl` -> match; `rotation_error=0.00274662deg`, `position_error=0.000811016px`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar163.mskl /tmp/player_idle.matl` -> exported runtime passed
+- `./build/marrow_agent_dispatch_smoke`, `./build/marrow_agent_socket_tests`, `./build/marrow_c_smoke`, and MCP schema `py_compile` -> unchanged surfaces and transports passed
+- `cmake --build build --target marrow_verify_third_party` and `git diff --check` -> passed
+
+This checkpoint adds no Windows qualification credit. MAR-192 through MAR-210 remain
+open, and macOS/Windows support qualification remains governed by
+`docs/root1/platform-validation.md`.
 
 ## MAR-162 Signed Local Scale Gizmo Validation Results
 

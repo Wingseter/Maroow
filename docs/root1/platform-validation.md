@@ -15,7 +15,8 @@ PASS and do not satisfy a dependency.
 | Windows 11 x64, VS2022 | SDL3 GLCORE 4.1 + Windows Ink; 100% and 150% or 200% DPI | Task #28 Debug and Release build plus 23/23 tests at 100% scale, including three display tests; same-host portable extraction/run | PARTIAL — high-DPI/manual desktop and physical Ink evidence remain open |
 
 MAR-192 through MAR-210 remain `open` as a parallel deferred qualification
-backlog and do not block MAR-163. Current qualification targets macOS arm64 and Windows 11 x64 only.
+backlog and do not block the completed MAR-163/MAR-164 checkpoints or the next MAR-165
+product milestone. Current qualification targets macOS arm64 and Windows 11 x64 only.
 Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, and
 ImGui OS multi-viewport support are not claimed.
 

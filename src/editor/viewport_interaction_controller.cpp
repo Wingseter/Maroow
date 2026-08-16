@@ -23,10 +23,17 @@ ViewportPressTarget press_target(
     bool translate,
     bool rotation,
     bool scale,
+    bool ffd_vertex,
     bool entity) {
     return static_cast<ViewportPressTarget>(
         marrow::editor::viewport_interaction_kernel::resolve_press_target(
-            active_gesture, weight_brush, translate, rotation, scale, entity));
+            active_gesture,
+            weight_brush,
+            translate,
+            rotation,
+            scale,
+            ffd_vertex,
+            entity));
 }
 
 bool finite_world_point(const ViewportWorldPoint& point) {

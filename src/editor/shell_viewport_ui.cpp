@@ -20,6 +20,7 @@
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
 #include "shell_widgets.hpp"
+#include "viewport_ffd_controller.hpp"
 
 namespace marrow::editor::shell {
 
@@ -28,7 +29,8 @@ using marrow::editor::IconRegistry;
 
 void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
     (void)canvas_size;
-    if (state == nullptr || state->viewport_transform_gesture.has_value()) {
+    if (state == nullptr || state->viewport_transform_gesture.has_value() ||
+        state->viewport_ffd_gesture.has_value()) {
         return;
     }
     if (frame_viewport_camera_to_preview_pose(state)) {
@@ -228,6 +230,76 @@ void draw_scale_gizmo(
         ImVec2(center.x + 10.0f, center.y + kScaleGizmoRadius + 10.0f),
         IM_COL32(255, 232, 174, 255),
         text.c_str());
+}
+
+void draw_ffd_vertices(
+    const ShellState& state,
+    const ViewportLayout& layout,
+    std::optional<std::size_t> hovered_vertex,
+    ImDrawList* draw_list) {
+    const auto overlay = viewport_ffd::build_overlay(state);
+    if (draw_list == nullptr || !overlay.has_value()) {
+        return;
+    }
+    const ViewportFfdSelection* selection =
+        state.viewport_ffd_selection.has_value() &&
+            viewport_ffd::selection_matches_overlay(
+                *state.viewport_ffd_selection, *overlay)
+        ? &*state.viewport_ffd_selection
+        : nullptr;
+    const std::optional<std::size_t> drag_source =
+        state.viewport_ffd_gesture.has_value()
+        ? std::optional<std::size_t>(
+              state.viewport_ffd_gesture->pressed_vertex_index)
+        : std::nullopt;
+    const std::vector<std::size_t> box_vertices =
+        viewport_ffd::box_preview_vertices(state, layout);
+
+    if (state.viewport_ffd_box_selection.has_value() &&
+        state.viewport_ffd_box_selection->dragged) {
+        const auto& box = *state.viewport_ffd_box_selection;
+        const ImVec2 minimum(
+            std::min(box.start.x, box.current.x),
+            std::min(box.start.y, box.current.y));
+        const ImVec2 maximum(
+            std::max(box.start.x, box.current.x),
+            std::max(box.start.y, box.current.y));
+        draw_list->AddRectFilled(
+            minimum, maximum, IM_COL32(72, 156, 196, 32));
+        draw_list->AddRect(
+            minimum, maximum, IM_COL32(110, 201, 232, 240), 0.0f, 0, 1.5f);
+    }
+    for (std::size_t index = 0U;
+         index < overlay->vertex_world_positions.size();
+         ++index) {
+        const ViewportWorldPoint& vertex = overlay->vertex_world_positions[index];
+        const ImVec2 screen = screen_from_world(layout, vertex.x, vertex.y);
+        const bool selected = selection != nullptr && std::binary_search(
+            selection->vertex_indices.begin(),
+            selection->vertex_indices.end(),
+            index);
+        const bool boxed = std::binary_search(
+            box_vertices.begin(), box_vertices.end(), index);
+        const bool source = drag_source == index;
+        const bool hovered = hovered_vertex == index;
+        const ImU32 fill = source
+            ? IM_COL32(255, 207, 104, 255)
+            : hovered ? IM_COL32(246, 238, 211, 255)
+            : boxed ? IM_COL32(110, 201, 232, 255)
+            : selected ? IM_COL32(129, 174, 221, 255)
+                       : IM_COL32(126, 188, 239, 205);
+        draw_list->AddCircleFilled(
+            screen,
+            source || hovered ? 4.5f : selected || boxed ? 4.0f : 3.5f,
+            fill,
+            16);
+        draw_list->AddCircle(
+            screen,
+            source || hovered ? 5.5f : selected || boxed ? 5.0f : 4.5f,
+            IM_COL32(18, 21, 25, 255),
+            16,
+            1.0f);
+    }
 }
 
 
@@ -870,14 +942,28 @@ void draw_viewport_selection_feedback(
 void draw_viewport_window(ShellState* state) {
     if (!ImGui::Begin(kViewportWindowTitle)) {
         finish_transform_gesture(state, false);
+        viewport_ffd::finish_gesture(state, false);
+        state->viewport_ffd_box_selection.reset();
         state->viewport_box_selection.reset();
         ImGui::End();
         return;
     }
 
+    if (state->viewport_ffd_gesture.has_value() &&
+        !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+        viewport_ffd::finish_gesture(state, false);
+    }
+    if (state->viewport_ffd_box_selection.has_value() &&
+        !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+        state->viewport_ffd_box_selection.reset();
+    }
+
     // No scene → editorial empty state, no chrome.
     if (!state->load_result) {
         finish_transform_gesture(state, false);
+        viewport_ffd::finish_gesture(state, false);
+        state->viewport_ffd_selection.reset();
+        state->viewport_ffd_box_selection.reset();
         state->viewport_box_selection.reset();
         widgets::empty_hero(
             "VIEWPORT",
@@ -887,6 +973,7 @@ void draw_viewport_window(ShellState* state) {
         ImGui::End();
         return;
     }
+    viewport_ffd::reconcile_selection(state);
     const ResolvedSelection resolved = resolve_shell_selection(*state);
     const WeightPaintSelectionContext weight_selection =
         resolve_weight_paint_selection_context(*state);
@@ -908,11 +995,17 @@ void draw_viewport_window(ShellState* state) {
     if (state->load_result && state->preview_skeleton) {
         const ImVec2 pre_toolbar_avail = ImGui::GetContentRegionAvail();
         if (!state->viewport_transform_gesture.has_value() &&
+            !state->viewport_ffd_gesture.has_value() &&
+            !state->viewport_ffd_box_selection.has_value() &&
+            !state->viewport_box_selection.has_value() &&
             icon_button(state->icons, Icon::ZoomFit, "Zoom to fit")) {
             auto_frame_skeleton(state, pre_toolbar_avail);
         }
         ImGui::SameLine();
         if (!state->viewport_transform_gesture.has_value() &&
+            !state->viewport_ffd_gesture.has_value() &&
+            !state->viewport_ffd_box_selection.has_value() &&
+            !state->viewport_box_selection.has_value() &&
             icon_button(state->icons, Icon::ZoomOne, "Zoom 1:1")) {
             state->viewport.zoom = 1.0;
             state->viewport.pan_x = 0.0;
@@ -964,6 +1057,8 @@ void draw_viewport_window(ShellState* state) {
     const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
     if (canvas_size.x < 32.0f || canvas_size.y < 32.0f) {
         finish_transform_gesture(state, false);
+        viewport_ffd::finish_gesture(state, false);
+        state->viewport_ffd_box_selection.reset();
         state->viewport_box_selection.reset();
         ImGui::End();
         return;
@@ -1003,6 +1098,8 @@ void draw_viewport_window(ShellState* state) {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
     if (!state->viewport_transform_gesture.has_value() &&
+        !state->viewport_ffd_gesture.has_value() &&
+        !state->viewport_ffd_box_selection.has_value() &&
         !state->viewport_box_selection.has_value() && hovered &&
         ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
         const ImVec2 mouse_delta = ImGui::GetIO().MouseDelta;
@@ -1011,6 +1108,8 @@ void draw_viewport_window(ShellState* state) {
     }
 
     if (!state->viewport_transform_gesture.has_value() &&
+        !state->viewport_ffd_gesture.has_value() &&
+        !state->viewport_ffd_box_selection.has_value() &&
         !state->viewport_box_selection.has_value() && hovered &&
         std::abs(ImGui::GetIO().MouseWheel) > 0.0f) {
         const float zoom_factor = ImGui::GetIO().MouseWheel > 0.0f ? 1.1f : 0.9f;
@@ -1025,6 +1124,8 @@ void draw_viewport_window(ShellState* state) {
     const auto layout = build_viewport_layout(*state, canvas_origin, canvas_size);
     if (!layout.has_value()) {
         finish_transform_gesture(state, false);
+        viewport_ffd::finish_gesture(state, false);
+        state->viewport_ffd_box_selection.reset();
         state->viewport_box_selection.reset();
     }
     std::optional<marrow::renderer::PreparedScene> frame_scene;
@@ -1078,6 +1179,11 @@ void draw_viewport_window(ShellState* state) {
         hovered && layout.has_value()
             ? hit_test_scale_gizmo(*state, *layout, ImGui::GetIO().MousePos)
             : std::nullopt;
+    const std::optional<std::size_t> hovered_ffd_vertex =
+        hovered && layout.has_value()
+            ? viewport_ffd::hit_test_vertex(
+                  *state, *layout, ImGui::GetIO().MousePos)
+            : std::nullopt;
     const std::vector<OnionSkinGhostPose> ghost_poses =
         layout.has_value() ? build_onion_skin_ghost_poses(*state, *layout)
                            : std::vector<OnionSkinGhostPose>{};
@@ -1091,9 +1197,18 @@ void draw_viewport_window(ShellState* state) {
         // (collapsed/hidden tab). Cancel instead of committing stale corners.
         state->viewport_box_selection.reset();
     }
+    if (state->viewport_ffd_box_selection.has_value() &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        state->viewport_ffd_box_selection.reset();
+    }
     if (state->viewport_box_selection.has_value() &&
         ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         state->viewport_box_selection.reset();
+    }
+    if (state->viewport_ffd_box_selection.has_value() &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        state->viewport_ffd_box_selection.reset();
     }
     if (hovered && layout.has_value() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1101,7 +1216,7 @@ void draw_viewport_window(ShellState* state) {
         const bool command_modifier = hierarchy_command_modifier(
             io.ConfigMacOSXBehaviors, io.KeyCtrl, io.KeySuper);
         // Deterministic press arbitration: an active edit/brush consumes the
-        // press, then translate Free/X/Y, rotation, scale, entity picking,
+        // press, then translate Free/X/Y, rotation, scale, FFD vertex, entity picking,
         // and only a confirmed empty-space press may seed a box gesture.
         switch (press_target(
             authoring_gesture_active(*state),
@@ -1109,6 +1224,7 @@ void draw_viewport_window(ShellState* state) {
             hovered_translate_axis.has_value(),
             hovered_rotation_ring,
             hovered_scale_handle.has_value(),
+            hovered_ffd_vertex.has_value(),
             hovered_entity.has_value())) {
         case ViewportPressTarget::ActiveGesture:
             // The owning gesture handles its own update below or in its panel.
@@ -1127,13 +1243,27 @@ void draw_viewport_window(ShellState* state) {
             (void)begin_scale_gesture(
                 state, *layout, *hovered_scale_handle, io.MousePos);
             break;
+        case ViewportPressTarget::FfdVertex:
+            if (command_modifier) {
+                (void)viewport_ffd::select_vertex(
+                    state, *hovered_ffd_vertex, true);
+            } else {
+                (void)viewport_ffd::begin_gesture(
+                    state, *layout, *hovered_ffd_vertex, io.MousePos);
+            }
+            break;
         case ViewportPressTarget::Entity:
             (void)apply_viewport_point_selection_gesture(
                 state, hovered_entity->item, command_modifier, true);
             break;
         case ViewportPressTarget::Box:
-            (void)begin_box_selection(
-                state, io.MousePos, command_modifier);
+            if (viewport_ffd::build_overlay(*state).has_value()) {
+                (void)viewport_ffd::begin_box_selection(
+                    state, io.MousePos, command_modifier);
+            } else {
+                (void)begin_box_selection(
+                    state, io.MousePos, command_modifier);
+            }
             break;
         }
     }
@@ -1152,6 +1282,12 @@ void draw_viewport_window(ShellState* state) {
             (void)update_translate_gesture(
                 state, *layout, ImGui::GetIO().MousePos);
         }
+    }
+    if (state->viewport_ffd_gesture.has_value() && layout.has_value() &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        !ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        (void)viewport_ffd::update_gesture(
+            state, *layout, ImGui::GetIO().MousePos);
     }
     if (brush_enabled &&
         hovered &&
@@ -1181,9 +1317,18 @@ void draw_viewport_window(ShellState* state) {
         ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         (void)update_box_selection(state, ImGui::GetIO().MousePos);
     }
+    if (state->viewport_ffd_box_selection.has_value() && layout.has_value() &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        (void)viewport_ffd::update_box_selection(
+            state, ImGui::GetIO().MousePos);
+    }
     if (state->viewport_box_selection.has_value() && layout.has_value() &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         (void)finish_box_selection(state, *layout, true);
+    }
+    if (state->viewport_ffd_box_selection.has_value() && layout.has_value() &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        (void)viewport_ffd::finish_box_selection(state, *layout, true);
     }
 
     const ImVec2 canvas_end(
@@ -1238,6 +1383,7 @@ void draw_viewport_window(ShellState* state) {
         draw_viewport_annotations(*state, *layout, hovered_bone, rendered_overlay, draw_list);
         draw_viewport_selection_feedback(
             *state, *layout, entity_hit_geometry, hovered_entity, draw_list);
+        draw_ffd_vertices(*state, *layout, hovered_ffd_vertex, draw_list);
         draw_translate_gizmo(*state, *layout, draw_list);
         draw_rotation_gizmo(
             *state, *layout, hovered_rotation_ring, draw_list);
@@ -1263,12 +1409,16 @@ void draw_viewport_window(ShellState* state) {
         const bool animation_move_ready =
             !weight_tool_ready && !state->selected_animation_name.empty() &&
             resolved.active_bone_index.has_value();
+        const bool animation_ffd_ready =
+            !weight_tool_ready && viewport_ffd::build_overlay(*state).has_value();
         const char* transform_hint = layout.has_value()
             ? viewport_interaction::transform_hint(*state, *layout)
             : active_rotation_inherit_hint(*state);
         std::string hint =
             std::string(weight_tool_ready
                             ? "LMB brush weights"
+                            : animation_ffd_ready
+                                ? "LMB move FFD vertex / select"
                             : animation_move_ready
                                 ? "LMB move / rotate / scale gizmo / select"
                                 : "LMB select") +
@@ -1309,7 +1459,7 @@ void draw_viewport_window(ShellState* state) {
 
     if (hovered_bone.has_value() && state->load_result &&
         !hovered_translate_axis.has_value() && !hovered_rotation_ring &&
-        !hovered_scale_handle.has_value()) {
+        !hovered_scale_handle.has_value() && !hovered_ffd_vertex.has_value()) {
         const auto& bones = state->load_result.skeleton_data->bones();
         ImGui::SetTooltip("%s", bones[*hovered_bone].name.c_str());
     }
@@ -1336,6 +1486,21 @@ void finalize_orphaned_viewport_transform_gesture(ShellState* state) {
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         finish_transform_gesture(state, true);
+    }
+}
+
+void finalize_orphaned_viewport_ffd_gesture(ShellState* state) {
+    if (state == nullptr || !state->viewport_ffd_gesture.has_value()) {
+        return;
+    }
+    const bool cancel = ImGui::GetCurrentContext() == nullptr ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (cancel) {
+        viewport_ffd::finish_gesture(state, false);
+        return;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        viewport_ffd::finish_gesture(state, true);
     }
 }
 

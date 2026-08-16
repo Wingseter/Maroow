@@ -10,6 +10,8 @@ namespace marrow::editor::viewport_interaction_kernel {
 constexpr double kRelativeSingularEpsilon = 1e-8;
 constexpr double kRotationPivotSuspendRadius = 2.0;
 constexpr double kScaleHandleRadius = 74.0;
+constexpr double kFfdVertexHitRadius = 6.0;
+constexpr double kFfdDragThreshold = 4.0;
 
 struct Point {
     double x{0.0};
@@ -98,6 +100,56 @@ std::optional<ScaleCandidate> map_scale(
     const ScaleMapping& mapping,
     Point pointer_screen);
 
+struct FfdInfluence {
+    Matrix2 bone_world{};
+    double weight{0.0};
+};
+
+std::optional<std::size_t> nearest_ffd_vertex(
+    const std::vector<Point>& vertex_screen_positions,
+    Point pointer_screen,
+    double hit_radius = kFfdVertexHitRadius);
+
+enum class FfdPointSelectionMode : std::uint8_t {
+    Replace,
+    Toggle,
+};
+
+std::optional<std::vector<std::size_t>> update_ffd_point_selection(
+    const std::vector<std::size_t>& current_selection,
+    std::size_t vertex_count,
+    std::size_t vertex_index,
+    FfdPointSelectionMode mode);
+std::optional<std::vector<std::size_t>> collect_ffd_vertices_in_box(
+    const std::vector<Point>& vertex_screen_positions,
+    Point first_corner,
+    Point second_corner);
+std::optional<std::vector<std::size_t>> update_ffd_box_selection(
+    const std::vector<std::size_t>& current_selection,
+    const std::vector<Point>& vertex_screen_positions,
+    Point first_corner,
+    Point second_corner,
+    bool additive);
+
+std::optional<Matrix2> make_ffd_inverse(
+    const std::vector<FfdInfluence>& influences);
+std::optional<Point> map_ffd_delta(
+    Matrix2 inverse,
+    Point world_delta);
+
+struct FfdVertexDelta {
+    std::size_t vertex_index{0U};
+    Point local_delta{};
+};
+
+std::optional<std::vector<double>> update_ffd_vertex_offsets(
+    const std::vector<double>& start_offsets,
+    const std::vector<FfdVertexDelta>& vertex_deltas);
+std::optional<std::vector<double>> update_ffd_vertex_offsets(
+    const std::vector<double>& start_offsets,
+    std::size_t vertex_index,
+    Point local_delta);
+
 enum class HitPriority : std::uint8_t {
     ConstraintTarget,
     BoneJoint,
@@ -122,6 +174,7 @@ enum class PressTarget : std::uint8_t {
     Translate,
     Rotation,
     Scale,
+    FfdVertex,
     Entity,
     Box,
 };
@@ -132,6 +185,7 @@ PressTarget resolve_press_target(
     bool translate,
     bool rotation,
     bool scale,
+    bool ffd_vertex,
     bool entity);
 
 enum class CompletionAction : std::uint8_t {

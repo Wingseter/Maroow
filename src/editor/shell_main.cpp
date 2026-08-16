@@ -603,6 +603,7 @@ ShellFrameOutcome render_shell_frame(
 
     finalize_orphaned_inspector_transform_gesture(shell_state);
     finalize_orphaned_viewport_transform_gesture(shell_state);
+    finalize_orphaned_viewport_ffd_gesture(shell_state);
     finalize_orphaned_coalesced_edit(shell_state);
 
     if (reload_requested) {

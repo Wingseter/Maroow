@@ -32,7 +32,7 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28 checkpoint or the next MAR-163 product milestone.
+Task #28/MAR-163/MAR-164 checkpoints or the next MAR-165 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -42,6 +42,35 @@ cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON
 cmake --build build-display
 ctest --test-dir build-display --output-on-failure -L display
 ```
+
+## Auto-key an attachment-local FFD vertex group
+
+Launch the canonical editor fixture, switch to Animation mode, and select the
+exact mesh Attachment that is currently displayed in the viewport:
+
+```sh
+./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow
+```
+
+Every vertex of that active mesh appears automatically. Plain-click an
+unselected handle to replace the attachment-local vertex selection. Cmd-click
+on macOS (Ctrl-click elsewhere) toggles a handle without starting a drag. Drag
+from any selected handle by at least 4px to move the complete selected group by
+one common world-space delta; a sub-threshold click on a selected handle
+collapses the selection to that vertex. Drag true empty space to box-select
+inclusive handle centers, using Cmd/Ctrl for additive boxes.
+
+The editor validates every selected vertex mapping before it materializes the
+complete effective deform vector, updates only the selected X/Y pairs, previews
+the move live, and commits one undo entry. `mesh_base/body_mesh` exercises a
+direct target; `warrior/warrior_body` keeps the displayed linked child selected
+while `deform=true` edits the immediate parent `body_mesh` timeline. Parameter
+preview affects handle positions but is not baked into animation FFD keys.
+Escape, lost context, invalid mapping, failed refresh, or downstream override
+rolls back the entire group. Vertex sub-selection is transient: it survives
+time, animation, parameter preview, undo/redo, and ordinary rebuilds for the
+same exact displayed Attachment, but is not saved and clears on context or
+successful source/project replacement.
 
 ## Minimal C++ embedding example
 

@@ -37,7 +37,8 @@ std::optional<std::size_t> preview_root_bone_index(
     const marrow::runtime::SkeletonData& skeleton);
 void apply_preview_slot_overrides(
     const ShellState& state,
-    marrow::runtime::Skeleton* skeleton);
+    marrow::runtime::Skeleton* skeleton,
+    std::optional<double> sample_time = std::nullopt);
 void apply_preview_slot_overrides(ShellState* state);
 bool apply_current_animation_state_to_preview(ShellState* state);
 bool restore_preview_playback(

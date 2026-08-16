@@ -28,6 +28,7 @@ ViewportPressTarget press_target(
     bool translate,
     bool rotation,
     bool scale,
+    bool ffd_vertex,
     bool entity);
 std::optional<ViewportTranslateAxis> hit_test_translate_gizmo(
     const ShellState& state,

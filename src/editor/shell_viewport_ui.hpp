@@ -96,5 +96,6 @@ void draw_viewport_annotations(
 void draw_viewport_window(ShellState* state);
 void draw_viewport_settings(ShellState* state);
 void finalize_orphaned_viewport_transform_gesture(ShellState* state);
+void finalize_orphaned_viewport_ffd_gesture(ShellState* state);
 
 } // namespace marrow::editor::shell

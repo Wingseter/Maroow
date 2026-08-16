@@ -1072,25 +1072,28 @@ bool validate_viewport_camera_smoke(
         camera_state.selected_timeline_track_id;
 
     if (viewport_interaction::press_target(
-            true, true, true, true, true, true) !=
+            true, true, true, true, true, true, true) !=
             ViewportPressTarget::ActiveGesture ||
         viewport_interaction::press_target(
-            false, true, true, true, true, true) !=
+            false, true, true, true, true, true, true) !=
             ViewportPressTarget::WeightBrush ||
         viewport_interaction::press_target(
-            false, false, true, true, true, true) !=
+            false, false, true, true, true, true, true) !=
             ViewportPressTarget::Translate ||
         viewport_interaction::press_target(
-            false, false, false, true, true, true) !=
+            false, false, false, true, true, true, true) !=
             ViewportPressTarget::Rotation ||
         viewport_interaction::press_target(
-            false, false, false, false, true, true) !=
+            false, false, false, false, true, true, true) !=
             ViewportPressTarget::Scale ||
         viewport_interaction::press_target(
-            false, false, false, false, false, true) !=
+            false, false, false, false, false, true, true) !=
+            ViewportPressTarget::FfdVertex ||
+        viewport_interaction::press_target(
+            false, false, false, false, false, false, true) !=
             ViewportPressTarget::Entity ||
         viewport_interaction::press_target(
-            false, false, false, false, false, false) !=
+            false, false, false, false, false, false, false) !=
             ViewportPressTarget::Box) {
         std::cerr << "Viewport scale press arbitration order changed.\n";
         return false;

@@ -130,6 +130,8 @@ bool reload_runtime_source_assets(ShellState* state) {
         return false;
     }
 
+    const auto previous_ffd_selection = state->viewport_ffd_selection;
+    const auto previous_ffd_box_selection = state->viewport_ffd_box_selection;
     const auto document_result = marrow::runtime::load_skeleton_document(
         state->load_result.project->resolved_skeleton_path());
     if (!document_result) {
@@ -161,6 +163,8 @@ bool reload_runtime_source_assets(ShellState* state) {
         const std::string reload_error = state->error_message;
         state->load_result.base_skeleton_document = previous_document;
         state->load_result.atlas_data = previous_atlas_data;
+        state->viewport_ffd_selection = previous_ffd_selection;
+        state->viewport_ffd_box_selection = previous_ffd_box_selection;
         state->error_message = reload_error;
         state->status_message = "Runtime asset hot-reload failed";
         return false;
@@ -170,6 +174,8 @@ bool reload_runtime_source_assets(ShellState* state) {
         state->load_result.base_skeleton_document = previous_document;
         state->load_result.atlas_data = previous_atlas_data;
         (void)rebuild_project_runtime(state);
+        state->viewport_ffd_selection = previous_ffd_selection;
+        state->viewport_ffd_box_selection = previous_ffd_box_selection;
         state->error_message = reload_error;
         state->status_message = "Runtime asset hot-reload failed";
         return false;
@@ -177,6 +183,8 @@ bool reload_runtime_source_assets(ShellState* state) {
 
     // Runtime source adoption may reorder or move bones. Never carry a stale
     // screen-space marquee into the newly adopted preview.
+    state->viewport_ffd_selection.reset();
+    state->viewport_ffd_box_selection.reset();
     state->viewport_box_selection.reset();
     marrow::editor::reconcile_selection_to_runtime(
         state->selection,

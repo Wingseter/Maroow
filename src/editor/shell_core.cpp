@@ -464,9 +464,21 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
         state->selected_timeline_track_id = gesture.timeline_focus_before;
         cancelled = true;
     }
+    if (state->viewport_ffd_gesture.has_value()) {
+        ViewportFfdGesture gesture =
+            std::move(*state->viewport_ffd_gesture);
+        state->viewport_ffd_gesture.reset();
+        gesture.transaction.cancel();
+        state->selection = gesture.selection_before;
+        state->viewport_ffd_selection = gesture.vertex_selection_before;
+        state->hierarchy_selection_anchor = gesture.hierarchy_anchor_before;
+        state->selected_timeline_track_id = gesture.timeline_focus_before;
+        cancelled = true;
+    }
     cancel_transaction_gesture(state->timeline_editor.retime_gesture);
     cancel_transaction_gesture(state->parameter_slider_gesture);
     cancel_transaction_gesture(state->parameter_geometry_gesture);
+    state->viewport_ffd_box_selection.reset();
     state->viewport_box_selection.reset();
     state->pointer_mediator.reset();
     sync_shell_from_editor_session(state);
@@ -543,6 +555,8 @@ bool reload_project(ShellState* state) {
 
     // A source adoption invalidates the screen-space rectangle captured by an
     // in-flight viewport box gesture, even when every selected identity survives.
+    state->viewport_ffd_selection.reset();
+    state->viewport_ffd_box_selection.reset();
     state->viewport_box_selection.reset();
     state->preview_skeleton = nullptr;
     state->animation_state = nullptr;

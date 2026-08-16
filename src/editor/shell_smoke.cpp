@@ -77,6 +77,11 @@ int run_headless_smoke(const Options& options) {
         return passed ? 0 : 1;
     }
 
+    if (!validate_viewport_ffd_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
     const bool passed =
         validate_shell_foundation_smoke(shell_state, options) &&
         validate_viewport_selection_smoke(shell_state) &&

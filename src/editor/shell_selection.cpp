@@ -16,6 +16,7 @@
 #include "shell_theme.hpp"
 #include "shell_preview.hpp"
 #include "shell_widgets.hpp"
+#include "viewport_ffd_controller.hpp"
 
 namespace marrow::editor::shell {
 
@@ -604,10 +605,15 @@ bool set_preview_skin_enabled(
         } else {
             state->preview_skin_names.erase(existing);
         }
-        return apply_preview_skin_selection(state, "Skin Preview", update_status_message);
+        const bool applied = apply_preview_skin_selection(
+            state, "Skin Preview", update_status_message);
+        if (applied) {
+            viewport_ffd::reconcile_selection(state);
+        }
+        return applied;
     }
 
-    return execute_preview_edit_action(
+    const bool applied = execute_preview_edit_action(
         state,
         EditActionKind::EditProperty,
         std::string(enabled ? "Enabled preview skin " : "Disabled preview skin ") + skin_name,
@@ -621,6 +627,10 @@ bool set_preview_skin_enabled(
                 state->preview_skin_names.erase(existing);
             }
         });
+    if (applied) {
+        viewport_ffd::reconcile_selection(state);
+    }
+    return applied;
 }
 
 bool apply_attachment_selection_to_preview_slot(
@@ -651,6 +661,7 @@ bool apply_attachment_selection_to_preview_slot(
         if (!refresh_preview_pose(state)) {
             return false;
         }
+        viewport_ffd::reconcile_selection(state);
 
         if (update_status_message) {
             std::ostringstream stream;
@@ -668,7 +679,7 @@ bool apply_attachment_selection_to_preview_slot(
 
     const std::string slot_name =
         state->load_result.skeleton_data->slots()[selection.slot_index].name;
-    return execute_preview_edit_action(
+    const bool applied = execute_preview_edit_action(
         state,
         EditActionKind::EditProperty,
         "Swapped preview attachment on " + slot_name + " to " + selection.attachment_name,
@@ -676,6 +687,10 @@ bool apply_attachment_selection_to_preview_slot(
         true,
         "Preview attachment swap failed",
         apply_selection);
+    if (applied) {
+        viewport_ffd::reconcile_selection(state);
+    }
+    return applied;
 }
 
 bool reset_preview_slot_to_skin_selection(
@@ -706,6 +721,7 @@ bool reset_preview_slot_to_skin_selection(
         if (!refresh_preview_pose(state)) {
             return false;
         }
+        viewport_ffd::reconcile_selection(state);
 
         if (update_status_message) {
             std::ostringstream stream;
@@ -722,7 +738,7 @@ bool reset_preview_slot_to_skin_selection(
     }
 
     const std::string slot_name = state->load_result.skeleton_data->slots()[slot_index].name;
-    return execute_preview_edit_action(
+    const bool applied = execute_preview_edit_action(
         state,
         EditActionKind::EditProperty,
         "Reset preview slot " + slot_name + " to the active skin composition",
@@ -730,6 +746,10 @@ bool reset_preview_slot_to_skin_selection(
         true,
         "Preview attachment reset failed",
         reset_selection);
+    if (applied) {
+        viewport_ffd::reconcile_selection(state);
+    }
+    return applied;
 }
 
 

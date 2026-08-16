@@ -180,6 +180,181 @@ bool scale_cases() {
         "uniform mapping accepted a zero-zero starting scale");
 }
 
+bool ffd_cases() {
+    const std::vector<kernel::Point> handles{
+        {10.0, 10.0},
+        {14.0, 10.0},
+        {14.0, 10.0},
+        {std::numeric_limits<double>::quiet_NaN(), 10.0}};
+    if (!check(
+            kernel::nearest_ffd_vertex(handles, {12.0, 10.0}) ==
+                std::optional<std::size_t>(0U),
+            "FFD hit did not break an equal-distance tie by lower vertex index") ||
+        !check(
+            kernel::nearest_ffd_vertex(handles, {19.9, 10.0}) ==
+                std::optional<std::size_t>(1U),
+            "FFD hit did not accept the nearest vertex inside 6px") ||
+        !check(
+            !kernel::nearest_ffd_vertex(handles, {20.1, 10.0}).has_value(),
+            "FFD hit accepted a vertex outside 6px")) {
+        return false;
+    }
+
+    const std::vector<std::size_t> selected{1U, 3U};
+    const auto replaced = kernel::update_ffd_point_selection(
+        selected, 4U, 2U, kernel::FfdPointSelectionMode::Replace);
+    const auto toggled_in = kernel::update_ffd_point_selection(
+        selected, 4U, 2U, kernel::FfdPointSelectionMode::Toggle);
+    const auto toggled_out = kernel::update_ffd_point_selection(
+        selected, 4U, 1U, kernel::FfdPointSelectionMode::Toggle);
+    if (!check(
+            replaced == std::optional<std::vector<std::size_t>>(
+                std::vector<std::size_t>{2U}),
+            "FFD point replace did not produce one stable vertex") ||
+        !check(
+            toggled_in ==
+                std::optional<std::vector<std::size_t>>(
+                    std::vector<std::size_t>{1U, 2U, 3U}),
+            "FFD point toggle did not insert in sorted order") ||
+        !check(
+            toggled_out ==
+                std::optional<std::vector<std::size_t>>(
+                    std::vector<std::size_t>{3U}),
+            "FFD point toggle did not remove the selected vertex") ||
+        !check(
+            !kernel::update_ffd_point_selection(
+                {1U, 1U}, 4U, 2U, kernel::FfdPointSelectionMode::Toggle),
+            "FFD point selection accepted duplicate input") ||
+        !check(
+            !kernel::update_ffd_point_selection(
+                selected, 4U, 4U, kernel::FfdPointSelectionMode::Replace),
+            "FFD point selection accepted an out-of-range vertex")) {
+        return false;
+    }
+
+    const std::vector<kernel::Point> box_handles{
+        {0.0, 0.0}, {10.0, 10.0}, {20.0, 20.0}, {10.0, 20.0}};
+    const auto forward_box = kernel::collect_ffd_vertices_in_box(
+        box_handles, {10.0, 10.0}, {20.0, 20.0});
+    const auto reverse_box = kernel::collect_ffd_vertices_in_box(
+        box_handles, {20.0, 20.0}, {10.0, 10.0});
+    const auto plain_empty = kernel::update_ffd_box_selection(
+        selected, box_handles, {30.0, 30.0}, {40.0, 40.0}, false);
+    const auto additive_empty = kernel::update_ffd_box_selection(
+        selected, box_handles, {30.0, 30.0}, {40.0, 40.0}, true);
+    const auto additive_box = kernel::update_ffd_box_selection(
+        {0U, 2U}, box_handles, {10.0, 10.0}, {20.0, 20.0}, true);
+    if (!check(
+            forward_box ==
+                std::optional<std::vector<std::size_t>>(
+                    std::vector<std::size_t>{1U, 2U, 3U}) &&
+                reverse_box == forward_box,
+            "FFD box collection was not forward/reverse inclusive and sorted") ||
+        !check(
+            plain_empty == std::optional<std::vector<std::size_t>>(
+                std::vector<std::size_t>{}),
+            "plain empty FFD box did not clear selection") ||
+        !check(
+            additive_empty ==
+                std::optional<std::vector<std::size_t>>(selected),
+            "additive empty FFD box changed selection") ||
+        !check(
+            additive_box ==
+                std::optional<std::vector<std::size_t>>(
+                    std::vector<std::size_t>{0U, 1U, 2U, 3U}),
+            "additive FFD box did not merge into sorted unique order") ||
+        !check(
+            !kernel::collect_ffd_vertices_in_box(
+                {{0.0, 0.0}, {std::numeric_limits<double>::quiet_NaN(), 1.0}},
+                {},
+                {2.0, 2.0}),
+            "FFD box collection accepted a non-finite handle")) {
+        return false;
+    }
+
+    const auto one = kernel::make_ffd_inverse({{{2.0, 0.0, 0.0, 4.0}, 1.0}});
+    const auto reflected = kernel::make_ffd_inverse({{{-2.0, 0.0, 0.0, 3.0}, 1.0}});
+    const auto weighted = kernel::make_ffd_inverse({
+        {{2.0, 0.0, 0.0, 1.0}, 0.25},
+        {{4.0, 0.0, 0.0, 3.0}, 0.75}});
+    const auto one_delta = one.has_value()
+        ? kernel::map_ffd_delta(*one, {4.0, 8.0})
+        : std::nullopt;
+    const auto reflected_delta = reflected.has_value()
+        ? kernel::map_ffd_delta(*reflected, {-4.0, 6.0})
+        : std::nullopt;
+    const auto weighted_delta = weighted.has_value()
+        ? kernel::map_ffd_delta(*weighted, {7.0, 5.0})
+        : std::nullopt;
+    if (!check(
+            one_delta.has_value() && near(one_delta->x, 2.0) && near(one_delta->y, 2.0),
+            "single-influence FFD inverse mapping failed") ||
+        !check(
+            reflected_delta.has_value() && near(reflected_delta->x, 2.0) &&
+                near(reflected_delta->y, 2.0),
+            "reflected FFD inverse mapping failed") ||
+        !check(
+            weighted_delta.has_value() && near(weighted_delta->x, 2.0) &&
+                near(weighted_delta->y, 2.0),
+            "weighted non-uniform FFD inverse mapping failed")) {
+        return false;
+    }
+
+    const std::vector<double> start{0.0, 1.0, 2.0, 3.0, -4.0, 5.0};
+    const auto updated = kernel::update_ffd_vertex_offsets(start, 1U, {7.0, -11.0});
+    const auto group_updated = kernel::update_ffd_vertex_offsets(
+        start,
+        std::vector<kernel::FfdVertexDelta>{
+            {2U, {1.0, -2.0}},
+            {0U, {3.0, 4.0}}});
+    if (!check(
+            updated.has_value() && (*updated)[0] == start[0] &&
+                (*updated)[1] == start[1] && (*updated)[2] == 9.0 &&
+                (*updated)[3] == -8.0 && (*updated)[4] == start[4] &&
+                (*updated)[5] == start[5],
+            "FFD full-vector update changed an untouched component") ||
+        !check(
+            group_updated.has_value() &&
+                *group_updated == std::vector<double>({3.0, 5.0, 2.0, 3.0, -3.0, 3.0}),
+            "FFD group update did not atomically update selected pairs")) {
+        return false;
+    }
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return check(
+               !kernel::make_ffd_inverse({{{1.0, 2.0, 2.0, 4.0}, 1.0}}),
+               "singular FFD matrix was accepted") &&
+        check(!kernel::make_ffd_inverse({}), "empty FFD influences were accepted") &&
+        check(
+               !kernel::make_ffd_inverse({{{}, 0.5}}),
+               "non-normalized FFD influences were accepted") &&
+        check(
+               !kernel::make_ffd_inverse({{{1.0, 0.0, 0.0, nan}, 1.0}}),
+               "non-finite FFD influence was accepted") &&
+        check(
+               !kernel::update_ffd_vertex_offsets({0.0, 0.0, nan, 0.0}, 0U, {}),
+               "non-finite untouched FFD component was accepted") &&
+        check(
+               !kernel::update_ffd_vertex_offsets({0.0, 0.0}, 1U, {}),
+               "out-of-range FFD vertex update was accepted") &&
+        check(
+               !kernel::update_ffd_vertex_offsets(
+                   start,
+                   std::vector<kernel::FfdVertexDelta>{
+                       {0U, {1.0, 1.0}}, {0U, {2.0, 2.0}}}),
+               "duplicate FFD group update was accepted") &&
+        check(
+               !kernel::update_ffd_vertex_offsets(
+                   start,
+                   std::vector<kernel::FfdVertexDelta>{{3U, {1.0, 1.0}}}),
+               "out-of-range FFD group update was accepted") &&
+        check(
+               !kernel::update_ffd_vertex_offsets(
+                   start,
+                   std::vector<kernel::FfdVertexDelta>{{0U, {nan, 1.0}}}),
+               "non-finite FFD group update was accepted");
+}
+
 bool arbitration_and_completion_cases() {
     struct PressCase {
         bool active;
@@ -187,17 +362,19 @@ bool arbitration_and_completion_cases() {
         bool translate;
         bool rotation;
         bool scale;
+        bool ffd_vertex;
         bool entity;
         kernel::PressTarget expected;
     };
     const std::vector<PressCase> press_cases{
-        {true, true, true, true, true, true, kernel::PressTarget::ActiveGesture},
-        {false, true, true, true, true, true, kernel::PressTarget::WeightBrush},
-        {false, false, true, true, true, true, kernel::PressTarget::Translate},
-        {false, false, false, true, true, true, kernel::PressTarget::Rotation},
-        {false, false, false, false, true, true, kernel::PressTarget::Scale},
-        {false, false, false, false, false, true, kernel::PressTarget::Entity},
-        {false, false, false, false, false, false, kernel::PressTarget::Box},
+        {true, true, true, true, true, true, true, kernel::PressTarget::ActiveGesture},
+        {false, true, true, true, true, true, true, kernel::PressTarget::WeightBrush},
+        {false, false, true, true, true, true, true, kernel::PressTarget::Translate},
+        {false, false, false, true, true, true, true, kernel::PressTarget::Rotation},
+        {false, false, false, false, true, true, true, kernel::PressTarget::Scale},
+        {false, false, false, false, false, true, true, kernel::PressTarget::FfdVertex},
+        {false, false, false, false, false, false, true, kernel::PressTarget::Entity},
+        {false, false, false, false, false, false, false, kernel::PressTarget::Box},
     };
     for (const PressCase& test : press_cases) {
         if (!check(
@@ -207,6 +384,7 @@ bool arbitration_and_completion_cases() {
                     test.translate,
                     test.rotation,
                     test.scale,
+                    test.ffd_vertex,
                     test.entity) == test.expected,
                 "viewport press precedence changed")) {
             return false;
@@ -268,7 +446,7 @@ bool arbitration_and_completion_cases() {
 
 int main() {
     if (!rotation_cases() || !rotation_drag_cases() || !scale_cases() ||
-        !arbitration_and_completion_cases()) {
+        !ffd_cases() || !arbitration_and_completion_cases()) {
         return 1;
     }
     std::cout << "Viewport interaction kernel tests passed.\n";

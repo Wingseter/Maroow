@@ -406,6 +406,16 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     hot_reload_state.hierarchy_selection_anchor = selected_arm;
     hot_reload_state.viewport_box_selection = ViewportBoxSelectionGesture{
         ImVec2(10.0f, 20.0f), ImVec2(80.0f, 90.0f), false, true};
+    hot_reload_state.viewport_ffd_selection = ViewportFfdSelection{
+        ViewportFfdSelectionScope{
+            0U, std::nullopt, "source-display", "source-deform", 2U},
+        {0U, 1U}};
+    hot_reload_state.viewport_ffd_box_selection = ViewportFfdBoxSelectionGesture{
+        hot_reload_state.viewport_ffd_selection->scope,
+        ImVec2(12.0f, 22.0f),
+        ImVec2(82.0f, 92.0f),
+        false,
+        true};
     if (!rewrite_selection_source_for_reload(
             temp_skeleton,
             SelectionSourceMutation::ReorderSurvivors,
@@ -449,6 +459,8 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
                 selected_temp_ik} ||
         reordered_active == nullptr ||
         *reordered_active != marrow::editor::SelectionItem(selected_temp_ik) ||
+        hot_reload_state.viewport_ffd_selection.has_value() ||
+        hot_reload_state.viewport_ffd_box_selection.has_value() ||
         hot_reload_state.viewport_box_selection.has_value() ||
         hot_reload_state.hierarchy_selection_anchor !=
             std::optional<marrow::editor::SelectionItem>(selected_arm) ||
@@ -580,6 +592,16 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     hot_reload_state.hierarchy_selection_anchor = selected_arm;
     hot_reload_state.viewport_box_selection = ViewportBoxSelectionGesture{
         ImVec2(30.0f, 40.0f), ImVec2(130.0f, 140.0f), true, true};
+    hot_reload_state.viewport_ffd_selection = ViewportFfdSelection{
+        ViewportFfdSelectionScope{
+            0U, std::nullopt, "project-display", "project-deform", 2U},
+        {0U, 1U}};
+    hot_reload_state.viewport_ffd_box_selection = ViewportFfdBoxSelectionGesture{
+        hot_reload_state.viewport_ffd_selection->scope,
+        ImVec2(32.0f, 42.0f),
+        ImVec2(132.0f, 142.0f),
+        true,
+        true};
     if (!reload_project(&hot_reload_state)) {
         std::cerr << "Project reload failed during derived-cache smoke.\n";
         return false;
@@ -593,6 +615,8 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     if (hot_reload_state.selection.items() != selection_before_project_reload ||
         hot_reload_state.selection.active() == nullptr ||
         *hot_reload_state.selection.active() != active_before_project_reload ||
+        hot_reload_state.viewport_ffd_selection.has_value() ||
+        hot_reload_state.viewport_ffd_box_selection.has_value() ||
         hot_reload_state.viewport_box_selection.has_value() ||
         hot_reload_state.hierarchy_selection_anchor !=
             std::optional<marrow::editor::SelectionItem>(selected_arm) ||
@@ -618,6 +642,16 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         hot_reload_state.timeline_track_cache.generation;
     const std::uint64_t stable_slot_cache_generation =
         hot_reload_state.slot_derived_cache.generation;
+    hot_reload_state.viewport_ffd_selection = ViewportFfdSelection{
+        ViewportFfdSelectionScope{
+            0U, std::nullopt, "failed-display", "failed-deform", 2U},
+        {1U}};
+    hot_reload_state.viewport_ffd_box_selection = ViewportFfdBoxSelectionGesture{
+        hot_reload_state.viewport_ffd_selection->scope,
+        ImVec2(34.0f, 44.0f),
+        ImVec2(134.0f, 144.0f),
+        true,
+        true};
     if (!write_text_file(temp_skeleton, "{}\n", &rewrite_error)) {
         std::cerr << rewrite_error << '\n';
         return false;
@@ -634,6 +668,20 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         hot_reload_state.selection.active() == nullptr ||
         *hot_reload_state.selection.active() != stable_active_selection ||
         hot_reload_state.hierarchy_selection_anchor != stable_hierarchy_anchor ||
+        !hot_reload_state.viewport_ffd_selection.has_value() ||
+        hot_reload_state.viewport_ffd_selection->scope.display_attachment_name !=
+            "failed-display" ||
+        hot_reload_state.viewport_ffd_selection->scope.deform_attachment_name !=
+            "failed-deform" ||
+        hot_reload_state.viewport_ffd_selection->vertex_indices !=
+            std::vector<std::size_t>{1U} ||
+        !hot_reload_state.viewport_ffd_box_selection.has_value() ||
+        hot_reload_state.viewport_ffd_box_selection->scope.display_attachment_name !=
+            "failed-display" ||
+        hot_reload_state.viewport_ffd_box_selection->start.x != 34.0f ||
+        hot_reload_state.viewport_ffd_box_selection->current.y != 144.0f ||
+        !hot_reload_state.viewport_ffd_box_selection->additive ||
+        !hot_reload_state.viewport_ffd_box_selection->dragged ||
         hot_reload_state.error_message.empty() ||
         hot_reload_state.timeline_track_cache.generation !=
             stable_timeline_cache_generation ||
