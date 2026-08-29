@@ -11,6 +11,7 @@
 
 #include "shell_derived_cache.hpp"
 #include "shell_preferences.hpp"
+#include "shell_project_panels.hpp"
 #include "shell_selection.hpp"
 #include "timeline_controller.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
@@ -3751,6 +3752,110 @@ bool validate_timeline_curve_mode_shell_smoke(
                 std::cerr << "A preset on an auto key must demote it in one entry.\n";
                 return false;
             }
+        }
+    }
+
+    // --- The animation-duration gesture is a wired trigger --------------
+    //
+    // A duration change moves no key time and no key value, so with consistent
+    // automatic curves it must resolve nothing at all. The seam is wired anyway
+    // because criterion 3 names duration and because MAR-172's managed boundary
+    // key will live at `duration` — and a deliberately stale pair proves the
+    // call really happens rather than being asserted into existence.
+    {
+        const auto first = key_of("bone:0:Translate", 0U);
+        if (!first.has_value()) {
+            std::cerr << "Duration trigger case lost its root Translate key.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:0:Translate");
+        state.timeline_editor.selected_keys = {*first};
+        state.timeline_editor.active_key = *first;
+        const auto seeded = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            TimelineScalarComponent::X);
+        if (!seeded.applied && seeded.error.empty() &&
+            !stored("root", TransformChannel::Translate, 0U).has_value()) {
+            std::cerr << "Duration trigger case could not seed an automatic key: "
+                      << seeded.error << '\n';
+            return false;
+        }
+        const auto consistent = stored("root", TransformChannel::Translate, 0U);
+        if (!consistent.has_value() ||
+            consistent->curve_mode != TimelineCurveMode::Auto) {
+            std::cerr << "Duration trigger case needs an automatic root Translate key.\n";
+            return false;
+        }
+
+        // 1. Consistent automatic curves: the duration change must resolve
+        //    nothing, so every stored easing stays byte-identical.
+        const marrow::runtime::Interpolation before_duration = consistent->interpolation;
+        const std::size_t undo_before = state.session.undo_count();
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 2.5) ||
+            !finish_animation_duration_gesture(&state, true)) {
+            std::cerr << "Duration trigger case could not run the duration gesture.\n";
+            return false;
+        }
+        const auto after_duration = stored("root", TransformChannel::Translate, 0U);
+        if (state.session.undo_count() != undo_before + 1U ||
+            !after_duration.has_value() ||
+            after_duration->curve_mode != TimelineCurveMode::Auto ||
+            !same_easing(after_duration->interpolation, before_duration)) {
+            std::cerr << "A duration change must resolve nothing with consistent curves.\n";
+            return false;
+        }
+
+        // 2. A deliberately stale mode/curve pair - legal data, because load
+        //    never resolves - is reconciled by the next auto-affecting
+        //    transaction. This is what proves the resolver is actually wired
+        //    into the shell's duration gesture rather than only the Agent's.
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "Inject a stale automatic curve",
+                "curve-mode-smoke:stale",
+                false,
+                marrow::editor::EditImpact::Project});
+            if (!transaction) {
+                std::cerr << "Duration trigger case could not inject a stale curve.\n";
+                return false;
+            }
+            auto* edit = transaction.project()->find_transform_timeline_edit(
+                "idle", "root", TransformChannel::Translate);
+            if (edit == nullptr || edit->keyframes.empty()) {
+                transaction.cancel();
+                sync_shell_from_editor_session(&state);
+                std::cerr << "Duration trigger case lost the root Translate track.\n";
+                return false;
+            }
+            edit->keyframes.front().interpolation =
+                marrow::runtime::Interpolation::cubic_bezier(0.25, 0.1, 0.75, 0.9);
+            if (!transaction.commit()) {
+                std::cerr << "Duration trigger case could not commit its stale curve.\n";
+                return false;
+            }
+            sync_shell_from_editor_session(&state);
+        }
+        const auto stale = stored("root", TransformChannel::Translate, 0U);
+        if (!stale.has_value() || stale->curve_mode != TimelineCurveMode::Auto ||
+            same_easing(stale->interpolation, before_duration)) {
+            std::cerr << "Duration trigger case did not produce a stale mode/curve pair.\n";
+            return false;
+        }
+        const std::size_t stale_undo_before = state.session.undo_count();
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 3.0) ||
+            !finish_animation_duration_gesture(&state, true)) {
+            std::cerr << "Duration trigger case could not run the reconciling gesture.\n";
+            return false;
+        }
+        const auto reconciled = stored("root", TransformChannel::Translate, 0U);
+        if (state.session.undo_count() != stale_undo_before + 1U ||
+            !reconciled.has_value() ||
+            !same_easing(reconciled->interpolation, before_duration)) {
+            std::cerr << "The shell duration gesture did not resolve automatic curves.\n";
+            return false;
         }
     }
 

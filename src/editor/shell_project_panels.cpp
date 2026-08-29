@@ -12,6 +12,7 @@
 #include "imgui_internal.h"
 
 #include "agent_socket.hpp"
+#include "timeline_controller.hpp"
 #include "shell_asset_watch.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
@@ -386,6 +387,24 @@ bool apply_animation_duration_gesture(ShellState* state, double duration) {
     }
     if (!mutation.changed) {
         return true;
+    }
+
+    // MAR-171: a duration change moves no key time and no key value, so with
+    // consistent automatic curves this resolves nothing. The seam is wired
+    // anyway because criterion 3 names duration, because it costs one call, and
+    // because it is precisely where MAR-172's managed boundary key will live.
+    // The Agent's `animation.set_duration` calls the same resolver, so both
+    // surfaces agree.
+    std::string auto_curve_error;
+    if (!resolve_timeline_auto_curves(
+            gesture.transaction.project(), gesture.animation_name, &auto_curve_error)) {
+        AnimationDurationGesture cancelled = std::move(gesture);
+        state->animation_duration_gesture.reset();
+        cancelled.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
     }
 
     const marrow::editor::SessionResult refreshed = gesture.transaction.refresh_runtime();

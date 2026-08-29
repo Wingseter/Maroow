@@ -1916,6 +1916,61 @@ int main(int argc, char** argv) {
             "timeline.set_curve_mode back to manual",
             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
                 kSpineRotate + "," + kSpineRotateSecond + "],\"mode\":\"manual\"}}");
+
+        // An explicitly supplied easing on an AUTOMATIC slot-colour key must
+        // not be silently discarded by the resolver that runs after it.
+        // `set_slot_color_keyframe` writes `interpolation` directly rather than
+        // through `set_keyframe_interpolation()`, so it carries the demotion
+        // itself, exactly as the numeric inspector does.
+        {
+            const char* kBodyColor =
+                "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"time\":0.0}";
+            harness.invoke(
+                "timeline.set_curve_mode auto on a slot colour key",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBodyColor + "],\"mode\":\"auto\",\"driver\":\"r\"}}");
+
+            // Colour only, no easing argument: the key stays automatic and its
+            // curve is re-resolved against the new driver value.
+            harness.invoke(
+                "set_slot_color_keyframe without an easing keeps auto",
+                "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":0.0,\"color\":{\"r\":0.5,\"g\":0.5,\"b\":0.5,\"a\":1.0}}}");
+            const DispatchObservation still_auto = harness.invoke(
+                "slot colour key still auto after a colour-only write",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBodyColor + "],\"mode\":\"auto\",\"dry_run\":true}}");
+            harness.expect(
+                string_is(first_key_member(still_auto, "previous_mode"), "auto"),
+                "set_slot_color_keyframe colour-only",
+                "a colour-only write must leave an automatic key automatic");
+
+            // An explicit easing is an absolute authored curve: it demotes the
+            // key and survives the resolver that follows it.
+            harness.invoke(
+                "set_slot_color_keyframe with an explicit easing demotes",
+                "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":0.0,"
+                "\"color\":{\"r\":0.5,\"g\":0.5,\"b\":0.5,\"a\":1.0},"
+                "\"interpolation\":[0.2,0.3,0.7,0.8]}}");
+            const DispatchObservation demoted_color = harness.invoke(
+                "slot colour easing survived the resolver",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBodyColor + "],\"mode\":\"auto\",\"dry_run\":true}}");
+            harness.expect(
+                string_is(first_key_member(demoted_color, "previous_mode"), "manual") &&
+                    curve_matches(
+                        first_key_member(demoted_color, "previous_interpolation"),
+                        {0.2, 0.3, 0.7, 0.8}),
+                "set_slot_color_keyframe explicit easing",
+                "an explicitly supplied easing was silently discarded by the resolver");
+
+            harness.invoke("undo the explicit slot colour easing", "{\"op\":\"undo\"}");
+            harness.invoke("undo the colour-only slot write", "{\"op\":\"undo\"}");
+            harness.invoke("undo the slot colour auto mode", "{\"op\":\"undo\"}");
+        }
+
         harness.invoke("undo back to manual", "{\"op\":\"undo\"}");
         harness.invoke("undo the automatic application", "{\"op\":\"undo\"}");
     }

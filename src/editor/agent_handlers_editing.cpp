@@ -1950,6 +1950,18 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (!interpolation.has_value()) {
             return make_error(std::move(interpolation_error), op, spec);
         }
+        // MAR-171: `interpolation_arg()` returns Linear for an ABSENT member,
+        // so "the caller asked for this curve" and "the caller said nothing"
+        // are only distinguishable here. An explicitly supplied easing is an
+        // absolute authored curve and must demote the key, exactly as
+        // `timeline.set_interpolation` does; without that the resolver below
+        // would silently overwrite it and the call would report `no_change`.
+        // An absent member leaves an automatic key automatic, so a colour-only
+        // write still re-resolves against the value it just changed.
+        const json::Value* supplied_interpolation =
+            json::find_member(*args, "interpolation");
+        const bool interpolation_was_supplied =
+            supplied_interpolation != nullptr && !supplied_interpolation->is_null();
         json::Value::Object preview;
         preview.emplace("dry_run", bool_value(bool_arg(args, "dry_run")));
         preview.emplace("slot", string_value(std::string(*slot_name)));
@@ -1987,6 +1999,9 @@ AgentDispatchResult handle_timeline_editing_operation(
         key_it->time = *time;
         key_it->color = *color;
         key_it->interpolation = *interpolation;
+        if (interpolation_was_supplied) {
+            key_it->curve_mode = marrow::editor::TimelineCurveMode::Manual;
+        }
         if (const std::string auto_curve_error =
                 resolve_agent_auto_curves(transaction.project());
             !auto_curve_error.empty()) {
