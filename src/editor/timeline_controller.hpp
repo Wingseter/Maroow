@@ -137,16 +137,6 @@ struct TimelineCurvePresetResult {
 };
 
 /**
- * @brief Applies one fixed preset to every compatible selected key.
- *
- * Draw-order, event, and slot-attachment selections are skipped rather than
- * rejected, duplicates are collapsed, runtime-only tracks are materialized, and
- * the whole write is one transaction with live preview and one history entry
- * whatever the key count. A selection with no compatible key, or a selection
- * already carrying the preset, leaves the project and the history untouched.
- * Applying a preset never changes the remembered default curve.
- */
-/**
  * @brief How many selected keys the preset row would actually write.
  *
  * Shares one definition of "compatible selected key" with
@@ -158,6 +148,16 @@ std::size_t compatible_curve_preset_key_count(
     const ShellState& state,
     const std::vector<TimelineTrackRow>& tracks);
 
+/**
+ * @brief Applies one fixed preset to every compatible selected key.
+ *
+ * Draw-order, event, and slot-attachment selections are skipped rather than
+ * rejected, duplicates are collapsed, runtime-only tracks are materialized, and
+ * the whole write is one transaction with live preview and one history entry
+ * whatever the key count. A selection with no compatible key, or a selection
+ * already carrying the preset, leaves the project and the history untouched.
+ * Applying a preset never changes the remembered default curve.
+ */
 TimelineCurvePresetResult apply_timeline_curve_preset(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks,

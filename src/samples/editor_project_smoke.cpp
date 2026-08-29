@@ -3446,6 +3446,53 @@ bool validate_mar170_curve_presets(
         }
     }
 
+    // --- Every newly authored continuous segment takes the remembered
+    // default, whichever shell gesture authored it. `upsert_transform_keyframe()`
+    // is the shared primitive behind the viewport gizmos and the Inspector
+    // fields, so it takes the seed as an argument: the shell passes the
+    // preference and the Agent keeps the reproducible Linear default. ---
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        const auto& skeleton = *project_result.skeleton_data;
+
+        // No argument: the Agent's contract. A new key is Linear.
+        const auto& agent_key = marrow::editor::upsert_transform_keyframe(
+            project, skeleton, "idle", "spine",
+            TransformTimelineChannel::Rotate, 0.135,
+            marrow::editor::TransformKeyframePatch{11.0, std::nullopt, std::nullopt});
+        if (agent_key.interpolation.kind() != InterpolationKind::Linear) {
+            std::cerr << "MAR-170 changed the default easing of an agent-created "
+                         "transform key.\n";
+            return false;
+        }
+
+        // Explicit seed: the shell's contract. A new key takes the preset.
+        const auto& seeded_key = marrow::editor::upsert_transform_keyframe(
+            project, skeleton, "idle", "spine",
+            TransformTimelineChannel::Rotate, 0.145,
+            marrow::editor::TransformKeyframePatch{12.0, std::nullopt, std::nullopt},
+            marrow::editor::curve_preset_interpolation(CurvePreset::EaseOut));
+        if (curve_preset_of(seeded_key.interpolation) !=
+            std::optional<CurvePreset>(CurvePreset::EaseOut)) {
+            std::cerr << "MAR-170 did not seed a newly inserted transform key with the "
+                         "remembered default.\n";
+            return false;
+        }
+
+        // An existing key keeps its own curve: a seed initializes, never rewrites.
+        const auto& updated_key = marrow::editor::upsert_transform_keyframe(
+            project, skeleton, "idle", "spine",
+            TransformTimelineChannel::Rotate, 0.135,
+            marrow::editor::TransformKeyframePatch{13.0, std::nullopt, std::nullopt},
+            marrow::editor::curve_preset_interpolation(CurvePreset::EaseIn));
+        if (updated_key.interpolation.kind() != InterpolationKind::Linear ||
+            updated_key.angle != 13.0) {
+            std::cerr << "MAR-170 rewrote an existing key's curve while updating its "
+                         "value.\n";
+            return false;
+        }
+    }
+
     // --- Save/reload/export on the real fixture: a preset must survive the
     // project writer, the project loader, the runtime JSON encoder, and the v2
     // binary encoder as the same preset. The exported artifact must carry the

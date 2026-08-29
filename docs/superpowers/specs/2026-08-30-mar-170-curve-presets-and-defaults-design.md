@@ -598,17 +598,57 @@ asserts both survive verbatim.
 
 ## 9. Seeding Newly Authored Keys
 
-### 9.1 The three sites
+### 9.1 The seeding sites
 
-`add_timeline_key_at_playhead()` in `src/editor/timeline_controller.cpp` is the
-shell's only key-creation path. Its three `Interpolation::linear()` literals —
-in `sample_transform_keyframe()`, in `sample_deform_keyframe()`, and in the
-Slot Color branch of the `visit_editable_timeline_keys()` lambda — become
+> **Correction (review, 2026-08-30).** This section originally asserted that
+> `add_timeline_key_at_playhead()` is "the shell's only key-creation path".
+> That premise is **false**, and it caused four further creation paths to be
+> missed. The corrected list is below. The premise, not the omission, was the
+> defect: a claim of exhaustiveness must be produced by a sweep, not asserted.
+
+`add_timeline_key_at_playhead()` in `src/editor/timeline_controller.cpp` is
+**one** of five shell key-creation paths. Its three `Interpolation::linear()`
+literals — in `sample_transform_keyframe()`, in `sample_deform_keyframe()`, and
+in the Slot Color branch of the `visit_editable_timeline_keys()` lambda — become
 `curve_preset_interpolation(state.preferences.default_curve)`.
+
+Four gesture-driven paths author a key when the playhead sits at a time that has
+none, and they take the same seed:
+
+| Path | Family | Creation site |
+| --- | --- | --- |
+| `add_timeline_key_at_playhead()` | Transform, Deform, Slot Color | `timeline_controller.cpp` (the three literals above) |
+| Viewport FFD vertex drag | Deform | `viewport_ffd_controller.cpp` `upsert_deform_keyframe()` |
+| Viewport translate/rotate/scale gizmo drag | Transform | `viewport_interaction_controller.cpp`, three calls |
+| Inspector transform fields | Transform | `shell_inspector.cpp` |
+
+The last three funnel into the shared UI-free `upsert_transform_keyframe()` /
+`upsert_deform_keyframe()` primitives. Those primitives do **not** read the
+preference: each gains a trailing `new_key_interpolation` argument that defaults
+to Linear, and only the shell call sites pass
+`curve_preset_interpolation(state->preferences.default_curve)`. That keeps three
+properties simultaneously true — the Agent's `set_transform` keeps its
+reproducible Linear default (§9.2, §18.8), `marrow_editor` still never reads a
+preference so MAR-156's isolation stays one-directional (§6.4), and every GUI
+gesture that authors a new continuous segment agrees with every other one.
+
+The seed initializes an **inserted** key only. Both primitives return before the
+seed when a key within `1e-6` seconds already exists, so a gesture that edits an
+existing key never rewrites the curve that key already carries. This is what
+criterion 4's "never rewrites existing curves" means at the gesture layer.
 
 Draw Order, Event, and Slot Attachment branches are untouched because those
 structs have no `interpolation` member. The compiler enforces that; there is no
 runtime branch to get wrong.
+
+**Why Deform is seeded rather than excluded.** MAR-171 excludes Deform from
+*automatic* curves because a monotone tangent fit needs a canonical driver
+scalar and a vertex-offset vector has none. A **fixed** preset needs no scalar
+at all: MAR-170 already seeds Deform keys from the default in
+`sample_deform_keyframe()` and already applies presets to Deform keys selected
+in the Dopesheet (§3.1). Excluding the FFD path alone would therefore not remove
+the inconsistency — it would relocate it, so that adding a Deform key at the
+playhead gave Ease while dragging a vertex gave Linear on the same track.
 
 ### 9.2 What is deliberately *not* seeded
 
@@ -619,6 +659,8 @@ runtime branch to get wrong.
 | MAR-169's Linear/Stepped → Cubic conversion seed `[1/3, 1/3, 2/3, 2/3]` | unchanged | That seed is chosen precisely because it evaluates identically to Linear, so grabbing a handle changes nothing until the pointer moves (MAR-169 §7.6). Seeding Ease there would make merely *touching* a handle jump the curve |
 | Inserting a key inside an existing segment | the new key gets the default, the preceding key keeps its own curve | Criterion 3 says the default initializes newly authored segments. Shape-preserving insertion is a different feature and belongs with MAR-171's auto mode (§18.7) |
 | `--create` minimal project generation | unchanged | Fixture generation must be byte-deterministic across machines and must not read a user settings file |
+| A gesture landing on a time that already has a key | that key keeps its own curve | The seed initializes a newly inserted key; both upsert primitives return before it when a key exists within `1e-6` seconds |
+| The per-key `Interpolation` combo and `Bezier X1/Y1/X2/Y2` fields in `shell_timeline.cpp` | unchanged | They rewrite an existing key's curve rather than authoring one, and MAR-169 §16 already deferred folding them onto the shared primitive (§3.3) |
 
 ### 9.3 A `Stepped` default is legal
 

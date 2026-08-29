@@ -19,6 +19,7 @@
 #include "shell_timeline.hpp"
 #include "shell_viewport_ui.hpp"
 #include "shell_widgets.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor::shell {
 
@@ -421,7 +422,10 @@ bool apply_inspector_transform_drag(
             state->load_result.skeleton_data->bones()[bone_index].name,
             channel,
             state->timeline_time_seconds,
-            patch);
+            patch,
+            // MAR-170: an Inspector edit at a time with no key authors one.
+            marrow::editor::curve_preset_interpolation(
+                state->preferences.default_curve));
         const marrow::editor::SessionResult refresh =
             gesture.transaction.refresh_runtime();
         if (!refresh) {

@@ -505,6 +505,10 @@ bool validate_viewport_camera_smoke(
 
     const std::string rotation_project_before =
         marrow::editor::serialize_project(*camera_state.session.project());
+    // MAR-170: a viewport gizmo drag at a time with no key authors one, so it
+    // is a key-creation path and must take the remembered default curve. Set in
+    // memory only; run_headless_smoke() already redirects MARROW_CONFIG_HOME.
+    camera_state.preferences.default_curve = marrow::editor::CurvePreset::EaseInOut;
     if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
@@ -566,6 +570,23 @@ bool validate_viewport_camera_smoke(
         std::cerr << "Viewport rotation did not commit one raw multi-turn undo item.\n";
         return false;
     }
+    {
+        const auto* seeded_key = root_rotate_edit == nullptr ? nullptr : [&] {
+            for (const auto& key : root_rotate_edit->keyframes) {
+                if (std::abs(key.time - 0.37) <= 1e-6) return &key;
+            }
+            return static_cast<const marrow::editor::TransformKeyframeEdit*>(nullptr);
+        }();
+        if (seeded_key == nullptr ||
+            marrow::editor::curve_preset_of(seeded_key->interpolation) !=
+                std::optional<marrow::editor::CurvePreset>(
+                    marrow::editor::CurvePreset::EaseInOut)) {
+            std::cerr << "A Transform key authored by a viewport gizmo drag did not "
+                         "take the remembered default curve.\n";
+            return false;
+        }
+    }
+    camera_state.preferences.default_curve = marrow::editor::CurvePreset::Linear;
 
     if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,

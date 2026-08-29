@@ -1410,6 +1410,22 @@ bool render_headless_smoke_frames(
             (preset_stats.first_preset_min_x + preset_stats.first_preset_max_x) * 0.5f,
             (preset_stats.first_preset_min_y + preset_stats.first_preset_max_y) * 0.5f);
         render_graph_frame(nullptr);
+        render_graph_frame(nullptr);
+        // The disabled row must teach its constraint on EVERY button, not only
+        // on the last one: reading the hover state after EndDisabled() tested
+        // the final SmallButton and overwrote that button's own tooltip.
+        // A tooltip window persists once created, so this asserts it was
+        // submitted in the frame just rendered rather than merely existing.
+        {
+            const ImGuiWindow* disabled_tooltip =
+                ImGui::FindWindowByName("##Tooltip_00");
+            if (disabled_tooltip == nullptr ||
+                disabled_tooltip->LastFrameActive != ImGui::GetFrameCount()) {
+                std::cerr << "Hovering the first disabled preset button produced no "
+                             "guidance tooltip.\n";
+                return false;
+            }
+        }
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
         render_graph_frame(nullptr);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);

@@ -5878,7 +5878,8 @@ TransformKeyframeEdit& upsert_transform_keyframe(
     std::string_view bone_name,
     TransformTimelineChannel channel,
     double time,
-    const TransformKeyframePatch& patch) {
+    const TransformKeyframePatch& patch,
+    runtime::Interpolation new_key_interpolation) {
     constexpr double kKeyTimeEpsilon = 1e-6;
 
     TransformTimelineEdit* edit = ensure_transform_timeline_edit(
@@ -5903,7 +5904,9 @@ TransformKeyframeEdit& upsert_transform_keyframe(
             });
         TransformKeyframeEdit inserted;
         inserted.time = time;
-        inserted.interpolation = runtime::Interpolation::linear();
+        // Seeds the new key only; the update path below never touches the
+        // interpolation of a key that already exists.
+        inserted.interpolation = std::move(new_key_interpolation);
         key_it = edit->keyframes.insert(insertion, std::move(inserted));
     }
 

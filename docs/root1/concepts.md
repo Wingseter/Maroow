@@ -182,7 +182,14 @@ moment a handle drag moves away from a preset and survives undo, redo, and
 reload with nothing to invalidate. The remembered default curve that seeds newly
 authored Transform, Deform, and Slot Color keys lives in the user-local
 `editor-settings.json`, never in the project: it changes no existing data, and
-two animators may reasonably want different defaults. Applying a preset does not
+two animators may reasonably want different defaults. Every shell gesture that
+authors a key at a time with none takes it — the playhead button, a mesh vertex
+drag, a viewport gizmo drag, and the Inspector fields — but the shared
+`upsert_transform_keyframe()` and `upsert_deform_keyframe()` primitives never
+read a preference themselves. They take the seed as an argument that defaults to
+Linear, so the Agent's output stays reproducible on any machine and the
+preference module stays as isolated as MAR-156 left it. The seed initializes an
+inserted key; a gesture that lands on an existing key leaves its curve alone. Applying a preset does not
 change it; only the explicit `Default:` control does.
 
 Viewport snap settings are optional project metadata, not user preferences or

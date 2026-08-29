@@ -10,6 +10,7 @@
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
 #include "viewport_interaction_kernel.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
 
 namespace marrow::editor::shell::viewport_ffd {
@@ -290,7 +291,8 @@ bool materialized_edit_valid(
 bool upsert_deform_keyframe(
     marrow::editor::MeshDeformTimelineEdit* edit,
     double time_seconds,
-    const std::vector<double>& offsets) {
+    const std::vector<double>& offsets,
+    const marrow::runtime::Interpolation& new_key_interpolation) {
     if (edit == nullptr || !std::isfinite(time_seconds) || offsets.empty() ||
         !std::all_of(offsets.begin(), offsets.end(), [](double value) {
             return std::isfinite(value);
@@ -306,7 +308,10 @@ bool upsert_deform_keyframe(
     marrow::editor::DeformKeyframeEdit keyframe;
     keyframe.time = time_seconds;
     keyframe.vertex_offsets = offsets;
-    keyframe.interpolation = marrow::runtime::Interpolation::linear();
+    // MAR-170: a vertex drag that lands on a time with no key authors a new
+    // continuous segment, so it takes the remembered default. The update path
+    // above returns before this and never rewrites an existing key's curve.
+    keyframe.interpolation = new_key_interpolation;
     const auto position = std::lower_bound(
         edit->keyframes.begin(),
         edit->keyframes.end(),
@@ -831,7 +836,12 @@ bool update_gesture(
         : nullptr;
     if (edit == nullptr ||
         !materialized_edit_valid(*edit, gesture.start_vertex_offsets.size()) ||
-        !upsert_deform_keyframe(edit, gesture.time_seconds, *offsets)) {
+        !upsert_deform_keyframe(
+            edit,
+            gesture.time_seconds,
+            *offsets,
+            marrow::editor::curve_preset_interpolation(
+                state->preferences.default_curve))) {
         finish_gesture(state, false);
         state->error_message =
             "FFD edit was cancelled because its full-vector key is unavailable.";

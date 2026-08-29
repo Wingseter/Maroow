@@ -107,7 +107,9 @@ drag is live. Each button's tooltip gives the full name and the exact
 preset the active key's curve exactly is, or `Custom Bezier` after you drag a
 handle away from one. No preset overshoots; only a manual handle drag can. The
 **Default:** combo chooses the curve that newly added Transform, Deform, and
-Slot Color keys start with. It is stored per user in `editor-settings.json`,
+Slot Color keys start with — whether you add the key at the playhead, drag a
+mesh vertex, drag a viewport gizmo, or type a value into the Inspector at a time
+that has no key yet. Editing a key that already exists never changes its curve. It is stored per user in `editor-settings.json`,
 never in the project, so it never dirties a file and never changes an existing
 key; applying a preset does not change it. Missing, malformed, or
 future-versioned settings fall back to Linear without rewriting the file, and

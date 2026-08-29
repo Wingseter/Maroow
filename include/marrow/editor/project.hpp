@@ -735,7 +735,13 @@ double setup_relative_rotation_key(
  * first edit cannot replace the imported track. Keys remain time-sorted and a
  * key within 1e-6 seconds of `time` is updated in place. Inputs are absolute
  * local values; rotate angles are converted to setup-relative runtime keys.
- * Newly inserted keys use linear interpolation.
+ *
+ * `new_key_interpolation` seeds a newly *inserted* key only; an existing key
+ * always keeps the curve it already carries. It defaults to linear, which is
+ * the reproducible contract every Agent operation relies on. The shell passes
+ * the user's remembered default curve here instead, so the preference is read
+ * by the shell and never by this module — the MAR-156 isolation boundary stays
+ * one-directional.
  *
  * @return The inserted or updated keyframe.
  */
@@ -746,7 +752,8 @@ TransformKeyframeEdit& upsert_transform_keyframe(
     std::string_view bone_name,
     TransformTimelineChannel channel,
     double time,
-    const TransformKeyframePatch& patch);
+    const TransformKeyframePatch& patch,
+    runtime::Interpolation new_key_interpolation = runtime::Interpolation::linear());
 
 struct ProjectLoadResult {
     std::shared_ptr<ProjectData> project;

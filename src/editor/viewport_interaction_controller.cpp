@@ -14,6 +14,7 @@
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
 #include "viewport_interaction_kernel.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor::shell::viewport_interaction {
 
@@ -821,7 +822,10 @@ bool update_translate_gesture(
         marrow::editor::TransformKeyframePatch{
             std::nullopt,
             local->x,
-            local->y});
+            local->y},
+        // MAR-170: a gizmo drag at a time with no key authors one.
+        marrow::editor::curve_preset_interpolation(
+            state->preferences.default_curve));
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
@@ -981,7 +985,10 @@ bool update_rotate_gesture(
         gesture.bone_name,
         marrow::editor::TransformTimelineChannel::Rotate,
         gesture.time_seconds,
-        marrow::editor::TransformKeyframePatch{candidate, std::nullopt, std::nullopt});
+        marrow::editor::TransformKeyframePatch{candidate, std::nullopt, std::nullopt},
+        // MAR-170: a gizmo drag at a time with no key authors one.
+        marrow::editor::curve_preset_interpolation(
+            state->preferences.default_curve));
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
@@ -1140,7 +1147,10 @@ bool update_scale_gesture(
         marrow::editor::TransformKeyframePatch{
             std::nullopt,
             candidate->scale_x,
-            candidate->scale_y});
+            candidate->scale_y},
+        // MAR-170: a gizmo drag at a time with no key authors one.
+        marrow::editor::curve_preset_interpolation(
+            state->preferences.default_curve));
     const marrow::editor::SessionResult refresh =
         gesture.transaction.refresh_runtime();
     if (!refresh) {

@@ -424,28 +424,37 @@ void draw_timeline_curve_preset_row(
             stats->first_preset_max_x = item_max.x;
             stats->first_preset_max_y = item_max.y;
         }
+        // The tooltip is built per button, inside the loop, so every button
+        // gets one. Reading the hover state after EndDisabled() would test only
+        // the last button and would overwrite that button's own tooltip.
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             const auto& definition = presets[index];
+            std::string tooltip(definition.display_name);
             if (definition.kind == marrow::runtime::InterpolationKind::CubicBezier) {
-                ImGui::SetTooltip(
-                    "%s  [%g, %g, %g, %g]",
-                    std::string(definition.display_name).c_str(),
+                char points[96]{};
+                std::snprintf(
+                    points,
+                    sizeof(points),
+                    "  [%g, %g, %g, %g]",
                     definition.control_points[0],
                     definition.control_points[1],
                     definition.control_points[2],
                     definition.control_points[3]);
-            } else {
-                ImGui::SetTooltip("%s", std::string(definition.display_name).c_str());
+                tooltip += points;
             }
+            // A disabled row teaches its constraint; a vanished row does not.
+            if (gesture_live) {
+                tooltip += "\nFinish the active edit before applying a curve preset";
+            } else if (compatible == 0U) {
+                tooltip +=
+                    "\nSelect one or more Transform, Deform, or Slot Color keys";
+            }
+            ImGui::SetTooltip("%s", tooltip.c_str());
         }
         if (clicked) requested = presets[index].preset;
         ImGui::PopID();
     }
     ImGui::EndDisabled();
-    if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip(
-            "Select one or more Transform, Deform, or Slot Color keys");
-    }
     if (requested.has_value()) {
         apply_timeline_curve_preset(state, tracks, *requested);
     }
