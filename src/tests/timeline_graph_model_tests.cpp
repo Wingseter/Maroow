@@ -841,6 +841,19 @@ void test_graph_drag_axis_and_unit_mapping(TestSuite& suite) {
     suite.expect(
         graph::decide_drag_axis(300.0, 200.0, 310.0, 210.0, 4.0) == graph::DragAxis::Value,
         "an exact axis tie must resolve to the value axis");
+    // The dead zone is a box compared with >=, so exactly the threshold locks.
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 304.0, 200.0, 4.0) == graph::DragAxis::Time &&
+            graph::decide_drag_axis(300.0, 200.0, 300.0, 196.0, 4.0) ==
+                graph::DragAxis::Value,
+        "a move of exactly the dead-zone distance must lock an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 303.999, 203.999, 4.0) ==
+            graph::DragAxis::Undecided,
+        "a diagonal move just inside the dead-zone box must not lock an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 320.0, 203.0) == graph::DragAxis::Time,
+        "the default dead zone must come from kDragDeadZonePixels");
     suite.expect(
         graph::decide_drag_axis(
             std::numeric_limits<double>::quiet_NaN(), 200.0, 310.0, 210.0, 4.0) ==
@@ -895,6 +908,21 @@ void test_graph_drag_axis_and_unit_mapping(TestSuite& suite) {
              overflow_view, std::numeric_limits<double>::max(), -std::numeric_limits<double>::max())
              .has_value(),
         "an overflowing quotient must reject the drag delta");
+
+    // A rect wide enough to overflow a naive (min + max) * 0.5 must still map
+    // through the shared safe midpoint the geometry builder uses.
+    const double huge_low = std::numeric_limits<double>::max() * 0.6;
+    const double huge_high = std::numeric_limits<double>::max() * 0.9;
+    const graph::PlotRect huge_rect{0.0, huge_low, 100.0, huge_high};
+    const graph::View unit_view{0.0, 100.0, 0.0, 1.0};
+    const double expected_midpoint = std::numeric_limits<double>::max() * 0.75;
+    suite.expect(
+        !std::isfinite((huge_rect.min_y + huge_rect.max_y) * 0.5) &&
+            std::isfinite(graph::y_at_value(huge_rect, unit_view, 2.0)) &&
+            near_scaled(
+                graph::y_at_value(huge_rect, unit_view, 2.0), expected_midpoint) &&
+            near(graph::value_at_y(huge_rect, unit_view, expected_midpoint), 0.0, 1e-9),
+        "near-limit rects must map through the shared safe midpoint");
 
     // The render path and the drag path must agree on every submitted point.
     const graph::View render_view{-0.1, 200.0, 10.0, 25.0};

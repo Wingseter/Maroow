@@ -584,25 +584,24 @@ struct TimelineGraphViewState {
 };
 
 /**
- * @brief Armed graph point press that has not yet chosen a drag axis.
+ * @brief One live graph point drag, from the press until the pointer is released.
  *
- * A candidate holds no transaction, so `authoring_gesture_active` stays false
- * while only a press is live. Every field is captured once and never re-read,
- * which freezes the view transform for the whole gesture.
+ * A drag holds no transaction of its own, so `authoring_gesture_active` stays
+ * false until the pointer leaves the dead zone and an axis gesture opens.
+ * `frozen_view` is captured at the press and never re-read from the live view,
+ * which is what keeps the pixel-to-unit mapping constant for the whole drag;
+ * `press_time_seconds` and `press_value` only feed the readout.
  */
 struct TimelineGraphPointDrag {
     std::uint32_t item_id{0U};
     timeline_graph_model::DragAxis axis{timeline_graph_model::DragAxis::Undecided};
     std::string track_id;
-    TimelineKeyRef pressed_key;
     timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
-    std::size_t component_index{0U};
     double press_pointer_x{0.0};
     double press_pointer_y{0.0};
     double press_time_seconds{0.0};
     double press_value{0.0};
     timeline_graph_model::View frozen_view{};
-    timeline_graph_model::PlotRect frozen_plot{};
 };
 
 /** @brief Live value-axis graph gesture owning one open transaction. */
@@ -611,7 +610,6 @@ struct TimelineGraphValueGesture {
     std::string track_id;
     timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
     std::vector<TimelineKeyRef> keys;
-    std::vector<double> original_values;
     double applied_delta{0.0};
     bool materialized{false};
     bool changed{false};

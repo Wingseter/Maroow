@@ -123,8 +123,10 @@ void update_timeline_retime_gesture(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks) {
     if (state == nullptr || !state->timeline_editor.retime_gesture.has_value()) return;
-    // The Graph tab drives its own retime from the graph view transform. Both
-    // updaters running would apply two deltas per frame at two scales.
+    // Defence in depth, currently unreachable: the only caller is at the end
+    // of draw_dopesheet_body, which runs solely inside the Dopesheet tab item.
+    // It exists so hoisting that call can never give a graph drag a second
+    // retime driver computing its delta from the dopesheet pixels_per_second.
     if (state->timeline_editor.view_mode == TimelineViewMode::Graph) return;
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         finish_timeline_retime_gesture(state, false);
@@ -2369,9 +2371,16 @@ void draw_timeline_window(
 
     // Leaving the Graph tab, in either direction, ends any live graph drag
     // before the dopesheet lane can see a half-owned retime gesture.
-    if (state->timeline_editor.requested_view_mode == TimelineViewMode::Dopesheet) {
+    if (state->timeline_editor.requested_view_mode == TimelineViewMode::Dopesheet ||
+        state->timeline_editor.view_mode != TimelineViewMode::Graph) {
         cancel_timeline_graph_point_drag(state);
     }
+    // Driven here, not inside the Graph body, so no fail-closed early return
+    // in that body can strand a live gesture and its open transaction. A time
+    // drag rewrites key times, so refresh the shared rows in place afterwards
+    // and let the rest of the frame render against the rebuilt animation.
+    poll_timeline_graph_point_drag(state, tracks);
+    (void)cached_timeline_tracks(state);
     if (ImGui::BeginTabBar("timeline_views")) {
         if (ImGui::BeginTabItem(
                 "Dopesheet",

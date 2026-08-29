@@ -127,20 +127,25 @@ double value_at_y(PlotRect rect, const View& view, double y);
 double x_at_time(PlotRect rect, const View& view, double time_seconds);
 double y_at_value(PlotRect rect, const View& view, double value);
 
+/** Half-width of the dead-zone box a press must leave before an axis locks. */
+constexpr double kDragDeadZonePixels = 4.0;
+
 /**
  * @brief Locks one drag axis by dominant-axis comparison.
  *
- * Returns `Undecided` for any non-finite input, a non-finite or negative dead
- * zone, and while the pointer stays inside the dead zone. Otherwise `|dx| >
- * |dy|` locks `Time` and every other case locks `Value`, so an exact tie
- * resolves to the value axis.
+ * The dead zone is an axis-aligned square, not a circle: the axis locks once
+ * `max(|dx|, |dy|)` reaches `dead_zone_pixels`, so a purely diagonal press
+ * travels about 5.7 px of screen distance before locking. Returns `Undecided`
+ * for any non-finite input, a non-finite or negative dead zone, and while the
+ * pointer stays inside the box. Otherwise `|dx| > |dy|` locks `Time` and every
+ * other case locks `Value`, so an exact tie resolves to the value axis.
  */
 DragAxis decide_drag_axis(
     double press_x,
     double press_y,
     double pointer_x,
     double pointer_y,
-    double dead_zone_pixels = 4.0);
+    double dead_zone_pixels = kDragDeadZonePixels);
 
 /** @brief Signed seconds a horizontal drag requests, or nullopt when unusable. */
 std::optional<double> drag_time_delta(

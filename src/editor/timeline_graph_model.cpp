@@ -320,8 +320,7 @@ double time_at_x(PlotRect rect, const View& view, double x) {
 }
 
 double value_at_y(PlotRect rect, const View& view, double y) {
-    return view.value_center +
-        (((rect.min_y + rect.max_y) * 0.5) - y) / view.pixels_per_value;
+    return view.value_center + (plot_midpoint_y(rect) - y) / view.pixels_per_value;
 }
 
 double x_at_time(PlotRect rect, const View& view, double time_seconds) {
@@ -330,8 +329,7 @@ double x_at_time(PlotRect rect, const View& view, double time_seconds) {
 }
 
 double y_at_value(PlotRect rect, const View& view, double value) {
-    return ((rect.min_y + rect.max_y) * 0.5) -
-        (value - view.value_center) * view.pixels_per_value;
+    return plot_midpoint_y(rect) - (value - view.value_center) * view.pixels_per_value;
 }
 
 DragAxis decide_drag_axis(

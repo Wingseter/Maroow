@@ -1871,7 +1871,6 @@ bool begin_timeline_graph_value_gesture(
             gesture.transaction.cancel();
             return false;
         }
-        gesture.original_values.push_back(projected->values[component_index]);
     }
     state->timeline_editor.graph_value_gesture.emplace(std::move(gesture));
     return true;

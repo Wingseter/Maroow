@@ -356,14 +356,26 @@ void write_scalar_component(
     TimelineScalarComponent component,
     double value) {
     if (resolved.kind == TimelineKeyKind::Transform) {
-        auto& keyframe = project->transform_timeline_edits[resolved.timeline_index]
-                             .keyframes[resolved.key_index];
+        auto& timeline = project->transform_timeline_edits[resolved.timeline_index];
+        auto& keyframe = timeline.keyframes[resolved.key_index];
+        const bool rotate = timeline.channel == TransformTimelineChannel::Rotate;
         switch (component) {
-        case TimelineScalarComponent::Angle: keyframe.angle = value; return;
-        case TimelineScalarComponent::X: keyframe.x = value; return;
-        case TimelineScalarComponent::Y: keyframe.y = value; return;
-        default: return;
+        case TimelineScalarComponent::Angle:
+            if (rotate) keyframe.angle = value;
+            return;
+        case TimelineScalarComponent::X:
+            if (!rotate) keyframe.x = value;
+            return;
+        case TimelineScalarComponent::Y:
+            if (!rotate) keyframe.y = value;
+            return;
+        case TimelineScalarComponent::Red:
+        case TimelineScalarComponent::Green:
+        case TimelineScalarComponent::Blue:
+        case TimelineScalarComponent::Alpha:
+            return;
         }
+        return;
     }
     if (resolved.kind == TimelineKeyKind::SlotColor) {
         auto& keyframe = project->slot_color_timeline_edits[resolved.timeline_index]
@@ -374,8 +386,12 @@ void write_scalar_component(
         case TimelineScalarComponent::Green: keyframe.color.g = scalar; return;
         case TimelineScalarComponent::Blue: keyframe.color.b = scalar; return;
         case TimelineScalarComponent::Alpha: keyframe.color.a = scalar; return;
-        default: return;
+        case TimelineScalarComponent::Angle:
+        case TimelineScalarComponent::X:
+        case TimelineScalarComponent::Y:
+            return;
         }
+        return;
     }
 }
 
@@ -1820,14 +1836,15 @@ TimelineScalarOffsetResult offset_keyframe_scalars(
     double applied_delta = requested_delta;
     if (component_is_color_channel(component)) {
         // The clamp is group-wide so a multi-key drag stops as one unit
-        // instead of collapsing against the boundary. Imported data already
-        // outside [0, 1] yields a zero delta, a no-op frame rather than an
-        // error, so it neither jumps nor blocks the rest of the gesture.
+        // instead of collapsing against the boundary. Both bounds are widened
+        // to include zero, so a group that imported data already placed
+        // outside [0, 1] can be dragged back toward the legal range but never
+        // further out of it, and a zero-net drag always stays a no-op.
         const auto bounds = std::minmax_element(
             original_values.begin(), original_values.end());
-        const double lower = -*bounds.first;
-        const double upper = 1.0 - *bounds.second;
-        applied_delta = upper < lower ? 0.0 : std::clamp(requested_delta, lower, upper);
+        const double lower = std::min(0.0, -*bounds.first);
+        const double upper = std::max(0.0, 1.0 - *bounds.second);
+        applied_delta = std::clamp(requested_delta, lower, upper);
     }
     if (std::abs(applied_delta) <= 1e-12) {
         return {{false, {}}, 0.0, resolved.size()};
@@ -1836,7 +1853,14 @@ TimelineScalarOffsetResult offset_keyframe_scalars(
     for (std::size_t index = 0U; index < resolved.size(); ++index) {
         double value = original_values[index] + applied_delta;
         if (component_is_color_channel(component)) {
-            value = std::clamp(value, 0.0, 1.0);
+            // Defensive only: the group bounds above already guarantee this
+            // envelope. Clamping to a flat [0, 1] instead would truncate an
+            // imported out-of-range key and silently destroy the authored
+            // spacing the group clamp exists to protect.
+            value = std::clamp(
+                value,
+                std::min(0.0, original_values[index]),
+                std::max(1.0, original_values[index]));
         }
         if (!finite_animation_scalar(value)) {
             return {{false, "A timeline scalar edit left the finite float32 range."},

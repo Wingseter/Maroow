@@ -42,9 +42,12 @@ struct TimelineGraphRenderStats {
     float first_point_x{0.0f};
     float first_point_y{0.0f};
     bool first_point_valid{false};
-    bool drag_candidate_active{false};
+    // True from the press until release, across both the undecided phase and
+    // the locked-axis phase.
+    bool drag_active{false};
     bool value_gesture_active{false};
-    bool retime_gesture_active{false};
+    // A retime is live AND owned by this graph drag, not by the dopesheet.
+    bool graph_owns_retime{false};
     timeline_graph_model::DragAxis drag_axis{
         timeline_graph_model::DragAxis::Undecided};
 };
@@ -96,6 +99,17 @@ bool update_timeline_graph_point_drag(
     bool bypass_frame_snap);
 
 void cancel_timeline_graph_point_drag(ShellState* state);
+
+/**
+ * @brief Samples ImGui input once per frame and advances any live graph drag.
+ *
+ * This runs from `draw_timeline_window` above every Graph-body early return,
+ * so a release, Escape, or invalidated context can always end the gesture and
+ * release its transaction.
+ */
+void poll_timeline_graph_point_drag(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks);
 
 TimelineGraphRenderStats draw_timeline_graph_body(
     ShellState* state,

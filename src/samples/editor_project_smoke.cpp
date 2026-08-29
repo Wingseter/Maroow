@@ -2762,6 +2762,64 @@ bool validate_mar168_graph_scalar_authoring(
         }
     }
 
+    // Out-of-range imported colour must never be pushed further out, and a
+    // drag toward the legal range must keep its group spacing.
+    {
+        struct OutOfRangeCase {
+            const char* label;
+            double first_alpha;
+            double second_alpha;
+            bool second_key;
+            double requested;
+            double expected_applied;
+            double expected_first;
+            double expected_second;
+        };
+        const OutOfRangeCase cases[] = {
+            {"a lone out-of-range key dragged up", 1.4, 0.0, false, 0.3, 0.0, 1.4, 0.0},
+            {"a lone out-of-range key dragged down", 1.4, 0.0, false, -0.3, -0.3, 1.1, 0.0},
+            {"a mixed out-of-range group dragged up", 0.2, 1.4, true, 0.3, 0.0, 0.2, 1.4},
+            {"a mixed out-of-range group dragged down", 0.2, 1.4, true, -0.3, -0.2, 0.0, 1.2},
+        };
+        for (const OutOfRangeCase& scenario : cases) {
+            marrow::editor::ProjectData project = build_project();
+            marrow::editor::SlotColorTimelineEdit* colors =
+                project.find_slot_color_timeline_edit("mar168", "body");
+            if (colors == nullptr || colors->keyframes.size() != 2U) return false;
+            colors->keyframes[0].color.a =
+                static_cast<marrow::runtime::AnimationScalar>(scenario.first_alpha);
+            colors->keyframes[1].color.a =
+                static_cast<marrow::runtime::AnimationScalar>(scenario.second_alpha);
+            const std::string before = marrow::editor::serialize_project(project);
+            std::vector<TimelineKeySelector> selectors{color_selector(0.0)};
+            if (scenario.second_key) selectors.push_back(color_selector(0.5));
+            const auto result = marrow::editor::offset_keyframe_scalars(
+                &project,
+                selectors,
+                TimelineScalarComponent::Alpha,
+                scenario.requested);
+            const auto* edited = project.find_slot_color_timeline_edit("mar168", "body");
+            const bool expected_change =
+                std::abs(scenario.expected_applied) > kExact;
+            if (edited == nullptr || !result.error.empty() ||
+                result.changed != expected_change ||
+                !near_float(result.applied_delta, scenario.expected_applied) ||
+                !near_float(edited->keyframes[0].color.a, scenario.expected_first) ||
+                !near_float(edited->keyframes[1].color.a, scenario.expected_second) ||
+                (!expected_change &&
+                 marrow::editor::serialize_project(project) != before)) {
+                std::cerr << "MAR-168 colour clamp mishandled " << scenario.label
+                          << ": applied=" << result.applied_delta
+                          << " first="
+                          << (edited != nullptr ? edited->keyframes[0].color.a : -1.0f)
+                          << " second="
+                          << (edited != nullptr ? edited->keyframes[1].color.a : -1.0f)
+                          << ".\n";
+                return false;
+            }
+        }
+    }
+
     // Rejection atomicity: every failing shape leaves the project byte-identical.
     {
         marrow::editor::ProjectData project = build_project();
@@ -2892,6 +2950,51 @@ bool validate_mar168_graph_scalar_authoring(
             std::cerr << "MAR-168 offset value did not survive save and reload.\n";
             return false;
         }
+        // AC5: the offset must survive all the way into exported JSON and the
+        // v2 binary, not only into the reloaded project.
+        const std::filesystem::path offset_json_path =
+            "/tmp/marrow_mar168_offset.mskl";
+        const std::filesystem::path offset_binary_path =
+            "/tmp/marrow_mar168_offset.mbin";
+        marrow::editor::ProjectExportOptions offset_export_options;
+        offset_export_options.skeleton_output_path = offset_json_path;
+        offset_export_options.binary_output_path = offset_binary_path;
+        const auto offset_export = marrow::editor::export_runtime_assets(
+            project, *project_result.base_skeleton_document, offset_export_options);
+        if (!offset_export) {
+            std::cerr << offset_export.error->format() << '\n';
+            return false;
+        }
+        const auto exported = marrow::runtime::load_skeleton_data(offset_json_path);
+        if (!exported) {
+            std::cerr << exported.error->format();
+            return false;
+        }
+        const auto exported_arm = exported.skeleton_data->find_bone_index("arm_l");
+        const auto* exported_idle = exported.skeleton_data->find_animation("idle");
+        const auto* exported_rotate =
+            exported_idle != nullptr && exported_arm.has_value()
+            ? exported_idle->find_rotate_timeline(*exported_arm)
+            : nullptr;
+        if (exported_rotate == nullptr || exported_rotate->keyframes.empty() ||
+            !near_float(
+                static_cast<double>(exported_rotate->keyframes.front().angle),
+                original_angle - 17.5)) {
+            std::cerr << "MAR-168 offset value did not reach the exported runtime JSON.\n";
+            return false;
+        }
+        if (!offset_export.binary_path.has_value() ||
+            !validate_binary_export(offset_export.path, *offset_export.binary_path)) {
+            std::cerr << "MAR-168 offset export did not match its v2 binary payload.\n";
+            return false;
+        }
+        std::error_code offset_size_error;
+        std::cout << "MAR-168 offset export: JSON "
+                  << std::filesystem::file_size(offset_json_path, offset_size_error)
+                  << " bytes, MBIN "
+                  << std::filesystem::file_size(offset_binary_path, offset_size_error)
+                  << " bytes.\n";
+
         const auto* reloaded_animation = reloaded.skeleton_data->find_animation("idle");
         const auto arm_index = reloaded.skeleton_data->find_bone_index("arm_l");
         const auto* reloaded_rotate =

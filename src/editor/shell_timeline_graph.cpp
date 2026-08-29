@@ -17,9 +17,6 @@ namespace {
 
 const timeline_graph_model::Projection kEmptyGraphProjection{};
 
-/** Inclusive logical-pixel radius a press must leave before an axis locks. */
-constexpr double kGraphDragDeadZonePixels = 4.0;
-
 constexpr ImU32 kGraphBackground = IM_COL32(0x17, 0x1a, 0x21, 0xff);
 constexpr ImU32 kGraphGrid = IM_COL32(0x46, 0x4b, 0x57, 0x60);
 constexpr ImU32 kGraphAxisText = IM_COL32(0xb7, 0xbd, 0xc9, 0xff);
@@ -450,15 +447,12 @@ bool begin_timeline_graph_point_drag(
     drag.item_id = item_id;
     drag.axis = timeline_graph_model::DragAxis::Undecided;
     drag.track_id = track.id;
-    drag.pressed_key = point.key;
     drag.component = point.component;
-    drag.component_index = point.component_index;
     drag.press_pointer_x = pointer_x;
     drag.press_pointer_y = pointer_y;
     drag.press_time_seconds = projected->time_seconds;
     drag.press_value = projected->values[point.component_index];
     drag.frozen_view = view;
-    drag.frozen_plot = plot;
     state->timeline_editor.graph_drag.emplace(std::move(drag));
     return true;
 }
@@ -510,7 +504,13 @@ bool update_timeline_graph_point_drag(
             *row, state->timeline_editor.graph_drag->component) ||
         cached_timeline_graph_projection(state, *row).status !=
             timeline_graph_model::ProjectionStatus::Ready) {
+        const bool had_gesture =
+            state->timeline_editor.graph_drag->axis !=
+            timeline_graph_model::DragAxis::Undecided;
         cancel_timeline_graph_point_drag(state);
+        if (!had_gesture) {
+            state->status_message = "The graph editing context changed during editing";
+        }
         return false;
     }
 
@@ -523,7 +523,7 @@ bool update_timeline_graph_point_drag(
             drag.press_pointer_y,
             pointer_x,
             pointer_y,
-            kGraphDragDeadZonePixels);
+            timeline_graph_model::kDragDeadZonePixels);
         if (axis == timeline_graph_model::DragAxis::Undecided) return true;
         const bool started = axis == timeline_graph_model::DragAxis::Time
             ? begin_timeline_retime_gesture(
@@ -532,6 +532,9 @@ bool update_timeline_graph_point_drag(
                   state, drag.item_id, *row, drag.component, tracks);
         if (!started) {
             state->timeline_editor.graph_drag.reset();
+            state->status_message = axis == timeline_graph_model::DragAxis::Time
+                ? "Could not start the graph time drag"
+                : "Could not start the graph value drag";
             return false;
         }
         state->timeline_editor.graph_drag->axis = axis;
@@ -544,6 +547,7 @@ bool update_timeline_graph_point_drag(
         if (!delta.has_value()) {
             state->timeline_editor.graph_drag.reset();
             finish_timeline_retime_gesture(state, false);
+            state->status_message = "Graph time drag pointer became unusable";
             return false;
         }
         const bool snap =
@@ -561,6 +565,7 @@ bool update_timeline_graph_point_drag(
     if (!delta.has_value()) {
         state->timeline_editor.graph_drag.reset();
         finish_timeline_graph_value_gesture(state, false);
+        state->status_message = "Graph value drag pointer became unusable";
         return false;
     }
     if (!apply_timeline_graph_value_delta(state, tracks, *delta)) {
@@ -569,6 +574,21 @@ bool update_timeline_graph_point_drag(
         return false;
     }
     return true;
+}
+
+void poll_timeline_graph_point_drag(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || !state->timeline_editor.graph_drag.has_value()) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    (void)update_timeline_graph_point_drag(
+        state,
+        tracks,
+        static_cast<double>(io.MousePos.x),
+        static_cast<double>(io.MousePos.y),
+        ImGui::IsMouseDown(ImGuiMouseButton_Left),
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false),
+        io.KeyAlt);
 }
 
 TimelineGraphRenderStats draw_timeline_graph_body(
@@ -785,23 +805,12 @@ TimelineGraphRenderStats draw_timeline_graph_body(
             state->timeline_editor.active_key = active_key;
         }
     }
-    if (state->timeline_editor.graph_drag.has_value()) {
-        (void)update_timeline_graph_point_drag(
-            state,
-            tracks,
-            static_cast<double>(io.MousePos.x),
-            static_cast<double>(io.MousePos.y),
-            ImGui::IsMouseDown(ImGuiMouseButton_Left),
-            ImGui::IsKeyPressed(ImGuiKey_Escape, false),
-            io.KeyAlt);
-    }
     const std::string drag_readout = timeline_graph_drag_readout(*state, track.kind);
-    stats.drag_candidate_active = state->timeline_editor.graph_drag.has_value();
+    stats.drag_active = state->timeline_editor.graph_drag.has_value();
     stats.value_gesture_active =
         state->timeline_editor.graph_value_gesture.has_value();
-    stats.retime_gesture_active =
-        stats.drag_candidate_active &&
-        state->timeline_editor.retime_gesture.has_value();
+    stats.graph_owns_retime =
+        stats.drag_active && state->timeline_editor.retime_gesture.has_value();
     stats.drag_axis = state->timeline_editor.graph_drag.has_value()
         ? state->timeline_editor.graph_drag->axis
         : timeline_graph_model::DragAxis::Undecided;

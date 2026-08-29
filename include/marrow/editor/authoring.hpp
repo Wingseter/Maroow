@@ -206,7 +206,8 @@ struct TimelineScalarOffsetResult : AuthoringResult {
  * @brief Atomically offsets one scalar component of persisted timeline keys.
  *
  * Every selector must resolve to a Transform or Slot Color key whose family
- * supports `component`. Slot Color deltas are clamped group-wide into [0, 1];
+ * supports `component`. Slot Color deltas are clamped group-wide so no key
+ * leaves [0, 1] and no imported out-of-range key is pushed further out;
  * Angle, X, and Y are unclamped. Rotate angles are setup-relative in the
  * project and absolute in the graph, but a delta is identical in both spaces,
  * so no setup-pose conversion occurs. Times and interpolations are never
