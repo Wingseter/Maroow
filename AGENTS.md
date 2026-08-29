@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-171, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-172 is the next product milestone and depends on MAR-171. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-172, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-173 is the next product milestone and depends on MAR-172. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -158,7 +158,7 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (58 operations, including parameter, animation-duration, timeline-interpolation, and timeline-curve-mode authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (59 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, and timeline-loop-boundary authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
@@ -226,6 +226,97 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-172 Loop Boundary Key Synchronization Validation Results
+
+Validated 2026-08-30. A Transform, Slot Color, or Deform **lane** can now record
+the intent "my last key is the loop boundary", as one optional, additive,
+`.marrow`-only boolean projected into a top-level `loop_sync` tree that mirrors
+`timeline_edits`. The flag is absent from every existing project, so every
+existing project serializes byte-identically and behaves byte-identically — the
+sync returns before it reaches MAR-171's resolver when no lane is opted in, and
+that is asserted rather than argued. An opted-in lane always carries exactly one
+managed key at `float32(explicit duration)` whose value and easing record —
+`interpolation` plus MAR-171's `curve_mode`/`curve_driver` — are a bit-exact copy
+of that lane's key at time zero, so a looping clip wraps with no pop. The
+contract is re-established inside the caller's already-open transaction at the
+one seam that is provably after every duration change: immediately after
+`auto_extend_explicit_animation_durations()` in `EditorSession::refresh_runtime()`
+and `EditorSession::commit()`. Managed identity is **derived, never stored** —
+the managed key *is* the lane's last key while the lane is opted in — so no
+marker can ride a copy/paste into a lane where it would be a lie, and adoption
+is the absence of code. `set_animation_duration()`'s inferred floor and
+`auto_extend_explicit_animation_durations()`'s overlay scan both exclude managed
+boundary keys, without which an opted-in clip could never be shortened and every
+shrink would be undone one line later; both exclusions are bit-exact no-ops for
+every animation with no opted-in lane. Draw Order, Event, and Slot Attachment
+lanes gain **no member**, so their exclusion is compile-enforced: an Event key at
+the boundary would fire twice per loop. The Agent/MCP surface grew by exactly one
+operation, `timeline.set_loop_sync`, taking the registry to exactly **59**.
+`.mskl` v1, `.mbin` v2, C ABI v1, and `editor-settings.json` v1 are unchanged,
+and the flag never enters a runtime file — but the managed boundary key does,
+as an ordinary keyframe, which is the entire point. MAR-172 adds **no ImGui
+code**: the story's criterion 5 says "the UI-free loop-sync operation".
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Additive, default-absent storage | `serialize_project()` of the untouched fixture contains no `loop_sync` and survives save/reload byte-identically; one opted-in lane serializes exactly `{"animations":{"idle":{"bones":{"spine":{"rotate":true}}}}}` with no `false` leaf and no opted-out lane anywhere in the block; the flag survives save and reload on exactly that lane and on no other; `false` loads as opted out and re-serializes as absence; an unknown top-level member round-trips beside the block through `preserved_root` | PASS |
+| Load and save validation | Nine hand-built documents rejected with the exact JSON path and message: a non-object `loop_sync`, a missing `animations`, a non-object `animations`, a non-object animation entry, a string leaf, the unknown channel `spinx`, `slots.body.attachment`, an orphan lane with no `timeline_edits` entry, and a `true` leaf on a lane whose first key is at 0.25. `validate_project_for_save()` re-validates the two structural rules a skeleton-free validator can see and refuses both in memory | PASS |
+| The boundary contract | Create appends a fourth key at exactly `float32(1.5)` whose `angle` and all four cubic control points compare `==` as `AnimationScalar`, not within an epsilon; adopt overwrites an existing key at the boundary and creates none; move relocates only the boundary key after a duration change; rewrite follows a first-key value change and touches nothing else; a single-key lane becomes a two-key constant lane; two consecutive syncs report `synchronized_lane_count == 0`, `created_key_count == 0`, and a byte-identical project, which is the two-phase termination argument asserted | PASS |
+| Fail-closed rejections | No explicit duration, no key at time zero, a duration below the one-millisecond spacing, a key past the boundary, a key crowding the boundary, duplicate keys at the boundary, a duplicate lane selector, an unresolvable lane selector, and an empty lane list each reject atomically with the project byte-identical. **Disabling evaluates no prerequisite and always succeeds**, clears the flag, reports `Released`, and leaves every keyframe in place — which is what makes the atomic rejection humane | PASS |
+| Duration, both directions | `set_animation_duration("idle", 1.2)` now **succeeds** on an opted-in clip where it previously failed with `Animation duration cannot be shorter than the last authored key (1.500000 seconds).`; the sync then moves the boundary to `float32(1.2)`; `auto_extend_explicit_animation_durations()` reports `changed == false` and does not undo the shrink; a shrink onto the 1.0005 spacing floor is accepted by the duration primitive and rejected by the sync; a shrink to 0.9 keeps MAR-155's own message verbatim; with no opted-in lane the whole accept/reject table and its exact message strings are unchanged | PASS |
+| Managed identity | Retime pins both ends of an opted-in lane, so a selection containing either collapses to `changed == false` and `applied_delta == 0` while a middle-key selection still moves by the full delta and a lane that is not opted in retimes exactly as before; the preset and curve-mode collectors and the graph value gesture skip a managed boundary key and report `is a managed loop boundary`; removing only the boundary key changes nothing and sets a status message; removing the time-zero key fails the transaction with `serialize_project()` byte-identical; pasting past the boundary fails the transaction byte-identically; a clipboard fragment never carries the flag | PASS |
+| The session seam | Adding a key at 2.0 s on the **not** opted-in `root`/`translate` lane grows `idle`'s explicit duration to 2.0 through the session's own auto-extend **and** moves the opted-in lane's boundary key to 2.0 in the **same** history entry; one undo restores the duration, the added key, and the boundary key together. Before the seam existed this reported `The managed boundary key is stale at 1.5 while the duration is 2`, which is the exact staleness a controller-level wiring cannot close | PASS |
+| Criterion 3, five ways | A MAR-168 value drag on key 0, a MAR-170 preset on key 0, a MAR-169 handle drag on key 0, a dopesheet retime of a middle key, and an `animation.set_duration`-equivalent duration edit each stay exactly one history entry with the boundary key re-mirrored inside it; cancelling a value drag on key 0 restores `serialize_project()`, `undo_count()`, `redo_count()`, `project_revision()`, `dirty()`, and the rebuilt dopesheet `key_times`; undo and redo of an enable restore the flag and the boundary key together | PASS |
+| The MAR-171 seam | MAR-171's `resolved_key_count == 0` duration assertion is **scoped, not replaced** — its failure message now reads "with no lane opted in" and nothing else about it changed — and is joined by an opted-in case where the boundary key gives key 2 a real outgoing segment and a 1.5 → 2.0 duration change reports `resolved_key_count >= 1`, with the boundary's easing equal to key 0's **post**-resolve value, which is §9.2's phase ordering asserted. The demotion guard asserts both key 0 and the boundary key are still `Auto` after a sync: if phase 2 ever called `set_keyframe_interpolation()` both would read `Manual` | PASS |
+| Export, on the MUTATED project | `export_runtime_assets()` runs on the project the validator just mutated. The exported `.mskl` carries `idle`'s explicit duration of 1.5, **four** spine rotate keyframes up from three with keyframe 3 at `time == 1.5f` and `angle` plus all four cubic control points bit-equal to keyframe 0's, and four `body` colour keyframes whose last colour is bit-equal to its first; the exported text contains no `loop_sync`; the `.mbin` matches the `.mskl`. Both files are strictly larger than the baseline measured in the same run — **JSON 15077 vs 14336, MBIN 4125 vs 3984** — and unlike MAR-171 the binary growth is a real signal, because two whole keyframe records were added | PASS |
+| Agent and MCP parity at 59 | `timeline.set_loop_sync` sits immediately after `timeline.set_curve_mode` as (`edit`, mutating, not review, dry-run supported); its lane entries carry **no `time`**, the surface's one structural difference from every other `timeline.*` operation; the dry run reports each lane's `previous_enabled`, `previous_boundary` (`null` when no key sat at the boundary time), `boundary_action`, and resulting `boundary` without touching the session; a live call reports `changed_lane_count` and `created_key_count` in one history entry; a second identical call returns `no_change`; the runtime-only `aim`/`arm_l` lane reports `adopted`; `set_transform` on the time-zero key moves the boundary in the same entry; twelve rejection cases each leave the project provably unchanged; disabling a lane in a rejected state succeeds | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, and C ABI v1 unchanged with a zero-byte diff on `src/runtime/**`, `include/marrow/runtime/**`, `include/marrow/c_api/**`, and `src/c_api/**`; `editor-settings.json` v1 unchanged with a zero-byte diff on `src/editor/preferences.cpp` and `include/marrow/editor/preferences.hpp`; a zero-byte diff on every ImGui translation unit plus `shell_state.hpp` and `shell_core.cpp`, so MAR-172 is UI-free as the story requires; `git diff -- src/editor/session.cpp | rg 'rebuild_runtime'` and `git diff -- src/editor/project.cpp | rg 'build_runtime'` are both empty; `retime_keyframes()`'s signature is unchanged for MAR-173; the three discrete lane structs gain no member | PASS |
+
+Command output recorded during validation:
+
+- `cmake -S . -B build && cmake --build build -j10` -> configured and built with zero new warnings; `cmake --build build --target marrow_verify_third_party` -> `Vendored SDL3, zlib, Dear ImGui, Sokol, sokol_imgui, and sokol-shdc hashes verified`
+- `./build/marrow_timeline_model_tests` -> `Timeline model: 15 cases passed`, up from 10, with five new MAR-172 cases: default-off-does-not-resolve and idempotence, create/adopt/move/rewrite plus the single-key lane, every §6.5 rejection and disable-never-validates, retime pinning, and the excluding floor's bit-exact fast path over every fixture animation
+- `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 20 cases passed`; `./build/marrow_preference_tests` -> `PreferenceStore: 11 cases passed` (unchanged; MAR-172 touches no preference code); `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`; `./build/marrow_viewport_interaction_tests` -> passed; `./build/marrow_windowing_tests` -> `Windowing: 4 cases passed`; `./build/marrow_pen_input_tests` -> `Pen input: 34 cases passed`; `./build/marrow_agent_socket_tests` -> `Agent socket tests: 4 cases passed`
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting `MAR-172 loop boundary export: JSON 15077 bytes, MBIN 4125 bytes.`, `MAR-172 untouched baseline export: JSON 14336 bytes, MBIN 3984 bytes.`, and `MAR-172 loop boundary synchronization validated as additive, default-absent, export-neutral, and strictly re-validated.` The exported artifact is **741 JSON bytes and 141 MBIN bytes larger** than the baseline measured in the same run, so it demonstrably carries the managed boundary keys rather than the untouched baseline
+- `./build/marrow_project_smoke --create /tmp/mar172_created.marrow` -> passed; the created project contains no `loop_sync` member (`grep -c loop_sync` -> `0`)
+- `./build/marrow_inspect --compare <export>.mbin <export>.mskl` -> `matches`; `./build/marrow_fixture_smoke <export>.mskl assets/fixtures/player_idle.matl` -> `Generic runtime asset smoke test passed.`; `grep -c 'loop_sync' /tmp/marrow_mar172_loop.mskl` -> `0`
+- `python3 -m json.tool assets/fixtures/player_idle.marrow` -> valid, and `git diff --stat -- assets/fixtures/` is empty: the checked-in fixture is untouched by MAR-172
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new `validate_timeline_loop_sync_shell_smoke` scenario; `--project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> passed unchanged; `--verify-launch-focus` -> `Verified macOS editor launch focus configuration.`
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` with 273 `[ OK ]` cases against the exact **59**-operation registry, including the new `timeline.set_loop_sync` expectation row immediately after `timeline.set_curve_mode` and its dry-run/live/read-back/`no_change`/adoption/duration-move/undo sequence plus twelve rejection cases with a proven-unchanged project
+- `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py` -> compiled
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py` against `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` -> `mcp test_client: PASSED` with **59/59** exact C++/Python name parity, the explicit `timeline.set_loop_sync` registry metadata row, and a duration -> dry-run -> live -> read-back -> `set_transform` -> read-back -> undo -> read-back sequence asserting `boundary_time == 1.5` and the mirrored angle to four decimal places, plus rejection of `"enabled": "yes"`, of a `draw_order` lane, and of enabling a clip with no explicit duration. A lane entry carrying an undeclared `time` member still succeeds, proving the advisory schema did not loosen the C++ gate
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only` against `parameter_face_basic.marrow` -> `mcp parameter test_client: PASSED`, unchanged
+- `ctest --test-dir build -N` -> `Total Tests: 21`; `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21`; `-L runtime` -> 4/4; `-L editor` -> 11/11; `-R marrow.renderer_link_boundary` -> 1/1. MAR-172 registers no new CTest
+- `./build/marrow_c_smoke` -> `commands=3, indices=6, callbackEvents=2`; `./build/marrow_spine_import_smoke ...` -> passed; `./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl|.mbin assets/fixtures/player_idle.matl` -> both passed; `./build/marrow_parameter_project_smoke` and `./build/marrow_atlas_packer_smoke` -> passed, unchanged
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j10 && ctest --test-dir build-display --output-on-failure` -> automated Debug display-enabled suite 24/24, including 3 windowing-labelled and 3 display-labelled tests, passed in 13.83 s
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after every gate above, including the three `--agent-port` runs of the production `shell_main.cpp` startup load, which resolves the real path with no override. No `/tmp/marrow-shell-config-*` directory was left behind. The new `validate_timeline_loop_sync_shell_smoke` scenario installs its own `ScopedPreferenceIsolation` even though MAR-172 reads no preference, so it cannot resolve that path at all
+
+**Two divergences from the design, recorded rather than glossed.**
+
+First, **the design's §18.4 assumption that an opted-in 1.5 -> 2.0 duration change
+resolves at least one key is false for the fixture's own angles.** With spine
+rotate at `angle = 0, 8, -2` and a boundary mirroring key 0, the last two secants
+have opposite signs, so `curve_auto`'s monotonicity clamp zeroes the interior
+tangent and the normalized control points `[1/3, a/3, 2/3, 1 - b/3]` come out
+span-invariant: `a = 0`, `b = 1` at every duration. The assertion is real and is
+kept; the test seeds `0, -6, -3` instead, which keeps those two secants the same
+sign so the automatic curve genuinely depends on the boundary key's time. The
+substituted angles are commented at the call site with that reason.
+
+Second, **the plan's Task 3 instruction to "leave the project-overlay
+`include_animation_timeline_maximum()` calls in place" would have defeated the
+exclusion it was introducing**: those calls fold the boundary key back into the
+floor from the project side one line after the effective side excluded it. The
+three continuous families now call a boundary-excluding overload instead, and the
+three discrete families keep the original helper — which is a bit-exact no-op
+when no lane is opted in, because the overload differs only in skipping a last
+key whose `loop_sync` is false.
+
+The display suites are automated evidence only. This checkpoint adds no manual
+visible-UI, Windows 11, physical-input, or platform qualification credit.
+MAR-192 through MAR-210 remain open, and support qualification remains governed
+by `docs/root1/platform-validation.md`.
 
 ## MAR-171 Project-Local Automatic Curve Handles Validation Results
 

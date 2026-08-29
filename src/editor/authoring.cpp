@@ -36,11 +36,11 @@ bool valid_animation_name(std::string_view name) {
     return !name.empty();
 }
 
-AnimationEdit* coalescible_duration_edit(
-    ProjectData* project,
+const AnimationEdit* pending_duration_edit(
+    const ProjectData& project,
     std::string_view animation_name) {
-    for (auto iterator = project->animation_edits.rbegin();
-         iterator != project->animation_edits.rend();
+    for (auto iterator = project.animation_edits.rbegin();
+         iterator != project.animation_edits.rend();
          ++iterator) {
         if (iterator->kind == AnimationEditKind::SetDuration) {
             if (iterator->name == animation_name) {
@@ -55,6 +55,13 @@ AnimationEdit* coalescible_duration_edit(
     return nullptr;
 }
 
+AnimationEdit* coalescible_duration_edit(
+    ProjectData* project,
+    std::string_view animation_name) {
+    return const_cast<AnimationEdit*>(
+        pending_duration_edit(*project, animation_name));
+}
+
 template <typename TimelineEdit>
 void include_animation_timeline_maximum(
     const std::vector<TimelineEdit>& edits,
@@ -62,6 +69,35 @@ void include_animation_timeline_maximum(
     double* maximum_time) {
     marrow::editor::timeline_model::include_animation_timeline_maximum(
         edits, animation_name, maximum_time);
+}
+
+/**
+ * @brief The overlay maximum with managed loop boundaries excluded.
+ *
+ * A loop-synchronized lane's last key sits at the explicit duration by the
+ * boundary contract, so counting it would make an opted-in clip permanently
+ * un-shortenable and would grow the duration straight back after a shrink. A
+ * lane that is not opted in folds in exactly as before, which is what makes
+ * this a bit-exact no-op for every project that does not use MAR-172.
+ */
+template <typename TimelineEdit>
+void include_animation_timeline_maximum_excluding_loop_boundaries(
+    const std::vector<TimelineEdit>& edits,
+    std::string_view animation_name,
+    double* maximum_time) {
+    if (maximum_time == nullptr) {
+        return;
+    }
+    for (const TimelineEdit& edit : edits) {
+        if (edit.animation_name != animation_name) {
+            continue;
+        }
+        const std::size_t count = edit.keyframes.size();
+        const std::size_t limit = edit.loop_sync && count >= 2U ? count - 1U : count;
+        for (std::size_t index = 0U; index < limit; ++index) {
+            *maximum_time = std::max(*maximum_time, edit.keyframes[index].time);
+        }
+    }
 }
 
 template <typename Edit>
@@ -475,6 +511,34 @@ void include_timeline_retime_bounds(
         maximum_delta);
 }
 
+/**
+ * @brief Pins both ends of a loop-synchronized lane, for the three continuous
+ *        families that carry the flag.
+ *
+ * The first key defines the boundary value at t = 0 and the last key IS the
+ * managed boundary at the clip duration. Moving either would leave the lane
+ * without the prerequisites its opt-in asserts, so both behave as immovable
+ * neighbours. This composes with the existing shared-bounds model rather than
+ * fighting it: one immovable key already freezes a whole selection, so a drag
+ * that includes one collapses to the existing `changed == false` result.
+ */
+template <typename Timeline>
+void include_loop_boundary_retime_pins(
+    const std::vector<Timeline>& timelines,
+    const ResolvedTimelineKey& resolved,
+    double* minimum_delta,
+    double* maximum_delta) {
+    const Timeline& timeline = timelines[resolved.timeline_index];
+    if (!timeline.loop_sync) {
+        return;
+    }
+    if (resolved.key_index == 0U ||
+        resolved.key_index + 1U == timeline.keyframes.size()) {
+        *minimum_delta = std::max(*minimum_delta, 0.0);
+        *maximum_delta = std::min(*maximum_delta, 0.0);
+    }
+}
+
 void include_resolved_retime_bounds(
     const ProjectData& project,
     const ResolvedTimelineKey& resolved,
@@ -490,6 +554,8 @@ void include_resolved_retime_bounds(
             kNonEventKeySpacing,
             minimum_delta,
             maximum_delta);
+        include_loop_boundary_retime_pins(
+            project.transform_timeline_edits, resolved, minimum_delta, maximum_delta);
         return;
     case TimelineKeyKind::Deform:
         include_timeline_retime_bounds(
@@ -499,6 +565,8 @@ void include_resolved_retime_bounds(
             kNonEventKeySpacing,
             minimum_delta,
             maximum_delta);
+        include_loop_boundary_retime_pins(
+            project.mesh_deform_timeline_edits, resolved, minimum_delta, maximum_delta);
         return;
     case TimelineKeyKind::DrawOrder:
         include_timeline_retime_bounds(
@@ -526,6 +594,8 @@ void include_resolved_retime_bounds(
             kNonEventKeySpacing,
             minimum_delta,
             maximum_delta);
+        include_loop_boundary_retime_pins(
+            project.slot_color_timeline_edits, resolved, minimum_delta, maximum_delta);
         return;
     case TimelineKeyKind::SlotAttachment:
         include_timeline_retime_bounds(
@@ -1611,16 +1681,21 @@ AuthoringResult set_animation_duration(
         return {false, "Animation not found: " + std::string(animation_name)};
     }
 
-    double inferred_duration = animation->inferred_duration();
-    include_animation_timeline_maximum(
+    // MAR-172: a managed loop boundary key sits at the explicit duration by
+    // the boundary contract, so it must not act as a floor on the duration it
+    // follows. Both the effective side and the project overlay exclude it, and
+    // both exclusions are bit-exact no-ops when no lane is opted in.
+    double inferred_duration = inferred_duration_excluding_loop_boundaries(
+        *project, effective_skeleton, *animation);
+    include_animation_timeline_maximum_excluding_loop_boundaries(
         project->transform_timeline_edits, animation_name, &inferred_duration);
-    include_animation_timeline_maximum(
+    include_animation_timeline_maximum_excluding_loop_boundaries(
         project->mesh_deform_timeline_edits, animation_name, &inferred_duration);
     include_animation_timeline_maximum(
         project->draw_order_timeline_edits, animation_name, &inferred_duration);
     include_animation_timeline_maximum(
         project->event_timeline_edits, animation_name, &inferred_duration);
-    include_animation_timeline_maximum(
+    include_animation_timeline_maximum_excluding_loop_boundaries(
         project->slot_color_timeline_edits, animation_name, &inferred_duration);
     include_animation_timeline_maximum(
         project->slot_attachment_timeline_edits, animation_name, &inferred_duration);
@@ -1635,7 +1710,8 @@ AuthoringResult set_animation_duration(
     const double applied_duration = static_cast<double>(
         static_cast<runtime::AnimationScalar>(duration));
     const double normalized_inferred_duration = std::max(
-        animation->inferred_duration(),
+        inferred_duration_excluding_loop_boundaries(
+            *project, effective_skeleton, *animation),
         static_cast<double>(
             static_cast<runtime::AnimationScalar>(inferred_duration)));
     if (!std::isfinite(applied_duration) ||
@@ -1685,16 +1761,18 @@ AuthoringResult auto_extend_explicit_animation_durations(
         const double authored_boundary = pending_duration != nullptr
             ? pending_duration->duration
             : *animation.explicit_duration;
+        // MAR-172: without the same exclusion this would grow a shrunken
+        // duration straight back to the boundary key one line later.
         double maximum_time = authored_boundary;
-        include_animation_timeline_maximum(
+        include_animation_timeline_maximum_excluding_loop_boundaries(
             candidate.transform_timeline_edits, animation.name, &maximum_time);
-        include_animation_timeline_maximum(
+        include_animation_timeline_maximum_excluding_loop_boundaries(
             candidate.mesh_deform_timeline_edits, animation.name, &maximum_time);
         include_animation_timeline_maximum(
             candidate.draw_order_timeline_edits, animation.name, &maximum_time);
         include_animation_timeline_maximum(
             candidate.event_timeline_edits, animation.name, &maximum_time);
-        include_animation_timeline_maximum(
+        include_animation_timeline_maximum_excluding_loop_boundaries(
             candidate.slot_color_timeline_edits, animation.name, &maximum_time);
         include_animation_timeline_maximum(
             candidate.slot_attachment_timeline_edits, animation.name, &maximum_time);
@@ -2655,6 +2733,757 @@ TimelineCurveModeResult set_keyframe_curve_mode(
     }
     *project = std::move(candidate);
     return {{true, {}}, resolved.size(), changed_key_count, resolved_key_count};
+}
+
+// ---------------------------------------------------------------------
+// MAR-172 loop boundary key synchronization.
+// ---------------------------------------------------------------------
+
+std::string_view timeline_lane_kind_token(TimelineLaneKind kind) {
+    switch (kind) {
+    case TimelineLaneKind::Transform:
+        return "transform";
+    case TimelineLaneKind::SlotColor:
+        return "slot_color";
+    case TimelineLaneKind::Deform:
+        return "deform";
+    }
+    return "transform";
+}
+
+std::optional<TimelineLaneKind> timeline_lane_kind_from_token(std::string_view token) {
+    if (token == "transform") return TimelineLaneKind::Transform;
+    if (token == "slot_color") return TimelineLaneKind::SlotColor;
+    if (token == "deform") return TimelineLaneKind::Deform;
+    return std::nullopt;
+}
+
+namespace {
+
+/**
+ * @brief The exact time a managed boundary key occupies for one duration.
+ *
+ * The runtime stores key times as float32, so the boundary is compared and
+ * written in that precision; anything else would move on save and reload.
+ */
+double loop_boundary_time(double duration) {
+    return static_cast<double>(static_cast<runtime::AnimationScalar>(duration));
+}
+
+/**
+ * @brief The duration the boundary contract follows, pending edits included.
+ *
+ * A `SetDuration` edit authored earlier in the same transaction has not reached
+ * the effective skeleton yet, so reading only `explicit_duration` would leave
+ * the boundary at the previous duration for exactly one transaction.
+ */
+std::optional<double> animation_explicit_duration(
+    const ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name) {
+    if (const AnimationEdit* pending = pending_duration_edit(project, animation_name)) {
+        return pending->duration;
+    }
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (animation == nullptr) {
+        return std::nullopt;
+    }
+    return animation->explicit_duration;
+}
+
+std::string transform_channel_label(TransformTimelineChannel channel) {
+    switch (channel) {
+    case TransformTimelineChannel::Rotate:
+        return "rotate";
+    case TransformTimelineChannel::Translate:
+        return "translate";
+    case TransformTimelineChannel::Scale:
+        return "scale";
+    case TransformTimelineChannel::Shear:
+        return "shear";
+    }
+    return "rotate";
+}
+
+std::string lane_label(const TransformTimelineEdit& edit) {
+    return "'" + edit.bone_name + "/" + transform_channel_label(edit.channel) + "'";
+}
+
+std::string lane_label(const SlotColorTimelineEdit& edit) {
+    return "slot '" + edit.slot_name + "' color";
+}
+
+std::string lane_label(const MeshDeformTimelineEdit& edit) {
+    return "slot '" + edit.slot_name + "' deform '" + edit.attachment_name + "'";
+}
+
+std::string lane_selector_label(const TimelineLaneSelector& lane) {
+    switch (lane.kind) {
+    case TimelineLaneKind::Transform:
+        return "'" + lane.bone_name + "/" +
+            transform_channel_label(lane.transform_channel) + "'";
+    case TimelineLaneKind::SlotColor:
+        return "slot '" + lane.slot_name + "' color";
+    case TimelineLaneKind::Deform:
+        return "slot '" + lane.slot_name + "' deform '" + lane.attachment_name + "'";
+    }
+    return "'?'";
+}
+
+struct ResolvedTimelineLane {
+    TimelineLaneKind kind{TimelineLaneKind::Transform};
+    std::size_t timeline_index{0U};
+};
+
+std::optional<ResolvedTimelineLane> resolve_timeline_lane(
+    const ProjectData& project,
+    const TimelineLaneSelector& lane,
+    std::string* error_out) {
+    const auto fail = [&]() -> std::optional<ResolvedTimelineLane> {
+        *error_out = "Persisted timeline lane not found: animation '" +
+            lane.animation_name + "' timeline " + lane_selector_label(lane) + ".";
+        return std::nullopt;
+    };
+    switch (lane.kind) {
+    case TimelineLaneKind::Transform: {
+        const auto index = matching_timeline_index(
+            project.transform_timeline_edits,
+            [&](const TransformTimelineEdit& edit) {
+                return edit.animation_name == lane.animation_name &&
+                    edit.bone_name == lane.bone_name &&
+                    edit.channel == lane.transform_channel;
+            });
+        if (!index.has_value()) return fail();
+        return ResolvedTimelineLane{lane.kind, *index};
+    }
+    case TimelineLaneKind::SlotColor: {
+        const auto index = matching_timeline_index(
+            project.slot_color_timeline_edits,
+            [&](const SlotColorTimelineEdit& edit) {
+                return edit.animation_name == lane.animation_name &&
+                    edit.slot_name == lane.slot_name;
+            });
+        if (!index.has_value()) return fail();
+        return ResolvedTimelineLane{lane.kind, *index};
+    }
+    case TimelineLaneKind::Deform: {
+        const auto index = matching_timeline_index(
+            project.mesh_deform_timeline_edits,
+            [&](const MeshDeformTimelineEdit& edit) {
+                return edit.animation_name == lane.animation_name &&
+                    edit.slot_name == lane.slot_name &&
+                    edit.attachment_name == lane.attachment_name;
+            });
+        if (!index.has_value()) return fail();
+        return ResolvedTimelineLane{lane.kind, *index};
+    }
+    }
+    return fail();
+}
+
+/** @brief Copies key `from`'s value components onto key `to`, per family. */
+bool copy_boundary_value(TransformTimelineEdit* lane, std::size_t from, std::size_t to) {
+    const TransformKeyframeEdit source = lane->keyframes[from];
+    TransformKeyframeEdit& target = lane->keyframes[to];
+    bool changed = false;
+    if (lane->channel == TransformTimelineChannel::Rotate) {
+        changed = target.angle != source.angle;
+        target.angle = source.angle;
+    } else {
+        changed = target.x != source.x || target.y != source.y;
+        target.x = source.x;
+        target.y = source.y;
+    }
+    return changed;
+}
+
+bool copy_boundary_value(SlotColorTimelineEdit* lane, std::size_t from, std::size_t to) {
+    const runtime::SlotColor source = lane->keyframes[from].color;
+    SlotColorKeyframeEdit& target = lane->keyframes[to];
+    const bool changed = target.color.r != source.r || target.color.g != source.g ||
+        target.color.b != source.b || target.color.a != source.a;
+    target.color = source;
+    return changed;
+}
+
+bool copy_boundary_value(MeshDeformTimelineEdit* lane, std::size_t from, std::size_t to) {
+    const std::vector<double> source = lane->keyframes[from].vertex_offsets;
+    DeformKeyframeEdit& target = lane->keyframes[to];
+    const bool changed = target.vertex_offsets != source;
+    target.vertex_offsets = source;
+    return changed;
+}
+
+/**
+ * @brief Copies key `from`'s easing record onto key `to`.
+ *
+ * Deliberately not `set_keyframe_interpolation()`, which MAR-171 makes demote
+ * every key it writes to `TimelineCurveMode::Manual`. Calling it here would
+ * destroy the mirrored automatic intent on every single transaction.
+ */
+bool copy_boundary_easing(TransformTimelineEdit* lane, std::size_t from, std::size_t to) {
+    const TransformKeyframeEdit source = lane->keyframes[from];
+    TransformKeyframeEdit& target = lane->keyframes[to];
+    const bool changed = !same_interpolation(target.interpolation, source.interpolation) ||
+        target.curve_mode != source.curve_mode ||
+        target.curve_driver != source.curve_driver;
+    target.interpolation = source.interpolation;
+    target.curve_mode = source.curve_mode;
+    target.curve_driver = source.curve_driver;
+    return changed;
+}
+
+bool copy_boundary_easing(SlotColorTimelineEdit* lane, std::size_t from, std::size_t to) {
+    const SlotColorKeyframeEdit source = lane->keyframes[from];
+    SlotColorKeyframeEdit& target = lane->keyframes[to];
+    const bool changed = !same_interpolation(target.interpolation, source.interpolation) ||
+        target.curve_mode != source.curve_mode ||
+        target.curve_driver != source.curve_driver;
+    target.interpolation = source.interpolation;
+    target.curve_mode = source.curve_mode;
+    target.curve_driver = source.curve_driver;
+    return changed;
+}
+
+bool copy_boundary_easing(MeshDeformTimelineEdit* lane, std::size_t from, std::size_t to) {
+    const runtime::Interpolation source = lane->keyframes[from].interpolation;
+    DeformKeyframeEdit& target = lane->keyframes[to];
+    const bool changed = !same_interpolation(target.interpolation, source);
+    target.interpolation = source;
+    return changed;
+}
+
+/**
+ * @brief The boundary contract's structural checks over one lane's other keys.
+ *
+ * `managed` names the key the contract already owns. On an opted-in lane that
+ * is its last key, because clause 4 put it there at the previous duration, so a
+ * duration change moves it rather than stranding it past the new boundary.
+ */
+template <typename Timeline>
+bool check_boundary_neighbours(
+    const Timeline& lane,
+    double boundary_time,
+    std::optional<std::size_t> managed,
+    std::string_view animation_name,
+    const std::string& label,
+    std::string* error_out) {
+    const auto prefix = [&] {
+        return "Animation '" + std::string(animation_name) + "' timeline " + label;
+    };
+    for (std::size_t index = 0U; index < lane.keyframes.size(); ++index) {
+        if (managed.has_value() && index == *managed) {
+            continue;
+        }
+        const double time = lane.keyframes[index].time;
+        if (time > boundary_time + kKeyTimeEpsilon) {
+            *error_out = prefix() + " is loop synchronized and cannot hold a key at " +
+                std::to_string(time) + " seconds past its boundary at " +
+                std::to_string(boundary_time) +
+                " seconds; lengthen the duration or disable loop synchronization.";
+            return false;
+        }
+        if (std::abs(time - boundary_time) <= kKeyTimeEpsilon) {
+            *error_out = prefix() + " already holds a key at its loop boundary of " +
+                std::to_string(boundary_time) +
+                " seconds; move or remove it, or disable loop synchronization.";
+            return false;
+        }
+        if (time > boundary_time - kNonEventKeySpacing) {
+            *error_out = prefix() + " keeps a key at " + std::to_string(time) +
+                " seconds within one millisecond of its loop boundary at " +
+                std::to_string(boundary_time) +
+                " seconds; move that key or disable loop synchronization.";
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Phase 1 for one lane: the boundary key's existence, time, and value.
+ *
+ * It changes the key set MAR-171's resolver reads, which is why the resolver
+ * runs after it and the easing mirror runs after the resolver.
+ */
+template <typename Timeline>
+bool synchronize_lane_structure(
+    Timeline* lane,
+    double boundary_time,
+    std::string_view animation_name,
+    TimelineLoopBoundaryAction* action_out,
+    std::size_t* created_key_count,
+    std::size_t* moved_key_count,
+    std::size_t* rewritten_key_count,
+    bool* changed_out,
+    std::string* error_out) {
+    const std::string label = lane_label(*lane);
+    if (lane->keyframes.empty() ||
+        std::abs(lane->keyframes.front().time) > kKeyTimeEpsilon) {
+        *error_out = "Animation '" + std::string(animation_name) + "' timeline " +
+            label +
+            " is loop synchronized and requires a key at time zero; disable loop "
+            "synchronization before removing it.";
+        return false;
+    }
+
+    // The managed boundary is derived, never stored: clause 4 makes it the
+    // lane's last key, and a lane holding only its time-zero key has none yet.
+    const std::size_t count = lane->keyframes.size();
+    const std::optional<std::size_t> managed =
+        count >= 2U ? std::optional<std::size_t>(count - 1U) : std::nullopt;
+    if (!check_boundary_neighbours(
+            *lane, boundary_time, managed, animation_name, label, error_out)) {
+        return false;
+    }
+
+    if (!managed.has_value()) {
+        auto key = lane->keyframes.front();
+        key.time = boundary_time;
+        lane->keyframes.push_back(std::move(key));
+        ++*created_key_count;
+        *action_out = TimelineLoopBoundaryAction::Created;
+        *changed_out = true;
+        return true;
+    }
+
+    const std::size_t index = *managed;
+    const bool moved =
+        std::abs(lane->keyframes[index].time - boundary_time) > kKeyTimeEpsilon;
+    lane->keyframes[index].time = boundary_time;
+    const bool rewritten = copy_boundary_value(lane, 0U, index);
+    if (moved) {
+        ++*moved_key_count;
+        *action_out = TimelineLoopBoundaryAction::Moved;
+    } else if (rewritten) {
+        ++*rewritten_key_count;
+        *action_out = TimelineLoopBoundaryAction::Rewritten;
+    } else {
+        *action_out = TimelineLoopBoundaryAction::Unchanged;
+    }
+    *changed_out = moved || rewritten;
+    return true;
+}
+
+/** @brief Phase 2 for one lane: the easing mirror, after the resolver ran. */
+template <typename Timeline>
+bool mirror_lane_boundary_easing(Timeline* lane) {
+    if (lane->keyframes.size() < 2U) {
+        return false;
+    }
+    return copy_boundary_easing(lane, 0U, lane->keyframes.size() - 1U);
+}
+
+/** @brief Whether any lane of `animation_name` in `project` is opted in. */
+bool project_has_opted_in_lane(
+    const ProjectData& project,
+    std::string_view animation_name) {
+    const auto scan = [&](const auto& edits) {
+        return std::any_of(edits.begin(), edits.end(), [&](const auto& edit) {
+            return edit.loop_sync &&
+                (animation_name.empty() || edit.animation_name == animation_name);
+        });
+    };
+    return scan(project.transform_timeline_edits) ||
+        scan(project.slot_color_timeline_edits) ||
+        scan(project.mesh_deform_timeline_edits);
+}
+
+} // namespace
+
+double inferred_duration_excluding_loop_boundaries(
+    const ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    const runtime::AnimationData& animation) {
+    // Not an optimization: this is the guarantee that MAR-172 cannot change
+    // duration validation for any project that does not use it.
+    if (!project_has_opted_in_lane(project, animation.name)) {
+        return animation.inferred_duration();
+    }
+
+    const auto bone_name = [&](std::size_t index) -> std::string_view {
+        return index < effective_skeleton.bones().size()
+            ? std::string_view(effective_skeleton.bones()[index].name)
+            : std::string_view{};
+    };
+    const auto slot_name = [&](std::size_t index) -> std::string_view {
+        return index < effective_skeleton.slots().size()
+            ? std::string_view(effective_skeleton.slots()[index].name)
+            : std::string_view{};
+    };
+    const auto owned_transform = [&](std::size_t index, TransformTimelineChannel channel) {
+        const std::string_view name = bone_name(index);
+        return std::any_of(
+            project.transform_timeline_edits.begin(),
+            project.transform_timeline_edits.end(),
+            [&](const TransformTimelineEdit& edit) {
+                return edit.loop_sync && edit.animation_name == animation.name &&
+                    edit.bone_name == name && edit.channel == channel;
+            });
+    };
+
+    double floor = 0.0;
+    const auto include_last = [&](const auto& timeline) {
+        if (!timeline.keyframes.empty()) {
+            floor = std::max(floor, static_cast<double>(timeline.keyframes.back().time));
+        }
+    };
+    for (const auto& timeline : animation.bone_rotate_timelines) {
+        if (!owned_transform(timeline.bone_index, TransformTimelineChannel::Rotate)) {
+            include_last(timeline);
+        }
+    }
+    for (const auto& timeline : animation.bone_translate_timelines) {
+        if (!owned_transform(timeline.bone_index, TransformTimelineChannel::Translate)) {
+            include_last(timeline);
+        }
+    }
+    for (const auto& timeline : animation.bone_scale_timelines) {
+        if (!owned_transform(timeline.bone_index, TransformTimelineChannel::Scale)) {
+            include_last(timeline);
+        }
+    }
+    for (const auto& timeline : animation.bone_shear_timelines) {
+        if (!owned_transform(timeline.bone_index, TransformTimelineChannel::Shear)) {
+            include_last(timeline);
+        }
+    }
+    for (const auto& timeline : animation.bone_inherit_timelines) {
+        include_last(timeline);
+    }
+    for (const auto& timeline : animation.slot_color_timelines) {
+        const std::string_view name = slot_name(timeline.slot_index);
+        const bool owned = std::any_of(
+            project.slot_color_timeline_edits.begin(),
+            project.slot_color_timeline_edits.end(),
+            [&](const SlotColorTimelineEdit& edit) {
+                return edit.loop_sync && edit.animation_name == animation.name &&
+                    edit.slot_name == name;
+            });
+        if (!owned) include_last(timeline);
+    }
+    for (const auto& timeline : animation.mesh_deform_timelines) {
+        const std::string_view name = slot_name(timeline.slot_index);
+        const bool owned = std::any_of(
+            project.mesh_deform_timeline_edits.begin(),
+            project.mesh_deform_timeline_edits.end(),
+            [&](const MeshDeformTimelineEdit& edit) {
+                return edit.loop_sync && edit.animation_name == animation.name &&
+                    edit.slot_name == name &&
+                    edit.attachment_name == timeline.attachment_name;
+            });
+        if (!owned) include_last(timeline);
+    }
+    // The discrete families can never be owned by an opted-in lane.
+    for (const auto& timeline : animation.slot_attachment_timelines) {
+        include_last(timeline);
+    }
+    if (animation.draw_order_timeline_data.has_value()) {
+        include_last(*animation.draw_order_timeline_data);
+    }
+    if (animation.event_timeline_data.has_value()) {
+        include_last(*animation.event_timeline_data);
+    }
+
+    // Every opted-in lane folds back in at its second-to-last key, which is the
+    // last time the animator actually authored on it.
+    const auto fold_opted_in = [&](const auto& edits) {
+        for (const auto& edit : edits) {
+            if (!edit.loop_sync || edit.animation_name != animation.name) continue;
+            const std::size_t count = edit.keyframes.size();
+            if (count >= 2U) {
+                floor = std::max(floor, edit.keyframes[count - 2U].time);
+            }
+        }
+    };
+    fold_opted_in(project.transform_timeline_edits);
+    fold_opted_in(project.slot_color_timeline_edits);
+    fold_opted_in(project.mesh_deform_timeline_edits);
+    return floor;
+}
+
+TimelineLoopSyncResult synchronize_loop_boundaries(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name) {
+    if (project == nullptr) {
+        return {{false, "Timeline authoring requires an open project."}};
+    }
+    // Step 0. A project with no opted-in lane in scope does nothing at all,
+    // including no automatic-curve resolution, so its behaviour is identical to
+    // a build that has never heard of MAR-172.
+    if (!project_has_opted_in_lane(*project, animation_name)) {
+        return {};
+    }
+
+    TimelineLoopSyncResult result;
+    ProjectData candidate = *project;
+    bool changed = false;
+    std::string error;
+
+    const auto in_scope = [&](const std::string& name) {
+        return animation_name.empty() || name == animation_name;
+    };
+
+    // PHASE 1 -- structure and value.
+    const auto phase_one = [&](auto& edits) {
+        for (auto& edit : edits) {
+            if (!edit.loop_sync || !in_scope(edit.animation_name)) continue;
+            ++result.lane_count;
+            const auto duration = animation_explicit_duration(
+                candidate, effective_skeleton, edit.animation_name);
+            if (!duration.has_value()) {
+                error = "Animation '" + edit.animation_name + "' timeline " +
+                    lane_label(edit) +
+                    " is loop synchronized but the animation has no explicit duration; "
+                    "author one or disable loop synchronization.";
+                return false;
+            }
+            const double boundary = loop_boundary_time(*duration);
+            if (!(boundary >= kNonEventKeySpacing)) {
+                error = "Animation '" + edit.animation_name + "' timeline " +
+                    lane_label(edit) + " is loop synchronized but the duration of " +
+                    std::to_string(boundary) +
+                    " seconds leaves no room for a key at time zero and a boundary "
+                    "key one millisecond apart.";
+                return false;
+            }
+            TimelineLoopBoundaryAction action = TimelineLoopBoundaryAction::Unchanged;
+            bool lane_changed = false;
+            if (!synchronize_lane_structure(
+                    &edit,
+                    boundary,
+                    edit.animation_name,
+                    &action,
+                    &result.created_key_count,
+                    &result.moved_key_count,
+                    &result.rewritten_key_count,
+                    &lane_changed,
+                    &error)) {
+                return false;
+            }
+            if (lane_changed) {
+                ++result.synchronized_lane_count;
+                changed = true;
+            }
+        }
+        return true;
+    };
+    if (!phase_one(candidate.transform_timeline_edits) ||
+        !phase_one(candidate.slot_color_timeline_edits) ||
+        !phase_one(candidate.mesh_deform_timeline_edits)) {
+        return {{false, std::move(error)}};
+    }
+
+    // Step 3. MAR-171's resolver, between the phases: phase 1 gave the
+    // previously-last key a real outgoing segment, and phase 2 mirrors an
+    // easing this may have just rewritten.
+    const TimelineAutoCurveResult resolved = resolve_automatic_curves(&candidate, {});
+    if (!resolved) {
+        return {{false, resolved.error}};
+    }
+    result.resolved_key_count = resolved.resolved_key_count;
+    changed = changed || resolved.changed;
+
+    // PHASE 2 -- the easing mirror. The resolver never writes a lane's last
+    // key, so this cannot invalidate step 3 and one pass of each is exact.
+    const auto phase_two = [&](auto& edits) {
+        for (auto& edit : edits) {
+            if (!edit.loop_sync || !in_scope(edit.animation_name)) continue;
+            if (mirror_lane_boundary_easing(&edit)) {
+                changed = true;
+            }
+        }
+    };
+    phase_two(candidate.transform_timeline_edits);
+    phase_two(candidate.slot_color_timeline_edits);
+    phase_two(candidate.mesh_deform_timeline_edits);
+
+    if (!changed) {
+        return result;
+    }
+    *project = std::move(candidate);
+    result.changed = true;
+    return result;
+}
+
+TimelineLoopSyncResult set_timeline_loop_sync(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    const std::vector<TimelineLaneSelector>& lanes,
+    bool enabled) {
+    if (project == nullptr) {
+        return {{false, "Timeline authoring requires an open project."}};
+    }
+    if (lanes.empty()) {
+        return {{false, "Loop synchronization requires at least one timeline lane."}};
+    }
+
+    ProjectData candidate = *project;
+    TimelineLoopSyncResult result;
+    result.lane_count = lanes.size();
+    result.lane_actions.assign(lanes.size(), TimelineLoopBoundaryAction::Unchanged);
+
+    std::vector<ResolvedTimelineLane> resolved;
+    resolved.reserve(lanes.size());
+    for (const TimelineLaneSelector& lane : lanes) {
+        std::string error;
+        const auto found = resolve_timeline_lane(candidate, lane, &error);
+        if (!found.has_value()) {
+            return {{false, std::move(error)}};
+        }
+        for (const ResolvedTimelineLane& existing : resolved) {
+            if (existing.kind == found->kind &&
+                existing.timeline_index == found->timeline_index) {
+                return {{false,
+                         "Loop synchronization selectors must name distinct timeline "
+                         "lanes: " + lane_selector_label(lane) + " appears twice."}};
+            }
+        }
+        resolved.push_back(*found);
+    }
+
+    std::vector<std::string> animations;
+    std::size_t changed_lane_count = 0U;
+    bool mutated = false;
+
+    // Enabling evaluates every prerequisite of the contract before it writes
+    // anything; disabling deliberately evaluates none, so a project that has
+    // reached an unsatisfiable state always has an escape.
+    for (std::size_t index = 0U; index < lanes.size(); ++index) {
+        const TimelineLaneSelector& lane = lanes[index];
+        const ResolvedTimelineLane& target = resolved[index];
+        if (std::find(animations.begin(), animations.end(), lane.animation_name) ==
+            animations.end()) {
+            animations.push_back(lane.animation_name);
+        }
+
+        const auto apply = [&](auto& edits) {
+            auto& edit = edits[target.timeline_index];
+            if (!enabled) {
+                if (edit.loop_sync) {
+                    edit.loop_sync = false;
+                    ++changed_lane_count;
+                    mutated = true;
+                }
+                result.lane_actions[index] = TimelineLoopBoundaryAction::Released;
+                return std::string{};
+            }
+
+            const auto duration = animation_explicit_duration(
+                candidate, effective_skeleton, edit.animation_name);
+            const std::string prefix =
+                "Animation '" + edit.animation_name + "' timeline " + lane_label(edit);
+            if (!duration.has_value()) {
+                return prefix +
+                    " cannot be loop synchronized without an explicit animation "
+                    "duration; author one first.";
+            }
+            const double boundary = loop_boundary_time(*duration);
+            if (!(boundary >= kNonEventKeySpacing)) {
+                return prefix + " cannot be loop synchronized at a duration of " +
+                    std::to_string(boundary) +
+                    " seconds; the boundary key needs one millisecond of room after "
+                    "the key at time zero.";
+            }
+            if (edit.keyframes.empty() ||
+                std::abs(edit.keyframes.front().time) > kKeyTimeEpsilon) {
+                return prefix +
+                    " cannot be loop synchronized without a key at time zero; author "
+                    "one first.";
+            }
+
+            std::optional<std::size_t> at_boundary;
+            std::size_t boundary_key_count = 0U;
+            for (std::size_t key = 0U; key < edit.keyframes.size(); ++key) {
+                if (std::abs(edit.keyframes[key].time - boundary) <= kKeyTimeEpsilon) {
+                    ++boundary_key_count;
+                    if (!at_boundary.has_value()) at_boundary = key;
+                }
+            }
+            if (boundary_key_count > 1U) {
+                return prefix + " holds " + std::to_string(boundary_key_count) +
+                    " keys at its loop boundary of " + std::to_string(boundary) +
+                    " seconds; remove the duplicates first.";
+            }
+            std::string error;
+            if (!check_boundary_neighbours(
+                    edit, boundary, at_boundary, edit.animation_name, lane_label(edit),
+                    &error)) {
+                return error;
+            }
+
+            const bool flag_changed = !edit.loop_sync;
+            edit.loop_sync = true;
+            if (flag_changed) {
+                ++changed_lane_count;
+                mutated = true;
+            }
+            if (at_boundary.has_value()) {
+                // Adoption overwrites an authored key's value: the animator
+                // asked for the last key to become the loop boundary, and the
+                // boundary's value is defined by the contract.
+                const bool value_changed = copy_boundary_value(&edit, 0U, *at_boundary);
+                const bool easing_changed = copy_boundary_easing(&edit, 0U, *at_boundary);
+                if (value_changed || easing_changed) {
+                    ++result.rewritten_key_count;
+                    mutated = true;
+                }
+                if (flag_changed || value_changed || easing_changed) {
+                    result.lane_actions[index] = TimelineLoopBoundaryAction::Adopted;
+                }
+            } else {
+                auto key = edit.keyframes.front();
+                key.time = boundary;
+                edit.keyframes.push_back(std::move(key));
+                ++result.created_key_count;
+                result.lane_actions[index] = TimelineLoopBoundaryAction::Created;
+                mutated = true;
+            }
+            return std::string{};
+        };
+
+        std::string error;
+        switch (target.kind) {
+        case TimelineLaneKind::Transform:
+            error = apply(candidate.transform_timeline_edits);
+            break;
+        case TimelineLaneKind::SlotColor:
+            error = apply(candidate.slot_color_timeline_edits);
+            break;
+        case TimelineLaneKind::Deform:
+            error = apply(candidate.mesh_deform_timeline_edits);
+            break;
+        }
+        if (!error.empty()) {
+            return {{false, std::move(error)}};
+        }
+    }
+
+    // The operation's own dry run must report the resulting boundary key, not a
+    // promise that the session seam will produce one later.
+    for (const std::string& animation : animations) {
+        const TimelineLoopSyncResult synchronized =
+            synchronize_loop_boundaries(&candidate, effective_skeleton, animation);
+        if (!synchronized) {
+            return {{false, synchronized.error}};
+        }
+        result.synchronized_lane_count += synchronized.synchronized_lane_count;
+        result.created_key_count += synchronized.created_key_count;
+        result.moved_key_count += synchronized.moved_key_count;
+        result.rewritten_key_count += synchronized.rewritten_key_count;
+        result.resolved_key_count += synchronized.resolved_key_count;
+        mutated = mutated || synchronized.changed;
+    }
+
+    result.changed_lane_count = changed_lane_count;
+    if (!mutated) {
+        return result;
+    }
+    *project = std::move(candidate);
+    result.changed = true;
+    return result;
 }
 
 } // namespace marrow::editor

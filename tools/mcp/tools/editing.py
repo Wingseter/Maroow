@@ -102,6 +102,54 @@ def _timeline_curve_mode_key_schema() -> dict:
     }
 
 
+def _timeline_loop_sync_lane_schema() -> dict:
+    """The three continuous families, named as whole lanes rather than keys.
+
+    Deliberately not a reuse of ``_timeline_interpolation_key_schema()``, whose
+    entries require a ``time``: loop synchronization is a property of a whole
+    timeline, and its identity is exactly the part no retime, insertion,
+    deletion, or paste can change. Draw-order, event, and slot-attachment lanes
+    are piecewise constant and are absent on purpose.
+    """
+    common = {"animation": {"type": "string", "minLength": 1}}
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "deform"},
+                    "slot": {"type": "string", "minLength": 1},
+                    "attachment": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "attachment"],
+            },
+        ]
+    }
+
+
 def _timeline_interpolation_key_schema() -> dict:
     """Only the three families whose keys carry an ``interpolation`` field.
 
@@ -645,6 +693,38 @@ def get_tools() -> list[types.Tool]:
                     "dry_run": {"type": "boolean"},
                 },
                 "required": ["keys", "mode"],
+            },
+        ),
+        types.Tool(
+            name="timeline.set_loop_sync",
+            description=(
+                "Enable or disable loop-boundary synchronization on whole transform, "
+                "slot-colour, and deform timelines. An opted-in lane always carries "
+                "exactly one managed key at the animation's explicit duration whose "
+                "value and easing mirror that lane's key at time zero, so a looping "
+                "clip wraps without a pop, and the editor re-establishes that on every "
+                "edit. Enabling requires an explicit clip duration of at least one "
+                "millisecond and a key exactly at time zero, and creates or adopts the "
+                "managed key immediately. Disabling evaluates no prerequisite and "
+                "leaves the managed key in place as an ordinary key. Draw-order, "
+                "event, and slot-attachment lanes are piecewise constant and are not "
+                "supported. Lane entries carry no `time`. A dry run reports each "
+                "lane's current flag and boundary key, and the resulting one, without "
+                "mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "lanes": {
+                        "type": "array",
+                        "items": _timeline_loop_sync_lane_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "enabled": {"type": "boolean"},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["lanes", "enabled"],
             },
         ),
         types.Tool(

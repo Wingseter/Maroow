@@ -1324,6 +1324,20 @@ struct EditorSession::Impl {
                     extension_result.error)};
         }
 
+        // MAR-172: the one position provably after every duration change,
+        // including the growth the session just performed on the caller's
+        // behalf. A controller-level wiring would run before that growth and
+        // leave every managed boundary key of the animation stale.
+        const TimelineLoopSyncResult loop_sync_result =
+            synchronize_loop_boundaries(load.project.get(), *load.skeleton_data);
+        if (!loop_sync_result) {
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    loop_sync_result.error)};
+        }
+
         const ProjectRuntimeResult runtime_result = build_project_runtime(
             *load.project,
             *load.base_skeleton_document);
@@ -1421,6 +1435,21 @@ struct EditorSession::Impl {
                     extension_result.error)};
         }
         if (extension_result.changed) {
+            transaction.runtime_is_current = false;
+            active_transaction->runtime_is_current = false;
+        }
+        // MAR-172, mirroring the auto-extend rollback and invalidation exactly.
+        const TimelineLoopSyncResult loop_sync_result =
+            synchronize_loop_boundaries(load.project.get(), *load.skeleton_data);
+        if (!loop_sync_result) {
+            restore_active_transaction();
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    loop_sync_result.error)};
+        }
+        if (loop_sync_result.changed) {
             transaction.runtime_is_current = false;
             active_transaction->runtime_is_current = false;
         }

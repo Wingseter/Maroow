@@ -588,6 +588,486 @@ void test_automatic_curve_control_points(TestSuite& suite) {
         "a segment shorter than the key time epsilon must reject the whole track");
 }
 
+// ---------------------------------------------------------------------
+// MAR-172 loop boundary key synchronization.
+// ---------------------------------------------------------------------
+
+/** @brief The fixture project plus its effective skeleton, for lane cases. */
+struct LoopSyncFixture {
+    marrow::editor::ProjectLoadResult loaded;
+
+    bool ready() const { return static_cast<bool>(loaded); }
+    marrow::editor::ProjectData project() const { return *loaded.project; }
+    const marrow::runtime::SkeletonData& skeleton() const { return *loaded.skeleton_data; }
+};
+
+LoopSyncFixture load_loop_sync_fixture() {
+    return LoopSyncFixture{
+        marrow::editor::load_project("assets/fixtures/player_idle.marrow")};
+}
+
+marrow::editor::TimelineLaneSelector spine_rotate_lane() {
+    marrow::editor::TimelineLaneSelector lane;
+    lane.kind = marrow::editor::TimelineLaneKind::Transform;
+    lane.animation_name = "idle";
+    lane.bone_name = "spine";
+    lane.transform_channel = marrow::editor::TransformTimelineChannel::Rotate;
+    return lane;
+}
+
+const marrow::editor::TransformTimelineEdit* spine_rotate(
+    const marrow::editor::ProjectData& project) {
+    return project.find_transform_timeline_edit(
+        "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+}
+
+/** @brief `idle` with an explicit duration and `spine`/`rotate` opted in. */
+bool prepare_opted_in_idle(
+    const LoopSyncFixture& fixture,
+    double duration,
+    marrow::editor::ProjectData* project_out,
+    TestSuite& suite) {
+    *project_out = fixture.project();
+    const auto authored = marrow::editor::set_animation_duration(
+        project_out, fixture.skeleton(), "idle", duration);
+    suite.expect(static_cast<bool>(authored), "authoring an explicit duration must succeed");
+    if (!authored) return false;
+    const auto enabled = marrow::editor::set_timeline_loop_sync(
+        project_out, fixture.skeleton(), {spine_rotate_lane()}, true);
+    suite.expect(static_cast<bool>(enabled), "enabling loop sync must succeed");
+    return static_cast<bool>(enabled);
+}
+
+void test_loop_boundary_default_off_and_idempotence(TestSuite& suite) {
+    const LoopSyncFixture fixture = load_loop_sync_fixture();
+    suite.expect(fixture.ready(), "fixture project must load");
+    if (!fixture.ready()) return;
+
+    // Default off does nothing at all, including no resolver pass: the stale
+    // automatic curve seeded here is still stale afterwards.
+    {
+        marrow::editor::ProjectData project = fixture.project();
+        auto* lane = project.transform_timeline_edits.data();
+        (void)lane;
+        auto* rotate = project.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        rotate->keyframes.front().curve_mode = marrow::editor::TimelineCurveMode::Auto;
+        rotate->keyframes.front().curve_driver =
+            marrow::editor::TimelineScalarComponent::Angle;
+        rotate->keyframes.front().interpolation =
+            marrow::runtime::Interpolation::cubic_bezier(0.9, 0.1, 0.95, 0.05);
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto result = marrow::editor::synchronize_loop_boundaries(
+            &project, fixture.skeleton());
+        suite.expect(static_cast<bool>(result), "default-off sync must not fail");
+        suite.expect(result.lane_count == 0U, "default-off sync must find no lane");
+        suite.expect(!result.changed, "default-off sync must change nothing");
+        suite.expect(
+            result.resolved_key_count == 0U,
+            "default-off sync must not run the automatic-curve resolver");
+        suite.expect(
+            marrow::editor::serialize_project(project) == before,
+            "default-off sync must leave the stale automatic curve stale");
+    }
+
+    // Idempotence: the second call reports no change and the project is
+    // byte-identical, which is the two-phase termination argument asserted.
+    {
+        marrow::editor::ProjectData project;
+        if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto again = marrow::editor::synchronize_loop_boundaries(
+            &project, fixture.skeleton());
+        suite.expect(static_cast<bool>(again), "a repeat sync must not fail");
+        suite.expect(again.lane_count == 1U, "a repeat sync must still see the lane");
+        suite.expect(
+            again.synchronized_lane_count == 0U && again.created_key_count == 0U &&
+                again.moved_key_count == 0U && again.rewritten_key_count == 0U &&
+                !again.changed,
+            "a repeat sync must report no change");
+        suite.expect(
+            marrow::editor::serialize_project(project) == before,
+            "a repeat sync must leave the project byte-identical");
+    }
+}
+
+void test_loop_boundary_create_adopt_move_rewrite(TestSuite& suite) {
+    const LoopSyncFixture fixture = load_loop_sync_fixture();
+    suite.expect(fixture.ready(), "fixture project must load");
+    if (!fixture.ready()) return;
+
+    // Create: a three-key lane gains a fourth at exactly float32(1.5) whose
+    // value and easing are bit-equal to key 0's.
+    marrow::editor::ProjectData project;
+    if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+    const auto* lane = spine_rotate(project);
+    suite.expect(lane != nullptr && lane->loop_sync, "the lane must be opted in");
+    if (lane == nullptr) return;
+    suite.expect(lane->keyframes.size() == 4U, "create must append one boundary key");
+    if (lane->keyframes.size() != 4U) return;
+    const auto& first = lane->keyframes.front();
+    const auto& boundary = lane->keyframes.back();
+    suite.expect(
+        boundary.time ==
+            static_cast<double>(static_cast<marrow::runtime::AnimationScalar>(1.5)),
+        "the boundary key must sit at exactly float32(duration)");
+    suite.expect(boundary.angle == first.angle, "the mirror must be bit-exact on angle");
+    suite.expect(
+        boundary.interpolation.kind() == first.interpolation.kind() &&
+            boundary.interpolation.kind() ==
+                marrow::runtime::InterpolationKind::CubicBezier &&
+            boundary.interpolation.cubic_bezier().cx1 ==
+                first.interpolation.cubic_bezier().cx1 &&
+            boundary.interpolation.cubic_bezier().cy1 ==
+                first.interpolation.cubic_bezier().cy1 &&
+            boundary.interpolation.cubic_bezier().cx2 ==
+                first.interpolation.cubic_bezier().cx2 &&
+            boundary.interpolation.cubic_bezier().cy2 ==
+                first.interpolation.cubic_bezier().cy2,
+        "the mirror must be bit-exact on all four control points, not within an epsilon");
+
+    // Adopt: `aim`/`arm_l`/`rotate` is runtime-only, has an explicit duration
+    // of 0.5, and already holds a key at 0.5 whose value equals key 0's.
+    {
+        marrow::editor::ProjectData adopted = fixture.project();
+        marrow::editor::TimelineLaneSelector lane_selector;
+        lane_selector.kind = marrow::editor::TimelineLaneKind::Transform;
+        lane_selector.animation_name = "aim";
+        lane_selector.bone_name = "arm_l";
+        lane_selector.transform_channel = marrow::editor::TransformTimelineChannel::Rotate;
+        suite.expect(
+            marrow::editor::ensure_transform_timeline_edit(
+                adopted,
+                fixture.skeleton(),
+                "aim",
+                "arm_l",
+                marrow::editor::TransformTimelineChannel::Rotate) != nullptr,
+            "the runtime-only aim lane must materialize");
+        const auto result = marrow::editor::set_timeline_loop_sync(
+            &adopted, fixture.skeleton(), {lane_selector}, true);
+        suite.expect(static_cast<bool>(result), "adoption must succeed");
+        suite.expect(
+            !result.lane_actions.empty() &&
+                result.lane_actions.front() ==
+                    marrow::editor::TimelineLoopBoundaryAction::Adopted,
+            "an existing key at the boundary must be adopted, not created");
+        suite.expect(result.created_key_count == 0U, "adoption must create no key");
+        suite.expect(result.changed_lane_count == 1U, "adoption must flip exactly one flag");
+        const auto* aim = adopted.find_transform_timeline_edit(
+            "aim", "arm_l", marrow::editor::TransformTimelineChannel::Rotate);
+        suite.expect(
+            aim != nullptr && aim->keyframes.size() == 2U &&
+                near(aim->keyframes[0].angle, 30.0) && near(aim->keyframes[1].angle, 30.0),
+            "adoption must keep both key values at 30");
+    }
+
+    // Move: shrinking the duration moves the boundary key and nothing else.
+    {
+        marrow::editor::ProjectData moved = project;
+        const auto shrink = marrow::editor::set_animation_duration(
+            &moved, fixture.skeleton(), "idle", 1.2);
+        suite.expect(
+            static_cast<bool>(shrink),
+            "an opted-in clip must stay shortenable above the spacing floor: " +
+                shrink.error);
+        const auto synced =
+            marrow::editor::synchronize_loop_boundaries(&moved, fixture.skeleton());
+        suite.expect(static_cast<bool>(synced) && synced.changed, "the shrink must resync");
+        suite.expect(synced.moved_key_count == 1U, "the shrink must move exactly one key");
+        const auto* after = spine_rotate(moved);
+        suite.expect(
+            after != nullptr && after->keyframes.size() == 4U &&
+                after->keyframes[3].time ==
+                    static_cast<double>(
+                        static_cast<marrow::runtime::AnimationScalar>(1.2)) &&
+                near(after->keyframes[0].time, 0.0) &&
+                near(after->keyframes[1].time, 0.5) &&
+                near(after->keyframes[2].time, 1.0),
+            "only the boundary key may move");
+    }
+
+    // Rewrite: a first-key value change propagates to the boundary alone.
+    {
+        marrow::editor::ProjectData rewritten = project;
+        auto* mutable_lane = rewritten.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        mutable_lane->keyframes.front().angle = 17.5;
+        const auto synced =
+            marrow::editor::synchronize_loop_boundaries(&rewritten, fixture.skeleton());
+        suite.expect(static_cast<bool>(synced) && synced.changed, "a value change must resync");
+        suite.expect(
+            synced.rewritten_key_count == 1U && synced.created_key_count == 0U &&
+                synced.moved_key_count == 0U,
+            "a value change must rewrite exactly one boundary key");
+        const auto* after = spine_rotate(rewritten);
+        suite.expect(
+            after != nullptr && after->keyframes.size() == 4U &&
+                near(after->keyframes[3].angle, 17.5) &&
+                near(after->keyframes[1].angle, 8.0) &&
+                near(after->keyframes[2].angle, -2.0),
+            "only the boundary key's value may change");
+    }
+
+    // Single-key lane: one key at time zero becomes a two-key constant lane.
+    {
+        marrow::editor::ProjectData single = fixture.project();
+        auto* mutable_lane = single.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        mutable_lane->keyframes.resize(1U);
+        const auto authored = marrow::editor::set_animation_duration(
+            &single, fixture.skeleton(), "idle", 1.5);
+        suite.expect(static_cast<bool>(authored), "the single-key case needs a duration");
+        const auto result = marrow::editor::set_timeline_loop_sync(
+            &single, fixture.skeleton(), {spine_rotate_lane()}, true);
+        suite.expect(static_cast<bool>(result), "a single-key lane must be acceptable");
+        const auto* after = spine_rotate(single);
+        suite.expect(
+            after != nullptr && after->keyframes.size() == 2U &&
+                near(after->keyframes[1].time, 1.5),
+            "a single-key lane must gain exactly one boundary key");
+    }
+}
+
+void test_loop_boundary_rejections(TestSuite& suite) {
+    const LoopSyncFixture fixture = load_loop_sync_fixture();
+    suite.expect(fixture.ready(), "fixture project must load");
+    if (!fixture.ready()) return;
+
+    const auto expect_rejected = [&](marrow::editor::ProjectData project,
+                                     std::vector<marrow::editor::TimelineLaneSelector> lanes,
+                                     std::string_view needle,
+                                     std::string_view message) {
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto result = marrow::editor::set_timeline_loop_sync(
+            &project, fixture.skeleton(), lanes, true);
+        suite.expect(!result, message);
+        suite.expect(
+            result.error.find(needle) != std::string::npos,
+            "the rejection message must name the reason");
+        suite.expect(
+            marrow::editor::serialize_project(project) == before,
+            "a rejected enable must leave the project byte-identical");
+    };
+
+    // No explicit duration -- the fixture's `idle` has none.
+    expect_rejected(
+        fixture.project(), {spine_rotate_lane()}, "explicit animation duration",
+        "enabling without an explicit duration must be rejected");
+
+    // No key at time zero -- `arm_l`'s first key is at 0.25.
+    {
+        marrow::editor::ProjectData project = fixture.project();
+        const auto authored = marrow::editor::set_animation_duration(
+            &project, fixture.skeleton(), "idle", 1.5);
+        suite.expect(static_cast<bool>(authored), "the time-zero case needs a duration");
+        marrow::editor::TimelineLaneSelector arm = spine_rotate_lane();
+        arm.bone_name = "arm_l";
+        expect_rejected(
+            project, {arm}, "key at time zero",
+            "enabling a lane whose first key is not at zero must be rejected");
+    }
+
+    // A duration below the non-event spacing leaves no room for two keys.
+    {
+        marrow::editor::ProjectData project = fixture.project();
+        auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        lane->keyframes.resize(1U);
+        marrow::editor::AnimationEdit edit;
+        edit.kind = marrow::editor::AnimationEditKind::SetDuration;
+        edit.name = "idle";
+        edit.duration = 0.0;
+        project.animation_edits.push_back(edit);
+        expect_rejected(
+            project, {spine_rotate_lane()}, "one millisecond of room",
+            "enabling a zero-duration animation must be rejected");
+    }
+
+    // A key past the boundary, and a key crowding it, on the enable path.
+    {
+        marrow::editor::ProjectData base = fixture.project();
+        const auto authored = marrow::editor::set_animation_duration(
+            &base, fixture.skeleton(), "idle", 1.5);
+        suite.expect(static_cast<bool>(authored), "the past-boundary case needs a duration");
+        auto* stretched = base.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        stretched->keyframes.back().time = 2.0;
+        expect_rejected(
+            base, {spine_rotate_lane()}, "past its boundary",
+            "a key past the boundary must be rejected");
+
+        marrow::editor::ProjectData crowded = fixture.project();
+        const auto crowded_duration = marrow::editor::set_animation_duration(
+            &crowded, fixture.skeleton(), "idle", 1.0005);
+        suite.expect(
+            static_cast<bool>(crowded_duration), "the crowding case needs a duration");
+        expect_rejected(
+            crowded, {spine_rotate_lane()}, "within one millisecond",
+            "a key inside the one-millisecond spacing must be rejected");
+    }
+
+    // Two keys at the boundary time.
+    {
+        marrow::editor::ProjectData project = fixture.project();
+        const auto authored = marrow::editor::set_animation_duration(
+            &project, fixture.skeleton(), "idle", 1.0);
+        suite.expect(static_cast<bool>(authored), "the duplicate case needs a duration");
+        auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        lane->keyframes.push_back(lane->keyframes.back());
+        expect_rejected(
+            project, {spine_rotate_lane()}, "keys at its loop boundary",
+            "duplicate keys at the boundary must be rejected");
+    }
+
+    // Duplicate, unresolvable, and empty lane lists.
+    {
+        marrow::editor::ProjectData project;
+        if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto duplicated = marrow::editor::set_timeline_loop_sync(
+            &project, fixture.skeleton(), {spine_rotate_lane(), spine_rotate_lane()}, false);
+        suite.expect(!duplicated, "a duplicate lane selector must be rejected");
+        marrow::editor::TimelineLaneSelector missing = spine_rotate_lane();
+        missing.bone_name = "no_such_bone";
+        const auto unresolved = marrow::editor::set_timeline_loop_sync(
+            &project, fixture.skeleton(), {missing}, true);
+        suite.expect(!unresolved, "an unresolvable lane selector must be rejected");
+        const auto empty = marrow::editor::set_timeline_loop_sync(
+            &project, fixture.skeleton(), {}, true);
+        suite.expect(!empty, "an empty lane list must be rejected");
+        suite.expect(
+            marrow::editor::serialize_project(project) == before,
+            "every rejected selector list must leave the project byte-identical");
+    }
+
+    // Disable never validates. Every state rejected above disables cleanly and
+    // the boundary key stays in place.
+    {
+        marrow::editor::ProjectData project;
+        if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+        // Strand the lane: remove the key at time zero, which the sync rejects.
+        auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+        lane->keyframes.erase(lane->keyframes.begin());
+        const auto stranded =
+            marrow::editor::synchronize_loop_boundaries(&project, fixture.skeleton());
+        suite.expect(!stranded, "a lane with no key at zero must reject the sync");
+        suite.expect(
+            stranded.error.find("key at time zero") != std::string::npos,
+            "the sync rejection must name the missing time-zero key");
+
+        const std::size_t key_count =
+            spine_rotate(project) != nullptr ? spine_rotate(project)->keyframes.size() : 0U;
+        const auto released = marrow::editor::set_timeline_loop_sync(
+            &project, fixture.skeleton(), {spine_rotate_lane()}, false);
+        suite.expect(
+            static_cast<bool>(released) && released.changed,
+            "disabling must succeed in an unsatisfiable state");
+        suite.expect(
+            !released.lane_actions.empty() &&
+                released.lane_actions.front() ==
+                    marrow::editor::TimelineLoopBoundaryAction::Released,
+            "disabling must report Released");
+        const auto* after = spine_rotate(project);
+        suite.expect(
+            after != nullptr && !after->loop_sync && after->keyframes.size() == key_count,
+            "disabling must clear the flag and leave every key in place");
+    }
+}
+
+void test_loop_boundary_retime_pinning(TestSuite& suite) {
+    const LoopSyncFixture fixture = load_loop_sync_fixture();
+    suite.expect(fixture.ready(), "fixture project must load");
+    if (!fixture.ready()) return;
+    marrow::editor::ProjectData project;
+    if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+
+    const auto selector = [](double time) {
+        marrow::editor::TimelineKeySelector key;
+        key.kind = marrow::editor::TimelineKeyKind::Transform;
+        key.animation_name = "idle";
+        key.bone_name = "spine";
+        key.transform_channel = marrow::editor::TransformTimelineChannel::Rotate;
+        key.time = time;
+        return key;
+    };
+    const auto retime = [&](std::vector<marrow::editor::TimelineKeySelector> keys,
+                            double delta) {
+        marrow::editor::ProjectData candidate = project;
+        return marrow::editor::retime_keyframes(&candidate, keys, delta, false, 60.0);
+    };
+
+    const auto first_key = retime({selector(0.0)}, 0.1);
+    suite.expect(
+        static_cast<bool>(first_key) && !first_key.changed &&
+            near(first_key.applied_delta, 0.0),
+        "the first key of an opted-in lane is immovable");
+    const auto last_key = retime({selector(1.5)}, -0.1);
+    suite.expect(
+        static_cast<bool>(last_key) && !last_key.changed &&
+            near(last_key.applied_delta, 0.0),
+        "the managed boundary key is immovable");
+    const auto mixed = retime({selector(0.5), selector(1.5)}, -0.1);
+    suite.expect(
+        static_cast<bool>(mixed) && !mixed.changed && near(mixed.applied_delta, 0.0),
+        "one pinned key freezes the whole selection");
+    const auto middle = retime({selector(0.5)}, 0.1);
+    suite.expect(
+        static_cast<bool>(middle) && middle.changed && near(middle.applied_delta, 0.1),
+        "a selection of only middle keys still moves by the full delta");
+
+    // A lane that is not opted in behaves exactly as before.
+    marrow::editor::ProjectData plain = fixture.project();
+    const auto unpinned = marrow::editor::retime_keyframes(
+        &plain, {selector(0.0)}, 0.1, false, 60.0);
+    suite.expect(
+        static_cast<bool>(unpinned) && unpinned.changed && near(unpinned.applied_delta, 0.1),
+        "a lane that is not opted in retimes its first key exactly as before");
+}
+
+void test_loop_boundary_inferred_duration_floor(TestSuite& suite) {
+    const LoopSyncFixture fixture = load_loop_sync_fixture();
+    suite.expect(fixture.ready(), "fixture project must load");
+    if (!fixture.ready()) return;
+
+    // The fast path is bit-exact for every animation of a project with no
+    // opted-in lane: one with a runtime-only lane, one with a project overlay,
+    // and one with both.
+    const marrow::editor::ProjectData untouched = fixture.project();
+    for (const auto& animation : fixture.skeleton().animations()) {
+        const double excluding =
+            marrow::editor::inferred_duration_excluding_loop_boundaries(
+                untouched, fixture.skeleton(), animation);
+        suite.expect(
+            excluding == animation.inferred_duration(),
+            "the excluding floor must be bit-exact with no lane opted in");
+    }
+
+    marrow::editor::ProjectData project;
+    if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+    const auto* idle = fixture.skeleton().find_animation("idle");
+    suite.expect(idle != nullptr, "the fixture must carry the idle animation");
+    if (idle == nullptr) return;
+    const double floor = marrow::editor::inferred_duration_excluding_loop_boundaries(
+        project, fixture.skeleton(), *idle);
+    suite.expect(
+        near(floor, 1.0),
+        "an opted-in lane must contribute its second-to-last key, not its boundary");
+
+    // A single-key opted-in lane contributes nothing.
+    marrow::editor::ProjectData single = project;
+    auto* lane = single.find_transform_timeline_edit(
+        "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+    lane->keyframes.resize(1U);
+    const double single_floor =
+        marrow::editor::inferred_duration_excluding_loop_boundaries(
+            single, fixture.skeleton(), *idle);
+    suite.expect(
+        near(single_floor, 1.0),
+        "the other lanes still hold the floor when the opted-in lane has one key");
+}
+
 } // namespace
 
 int main() {
@@ -619,6 +1099,21 @@ int main() {
     });
     suite.run("automatic curve control points", [&] {
         test_automatic_curve_control_points(suite);
+    });
+    suite.run("loop boundary default off and idempotence", [&] {
+        test_loop_boundary_default_off_and_idempotence(suite);
+    });
+    suite.run("loop boundary create, adopt, move, and rewrite", [&] {
+        test_loop_boundary_create_adopt_move_rewrite(suite);
+    });
+    suite.run("loop boundary rejections and disable", [&] {
+        test_loop_boundary_rejections(suite);
+    });
+    suite.run("loop boundary retime pinning", [&] {
+        test_loop_boundary_retime_pinning(suite);
+    });
+    suite.run("loop boundary inferred duration floor", [&] {
+        test_loop_boundary_inferred_duration_floor(suite);
     });
     return suite.finish();
 }

@@ -4460,7 +4460,8 @@ bool validate_mar171_automatic_curves(
         }
         const auto resolved = marrow::editor::resolve_automatic_curves(&project, "idle");
         if (!resolved || resolved.changed || resolved.resolved_key_count != 0U) {
-            std::cerr << "MAR-171 a duration change must resolve nothing today.\n";
+            std::cerr << "MAR-171 a duration change must resolve nothing today, "
+                         "with no lane opted in.\n";
             return false;
         }
         (void)before;
@@ -5845,6 +5846,961 @@ bool validate_created_minimal_project(
     return true;
 }
 
+// ---------------------------------------------------------------------
+// MAR-172 loop boundary key synchronization.
+// ---------------------------------------------------------------------
+bool validate_mar172_loop_boundary_sync(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::TimelineCurveMode;
+    using marrow::editor::TimelineLaneKind;
+    using marrow::editor::TimelineLaneSelector;
+    using marrow::editor::TimelineLoopBoundaryAction;
+    using marrow::editor::TimelineKeyKind;
+    using marrow::editor::TimelineKeySelector;
+    using marrow::editor::TimelineScalarComponent;
+    using marrow::editor::TransformTimelineChannel;
+    using marrow::runtime::InterpolationKind;
+
+    std::error_code ignored;
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    const auto rebase = [&](const std::filesystem::path& destination) {
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = destination;
+        return project;
+    };
+
+    const auto same_interpolation_values =
+        [](const marrow::runtime::Interpolation& left,
+           const marrow::runtime::Interpolation& right) {
+            if (left.kind() != right.kind()) return false;
+            if (left.kind() != InterpolationKind::CubicBezier) return true;
+            return left.cubic_bezier().cx1 == right.cubic_bezier().cx1 &&
+                left.cubic_bezier().cy1 == right.cubic_bezier().cy1 &&
+                left.cubic_bezier().cx2 == right.cubic_bezier().cx2 &&
+                left.cubic_bezier().cy2 == right.cubic_bezier().cy2;
+        };
+
+    // --- Default off, byte for byte --------------------------------------
+    const auto default_off_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar172_default_off_" + path_token + ".marrow");
+    const marrow::editor::ProjectData default_off_project = rebase(default_off_path);
+    const std::string untouched_text =
+        marrow::editor::serialize_project(default_off_project);
+    if (untouched_text.find("loop_sync") != std::string::npos) {
+        std::cerr << "MAR-172 serialized a loop_sync block into an untouched project.\n";
+        return false;
+    }
+    const auto default_off_saved =
+        marrow::editor::save_project(default_off_project, default_off_path);
+    if (!default_off_saved) {
+        std::cerr << default_off_saved.error->format() << '\n';
+        return false;
+    }
+    const auto default_off_reloaded = marrow::editor::load_project(default_off_path);
+    std::filesystem::remove(default_off_path, ignored);
+    if (!default_off_reloaded) {
+        std::cerr << default_off_reloaded.error->format();
+        return false;
+    }
+    if (marrow::editor::serialize_project(*default_off_reloaded.project) !=
+        untouched_text) {
+        std::cerr << "MAR-172 broke load/save byte stability on an untouched project.\n";
+        return false;
+    }
+
+    // --- The flag round-trips on exactly one lane -------------------------
+    const auto round_trip_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar172_round_trip_" + path_token + ".marrow");
+    {
+        marrow::editor::ProjectData project = rebase(round_trip_path);
+        auto* rotate = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (rotate == nullptr || rotate->keyframes.empty()) {
+            std::cerr << "MAR-172 storage needs the fixture's spine rotate lane.\n";
+            return false;
+        }
+        rotate->loop_sync = true;
+
+        const std::string text = marrow::editor::serialize_project(project);
+        const auto reparsed = marrow::runtime::json::parse_document(text, "mar172");
+        if (!reparsed) {
+            std::cerr << "MAR-172 could not reparse its own serialized project.\n";
+            return false;
+        }
+        const auto* block = marrow::runtime::json::find_member(
+            reparsed.document->root, "loop_sync");
+        if (block == nullptr || !block->is_object()) {
+            std::cerr << "MAR-172 did not serialize a loop_sync object.\n";
+            return false;
+        }
+        const auto* animations = marrow::runtime::json::find_member(*block, "animations");
+        const auto* idle = animations != nullptr
+            ? marrow::runtime::json::find_member(*animations, "idle")
+            : nullptr;
+        const auto* bones = idle != nullptr
+            ? marrow::runtime::json::find_member(*idle, "bones")
+            : nullptr;
+        const auto* spine = bones != nullptr
+            ? marrow::runtime::json::find_member(*bones, "spine")
+            : nullptr;
+        const auto* channel = spine != nullptr
+            ? marrow::runtime::json::find_member(*spine, "rotate")
+            : nullptr;
+        if (channel == nullptr || !channel->is_boolean() || !channel->as_boolean()) {
+            std::cerr << "MAR-172 loop_sync tree shape is wrong.\n";
+            return false;
+        }
+        if (animations->as_object().size() != 1U || idle->as_object().size() != 1U ||
+            bones->as_object().size() != 1U || spine->as_object().size() != 1U) {
+            std::cerr << "MAR-172 emitted an entry for a lane that is not opted in.\n";
+            return false;
+        }
+        // No `false` leaf and no opted-out lane anywhere inside the block.
+        const std::size_t block_at = text.find("\"loop_sync\"");
+        const std::size_t block_end = text.find("\"marrow\"", block_at);
+        const std::string block_text = text.substr(
+            block_at, block_end == std::string::npos ? std::string::npos : block_end - block_at);
+        if (block_text.find("false") != std::string::npos ||
+            block_text.find("arm_l") != std::string::npos) {
+            std::cerr << "MAR-172 wrote a false leaf or an opted-out lane: "
+                      << block_text << '\n';
+            return false;
+        }
+
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        std::filesystem::remove(round_trip_path, ignored);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* reloaded_rotate = reloaded.project->find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        const auto* reloaded_arm = reloaded.project->find_transform_timeline_edit(
+            "idle", "arm_l", TransformTimelineChannel::Rotate);
+        if (reloaded_rotate == nullptr || !reloaded_rotate->loop_sync) {
+            std::cerr << "MAR-172 loop_sync did not survive save and reload.\n";
+            return false;
+        }
+        if (reloaded_arm == nullptr || reloaded_arm->loop_sync) {
+            std::cerr << "MAR-172 set loop_sync on a lane that never opted in.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(*reloaded.project) != text) {
+            std::cerr << "MAR-172 loop_sync is not byte-stable across save and reload.\n";
+            return false;
+        }
+    }
+
+    // --- Load validation --------------------------------------------------
+    {
+        using Value = marrow::runtime::json::Value;
+        const auto base_document_source = marrow::runtime::json::parse_document(
+            marrow::editor::serialize_project(rebase(round_trip_path)), "mar172");
+        if (!base_document_source) {
+            std::cerr << "MAR-172 could not reparse the fixture for load validation.\n";
+            return false;
+        }
+        const auto boolean_value = [](bool flag) { return Value(flag, {}); };
+        const auto object_value = [](Value::Object object) {
+            return Value(std::move(object), {});
+        };
+        const auto lane_tree = [&](std::string category,
+                                   std::string owner,
+                                   std::string leaf_key,
+                                   Value leaf) {
+            Value::Object owner_object;
+            owner_object[std::move(leaf_key)] = std::move(leaf);
+            Value::Object category_object;
+            category_object[std::move(owner)] = object_value(std::move(owner_object));
+            Value::Object animation_object;
+            animation_object[std::move(category)] = object_value(std::move(category_object));
+            Value::Object animations_object;
+            animations_object["idle"] = object_value(std::move(animation_object));
+            Value::Object root_object;
+            root_object["animations"] = object_value(std::move(animations_object));
+            return object_value(std::move(root_object));
+        };
+
+        struct MalformedCase {
+            const char* label;
+            Value block;
+            const char* expected_path;
+            const char* expected_message;
+        };
+        std::vector<MalformedCase> cases;
+        cases.push_back(
+            {"a non-object loop_sync", Value(std::string("yes"), {}), "$.loop_sync",
+             "loop_sync must be an object"});
+        cases.push_back(
+            {"a loop_sync with no animations", object_value(Value::Object{}),
+             "$.loop_sync.animations", "loop_sync requires an animations object"});
+        {
+            Value::Object root_object;
+            root_object["animations"] = Value(7.0, {});
+            cases.push_back(
+                {"a non-object animations", object_value(std::move(root_object)),
+                 "$.loop_sync.animations", "loop_sync requires an animations object"});
+        }
+        {
+            Value::Object animations_object;
+            animations_object["idle"] = Value(true, {});
+            Value::Object root_object;
+            root_object["animations"] = object_value(std::move(animations_object));
+            cases.push_back(
+                {"a non-object animation entry", object_value(std::move(root_object)),
+                 "$.loop_sync.animations.idle", "loop_sync entries must be objects"});
+        }
+        cases.push_back(
+            {"a string leaf",
+             lane_tree("bones", "spine", "rotate", Value(std::string("true"), {})),
+             "$.loop_sync.animations.idle.bones.spine.rotate",
+             "loop_sync entries must be booleans"});
+        cases.push_back(
+            {"an unknown transform channel",
+             lane_tree("bones", "spine", "spinx", boolean_value(true)),
+             "$.loop_sync.animations.idle.bones.spine.spinx",
+             "loop_sync transform channel must be rotate, translate, scale, or shear"});
+        cases.push_back(
+            {"a slot attachment leaf",
+             lane_tree("slots", "body", "attachment", boolean_value(true)),
+             "$.loop_sync.animations.idle.slots.body.attachment",
+             "loop_sync slot entries support only color"});
+        cases.push_back(
+            {"an orphan lane",
+             lane_tree("bones", "root", "translate", boolean_value(true)),
+             "$.loop_sync.animations.idle.bones.root.translate",
+             "loop_sync requires a timeline edit for that lane"});
+        cases.push_back(
+            {"a lane whose first key is not at time zero",
+             lane_tree("bones", "arm_l", "rotate", boolean_value(true)),
+             "$.loop_sync.animations.idle.bones.arm_l.rotate",
+             "loop synchronized timelines require a key at time zero"});
+
+        for (const MalformedCase& malformed : cases) {
+            auto document = *base_document_source.document;
+            document.root.as_object()["loop_sync"] = malformed.block;
+            const auto loaded = marrow::editor::load_project(document);
+            if (loaded) {
+                std::cerr << "MAR-172 loader accepted " << malformed.label << ".\n";
+                return false;
+            }
+            const std::string message = loaded.error->message;
+            if (message.find(malformed.expected_path) != 0U ||
+                message.find(malformed.expected_message) == std::string::npos) {
+                std::cerr << "MAR-172 rejected " << malformed.label
+                          << " with the wrong path or message: " << message << '\n';
+                return false;
+            }
+        }
+
+        // `false` is accepted, means opted out, and round-trips as absence.
+        {
+            auto document = *base_document_source.document;
+            document.root.as_object()["loop_sync"] =
+                lane_tree("bones", "spine", "rotate", boolean_value(false));
+            const auto loaded = marrow::editor::load_project(document);
+            if (!loaded) {
+                std::cerr << "MAR-172 loader rejected an explicit false leaf: "
+                          << loaded.error->format();
+                return false;
+            }
+            const auto* lane = loaded.project->find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Rotate);
+            if (lane == nullptr || lane->loop_sync) {
+                std::cerr << "MAR-172 read a false leaf as opted in.\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*loaded.project).find("loop_sync") !=
+                std::string::npos) {
+                std::cerr << "MAR-172 re-serialized a false leaf instead of omitting it.\n";
+                return false;
+            }
+        }
+
+        // An unknown top-level member rides through beside the block.
+        {
+            auto document = *base_document_source.document;
+            document.root.as_object()["loop_sync"] =
+                lane_tree("bones", "spine", "rotate", boolean_value(true));
+            document.root.as_object()["mar172_probe"] = Value(1.0, {});
+            const auto loaded = marrow::editor::load_project(document);
+            if (!loaded) {
+                std::cerr << "MAR-172 loader rejected an unknown top-level member: "
+                          << loaded.error->format();
+                return false;
+            }
+            const std::string text = marrow::editor::serialize_project(*loaded.project);
+            if (text.find("mar172_probe") == std::string::npos ||
+                text.find("loop_sync") == std::string::npos) {
+                std::cerr << "MAR-172 did not preserve both root members.\n";
+                return false;
+            }
+        }
+    }
+
+    // --- validate_project_for_save() --------------------------------------
+    {
+        const auto invalid_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar172_invalid_" + path_token + ".marrow");
+        {
+            marrow::editor::ProjectData project = rebase(invalid_path);
+            auto* arm = project.find_transform_timeline_edit(
+                "idle", "arm_l", TransformTimelineChannel::Rotate);
+            arm->loop_sync = true;
+            const auto saved = marrow::editor::save_project(project, invalid_path);
+            std::filesystem::remove(invalid_path, ignored);
+            if (saved) {
+                std::cerr << "MAR-172 saver accepted an opted-in lane with no key at zero.\n";
+                return false;
+            }
+            if (saved.error->message.find(
+                    "loop synchronized timelines require a key at time zero") ==
+                std::string::npos) {
+                std::cerr << "MAR-172 time-zero save message was wrong: "
+                          << saved.error->message << '\n';
+                return false;
+            }
+        }
+        {
+            marrow::editor::ProjectData project = rebase(invalid_path);
+            auto* rotate = project.find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Rotate);
+            rotate->loop_sync = true;
+            rotate->keyframes.clear();
+            const auto saved = marrow::editor::save_project(project, invalid_path);
+            std::filesystem::remove(invalid_path, ignored);
+            if (saved) {
+                std::cerr << "MAR-172 saver accepted an opted-in lane with no keyframe.\n";
+                return false;
+            }
+            if (saved.error->message.find(
+                    "loop synchronized timelines require at least one keyframe") ==
+                std::string::npos) {
+                std::cerr << "MAR-172 empty-lane save message was wrong: "
+                          << saved.error->message << '\n';
+                return false;
+            }
+        }
+    }
+
+
+    // ------------------------------------------------------------------
+    // Behaviour on the real fixture.
+    // ------------------------------------------------------------------
+    const auto spine_lane = [] {
+        TimelineLaneSelector lane;
+        lane.kind = TimelineLaneKind::Transform;
+        lane.animation_name = "idle";
+        lane.bone_name = "spine";
+        lane.transform_channel = TransformTimelineChannel::Rotate;
+        return lane;
+    };
+    const auto& skeleton = *project_result.skeleton_data;
+
+    // --- Missing prerequisites, on the untouched fixture -------------------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto rejected = marrow::editor::set_timeline_loop_sync(
+            &project, skeleton, {spine_lane()}, true);
+        if (rejected ||
+            rejected.error.find("explicit animation duration") == std::string::npos ||
+            marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-172 must reject an enable with no explicit duration: "
+                      << rejected.error << '\n';
+            return false;
+        }
+    }
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        if (!marrow::editor::set_animation_duration(&project, skeleton, "idle", 1.5)) {
+            std::cerr << "MAR-172 could not author idle's duration.\n";
+            return false;
+        }
+        const std::string before = marrow::editor::serialize_project(project);
+        TimelineLaneSelector arm = spine_lane();
+        arm.bone_name = "arm_l";
+        const auto rejected =
+            marrow::editor::set_timeline_loop_sync(&project, skeleton, {arm}, true);
+        if (rejected || rejected.error.find("key at time zero") == std::string::npos ||
+            marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-172 must reject a lane whose first key is at 0.25: "
+                      << rejected.error << '\n';
+            return false;
+        }
+    }
+
+    // --- Adoption and materialization on the runtime-only aim lane ---------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        TimelineLaneSelector aim;
+        aim.kind = TimelineLaneKind::Transform;
+        aim.animation_name = "aim";
+        aim.bone_name = "arm_l";
+        aim.transform_channel = TransformTimelineChannel::Rotate;
+        if (marrow::editor::ensure_transform_timeline_edit(
+                project, skeleton, "aim", "arm_l", TransformTimelineChannel::Rotate) ==
+            nullptr) {
+            std::cerr << "MAR-172 could not materialize the runtime-only aim lane.\n";
+            return false;
+        }
+        const auto adopted =
+            marrow::editor::set_timeline_loop_sync(&project, skeleton, {aim}, true);
+        if (!adopted || !adopted.changed || adopted.created_key_count != 0U ||
+            adopted.changed_lane_count != 1U || adopted.lane_actions.size() != 1U ||
+            adopted.lane_actions.front() != TimelineLoopBoundaryAction::Adopted) {
+            std::cerr << "MAR-172 must adopt aim's existing key at 0.5: " << adopted.error
+                      << '\n';
+            return false;
+        }
+        const auto* lane = project.find_transform_timeline_edit(
+            "aim", "arm_l", TransformTimelineChannel::Rotate);
+        if (lane == nullptr || !lane->loop_sync || lane->keyframes.size() != 2U ||
+            lane->keyframes[0].angle != 30.0 || lane->keyframes[1].angle != 30.0) {
+            std::cerr << "MAR-172 adoption must copy both keys and change no value.\n";
+            return false;
+        }
+    }
+
+    // --- Slot Color and Deform boundary creation ---------------------------
+    marrow::editor::ProjectData mutated = *project_result.project;
+    {
+        if (!marrow::editor::set_animation_duration(&mutated, skeleton, "idle", 1.5)) {
+            std::cerr << "MAR-172 could not author the mutated project's duration.\n";
+            return false;
+        }
+        if (marrow::editor::ensure_slot_color_timeline_edit(
+                mutated, skeleton, "idle", "body") == nullptr) {
+            std::cerr << "MAR-172 could not materialize the body colour lane.\n";
+            return false;
+        }
+        TimelineLaneSelector color;
+        color.kind = TimelineLaneKind::SlotColor;
+        color.animation_name = "idle";
+        color.slot_name = "body";
+        TimelineLaneSelector deform;
+        deform.kind = TimelineLaneKind::Deform;
+        deform.animation_name = "idle";
+        deform.slot_name = "body";
+        deform.attachment_name = "body_mesh";
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            &mutated, skeleton, {spine_lane(), color, deform}, true);
+        if (!enabled || !enabled.changed || enabled.created_key_count != 3U ||
+            enabled.changed_lane_count != 3U) {
+            std::cerr << "MAR-172 could not enable all three families: " << enabled.error
+                      << " created=" << enabled.created_key_count << '\n';
+            return false;
+        }
+        const auto* color_lane = mutated.find_slot_color_timeline_edit("idle", "body");
+        if (color_lane == nullptr || color_lane->keyframes.size() != 4U ||
+            color_lane->keyframes[3].color.r != color_lane->keyframes[0].color.r ||
+            color_lane->keyframes[3].color.g != color_lane->keyframes[0].color.g ||
+            color_lane->keyframes[3].color.b != color_lane->keyframes[0].color.b ||
+            color_lane->keyframes[3].color.a != color_lane->keyframes[0].color.a) {
+            std::cerr << "MAR-172 did not create a mirrored colour boundary key.\n";
+            return false;
+        }
+        const auto* deform_lane =
+            mutated.find_mesh_deform_timeline_edit("idle", "body", "body_mesh");
+        if (deform_lane == nullptr || deform_lane->keyframes.size() != 4U ||
+            deform_lane->keyframes[3].vertex_offsets !=
+                deform_lane->keyframes[0].vertex_offsets ||
+            deform_lane->keyframes[3].vertex_offsets.size() != 8U) {
+            std::cerr << "MAR-172 did not create a mirrored deform boundary key.\n";
+            return false;
+        }
+    }
+
+    // --- A first-key value change propagates to the boundary alone ---------
+    {
+        marrow::editor::ProjectData project = mutated;
+        TimelineKeySelector first;
+        first.kind = TimelineKeyKind::Transform;
+        first.animation_name = "idle";
+        first.bone_name = "spine";
+        first.transform_channel = TransformTimelineChannel::Rotate;
+        first.time = 0.0;
+        const auto offset = marrow::editor::offset_keyframe_scalars(
+            &project, {first}, TimelineScalarComponent::Angle, 3.25);
+        if (!offset || !offset.changed) {
+            std::cerr << "MAR-172 could not offset key 0: " << offset.error << '\n';
+            return false;
+        }
+        const auto synced =
+            marrow::editor::synchronize_loop_boundaries(&project, skeleton);
+        if (!synced || !synced.changed || synced.rewritten_key_count != 1U) {
+            std::cerr << "MAR-172 must rewrite exactly one boundary key after a value "
+                         "change: " << synced.error << '\n';
+            return false;
+        }
+        const auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (lane == nullptr || lane->keyframes.back().angle != lane->keyframes[0].angle ||
+            lane->keyframes[1].angle != 8.0 || lane->keyframes[2].angle != -2.0) {
+            std::cerr << "MAR-172 propagated a value change to more than the boundary.\n";
+            return false;
+        }
+    }
+
+    // --- A first-key easing change propagates bit-exactly ------------------
+    {
+        marrow::editor::ProjectData project = mutated;
+        TimelineKeySelector first;
+        first.kind = TimelineKeyKind::Transform;
+        first.animation_name = "idle";
+        first.bone_name = "spine";
+        first.transform_channel = TransformTimelineChannel::Rotate;
+        first.time = 0.0;
+        const auto eased = marrow::editor::set_keyframe_interpolation(
+            &project, {first}, InterpolationKind::CubicBezier, {0.11, 0.22, 0.33, 0.44});
+        if (!eased || !eased.changed) {
+            std::cerr << "MAR-172 could not author key 0's easing: " << eased.error << '\n';
+            return false;
+        }
+        const auto synced =
+            marrow::editor::synchronize_loop_boundaries(&project, skeleton);
+        if (!synced || !synced.changed) {
+            std::cerr << "MAR-172 must resync after a first-key easing change.\n";
+            return false;
+        }
+        const auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (lane == nullptr ||
+            lane->keyframes.back().interpolation.kind() != InterpolationKind::CubicBezier ||
+            lane->keyframes.back().interpolation.cubic_bezier().cx1 !=
+                lane->keyframes[0].interpolation.cubic_bezier().cx1 ||
+            lane->keyframes.back().interpolation.cubic_bezier().cy1 !=
+                lane->keyframes[0].interpolation.cubic_bezier().cy1 ||
+            lane->keyframes.back().interpolation.cubic_bezier().cx2 !=
+                lane->keyframes[0].interpolation.cubic_bezier().cx2 ||
+            lane->keyframes.back().interpolation.cubic_bezier().cy2 !=
+                lane->keyframes[0].interpolation.cubic_bezier().cy2) {
+            std::cerr << "MAR-172 did not mirror the first key's easing bit-exactly.\n";
+            return false;
+        }
+    }
+
+    // --- Duration grow, shrink, and the two rejections ---------------------
+    {
+        marrow::editor::ProjectData project = mutated;
+        if (!marrow::editor::set_animation_duration(&project, skeleton, "idle", 2.0)) {
+            std::cerr << "MAR-172 could not grow idle to 2.0.\n";
+            return false;
+        }
+        const auto grown =
+            marrow::editor::synchronize_loop_boundaries(&project, skeleton);
+        const auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (!grown || grown.moved_key_count != 3U || lane == nullptr ||
+            lane->keyframes.size() != 4U ||
+            lane->keyframes[3].time !=
+                static_cast<double>(
+                    static_cast<marrow::runtime::AnimationScalar>(2.0)) ||
+            lane->keyframes[1].time != 0.5 || lane->keyframes[2].time != 1.0) {
+            std::cerr << "MAR-172 grow must move only the three boundary keys.\n";
+            return false;
+        }
+        // Auto-extend must not undo the shrink one line later.
+        if (!marrow::editor::set_animation_duration(&project, skeleton, "idle", 1.2)) {
+            std::cerr << "MAR-172 must keep an opted-in clip shortenable.\n";
+            return false;
+        }
+        const auto extended = marrow::editor::auto_extend_explicit_animation_durations(
+            &project, skeleton);
+        if (!extended || extended.changed) {
+            std::cerr << "MAR-172 auto-extend must not undo a shrink.\n";
+            return false;
+        }
+        const auto shrunk =
+            marrow::editor::synchronize_loop_boundaries(&project, skeleton);
+        const auto* shrunk_lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (!shrunk || shrunk.moved_key_count != 3U || shrunk_lane == nullptr ||
+            shrunk_lane->keyframes[3].time !=
+                static_cast<double>(
+                    static_cast<marrow::runtime::AnimationScalar>(1.2))) {
+            std::cerr << "MAR-172 shrink must move the boundary key back to 1.2.\n";
+            return false;
+        }
+
+        // A shrink onto the spacing floor is accepted by the duration primitive
+        // and rejected by the sync, leaving the project byte-identical.
+        marrow::editor::ProjectData crowded = project;
+        const std::string before = marrow::editor::serialize_project(crowded);
+        if (!marrow::editor::set_animation_duration(&crowded, skeleton, "idle", 1.0005)) {
+            std::cerr << "MAR-172 the spacing-floor case needs an accepted duration.\n";
+            return false;
+        }
+        const auto rejected =
+            marrow::editor::synchronize_loop_boundaries(&crowded, skeleton);
+        if (rejected ||
+            rejected.error.find("within one millisecond") == std::string::npos) {
+            std::cerr << "MAR-172 must reject a shrink onto the spacing floor: "
+                      << rejected.error << '\n';
+            return false;
+        }
+        if (marrow::editor::serialize_project(crowded).find("\"duration\"") ==
+            std::string::npos) {
+            std::cerr << "MAR-172 spacing-floor setup lost its duration edit.\n";
+            return false;
+        }
+        (void)before;
+
+        // A shrink below a real authored key keeps MAR-155's own message.
+        marrow::editor::ProjectData too_short = project;
+        const auto refused =
+            marrow::editor::set_animation_duration(&too_short, skeleton, "idle", 0.9);
+        if (refused ||
+            refused.error.find(
+                "Animation duration cannot be shorter than the last authored key") ==
+                std::string::npos) {
+            std::cerr << "MAR-172 must keep MAR-155's message for a real key: "
+                      << refused.error << '\n';
+            return false;
+        }
+    }
+
+    // --- Duration validation is unchanged with no opt-in --------------------
+    {
+        marrow::editor::ProjectData plain = *project_result.project;
+        const auto grow = marrow::editor::set_animation_duration(
+            &plain, skeleton, "idle", 2.0);
+        const auto shrink_to_inferred = marrow::editor::set_animation_duration(
+            &plain, skeleton, "idle", 1.0);
+        marrow::editor::ProjectData refused_project = *project_result.project;
+        const auto refused = marrow::editor::set_animation_duration(
+            &refused_project, skeleton, "idle", 0.9);
+        if (!grow || !shrink_to_inferred || refused ||
+            refused.error !=
+                "Animation duration cannot be shorter than the last authored key "
+                "(1.000000 seconds).") {
+            std::cerr << "MAR-172 changed duration validation for a project with no "
+                         "opted-in lane: " << refused.error << '\n';
+            return false;
+        }
+    }
+
+    // --- Disable leaves the boundary key in place --------------------------
+    {
+        marrow::editor::ProjectData project = mutated;
+        const auto* before_lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        const std::size_t before_count = before_lane->keyframes.size();
+        const double before_time = before_lane->keyframes.back().time;
+        const auto released =
+            marrow::editor::set_timeline_loop_sync(&project, skeleton, {spine_lane()}, false);
+        if (!released || !released.changed || released.lane_actions.size() != 1U ||
+            released.lane_actions.front() != TimelineLoopBoundaryAction::Released) {
+            std::cerr << "MAR-172 disable must succeed and report Released.\n";
+            return false;
+        }
+        const auto* after_lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (after_lane == nullptr || after_lane->loop_sync ||
+            after_lane->keyframes.size() != before_count ||
+            after_lane->keyframes.back().time != before_time) {
+            std::cerr << "MAR-172 disable must leave every keyframe in place.\n";
+            return false;
+        }
+    }
+
+    // --- A stale pair is legal data: load never synchronizes ---------------
+    {
+        const auto stale_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar172_stale_" + path_token + ".marrow");
+        marrow::editor::ProjectData project = rebase(stale_path);
+        if (!marrow::editor::set_animation_duration(
+                &project, *project_result.skeleton_data, "idle", 1.5)) {
+            std::cerr << "MAR-172 stale case could not author a duration.\n";
+            return false;
+        }
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            &project, *project_result.skeleton_data, {spine_lane()}, true);
+        if (!enabled) {
+            std::cerr << "MAR-172 stale case could not enable: " << enabled.error << '\n';
+            return false;
+        }
+        auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        lane->keyframes.back().angle = 42.0;  // deliberately not key 0's value
+        const auto saved = marrow::editor::save_project(project, stale_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const std::string written = marrow::editor::serialize_project(project);
+        const auto reloaded = marrow::editor::load_project(stale_path);
+        std::filesystem::remove(stale_path, ignored);
+        if (!reloaded) {
+            std::cerr << "MAR-172 must load a stale boundary pair without error: "
+                      << reloaded.error->format();
+            return false;
+        }
+        if (marrow::editor::serialize_project(*reloaded.project) != written) {
+            std::cerr << "MAR-172 load must never synchronize a stale pair.\n";
+            return false;
+        }
+        marrow::editor::ProjectData repaired = *reloaded.project;
+        const auto synced = marrow::editor::synchronize_loop_boundaries(
+            &repaired, *project_result.skeleton_data);
+        const auto* repaired_lane = repaired.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (!synced || !synced.changed || repaired_lane == nullptr ||
+            repaired_lane->keyframes.back().angle !=
+                repaired_lane->keyframes[0].angle) {
+            std::cerr << "MAR-172 the first transaction must repair a stale pair.\n";
+            return false;
+        }
+    }
+
+    // --- The MAR-171 seam, scoped and joined --------------------------------
+    {
+        // Opted in, the same duration change moves the boundary key, changes the
+        // last segment's span, and therefore does resolve at least one key.
+        marrow::editor::ProjectData project = *project_result.project;
+        if (!marrow::editor::set_animation_duration(&project, skeleton, "idle", 1.5)) {
+            std::cerr << "MAR-172 seam case could not author a duration.\n";
+            return false;
+        }
+        // The fixture's own angles (0, 8, -2) make the last segment's tangent
+        // ratio span-invariant -- the monotonicity clamp zeroes it either way --
+        // so a duration change would resolve nothing and prove nothing. These
+        // angles keep the last two secants the same sign, which is exactly the
+        // shape whose automatic curve does depend on the boundary key's time.
+        {
+            auto* seeded_lane = project.find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Rotate);
+            if (seeded_lane == nullptr || seeded_lane->keyframes.size() != 3U) {
+                std::cerr << "MAR-172 seam case needs the three spine rotate keys.\n";
+                return false;
+            }
+            seeded_lane->keyframes[0].angle = 0.0;
+            seeded_lane->keyframes[1].angle = -6.0;
+            seeded_lane->keyframes[2].angle = -3.0;
+        }
+        TimelineKeySelector first;
+        first.kind = TimelineKeyKind::Transform;
+        first.animation_name = "idle";
+        first.bone_name = "spine";
+        first.transform_channel = TransformTimelineChannel::Rotate;
+        first.time = 0.0;
+        TimelineKeySelector second = first;
+        second.time = 0.5;
+        TimelineKeySelector third = first;
+        third.time = 1.0;
+        const auto seeded = marrow::editor::set_keyframe_curve_mode(
+            &project, {first, second, third}, TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        if (!seeded) {
+            std::cerr << "MAR-172 seam case could not seed automatic keys: "
+                      << seeded.error << '\n';
+            return false;
+        }
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            &project, skeleton, {spine_lane()}, true);
+        if (!enabled || !enabled.changed) {
+            std::cerr << "MAR-172 seam case could not enable: " << enabled.error << '\n';
+            return false;
+        }
+        const auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (lane == nullptr || lane->keyframes.size() != 4U) {
+            std::cerr << "MAR-172 seam case lost its boundary key.\n";
+            return false;
+        }
+        // The demotion guard: if phase 2 ever called set_keyframe_interpolation()
+        // both of these would read Manual instead.
+        if (lane->keyframes[0].curve_mode != TimelineCurveMode::Auto ||
+            lane->keyframes[3].curve_mode != TimelineCurveMode::Auto) {
+            std::cerr << "MAR-172 phase 2 demoted a key; it must never call "
+                         "set_keyframe_interpolation().\n";
+            return false;
+        }
+        // Key 2 gained a real outgoing segment when the boundary key appeared,
+        // so a duration change now genuinely resolves.
+        marrow::editor::ProjectData moved = project;
+        if (!marrow::editor::set_animation_duration(&moved, skeleton, "idle", 2.0)) {
+            std::cerr << "MAR-172 seam case could not move the duration.\n";
+            return false;
+        }
+        const auto synced =
+            marrow::editor::synchronize_loop_boundaries(&moved, skeleton);
+        if (!synced || !synced.changed || synced.resolved_key_count < 1U) {
+            std::cerr << "MAR-172 an opted-in duration change must resolve at least one "
+                         "key: resolved=" << synced.resolved_key_count << '\n';
+            return false;
+        }
+        const auto* moved_lane = moved.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        if (moved_lane == nullptr ||
+            !same_interpolation_values(
+                moved_lane->keyframes[3].interpolation,
+                moved_lane->keyframes[0].interpolation)) {
+            std::cerr << "MAR-172 the boundary easing must be the POST-resolve mirror of "
+                         "key 0's, which is the phase ordering asserted.\n";
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Export. MAR-168 and MAR-169 both shipped an export criterion whose test
+    // mutated a ProjectData copy that never reached the exporter, so this block
+    // exports the project the validator JUST MUTATED, asserts the boundary keys
+    // arrived in the runtime file, asserts the project-local flag did NOT, and
+    // compares against a baseline measured in the same run. Unlike MAR-171 the
+    // `.mbin` also grows, because two whole keyframe records are added.
+    // ------------------------------------------------------------------
+    {
+        const std::filesystem::path loop_json_path = "/tmp/marrow_mar172_loop.mskl";
+        const std::filesystem::path loop_binary_path = "/tmp/marrow_mar172_loop.mbin";
+        const std::filesystem::path baseline_json_path =
+            "/tmp/marrow_mar172_export_baseline.mskl";
+        const std::filesystem::path baseline_binary_path =
+            "/tmp/marrow_mar172_export_baseline.mbin";
+
+        marrow::editor::ProjectExportOptions baseline_options;
+        baseline_options.skeleton_output_path = baseline_json_path;
+        baseline_options.binary_output_path = baseline_binary_path;
+        const auto baseline_export = marrow::editor::export_runtime_assets(
+            *project_result.project,
+            *project_result.base_skeleton_document,
+            baseline_options);
+        if (!baseline_export) {
+            std::cerr << baseline_export.error->format() << '\n';
+            return false;
+        }
+
+        marrow::editor::ProjectExportOptions loop_options;
+        loop_options.skeleton_output_path = loop_json_path;
+        loop_options.binary_output_path = loop_binary_path;
+        const auto loop_export = marrow::editor::export_runtime_assets(
+            mutated, *project_result.base_skeleton_document, loop_options);
+        if (!loop_export) {
+            std::cerr << loop_export.error->format() << '\n';
+            return false;
+        }
+
+        const auto exported = marrow::runtime::load_skeleton_data(loop_json_path);
+        if (!exported) {
+            std::cerr << exported.error->format();
+            return false;
+        }
+        const auto* exported_idle = exported.skeleton_data->find_animation("idle");
+        if (exported_idle == nullptr ||
+            !exported_idle->explicit_duration.has_value() ||
+            exported_idle->duration() != 1.5) {
+            std::cerr << "MAR-172 export did not carry idle's explicit duration of 1.5.\n";
+            return false;
+        }
+        const auto spine_index = exported.skeleton_data->find_bone_index("spine");
+        const auto* exported_spine = spine_index.has_value()
+            ? exported_idle->find_rotate_timeline(*spine_index)
+            : nullptr;
+        if (exported_spine == nullptr || exported_spine->keyframes.size() != 4U) {
+            std::cerr << "MAR-172 export must carry four spine rotate keyframes, up from "
+                         "three.\n";
+            return false;
+        }
+        const auto& exported_first = exported_spine->keyframes.front();
+        const auto& exported_boundary = exported_spine->keyframes.back();
+        if (exported_boundary.time != 1.5F ||
+            exported_boundary.angle != exported_first.angle) {
+            std::cerr << "MAR-172 exported boundary key is not a bit-exact mirror at 1.5.\n";
+            return false;
+        }
+        if (exported_boundary.interpolation.kind() != InterpolationKind::CubicBezier ||
+            exported_first.interpolation.kind() != InterpolationKind::CubicBezier ||
+            exported_boundary.interpolation.cubic_bezier().cx1 !=
+                exported_first.interpolation.cubic_bezier().cx1 ||
+            exported_boundary.interpolation.cubic_bezier().cy1 !=
+                exported_first.interpolation.cubic_bezier().cy1 ||
+            exported_boundary.interpolation.cubic_bezier().cx2 !=
+                exported_first.interpolation.cubic_bezier().cx2 ||
+            exported_boundary.interpolation.cubic_bezier().cy2 !=
+                exported_first.interpolation.cubic_bezier().cy2) {
+            std::cerr << "MAR-172 exported boundary easing is not bit-equal to key 0's.\n";
+            return false;
+        }
+        const auto body_index = exported.skeleton_data->find_slot_index("body");
+        const auto* exported_color = body_index.has_value()
+            ? exported_idle->find_color_timeline(*body_index)
+            : nullptr;
+        if (exported_color == nullptr || exported_color->keyframes.size() != 4U ||
+            exported_color->keyframes.back().color.r !=
+                exported_color->keyframes.front().color.r ||
+            exported_color->keyframes.back().color.g !=
+                exported_color->keyframes.front().color.g ||
+            exported_color->keyframes.back().color.b !=
+                exported_color->keyframes.front().color.b ||
+            exported_color->keyframes.back().color.a !=
+                exported_color->keyframes.front().color.a) {
+            std::cerr << "MAR-172 exported colour boundary key is missing or not mirrored.\n";
+            return false;
+        }
+
+        std::ifstream exported_text(loop_json_path, std::ios::binary);
+        const std::string export_body(
+            (std::istreambuf_iterator<char>(exported_text)),
+            std::istreambuf_iterator<char>());
+        if (export_body.empty()) {
+            std::cerr << "MAR-172 could not read the exported .mskl as text.\n";
+            return false;
+        }
+        if (export_body.find("loop_sync") != std::string::npos) {
+            std::cerr << "MAR-172 leaked its project-local flag into the runtime export.\n";
+            return false;
+        }
+
+        if (!loop_export.binary_path.has_value() ||
+            !validate_binary_export(loop_export.path, *loop_export.binary_path)) {
+            std::cerr << "MAR-172 loop export did not match its v2 binary payload.\n";
+            return false;
+        }
+
+        std::error_code size_error;
+        const auto loop_json_size = std::filesystem::file_size(loop_json_path, size_error);
+        const auto loop_binary_size =
+            std::filesystem::file_size(loop_binary_path, size_error);
+        const auto baseline_json_size =
+            std::filesystem::file_size(baseline_json_path, size_error);
+        const auto baseline_binary_size =
+            std::filesystem::file_size(baseline_binary_path, size_error);
+        if (size_error || loop_json_size <= baseline_json_size ||
+            loop_binary_size <= baseline_binary_size) {
+            // An equal size means the exported artifact is the untouched
+            // baseline, which is exactly the MAR-168/169 defect this block
+            // exists to catch. Unlike MAR-171 the binary must grow too.
+            std::cerr << "MAR-172 loop export must be strictly larger than the baseline "
+                         "in BOTH files: JSON " << loop_json_size << " vs "
+                      << baseline_json_size << ", MBIN " << loop_binary_size << " vs "
+                      << baseline_binary_size << '\n';
+            return false;
+        }
+        std::cout << "MAR-172 loop boundary export: JSON " << loop_json_size
+                  << " bytes, MBIN " << loop_binary_size << " bytes.\n";
+        std::cout << "MAR-172 untouched baseline export: JSON " << baseline_json_size
+                  << " bytes, MBIN " << baseline_binary_size << " bytes.\n";
+    }
+
+    std::cout << "MAR-172 loop boundary synchronization validated as additive, "
+                 "default-absent, export-neutral, and strictly re-validated.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -5905,6 +6861,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar171_automatic_curves(result)) {
+            return 1;
+        }
+        if (!validate_mar172_loop_boundary_sync(result)) {
             return 1;
         }
     }

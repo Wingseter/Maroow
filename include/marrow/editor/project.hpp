@@ -113,6 +113,16 @@ struct TransformTimelineEdit {
     std::string bone_name;
     TransformTimelineChannel channel{TransformTimelineChannel::Rotate};
     std::vector<TransformKeyframeEdit> keyframes;
+    /**
+     * @brief Loop-boundary synchronization intent for this timeline.
+     *
+     * When true, the editor maintains one managed key at the animation's
+     * explicit duration whose value and easing mirror this timeline's key at
+     * time zero, so a looping clip wraps without a pop. Absent from every
+     * project that has not opted in, never exported, and default-off for every
+     * newly created timeline.
+     */
+    bool loop_sync{false};
 };
 
 /**
@@ -169,6 +179,16 @@ struct MeshDeformTimelineEdit {
     std::string slot_name;
     std::string attachment_name;
     std::vector<DeformKeyframeEdit> keyframes;
+    /**
+     * @brief Loop-boundary synchronization intent for this timeline.
+     *
+     * When true, the editor maintains one managed key at the animation's
+     * explicit duration whose value and easing mirror this timeline's key at
+     * time zero, so a looping clip wraps without a pop. Absent from every
+     * project that has not opted in, never exported, and default-off for every
+     * newly created timeline.
+     */
+    bool loop_sync{false};
 };
 
 struct MeshWeightInfluenceEdit {
@@ -227,6 +247,16 @@ struct SlotColorTimelineEdit {
     std::string animation_name;
     std::string slot_name;
     std::vector<SlotColorKeyframeEdit> keyframes;
+    /**
+     * @brief Loop-boundary synchronization intent for this timeline.
+     *
+     * When true, the editor maintains one managed key at the animation's
+     * explicit duration whose value and easing mirror this timeline's key at
+     * time zero, so a looping clip wraps without a pop. Absent from every
+     * project that has not opted in, never exported, and default-off for every
+     * newly created timeline.
+     */
+    bool loop_sync{false};
 };
 
 struct SlotAttachmentKeyframeEdit {

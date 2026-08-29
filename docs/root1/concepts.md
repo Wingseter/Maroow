@@ -210,6 +210,26 @@ handle drag, a preset, the numeric inspector, or the Agent — demotes the key t
 manual, and the rule lives inside the one primitive that writes an absolute
 easing so no caller can forget it.
 
+MAR-172 gives a **lane** the same kind of project-local intent. A looping
+`TrackEntry` wraps `track_time` modulo `AnimationData::duration()`, which is the
+explicit duration when one is authored and the last-key time otherwise, and
+sampling a continuous timeline past its last key holds that key's value. So a
+clip whose duration is 1.5 s and whose `spine` rotate lane ends at 1.0 s holds
+that last pose for half a second and then snaps back to the pose at time zero —
+the pop every animator hand-fixes by copying the first key to the end of the clip
+and re-copying it every time the first key changes. A lane can now be opted in to
+**loop synchronization**, after which the editor guarantees, on every
+transaction, that the lane carries exactly one managed key at the explicit
+duration whose value and easing record are a bit-exact copy of that lane's key at
+time zero. The prerequisites are exactly an *explicit* duration and a key at time
+zero: with an inferred duration the boundary key would define the duration that
+defines the boundary key, a recursion with no fixed point, and without a key at
+time zero the boundary would mirror a key whose own time is arbitrary. The
+managed key's identity is derived — it *is* the key at the duration — so nothing
+can carry a stale marker through a copy, a paste, or a retime, and the flag
+itself is one `.marrow`-only boolean that never reaches a runtime file. The
+boundary key does reach it, as an ordinary keyframe, which is the whole point.
+
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active
 `EditorSession`, while live Alt and platform Cmd/Ctrl state flows only through

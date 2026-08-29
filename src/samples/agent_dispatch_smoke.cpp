@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 58> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 59> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -71,6 +71,7 @@ constexpr std::array<OperationExpectation, 58> kExpectedOperations{{
     {"timeline.retime_keyframes", "edit", true, false, true},
     {"timeline.set_interpolation", "edit", true, false, true},
     {"timeline.set_curve_mode", "edit", true, false, true},
+    {"timeline.set_loop_sync", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
     {"set_event_keyframe", "edit", true, false, true},
@@ -1973,6 +1974,288 @@ int main(int argc, char** argv) {
 
         harness.invoke("undo back to manual", "{\"op\":\"undo\"}");
         harness.invoke("undo the automatic application", "{\"op\":\"undo\"}");
+    }
+
+    // --- MAR-172: timeline.set_loop_sync, the 59th operation. ---
+    {
+        const char* kSpineLane =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\"}";
+        const char* kAimLane =
+            "{\"kind\":\"transform\",\"animation\":\"aim\",\"bone\":\"arm_l\","
+            "\"channel\":\"rotate\"}";
+        const auto first_lane_member = [&](const DispatchObservation& observation,
+                                           std::string_view name)
+            -> const json::Value* {
+            const json::Value* entries = member(observation.scene_delta(), "lanes");
+            if (entries == nullptr || !entries->is_array() ||
+                entries->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&entries->as_array()[0], name);
+        };
+        const auto lane_string_is = [](const json::Value* value,
+                                       std::string_view expected) {
+            return value != nullptr && value->is_string() &&
+                value->as_string() == expected;
+        };
+        const auto lane_number_is = [](const json::Value* value, double expected) {
+            return value != nullptr && value->is_number() &&
+                std::abs(value->as_number() - expected) <= 1e-6;
+        };
+
+        // Enabling before an explicit duration exists is rejected, naming the
+        // remedy, and leaves the project untouched.
+        harness.invoke(
+            "timeline.set_loop_sync rejects a clip with no explicit duration",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true}}",
+            false,
+            "invalid_request");
+
+        harness.invoke(
+            "animation.set_duration for the loop boundary",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":1.5}}");
+
+        // A dry run reports the resulting boundary key without touching the
+        // session, and reports no boundary key existed before.
+        const DispatchObservation loop_dry_run = harness.invoke(
+            "timeline.set_loop_sync dry run",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            bool_member(loop_dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(loop_dry_run.scene_delta(), "lane_count") ==
+                    std::optional<double>(1.0) &&
+                number_member(loop_dry_run.scene_delta(), "created_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(loop_dry_run.scene_delta(), "lanes_truncated") ==
+                    std::optional<bool>(false) &&
+                first_lane_member(loop_dry_run, "previous_enabled") != nullptr &&
+                first_lane_member(loop_dry_run, "previous_enabled")->is_boolean() &&
+                !first_lane_member(loop_dry_run, "previous_enabled")->as_boolean() &&
+                lane_string_is(
+                    first_lane_member(loop_dry_run, "boundary_action"), "created") &&
+                lane_number_is(first_lane_member(loop_dry_run, "boundary_time"), 1.5),
+            "timeline.set_loop_sync dry run",
+            "the dry run did not report the resulting boundary key of each lane");
+
+        const DispatchObservation loop_live = harness.invoke(
+            "timeline.set_loop_sync live",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true}}");
+        harness.expect(
+            number_member(loop_live.scene_delta(), "changed_lane_count") ==
+                    std::optional<double>(1.0) &&
+                number_member(loop_live.scene_delta(), "created_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(loop_live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false),
+            "timeline.set_loop_sync live",
+            "a live loop-sync write did not report its changed and created counts");
+
+        // A second identical live call changes nothing at all.
+        harness.invoke(
+            "timeline.set_loop_sync no_change",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true}}",
+            false,
+            "no_change");
+
+        // set_transform on the time-zero key updates the boundary key in the
+        // SAME history entry, proven by the following dry run's read-back.
+        harness.invoke(
+            "set_transform on the time-zero key of an opted-in lane",
+            "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.0,\"angle\":21}}");
+        const DispatchObservation followed = harness.invoke(
+            "timeline.set_loop_sync read-back after set_transform",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            first_lane_member(followed, "previous_boundary") != nullptr &&
+                first_lane_member(followed, "previous_boundary")->is_object() &&
+                lane_number_is(
+                    member(first_lane_member(followed, "previous_boundary"), "angle"),
+                    21.0),
+            "timeline.set_loop_sync follows the first key",
+            "the boundary key did not follow the time-zero key in the same entry");
+        harness.invoke("undo the time-zero transform", "{\"op\":\"undo\"}");
+
+        // animation.set_duration moves the boundary key in one reversible entry.
+        harness.invoke(
+            "animation.set_duration moves the boundary",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":2.0}}");
+        const DispatchObservation moved = harness.invoke(
+            "timeline.set_loop_sync read-back after a duration move",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_number_is(first_lane_member(moved, "boundary_time"), 2.0),
+            "timeline.set_loop_sync duration move",
+            "a duration change did not move the managed boundary key");
+        harness.invoke("undo the duration move", "{\"op\":\"undo\"}");
+        const DispatchObservation restored = harness.invoke(
+            "timeline.set_loop_sync read-back after undo",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_number_is(first_lane_member(restored, "boundary_time"), 1.5),
+            "timeline.set_loop_sync undo",
+            "one undo did not restore the boundary key's time");
+
+        // A shrink below the one-millisecond spacing floor is rejected with the
+        // project unchanged: the sync cancels the enclosing transaction.
+        // The duration primitive accepts 1.0005 -- its boundary-excluding floor
+        // is 1.0 -- and the sync's one-millisecond spacing check then rejects,
+        // cancelling the enclosing transaction. The session surfaces that as a
+        // commit-time validation failure.
+        harness.invoke(
+            "animation.set_duration rejected onto the spacing floor",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":1.0005}}",
+            false,
+            "validation_failed");
+
+        // The runtime-only aim lane adopts its existing key at 0.5. The smoke's
+        // earlier duration cases leave `aim` at 0.75, so the precondition is
+        // asserted rather than assumed and then restored to the fixture's own
+        // boundary, which is exactly where the adoptable key sits.
+        const DispatchObservation aim_before_adoption = harness.invoke(
+            "timeline.describe aim before adoption",
+            "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+        harness.expect(
+            number_member(aim_before_adoption.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.75),
+            "timeline.set_loop_sync adoption precondition",
+            "the adoption case expects aim at the smoke's 0.75 duration");
+        harness.invoke(
+            "animation.set_duration aim back onto its last key",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"aim\","
+            "\"duration\":0.5}}");
+        const DispatchObservation adopted = harness.invoke(
+            "timeline.set_loop_sync adopts a runtime-only lane",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kAimLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_string_is(
+                first_lane_member(adopted, "boundary_action"), "adopted"),
+            "timeline.set_loop_sync adoption action",
+            "an existing key at the boundary must be adopted, not created");
+        harness.expect(
+            number_member(adopted.scene_delta(), "created_key_count") ==
+                std::optional<double>(0.0),
+            "timeline.set_loop_sync adoption creates nothing",
+            "adoption must create no key");
+        harness.invoke(
+            "timeline.set_loop_sync materializes the aim lane",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kAimLane + "],\"enabled\":true}}");
+        harness.invoke("undo the aim materialization", "{\"op\":\"undo\"}");
+        harness.invoke("undo the aim duration", "{\"op\":\"undo\"}");
+
+        // Rejections, each leaving the project untouched.
+        struct LoopSyncRejection {
+            const char* label;
+            std::string request;
+        };
+        const std::vector<LoopSyncRejection> loop_rejections{
+            {"missing enabled",
+             std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                 kSpineLane + "]}}"},
+            {"a non-boolean enabled",
+             std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                 kSpineLane + "],\"enabled\":\"yes\"}}"},
+            {"a deform lane with no attachment",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\"}],"
+             "\"enabled\":true}}"},
+            {"a draw_order lane",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"draw_order\",\"animation\":\"idle\"}],\"enabled\":true}}"},
+            {"an event lane",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"event\",\"animation\":\"idle\"}],\"enabled\":true}}"},
+            {"a slot_attachment lane",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"slot_attachment\",\"animation\":\"idle\","
+             "\"slot\":\"body\"}],\"enabled\":true}}"},
+            {"an unknown kind",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"physics\",\"animation\":\"idle\"}],\"enabled\":true}}"},
+            {"an unknown transform channel",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+             "\"channel\":\"spinx\"}],\"enabled\":true}}"},
+            {"a duplicate lane",
+             std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                 kSpineLane + "," + kSpineLane + "],\"enabled\":true}}"},
+            {"an empty lanes array",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[],"
+             "\"enabled\":true}}"},
+            {"a lane with no key at time zero",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"arm_l\","
+             "\"channel\":\"rotate\"}],\"enabled\":true}}"},
+        };
+        for (const LoopSyncRejection& rejection : loop_rejections) {
+            harness.invoke(
+                std::string("timeline.set_loop_sync rejects ") + rejection.label,
+                rejection.request,
+                false,
+                "invalid_request");
+        }
+        harness.invoke(
+            "timeline.set_loop_sync rejects an unresolvable lane",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"no_such_bone\","
+            "\"channel\":\"rotate\"}],\"enabled\":true}}",
+            false,
+            "not_found");
+
+        const DispatchObservation after_loop_rejections = harness.invoke(
+            "timeline.set_loop_sync unchanged after rejections",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_number_is(
+                first_lane_member(after_loop_rejections, "boundary_time"), 1.5) &&
+                first_lane_member(after_loop_rejections, "previous_enabled") != nullptr &&
+                first_lane_member(after_loop_rejections, "previous_enabled")
+                    ->as_boolean(),
+            "timeline.set_loop_sync rejection atomicity",
+            "a rejected loop-sync request mutated the project");
+
+        // Disabling succeeds even from a state the enable path would reject,
+        // which is what makes the atomic rejection humane.
+        harness.invoke(
+            "timeline.set_loop_sync disables a lane in a rejected state",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"arm_l\","
+            "\"channel\":\"rotate\"}],\"enabled\":false}}",
+            false,
+            "no_change");
+        harness.invoke(
+            "timeline.set_loop_sync disable",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":false}}");
+        const DispatchObservation released = harness.invoke(
+            "timeline.set_loop_sync read-back after disable",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            first_lane_member(released, "previous_enabled") != nullptr &&
+                !first_lane_member(released, "previous_enabled")->as_boolean() &&
+                lane_number_is(first_lane_member(released, "boundary_time"), 1.5),
+            "timeline.set_loop_sync disable",
+            "disabling must clear the flag and leave the boundary key in place");
+
+        harness.invoke("undo the loop-sync disable", "{\"op\":\"undo\"}");
+        harness.invoke("undo the loop-sync enable", "{\"op\":\"undo\"}");
+        harness.invoke("undo the loop-boundary duration", "{\"op\":\"undo\"}");
     }
 
     // Two merge-enabled transform edits must form one undo group. Temporary

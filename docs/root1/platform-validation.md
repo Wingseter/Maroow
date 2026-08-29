@@ -16,8 +16,8 @@ PASS and do not satisfy a dependency.
 
 MAR-192 through MAR-210 remain `open` as a parallel deferred qualification
 backlog and do not block the completed
-MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170/MAR-171
-checkpoints or the next MAR-172 product milestone. Current qualification targets
+MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170/MAR-171/MAR-172
+checkpoints or the next MAR-173 product milestone. Current qualification targets
 macOS arm64 and Windows 11 x64 only.
 Ubuntu/Linux, Windows 10, Wayland, Windows ARM64, D3D/Vulkan, installer, and
 ImGui OS multi-viewport support are not claimed.

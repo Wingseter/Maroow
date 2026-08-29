@@ -42,6 +42,20 @@ const TimelineTrackRow* find_timeline_track(
     const std::vector<TimelineTrackRow>& tracks,
     std::string_view track_id);
 bool timeline_track_is_editable(const TimelineTrackRow& track);
+
+/**
+ * @brief Reports whether one key of one lane is a managed loop boundary.
+ *
+ * True only when the lane is loop synchronized and `key_index` names its last
+ * key, which is exactly the contract's definition of the managed boundary. Used
+ * by every selection collector so a derived key is never offered for direct
+ * value or easing authoring, and by the removal filter so it cannot be deleted
+ * out from under its own contract.
+ */
+bool timeline_key_is_managed_loop_boundary(
+    const ShellState& state,
+    const TimelineTrackRow& track,
+    std::size_t key_index);
 bool timeline_key_selected(
     const ShellState& state,
     const TimelineKeyRef& key);

@@ -32,8 +32,8 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170
-checkpoints or the next MAR-171 product milestone.
+Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170/
+MAR-171/MAR-172 checkpoints or the next MAR-173 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -130,8 +130,13 @@ which series drives the shape — `Angle` for a rotate key, `X`/`Y` for
 translate, scale, and shear, and `Red`/`Green`/`Blue`/`Alpha` for a slot colour
 — and is disabled when the selection spans families that share no component.
 Mesh deform keys have no automatic mode: a vertex-offset vector has no single
-number to compute a tangent from. Loop-boundary key synchronization arrives in
-MAR-172. FFD and discrete Inherit,
+number to compute a tangent from. MAR-172 adds loop-boundary key
+synchronization as a per-lane `.marrow` flag with no widget of its own: an
+opted-in Transform, Slot Color, or Deform lane always carries one managed key at
+the clip's explicit duration mirroring its key at time zero, the editor
+re-establishes that inside the same transaction as any edit, and the graph and
+dopesheet skip that derived key for direct value and easing authoring.
+FFD and discrete Inherit,
 Attachment, Draw Order, and Event lanes show an unsupported empty state instead
 of stale graph data. Graph tab, visibility, Fit, pan, zoom, hover,
 active-component, and drag state are shell-private and are not saved to

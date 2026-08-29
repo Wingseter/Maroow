@@ -665,6 +665,7 @@ Top-level keys:
 - `runtime`
 - `editor`
 - `snap`
+- `loop_sync`
 - `animation_edits`
 - `timeline_edits`
 - `mesh_edits`
@@ -749,6 +750,81 @@ also defaults magnetic snapping to off.
 - `snap` never enters `.mskl` or `.mbin` export and does not change runtime
   format versions, C ABI v1, or the Agent/MCP surface.
 
+### `loop_sync`
+
+Optional per-**lane** loop-boundary synchronization intent (MAR-172), stored as
+one top-level tree that mirrors the shape of `timeline_edits.animations`. Absent
+from every project that has not opted in, so every existing project serializes
+byte-identically and behaves identically.
+
+```json
+"loop_sync": {
+  "animations": {
+    "idle": {
+      "bones":  { "spine": { "rotate": true } },
+      "slots":  { "body":  { "color":  true } },
+      "deform": { "body":  { "body_mesh": true } }
+    },
+    "aim": { "bones": { "arm_l": { "rotate": true } } }
+  }
+}
+```
+
+- Every leaf is a boolean. `true` means the lane is opted in; `false` is accepted
+  on load, means opted out, and round-trips as absence. Only opted-in lanes are
+  written, and an animation, category, bone, or slot object with nothing under it
+  is not emitted, so an orphan entry is unrepresentable on the write side.
+- **Why a top-level tree and not a member of the lane's own value.** A lane's
+  `timeline_edits` value is a bare *array*, so there is no lane object to hold a
+  member; promoting it to an object would make an opted-in project fail to load
+  in a build that has never heard of `loop_sync`. The top-level block degrades
+  gracefully instead: an older build preserves the unknown member through
+  `preserved_root`, loads the timeline normally, and plays the loop correctly —
+  it simply stops maintaining it. The usual staleness hazard of a side table does
+  not apply, because a lane key `(animation, bone, channel)` is invariant under
+  retime, insertion, deletion, and paste, and animation rename and delete already
+  move or erase the whole lane struct that owns the boolean.
+- **Only three families can be opted in**: bone transform (all four channels),
+  slot light-color, and mesh deform. Each carries a continuous, copyable value
+  and a shared `curve`. Draw order, events, and slot attachment are piecewise
+  constant, already wrap without an interpolation artifact, and an event key at
+  the boundary would fire twice per loop; their lane structs gain no member, so
+  the exclusion is compile-enforced rather than branch-enforced.
+- **The managed key is derived, never stored.** On an opted-in lane the managed
+  boundary key *is* the key at `float32(explicit duration)`, which by contract is
+  that lane's last key. No per-key marker exists, so no marker can travel through
+  a copy/paste into a lane where it would be a lie, and adopting an existing key
+  at that time needs no code at all.
+- **The contract.** For every opted-in lane, the last key sits at
+  `float32(duration)` exactly; its every value component equals the lane's first
+  key's corresponding component bit for bit; its `curve` — and its `curve_mode`
+  and `curve_driver` — equal the first key's bit for bit; and no other key of the
+  lane is within one millisecond of the boundary. Synchronization is
+  one-directional: the key at time zero is authored and always wins.
+- **Load validation**, each rejection carrying a JSON path such as
+  `$.loop_sync.animations.idle.bones.spine.rotate`: `loop_sync` must be an
+  object; it requires an `animations` object; every animation, category, bone,
+  and slot value must be an object; a `bones.<bone>` key must be `rotate`,
+  `translate`, `scale`, or `shear`; a `slots.<slot>` key must be `color`; a leaf
+  must be a boolean; a `true` leaf requires a matching `timeline_edits` lane; and
+  that lane's first keyframe must be at time zero. The explicit-duration
+  prerequisite is deliberately **not** checked at load — the parser runs before
+  any animation catalog exists and `animation_edits` in the same document can
+  author the very duration in question — and a stale boundary key is legal data
+  that load never rewrites; the first transaction reconciles it, or rejects and
+  names both remedies.
+- **Save validation** re-checks the two structural rules a skeleton-free
+  validator can see: an opted-in lane must hold at least one keyframe, and its
+  first keyframe must be at time zero.
+- Unknown members *inside* the `loop_sync` tree are dropped on save, exactly as
+  they already are inside `timeline_edits`, which this tree mirrors. A future
+  story needing richer per-lane data should promote a leaf from `true` to an
+  object and add a preserved source at that point.
+- `loop_sync` never enters `.mskl` or `.mbin` export and does not change runtime
+  format versions, C ABI v1, or `editor-settings.json` v1. The **managed boundary
+  key does** reach the export, as an ordinary keyframe of the family the lane
+  already writes, which is the entire point.
+
 ### `animation_edits`
 
 Optional ordered animation-catalog operations applied to the referenced base skeleton before
@@ -769,7 +845,8 @@ Optional ordered animation-catalog operations applied to the referenced base ske
   against the catalog produced by all preceding operations. The value must be finite, non-negative,
   representable by runtime animation-time storage, and no shorter than the target's last authored key.
   The editor stores the normalized applied value and never substitutes `max(requested, inferred)` for
-  an invalid manual request.
+  an invalid manual request. A managed loop boundary key does not constrain the duration it follows
+  (see `loop_sync`), so an opted-in clip stays shortenable down to its last real authored key.
 - `delete` removes the animation plus its mixing entries and editor timeline overlays.
 - Operations are applied in array order. Empty names, missing sources, duplicate destinations, and deleting the last remaining animation are rejected.
 - Creating or moving a key past an existing explicit boundary extends that boundary in the same

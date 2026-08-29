@@ -1526,6 +1526,307 @@ AgentDispatchResult handle_timeline_editing_operation(
             response_delta(result, false, previous, current));
     }
 
+    if (op == "timeline.set_loop_sync") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.set_loop_sync requires an 'args' object.", op, spec);
+        }
+        std::vector<marrow::editor::TimelineLaneSelector> lanes;
+        std::string lane_error;
+        if (!timeline_lane_selectors_arg(*args, &lanes, &lane_error)) {
+            return make_error(lane_error, op, spec);
+        }
+        const json::Value* enabled_value = json::find_member(*args, "enabled");
+        if (enabled_value == nullptr || !enabled_value->is_boolean()) {
+            // Missing is an error rather than a default: guessing for a whole
+            // selection is destructive in exactly one of the two directions.
+            return make_error(
+                "timeline.set_loop_sync requires a boolean 'enabled'.", op, spec);
+        }
+        const bool requested_enabled = enabled_value->as_boolean();
+
+        const auto materialize = [&](ProjectData* project) {
+            for (const marrow::editor::TimelineLaneSelector& lane : lanes) {
+                switch (lane.kind) {
+                case marrow::editor::TimelineLaneKind::Transform:
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        lane.animation_name,
+                        lane.bone_name,
+                        lane.transform_channel);
+                    break;
+                case marrow::editor::TimelineLaneKind::SlotColor:
+                    (void)ensure_slot_color_timeline_edit(
+                        *project, skeleton, lane.animation_name, lane.slot_name);
+                    break;
+                case marrow::editor::TimelineLaneKind::Deform:
+                    (void)ensure_mesh_deform_timeline_edit(
+                        *project,
+                        skeleton,
+                        lane.animation_name,
+                        lane.slot_name,
+                        lane.attachment_name);
+                    break;
+                }
+            }
+        };
+
+        struct LaneReport {
+            bool enabled{false};
+            json::Value duration;
+            json::Value boundary_time;
+            json::Value boundary;
+        };
+        // The boundary key is reported using the `.marrow` keyframe encoding so
+        // a caller can compare it against the stored bytes. A deform boundary
+        // reports its vertex count instead of hundreds of offsets: the response
+        // is a report, not a copy.
+        const auto collect = [&](const ProjectData& project) {
+            std::vector<LaneReport> reports;
+            reports.reserve(lanes.size());
+            for (const marrow::editor::TimelineLaneSelector& lane : lanes) {
+                LaneReport entry;
+                // The managed boundary is derived: it is the key at
+                // `float32(duration)`, so a lane whose last key sits elsewhere
+                // reports no boundary at all rather than its last authored key.
+                const auto* animation = skeleton.find_animation(lane.animation_name);
+                std::optional<double> boundary_time;
+                if (animation != nullptr && animation->explicit_duration.has_value()) {
+                    entry.duration = number_value(*animation->explicit_duration);
+                    boundary_time = static_cast<double>(
+                        static_cast<marrow::runtime::AnimationScalar>(
+                            *animation->explicit_duration));
+                }
+                const auto boundary_of = [&](const auto* edit) {
+                    if (edit == nullptr) return;
+                    entry.enabled = edit->loop_sync;
+                    if (edit->keyframes.size() < 2U || !boundary_time.has_value()) return;
+                    const auto& key = edit->keyframes.back();
+                    if (std::abs(key.time - *boundary_time) > 1e-6) return;
+                    entry.boundary_time = number_value(key.time);
+                    json::Value::Object encoded;
+                    encoded.emplace("time", number_value(key.time));
+                    encoded.emplace(
+                        "curve", interpolation_curve_value(key.interpolation));
+                    entry.boundary = object_value(std::move(encoded));
+                };
+                switch (lane.kind) {
+                case marrow::editor::TimelineLaneKind::Transform: {
+                    const auto* edit = project.find_transform_timeline_edit(
+                        lane.animation_name, lane.bone_name, lane.transform_channel);
+                    boundary_of(edit);
+                    if (edit != nullptr && entry.boundary.is_object()) {
+                        const auto& key = edit->keyframes.back();
+                        if (lane.transform_channel == TransformTimelineChannel::Rotate) {
+                            entry.boundary.as_object()["angle"] = number_value(key.angle);
+                        } else {
+                            entry.boundary.as_object()["x"] = number_value(key.x);
+                            entry.boundary.as_object()["y"] = number_value(key.y);
+                        }
+                    }
+                    break;
+                }
+                case marrow::editor::TimelineLaneKind::SlotColor: {
+                    const auto* edit = project.find_slot_color_timeline_edit(
+                        lane.animation_name, lane.slot_name);
+                    boundary_of(edit);
+                    if (edit != nullptr && entry.boundary.is_object()) {
+                        const auto& color = edit->keyframes.back().color;
+                        entry.boundary.as_object()["r"] = number_value(color.r);
+                        entry.boundary.as_object()["g"] = number_value(color.g);
+                        entry.boundary.as_object()["b"] = number_value(color.b);
+                        entry.boundary.as_object()["a"] = number_value(color.a);
+                    }
+                    break;
+                }
+                case marrow::editor::TimelineLaneKind::Deform: {
+                    const auto* edit = project.find_mesh_deform_timeline_edit(
+                        lane.animation_name, lane.slot_name, lane.attachment_name);
+                    boundary_of(edit);
+                    if (edit != nullptr && entry.boundary.is_object()) {
+                        entry.boundary.as_object()["vertex_count"] =
+                            number_value(edit->keyframes.back().vertex_offsets.size());
+                    }
+                    break;
+                }
+                }
+                reports.push_back(std::move(entry));
+            }
+            return reports;
+        };
+
+        const auto boundary_action_name =
+            [](marrow::editor::TimelineLoopBoundaryAction action) -> std::string {
+            switch (action) {
+            case marrow::editor::TimelineLoopBoundaryAction::Created:
+                return "created";
+            case marrow::editor::TimelineLoopBoundaryAction::Adopted:
+                return "adopted";
+            case marrow::editor::TimelineLoopBoundaryAction::Moved:
+                return "moved";
+            case marrow::editor::TimelineLoopBoundaryAction::Rewritten:
+                return "rewritten";
+            case marrow::editor::TimelineLoopBoundaryAction::Released:
+                return "released";
+            case marrow::editor::TimelineLoopBoundaryAction::Unchanged:
+                break;
+            }
+            return "unchanged";
+        };
+
+        const auto response_delta =
+            [&](const marrow::editor::TimelineLoopSyncResult& result,
+                bool dry_run,
+                const std::vector<LaneReport>& previous,
+                const std::vector<LaneReport>& current) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace("enabled", bool_value(requested_enabled));
+                response.emplace("lane_count", number_value(result.lane_count));
+                response.emplace(
+                    "changed_lane_count", number_value(result.changed_lane_count));
+                response.emplace(
+                    "synchronized_lane_count",
+                    number_value(result.synchronized_lane_count));
+                response.emplace(
+                    "created_key_count", number_value(result.created_key_count));
+                response.emplace("moved_key_count", number_value(result.moved_key_count));
+                response.emplace(
+                    "rewritten_key_count", number_value(result.rewritten_key_count));
+                response.emplace(
+                    "resolved_key_count", number_value(result.resolved_key_count));
+                constexpr std::size_t kMaxReportedLanes = 256U;
+                const std::size_t reported = std::min(lanes.size(), kMaxReportedLanes);
+                response.emplace(
+                    "lanes_truncated", bool_value(lanes.size() > reported));
+                json::Value::Array reported_lanes;
+                reported_lanes.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    const marrow::editor::TimelineLaneSelector& lane = lanes[index];
+                    json::Value::Object entry;
+                    entry.emplace(
+                        "kind",
+                        string_value(std::string(
+                            marrow::editor::timeline_lane_kind_token(lane.kind))));
+                    entry.emplace("animation", string_value(lane.animation_name));
+                    if (lane.kind == marrow::editor::TimelineLaneKind::Transform) {
+                        entry.emplace("bone", string_value(lane.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(lane.transform_channel))));
+                    } else {
+                        entry.emplace("slot", string_value(lane.slot_name));
+                        if (lane.kind == marrow::editor::TimelineLaneKind::Deform) {
+                            entry.emplace(
+                                "attachment", string_value(lane.attachment_name));
+                        }
+                    }
+                    entry.emplace(
+                        "previous_enabled",
+                        bool_value(index < previous.size() && previous[index].enabled));
+                    entry.emplace(
+                        "enabled",
+                        bool_value(index < current.size() && current[index].enabled));
+                    entry.emplace(
+                        "duration",
+                        index < current.size() ? current[index].duration : json::Value{});
+                    entry.emplace(
+                        "boundary_time",
+                        index < current.size() ? current[index].boundary_time
+                                               : json::Value{});
+                    entry.emplace(
+                        "boundary_action",
+                        string_value(
+                            index < result.lane_actions.size()
+                                ? boundary_action_name(result.lane_actions[index])
+                                : std::string("unchanged")));
+                    entry.emplace(
+                        "previous_boundary",
+                        index < previous.size() ? previous[index].boundary
+                                                : json::Value{});
+                    entry.emplace(
+                        "boundary",
+                        index < current.size() ? current[index].boundary : json::Value{});
+                    const bool changed = index < previous.size() &&
+                        index < current.size() &&
+                        (previous[index].enabled != current[index].enabled ||
+                         !same_curve_value(
+                             previous[index].boundary, current[index].boundary));
+                    entry.emplace("changed", bool_value(changed));
+                    reported_lanes.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("lanes", array_value(std::move(reported_lanes)));
+                return object_value(std::move(response));
+            };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            materialize(&candidate);
+            const std::vector<LaneReport> previous = collect(candidate);
+            const marrow::editor::TimelineLoopSyncResult result =
+                marrow::editor::set_timeline_loop_sync(
+                    &candidate, skeleton, lanes, requested_enabled);
+            if (!result && !result.error.empty()) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            const std::vector<LaneReport> current = collect(candidate);
+            return make_success(
+                "Timeline loop synchronization validated.",
+                op,
+                spec,
+                response_delta(result, true, previous, current));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            requested_enabled
+                ? (lanes.size() == 1U ? "Enable loop synchronization via Agent"
+                                      : "Enable loop synchronization on timelines via Agent")
+                : (lanes.size() == 1U ? "Disable loop synchronization via Agent"
+                                      : "Disable loop synchronization on timelines via Agent"),
+            "timeline:loop-sync",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        materialize(transaction.project());
+        const std::vector<LaneReport> previous = collect(*transaction.project());
+        const marrow::editor::TimelineLoopSyncResult result =
+            marrow::editor::set_timeline_loop_sync(
+                transaction.project(), skeleton, lanes, requested_enabled);
+        if (!result && !result.error.empty()) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const std::vector<LaneReport> current = collect(*transaction.project());
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to set loop synchronization: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Set timeline loop synchronization successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous, current));
+    }
+
     if (op == "set_event_keyframe") {
         const json::Value* args = command_args(cmd);
         if (args == nullptr) {

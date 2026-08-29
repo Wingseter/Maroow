@@ -60,6 +60,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"timeline.retime_keyframes", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.set_interpolation", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.set_curve_mode", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.set_loop_sync", "edit", true, false, true, true, &handle_editing_operation},
     {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_event_keyframe", "edit", true, false, true, true, &handle_editing_operation},
@@ -285,6 +286,97 @@ std::optional<marrow::runtime::Interpolation> interpolation_arg(
     }
     return marrow::runtime::Interpolation::cubic_bezier(
         coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+}
+
+bool timeline_lane_selectors_arg(
+    const json::Value& args,
+    std::vector<marrow::editor::TimelineLaneSelector>* lanes_out,
+    std::string* error_out) {
+    const json::Value* lanes_value = json::find_member(args, "lanes");
+    if (lanes_value == nullptr || !lanes_value->is_array() ||
+        lanes_value->as_array().empty()) {
+        *error_out = "timeline.set_loop_sync requires a non-empty lanes(array).";
+        return false;
+    }
+    if (lanes_value->as_array().size() > 4096U) {
+        *error_out = "timeline.set_loop_sync accepts at most 4096 lanes.";
+        return false;
+    }
+    lanes_out->clear();
+    lanes_out->reserve(lanes_value->as_array().size());
+    for (std::size_t index = 0U; index < lanes_value->as_array().size(); ++index) {
+        const json::Value& lane_value = lanes_value->as_array()[index];
+        if (!lane_value.is_object()) {
+            *error_out = "timeline.set_loop_sync lane " + std::to_string(index) +
+                " must be an object.";
+            return false;
+        }
+        const auto kind = string_arg_any(lane_value, {"kind", "type"});
+        const auto animation = string_arg(lane_value, "animation");
+        if (!kind.has_value() || !animation.has_value()) {
+            *error_out = "timeline.set_loop_sync lane " + std::to_string(index) +
+                " requires kind and animation.";
+            return false;
+        }
+        marrow::editor::TimelineLaneSelector lane;
+        lane.animation_name = std::string(*animation);
+        if (*kind == "transform") {
+            const auto bone = string_arg(lane_value, "bone");
+            const auto channel = string_arg(lane_value, "channel");
+            if (!bone.has_value() || !channel.has_value()) {
+                *error_out = "Transform loop-sync lanes require bone and channel.";
+                return false;
+            }
+            lane.kind = marrow::editor::TimelineLaneKind::Transform;
+            lane.bone_name = std::string(*bone);
+            if (*channel == "rotate") {
+                lane.transform_channel = TransformTimelineChannel::Rotate;
+            } else if (*channel == "translate") {
+                lane.transform_channel = TransformTimelineChannel::Translate;
+            } else if (*channel == "scale") {
+                lane.transform_channel = TransformTimelineChannel::Scale;
+            } else if (*channel == "shear") {
+                lane.transform_channel = TransformTimelineChannel::Shear;
+            } else {
+                *error_out =
+                    "Transform loop-sync channel must be rotate, translate, scale, "
+                    "or shear.";
+                return false;
+            }
+        } else if (*kind == "slot_color") {
+            const auto slot = string_arg(lane_value, "slot");
+            if (!slot.has_value()) {
+                *error_out = "Slot-colour loop-sync lanes require slot.";
+                return false;
+            }
+            lane.kind = marrow::editor::TimelineLaneKind::SlotColor;
+            lane.slot_name = std::string(*slot);
+        } else if (*kind == "deform") {
+            const auto slot = string_arg(lane_value, "slot");
+            const auto attachment = string_arg(lane_value, "attachment");
+            if (!slot.has_value() || !attachment.has_value()) {
+                *error_out = "Deform loop-sync lanes require slot and attachment.";
+                return false;
+            }
+            lane.kind = marrow::editor::TimelineLaneKind::Deform;
+            lane.slot_name = std::string(*slot);
+            lane.attachment_name = std::string(*attachment);
+        } else if (*kind == "draw_order" || *kind == "event" ||
+                   *kind == "slot_attachment") {
+            // Rejected rather than ignored: those families are piecewise
+            // constant and already wrap without a pop, and an event key at the
+            // boundary would fire twice per loop.
+            *error_out = "timeline.set_loop_sync does not support " +
+                std::string(*kind) +
+                " lanes: they are piecewise constant and need no boundary key.";
+            return false;
+        } else {
+            *error_out = "Unknown timeline loop-sync lane kind: " + std::string(*kind);
+            return false;
+        }
+        lanes_out->push_back(std::move(lane));
+    }
+    return true;
 }
 
 bool curve_mode_request_arg(

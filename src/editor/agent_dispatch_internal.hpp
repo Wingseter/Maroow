@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/session.hpp"
 
@@ -125,6 +126,18 @@ bool curve_mode_request_arg(
     const json::Value& args,
     marrow::editor::TimelineCurveMode* mode_out,
     std::optional<marrow::editor::TimelineScalarComponent>* driver_out,
+    std::string* error_out);
+/**
+ * @brief Parses one lane selector array into project-domain lane selectors.
+ *
+ * Lane selectors carry no time, because loop synchronization is a property of
+ * a whole timeline. Draw-order, event, and slot-attachment kinds are rejected
+ * rather than ignored: those families are piecewise constant and need no
+ * boundary key at all.
+ */
+bool timeline_lane_selectors_arg(
+    const json::Value& args,
+    std::vector<marrow::editor::TimelineLaneSelector>* lanes_out,
     std::string* error_out);
 bool parse_number_array(
     const json::Value& args,

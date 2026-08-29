@@ -901,6 +901,41 @@ std::optional<marrow::editor::TimelineKeySelector> timeline_key_selector(
     return std::nullopt;
 }
 
+bool timeline_key_is_managed_loop_boundary(
+    const ShellState& state,
+    const TimelineTrackRow& track,
+    std::size_t key_index) {
+    if (!state.load_result || state.load_result.project == nullptr ||
+        key_index >= track.key_times.size()) {
+        return false;
+    }
+    const auto selector = timeline_key_selector(state, track, key_index);
+    if (!selector.has_value()) return false;
+    // Identity is derived, never stored: the managed boundary IS the lane's
+    // last key while the lane is opted in, so nothing can carry a stale marker
+    // through a copy, a paste, or a retime.
+    const auto is_boundary = [&](const auto* lane) {
+        return lane != nullptr && lane->loop_sync && !lane->keyframes.empty() &&
+            std::abs(lane->keyframes.back().time - selector->time) <= 1e-6;
+    };
+    switch (selector->kind) {
+    case marrow::editor::TimelineKeyKind::Transform:
+        return is_boundary(state.load_result.project->find_transform_timeline_edit(
+            selector->animation_name, selector->bone_name, selector->transform_channel));
+    case marrow::editor::TimelineKeyKind::SlotColor:
+        return is_boundary(state.load_result.project->find_slot_color_timeline_edit(
+            selector->animation_name, selector->slot_name));
+    case marrow::editor::TimelineKeyKind::Deform:
+        return is_boundary(state.load_result.project->find_mesh_deform_timeline_edit(
+            selector->animation_name, selector->slot_name, selector->attachment_name));
+    case marrow::editor::TimelineKeyKind::DrawOrder:
+    case marrow::editor::TimelineKeyKind::Event:
+    case marrow::editor::TimelineKeyKind::SlotAttachment:
+        return false;
+    }
+    return false;
+}
+
 template <typename Fn>
 bool visit_editable_timeline_keys(
     ShellState* state,
@@ -1205,7 +1240,8 @@ bool timeline_key_kind_carries_easing(marrow::editor::TimelineKeyKind kind) {
 std::vector<marrow::editor::TimelineKeySelector> collect_curve_preset_selectors(
     const ShellState& state,
     const std::vector<TimelineTrackRow>& tracks,
-    std::vector<std::string>* track_ids_out) {
+    std::vector<std::string>* track_ids_out,
+    std::size_t* boundary_skip_count_out = nullptr) {
     std::vector<marrow::editor::TimelineKeySelector> selectors;
     selectors.reserve(state.timeline_editor.selected_keys.size());
     for (const TimelineKeyRef& key : state.timeline_editor.selected_keys) {
@@ -1226,6 +1262,13 @@ std::vector<marrow::editor::TimelineKeySelector> collect_curve_preset_selectors(
         // rejects them. A dopesheet box selection routinely spans an Event lane,
         // so rejecting the whole command would make the feature unusable there.
         if (!timeline_key_kind_carries_easing(selector->kind)) continue;
+        // MAR-172: a managed boundary key's easing is derived from key 0 and
+        // the sync pass would rewrite it in the same transaction, so the GUI
+        // skips and counts it rather than writing something invisible.
+        if (timeline_key_is_managed_loop_boundary(state, *track, *key_index)) {
+            if (boundary_skip_count_out != nullptr) ++*boundary_skip_count_out;
+            continue;
+        }
         // Two refs can resolve to the same parent key, and the primitive
         // rejects a duplicate selector atomically, so collapsing here is
         // required rather than defensive.
@@ -1274,8 +1317,10 @@ TimelineCurvePresetResult apply_timeline_curve_preset(
     }
 
     std::vector<std::string> selector_track_ids;
+    std::size_t boundary_skip_count = 0U;
     const std::vector<marrow::editor::TimelineKeySelector> selectors =
-        collect_curve_preset_selectors(*state, tracks, &selector_track_ids);
+        collect_curve_preset_selectors(
+            *state, tracks, &selector_track_ids, &boundary_skip_count);
     result.compatible_key_count = selectors.size();
     result.skipped_key_count =
         state->timeline_editor.selected_keys.size() - selectors.size();
@@ -1372,6 +1417,11 @@ TimelineCurvePresetResult apply_timeline_curve_preset(
             " selected keys; " + std::to_string(result.skipped_key_count) +
             " have no easing";
     }
+    if (boundary_skip_count != 0U) {
+        state->status_message += "; " + std::to_string(boundary_skip_count) +
+            (boundary_skip_count == 1U ? " is a managed loop boundary"
+                                       : " are managed loop boundaries");
+    }
     return result;
 }
 
@@ -1424,7 +1474,8 @@ namespace {
 std::vector<marrow::editor::TimelineKeySelector> collect_curve_mode_selectors(
     const ShellState& state,
     const std::vector<TimelineTrackRow>& tracks,
-    std::vector<std::string>* track_ids_out) {
+    std::vector<std::string>* track_ids_out,
+    std::size_t* boundary_skip_count_out = nullptr) {
     std::vector<marrow::editor::TimelineKeySelector> selectors;
     selectors.reserve(state.timeline_editor.selected_keys.size());
     for (const TimelineKeyRef& key : state.timeline_editor.selected_keys) {
@@ -1443,6 +1494,12 @@ std::vector<marrow::editor::TimelineKeySelector> collect_curve_mode_selectors(
         if (!selector.has_value()) continue;
         if (selector->kind != marrow::editor::TimelineKeyKind::Transform &&
             selector->kind != marrow::editor::TimelineKeyKind::SlotColor) {
+            continue;
+        }
+        // MAR-172: same reason as the preset row -- a managed boundary key's
+        // curve intent is mirrored from key 0 on every transaction.
+        if (timeline_key_is_managed_loop_boundary(state, *track, *key_index)) {
+            if (boundary_skip_count_out != nullptr) ++*boundary_skip_count_out;
             continue;
         }
         bool duplicate = false;
@@ -1511,8 +1568,10 @@ TimelineCurveModeApplyResult apply_timeline_curve_mode(
     }
 
     std::vector<std::string> selector_track_ids;
+    std::size_t boundary_skip_count = 0U;
     const std::vector<marrow::editor::TimelineKeySelector> selectors =
-        collect_curve_mode_selectors(*state, tracks, &selector_track_ids);
+        collect_curve_mode_selectors(
+            *state, tracks, &selector_track_ids, &boundary_skip_count);
     result.compatible_key_count = selectors.size();
     result.skipped_key_count =
         state->timeline_editor.selected_keys.size() - selectors.size();
@@ -1617,6 +1676,11 @@ TimelineCurveModeApplyResult apply_timeline_curve_mode(
             std::to_string(state->timeline_editor.selected_keys.size()) +
             " selected keys" + verb + "; " +
             std::to_string(result.skipped_key_count) + " have no curve mode";
+    }
+    if (boundary_skip_count != 0U) {
+        state->status_message += "; " + std::to_string(boundary_skip_count) +
+            (boundary_skip_count == 1U ? " is a managed loop boundary"
+                                       : " are managed loop boundaries");
     }
     return result;
 }
@@ -1752,6 +1816,37 @@ bool remove_selected_timeline_keys(
         removals.push_back(timeline_key_ref(*track, index));
     }
     if (removals.empty()) return false;
+
+    // MAR-172: a managed boundary key exists only because its lane's contract
+    // requires it, so it is filtered out of the removal rather than deleted out
+    // from under that contract. Removing the time-zero key is a different case:
+    // the sync pass rejects it and cancels the whole transaction.
+    std::size_t boundary_skip_count = 0U;
+    removals.erase(
+        std::remove_if(
+            removals.begin(),
+            removals.end(),
+            [&](const TimelineKeyRef& removal) {
+                for (const TimelineTrackRow& track : tracks) {
+                    if (removal.track_id != track.id) continue;
+                    const auto index = timeline_key_index(track, removal);
+                    if (index.has_value() &&
+                        timeline_key_is_managed_loop_boundary(*state, track, *index)) {
+                        ++boundary_skip_count;
+                        return true;
+                    }
+                }
+                return false;
+            }),
+        removals.end());
+    if (removals.empty()) {
+        if (boundary_skip_count != 0U) {
+            state->status_message =
+                "Nothing was removed: the selection is a managed loop boundary; "
+                "disable loop synchronization on that timeline first";
+        }
+        return false;
+    }
 
     auto transaction = state->session.begin_edit({
         marrow::editor::EditKind::RemoveKeyframe,
@@ -1910,6 +2005,18 @@ bool copy_selected_timeline_keys(
                     &clipboard.project_fragment.slot_attachment_timeline_edits);
             }
         }
+    }
+    // The flag is a property of a lane in a project, never of a clipboard
+    // fragment: a pasted lane's own opt-in decides, and a fragment that carried
+    // one would assert a contract the destination may not satisfy.
+    for (auto& edit : clipboard.project_fragment.transform_timeline_edits) {
+        edit.loop_sync = false;
+    }
+    for (auto& edit : clipboard.project_fragment.slot_color_timeline_edits) {
+        edit.loop_sync = false;
+    }
+    for (auto& edit : clipboard.project_fragment.mesh_deform_timeline_edits) {
+        edit.loop_sync = false;
     }
     clipboard.has_data = std::isfinite(clipboard.earliest_time);
     if (!clipboard.has_data) return false;
@@ -2398,10 +2505,27 @@ bool begin_timeline_graph_value_gesture(
     // The graph shows one track at a time, so only the focused row's keys join
     // the gesture. Selected keys on other rows are ignored and left untouched.
     std::vector<TimelineKeyRef> keys;
+    std::size_t boundary_skip_count = 0U;
     for (const TimelineKeyRef& key : state->timeline_editor.selected_keys) {
-        if (key.track_id == track.id) keys.push_back(key);
+        if (key.track_id != track.id) continue;
+        // MAR-172: a managed boundary key's value is derived from key 0, so a
+        // drag on it would be undone by the sync pass in the same transaction.
+        const auto key_index = timeline_key_index(track, key);
+        if (key_index.has_value() &&
+            timeline_key_is_managed_loop_boundary(*state, track, *key_index)) {
+            ++boundary_skip_count;
+            continue;
+        }
+        keys.push_back(key);
     }
-    if (keys.empty()) return false;
+    if (keys.empty()) {
+        if (boundary_skip_count != 0U) {
+            state->status_message =
+                "Edit the key at time 0 of this timeline instead; the last key is a "
+                "managed loop boundary";
+        }
+        return false;
+    }
 
     auto transaction = state->session.begin_edit({
         marrow::editor::EditKind::EditProperty,

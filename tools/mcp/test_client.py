@@ -38,15 +38,16 @@ async def test(parameter_only=False):
         "timeline.retime_keyframes",
         "timeline.set_interpolation",
         "timeline.set_curve_mode",
+        "timeline.set_loop_sync",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 58
+    assert len(registry_names) == 59
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 58
+    assert len(mcp_names) == 59
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -82,6 +83,13 @@ async def test(parameter_only=False):
     }
     assert registry_by_name["timeline.set_curve_mode"] == {
         "name": "timeline.set_curve_mode",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["timeline.set_loop_sync"] == {
+        "name": "timeline.set_loop_sync",
         "category": "edit",
         "mutating": True,
         "requires_review": False,
@@ -817,6 +825,144 @@ async def test(parameter_only=False):
         == original_mode_curve
     )
     assert after_curve_mode_undo["scene_delta"]["keys"][0]["previous_mode"] == "manual"
+
+
+    # MAR-172: timeline.set_loop_sync, the 59th operation. An opted-in lane
+    # always carries one managed key at the explicit duration mirroring its key
+    # at time zero, and the editor re-establishes that on every edit.
+    loop_lane = {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "rotate",
+    }
+    require_rejected(
+        "timeline.set_loop_sync rejects a clip with no explicit duration",
+        await client.send_command(
+            "timeline.set_loop_sync", {"lanes": [loop_lane], "enabled": True}
+        ),
+    )
+    require_ok(
+        "animation.set_duration for the loop boundary",
+        await client.send_command(
+            "animation.set_duration", {"animation": "idle", "duration": 1.5}
+        ),
+    )
+    loop_dry = require_ok(
+        "timeline.set_loop_sync dry-run",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    assert loop_dry["scene_delta"]["lane_count"] == 1
+    assert loop_dry["scene_delta"]["created_key_count"] == 1
+    assert loop_dry["scene_delta"]["lanes"][0]["previous_enabled"] is False
+    assert loop_dry["scene_delta"]["lanes"][0]["boundary_action"] == "created"
+    assert loop_dry["scene_delta"]["lanes"][0]["boundary_time"] == 1.5
+    assert loop_dry["scene_delta"]["lanes"][0]["previous_boundary"] is None
+
+    loop_live = require_ok(
+        "timeline.set_loop_sync live",
+        await client.send_command(
+            "timeline.set_loop_sync", {"lanes": [loop_lane], "enabled": True}
+        ),
+    )
+    assert loop_live["scene_delta"]["changed_lane_count"] == 1
+    assert loop_live["scene_delta"]["created_key_count"] == 1
+
+    loop_read_back = require_ok(
+        "timeline.set_loop_sync read-back",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    boundary = loop_read_back["scene_delta"]["lanes"][0]["previous_boundary"]
+    assert loop_read_back["scene_delta"]["lanes"][0]["previous_enabled"] is True
+    assert round(boundary["time"], 4) == 1.5
+    first_key_angle = round(boundary["angle"], 4)
+
+    # The boundary key follows the first key through the MCP surface: one
+    # set_transform between two dry runs moves it, in that same history entry.
+    require_ok(
+        "set_transform on the time-zero key of an opted-in lane",
+        await client.send_command(
+            "set_transform",
+            {
+                "animation": "idle",
+                "bone": "spine",
+                "channel": "rotate",
+                "time": 0.0,
+                "angle": 24.5,
+            },
+        ),
+    )
+    loop_followed = require_ok(
+        "timeline.set_loop_sync read-back after set_transform",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    followed_boundary = loop_followed["scene_delta"]["lanes"][0]["previous_boundary"]
+    assert round(followed_boundary["angle"], 4) == 24.5
+    assert round(followed_boundary["angle"], 4) != first_key_angle
+    require_ok("undo the time-zero transform", await client.send_command("undo"))
+
+    require_rejected(
+        "timeline.set_loop_sync rejects a non-boolean enabled",
+        await client.send_command(
+            "timeline.set_loop_sync", {"lanes": [loop_lane], "enabled": "yes"}
+        ),
+    )
+    require_rejected(
+        "timeline.set_loop_sync rejects a draw_order lane",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {
+                "lanes": [{"kind": "draw_order", "animation": "idle"}],
+                "enabled": True,
+            },
+        ),
+    )
+    # The schema declares no `time` on a lane entry; the C++ gate ignores the
+    # extra member rather than loosening, so this still succeeds as a dry run.
+    require_ok(
+        "timeline.set_loop_sync ignores an undeclared time member",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [dict(loop_lane, time=0.0)], "enabled": True, "dry_run": True},
+        ),
+    )
+    require_rejected(
+        "timeline.set_loop_sync rejects a lane whose animation has no duration",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {
+                "lanes": [
+                    {
+                        "kind": "transform",
+                        "animation": "attack",
+                        "bone": "arm_l",
+                        "channel": "rotate",
+                    }
+                ],
+                "enabled": True,
+            },
+        ),
+    )
+
+    require_ok("undo timeline loop sync", await client.send_command("undo"))
+    after_loop_undo = require_ok(
+        "timeline.set_loop_sync after undo",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    assert after_loop_undo["scene_delta"]["lanes"][0]["previous_enabled"] is False
+    require_ok("undo the loop-boundary duration", await client.send_command("undo"))
 
     require_ok(
         "set_transform dry-run",

@@ -2852,6 +2852,207 @@ std::optional<LoadError> parse_slot_timeline_edits(
     return std::nullopt;
 }
 
+/**
+ * @brief Scatters the optional top-level `loop_sync` tree into the lane flags.
+ *
+ * Runs after every `timeline_edits` parser, because every `true` leaf is a
+ * cross-reference into a lane those parsers populate. The tree mirrors
+ * `timeline_edits.animations` exactly, and every leaf is a boolean whose
+ * absence and whose `false` both mean "opted out".
+ */
+std::optional<LoadError> parse_loop_sync(
+    const Document& document,
+    const Value& root,
+    std::vector<TransformTimelineEdit>* transform_edits,
+    std::vector<SlotColorTimelineEdit>* slot_color_edits,
+    std::vector<MeshDeformTimelineEdit>* deform_edits) {
+    constexpr double kLoopSyncKeyTimeEpsilon = 1e-6;
+    const Value* block = find_optional_member(root, "loop_sync");
+    if (block == nullptr) {
+        return std::nullopt;
+    }
+    if (!block->is_object()) {
+        return validation_error(
+            document, block->location(), "$.loop_sync", "loop_sync must be an object");
+    }
+    const Value* animations = find_optional_member(*block, "animations");
+    if (animations == nullptr || !animations->is_object()) {
+        return validation_error(
+            document,
+            animations != nullptr ? animations->location() : block->location(),
+            "$.loop_sync.animations",
+            "loop_sync requires an animations object");
+    }
+
+    const auto require_object =
+        [&](const Value& value, const std::string& path) -> std::optional<LoadError> {
+        if (value.is_object()) {
+            return std::nullopt;
+        }
+        return validation_error(
+            document, value.location(), path, "loop_sync entries must be objects");
+    };
+    const auto read_leaf = [&](const Value& value,
+                               const std::string& path,
+                               bool* enabled_out) -> std::optional<LoadError> {
+        if (!value.is_boolean()) {
+            return validation_error(
+                document, value.location(), path, "loop_sync entries must be booleans");
+        }
+        *enabled_out = value.as_boolean();
+        return std::nullopt;
+    };
+    // A lane opted in at load must exist and must already satisfy the one
+    // structural prerequisite a parser can see. The explicit-duration
+    // prerequisite is deliberately not checked here: no animation catalog
+    // exists yet and `animation_edits` in the same document can author the
+    // very duration in question.
+    const auto accept_lane = [&](auto* lane,
+                                 const Value& value,
+                                 const std::string& path) -> std::optional<LoadError> {
+        if (lane == nullptr) {
+            return validation_error(
+                document,
+                value.location(),
+                path,
+                "loop_sync requires a timeline edit for that lane");
+        }
+        if (lane->keyframes.empty() ||
+            std::abs(lane->keyframes.front().time) > kLoopSyncKeyTimeEpsilon) {
+            return validation_error(
+                document,
+                value.location(),
+                path,
+                "loop synchronized timelines require a key at time zero");
+        }
+        lane->loop_sync = true;
+        return std::nullopt;
+    };
+
+    for (const auto& [animation_name, animation_value] : animations->as_object()) {
+        const std::string animation_path =
+            "$.loop_sync.animations." + animation_name;
+        if (const auto error = require_object(animation_value, animation_path)) {
+            return error;
+        }
+        for (const auto& [category, category_value] : animation_value.as_object()) {
+            const std::string category_path = animation_path + "." + category;
+            if (const auto error = require_object(category_value, category_path)) {
+                return error;
+            }
+            if (category == "bones") {
+                for (const auto& [bone_name, bone_value] : category_value.as_object()) {
+                    const std::string bone_path = category_path + "." + bone_name;
+                    if (const auto error = require_object(bone_value, bone_path)) {
+                        return error;
+                    }
+                    for (const auto& [channel_key, leaf] : bone_value.as_object()) {
+                        const std::string leaf_path = bone_path + "." + channel_key;
+                        const auto channel = transform_channel_from_key(channel_key);
+                        if (!channel.has_value()) {
+                            return validation_error(
+                                document,
+                                leaf.location(),
+                                leaf_path,
+                                "loop_sync transform channel must be rotate, translate, "
+                                "scale, or shear");
+                        }
+                        bool enabled = false;
+                        if (const auto error = read_leaf(leaf, leaf_path, &enabled)) {
+                            return error;
+                        }
+                        if (!enabled) {
+                            continue;
+                        }
+                        TransformTimelineEdit* lane = nullptr;
+                        for (TransformTimelineEdit& edit : *transform_edits) {
+                            if (edit.animation_name == animation_name &&
+                                edit.bone_name == bone_name && edit.channel == *channel) {
+                                lane = &edit;
+                                break;
+                            }
+                        }
+                        if (const auto error = accept_lane(lane, leaf, leaf_path)) {
+                            return error;
+                        }
+                    }
+                }
+            } else if (category == "slots") {
+                for (const auto& [slot_name, slot_value] : category_value.as_object()) {
+                    const std::string slot_path = category_path + "." + slot_name;
+                    if (const auto error = require_object(slot_value, slot_path)) {
+                        return error;
+                    }
+                    for (const auto& [channel_key, leaf] : slot_value.as_object()) {
+                        const std::string leaf_path = slot_path + "." + channel_key;
+                        if (channel_key != "color") {
+                            return validation_error(
+                                document,
+                                leaf.location(),
+                                leaf_path,
+                                "loop_sync slot entries support only color");
+                        }
+                        bool enabled = false;
+                        if (const auto error = read_leaf(leaf, leaf_path, &enabled)) {
+                            return error;
+                        }
+                        if (!enabled) {
+                            continue;
+                        }
+                        SlotColorTimelineEdit* lane = nullptr;
+                        for (SlotColorTimelineEdit& edit : *slot_color_edits) {
+                            if (edit.animation_name == animation_name &&
+                                edit.slot_name == slot_name) {
+                                lane = &edit;
+                                break;
+                            }
+                        }
+                        if (const auto error = accept_lane(lane, leaf, leaf_path)) {
+                            return error;
+                        }
+                    }
+                }
+            } else if (category == "deform") {
+                for (const auto& [slot_name, slot_value] : category_value.as_object()) {
+                    const std::string slot_path = category_path + "." + slot_name;
+                    if (const auto error = require_object(slot_value, slot_path)) {
+                        return error;
+                    }
+                    for (const auto& [attachment_name, leaf] : slot_value.as_object()) {
+                        const std::string leaf_path = slot_path + "." + attachment_name;
+                        bool enabled = false;
+                        if (const auto error = read_leaf(leaf, leaf_path, &enabled)) {
+                            return error;
+                        }
+                        if (!enabled) {
+                            continue;
+                        }
+                        MeshDeformTimelineEdit* lane = nullptr;
+                        for (MeshDeformTimelineEdit& edit : *deform_edits) {
+                            if (edit.animation_name == animation_name &&
+                                edit.slot_name == slot_name &&
+                                edit.attachment_name == attachment_name) {
+                                lane = &edit;
+                                break;
+                            }
+                        }
+                        if (const auto error = accept_lane(lane, leaf, leaf_path)) {
+                            return error;
+                        }
+                    }
+                }
+            } else {
+                return validation_error(
+                    document,
+                    category_value.location(),
+                    category_path,
+                    "loop_sync entries must be objects");
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<LoadError> parse_ik_constraint_edits(
     const Document& document,
     const Value& root,
@@ -3908,6 +4109,67 @@ Value build_physics_constraint_edits_value(const std::vector<PhysicsConstraintEd
     return make_array_value(std::move(constraints));
 }
 
+/**
+ * @brief Projects the three continuous families' `loop_sync` flags into a tree.
+ *
+ * A pure projection: only opted-in lanes appear, `false` is never written, and
+ * an animation, category, bone, or slot object with nothing under it is not
+ * emitted. That is what makes an orphan entry unrepresentable on the write
+ * side and what keeps a project with no opted-in lane byte-identical.
+ */
+Value build_loop_sync_value(
+    const std::vector<TransformTimelineEdit>& transform_edits,
+    const std::vector<MeshDeformTimelineEdit>& mesh_deform_edits,
+    const std::vector<SlotColorTimelineEdit>& slot_color_edits) {
+    Value::Object animations_object;
+    const auto ensure_animation = [&](const std::string& animation_name) {
+        auto& animation_value = animations_object[animation_name];
+        if (!animation_value.is_object()) {
+            animation_value = make_object_value();
+        }
+        return &animation_value;
+    };
+
+    for (const TransformTimelineEdit& edit : transform_edits) {
+        if (!edit.loop_sync) {
+            continue;
+        }
+        Value* animation_value = ensure_animation(edit.animation_name);
+        Value* bones_value = ensure_object_member(animation_value, "bones");
+        Value* bone_value = ensure_object_member(bones_value, edit.bone_name);
+        if (bone_value != nullptr) {
+            bone_value->as_object()[std::string(transform_channel_json_key(edit.channel))] =
+                make_boolean_value(true);
+        }
+    }
+    for (const SlotColorTimelineEdit& edit : slot_color_edits) {
+        if (!edit.loop_sync) {
+            continue;
+        }
+        Value* animation_value = ensure_animation(edit.animation_name);
+        Value* slots_value = ensure_object_member(animation_value, "slots");
+        Value* slot_value = ensure_object_member(slots_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()["color"] = make_boolean_value(true);
+        }
+    }
+    for (const MeshDeformTimelineEdit& edit : mesh_deform_edits) {
+        if (!edit.loop_sync) {
+            continue;
+        }
+        Value* animation_value = ensure_animation(edit.animation_name);
+        Value* deform_value = ensure_object_member(animation_value, "deform");
+        Value* slot_value = ensure_object_member(deform_value, edit.slot_name);
+        if (slot_value != nullptr) {
+            slot_value->as_object()[edit.attachment_name] = make_boolean_value(true);
+        }
+    }
+
+    Value::Object loop_sync;
+    loop_sync["animations"] = make_object_value(std::move(animations_object));
+    return make_object_value(std::move(loop_sync));
+}
+
 Value build_timeline_edits_value(
     const std::vector<TransformTimelineEdit>& transform_edits,
     const std::vector<MeshDeformTimelineEdit>& mesh_deform_edits,
@@ -4369,6 +4631,25 @@ Value build_project_value(const ProjectData& project) {
                 project.slot_attachment_timeline_edits);
     } else {
         root.erase("timeline_edits");
+    }
+
+    // MAR-172: an optional projection of the three continuous families' lane
+    // flags. The `erase` branch is what keeps a project with no opted-in lane
+    // byte-identical to a pre-MAR-172 build's output.
+    const auto lane_is_opted_in = [](const auto& edits) {
+        return std::any_of(edits.begin(), edits.end(), [](const auto& edit) {
+            return edit.loop_sync;
+        });
+    };
+    if (lane_is_opted_in(project.transform_timeline_edits) ||
+        lane_is_opted_in(project.slot_color_timeline_edits) ||
+        lane_is_opted_in(project.mesh_deform_timeline_edits)) {
+        root["loop_sync"] = build_loop_sync_value(
+            project.transform_timeline_edits,
+            project.mesh_deform_timeline_edits,
+            project.slot_color_timeline_edits);
+    } else {
+        root.erase("loop_sync");
     }
     if (!project.mesh_weight_attachment_edits.empty()) {
         root["mesh_edits"] =
@@ -4938,6 +5219,36 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
             settings.absolute_scale_step <= 0.0) {
             error_out->message =
                 "project snap steps must be finite and greater than zero";
+            return false;
+        }
+    }
+
+    // MAR-172 re-validates the two structural prerequisites a skeleton-free
+    // validator can see, for the same reason the snap block re-validates its
+    // steps: the loader's gate protects documents, and this one protects a
+    // project mutated in memory.
+    {
+        const auto validate_lane = [&](const auto& edits) {
+            for (const auto& edit : edits) {
+                if (!edit.loop_sync) {
+                    continue;
+                }
+                if (edit.keyframes.empty()) {
+                    error_out->message =
+                        "loop synchronized timelines require at least one keyframe";
+                    return false;
+                }
+                if (std::abs(edit.keyframes.front().time) > 1e-6) {
+                    error_out->message =
+                        "loop synchronized timelines require a key at time zero";
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!validate_lane(project.transform_timeline_edits) ||
+            !validate_lane(project.slot_color_timeline_edits) ||
+            !validate_lane(project.mesh_deform_timeline_edits)) {
             return false;
         }
     }
@@ -6644,6 +6955,17 @@ ProjectLoadResult load_project(const Document& document) {
             document.root,
             &project.slot_color_timeline_edits,
             &project.slot_attachment_timeline_edits)) {
+        result.error = error;
+        return result;
+    }
+    // MAR-172 runs after every timeline_edits parser: each `true` leaf is a
+    // cross-reference into a lane those parsers populate.
+    if (const auto error = parse_loop_sync(
+            document,
+            document.root,
+            &project.transform_timeline_edits,
+            &project.slot_color_timeline_edits,
+            &project.mesh_deform_timeline_edits)) {
         result.error = error;
         return result;
     }

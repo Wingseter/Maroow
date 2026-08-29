@@ -154,8 +154,10 @@ AuthoringResult delete_animation(
  * @brief Authors one explicit animation duration through the ordered edit log.
  *
  * The requested value is normalized to runtime float32 precision and must not
- * be shorter than the effective animation's inferred duration. Rejected edits
- * leave the project unchanged.
+ * be shorter than the effective animation's inferred duration. A managed loop
+ * boundary key does not constrain the duration it follows, so an opted-in clip
+ * stays shortenable; every animation with no opted-in lane validates exactly as
+ * before. Rejected edits leave the project unchanged.
  */
 AuthoringResult set_animation_duration(
     ProjectData* project,
@@ -367,5 +369,103 @@ struct TimelineAutoCurveResult : AuthoringResult {
 TimelineAutoCurveResult resolve_automatic_curves(
     ProjectData* project,
     std::string_view animation_name = {});
+
+/** @brief Which timeline family a lane selector names. */
+enum class TimelineLaneKind : std::uint8_t { Transform, SlotColor, Deform };
+
+/**
+ * @brief Stable project-domain selector for one persisted timeline lane.
+ *
+ * Unlike `TimelineKeySelector`, this names a whole timeline and carries no
+ * time, because loop synchronization is a lane-level property whose identity
+ * no retime, insertion, deletion, or paste can change. Fields not used by the
+ * selected kind remain empty.
+ */
+struct TimelineLaneSelector {
+    TimelineLaneKind kind{TimelineLaneKind::Transform};
+    std::string animation_name;
+    std::string bone_name;
+    TransformTimelineChannel transform_channel{TransformTimelineChannel::Rotate};
+    std::string slot_name;
+    std::string attachment_name;
+};
+
+/** @brief What the contract did to one lane's boundary key. */
+enum class TimelineLoopBoundaryAction : std::uint8_t {
+    Unchanged,
+    Created,
+    Adopted,
+    Moved,
+    Rewritten,
+    Released,
+};
+
+struct TimelineLoopSyncResult : AuthoringResult {
+    std::size_t lane_count{0U};               // opted-in lanes in scope
+    std::size_t changed_lane_count{0U};       // the flag differed
+    std::size_t synchronized_lane_count{0U};  // the boundary key differed
+    std::size_t created_key_count{0U};
+    std::size_t moved_key_count{0U};
+    std::size_t rewritten_key_count{0U};
+    std::size_t resolved_key_count{0U};       // from the MAR-171 resolver pass
+    std::vector<TimelineLoopBoundaryAction> lane_actions;  // parallel to selectors
+};
+
+/**
+ * @brief Atomically records loop-boundary synchronization intent on lanes.
+ *
+ * Only Transform, Slot Color, and Deform timelines can be synchronized: the
+ * discrete families are piecewise constant, already wrap without a pop, and an
+ * event key at the boundary would fire twice per loop. Enabling requires the
+ * lane's animation to carry an explicit duration of at least one millisecond
+ * and the lane to hold a key exactly at time zero, and immediately creates or
+ * adopts one managed key at that duration mirroring the time-zero key.
+ * Disabling evaluates no prerequisite and leaves the managed key in place as an
+ * ordinary key, so a project that has reached an unsatisfiable state always has
+ * an escape. A rejected edit leaves the project unchanged.
+ */
+TimelineLoopSyncResult set_timeline_loop_sync(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    const std::vector<TimelineLaneSelector>& lanes,
+    bool enabled);
+
+/**
+ * @brief Re-establishes the loop-boundary contract on every opted-in lane.
+ *
+ * Callers run this inside the transaction that changed a key value, a key time,
+ * a key's existence, an automatic curve, or an explicit duration, so one edit
+ * stays one history entry. Projects with no opted-in lane return immediately
+ * having done nothing at all, including no automatic-curve resolution. A lane
+ * that cannot satisfy its contract rejects the whole call atomically rather
+ * than synchronizing part of it, naming the animation, the timeline, and the
+ * remedy.
+ */
+TimelineLoopSyncResult synchronize_loop_boundaries(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name = {});
+
+/**
+ * @brief The animation's inferred duration with managed loop boundaries excluded.
+ *
+ * A loop-synchronized lane's last key is placed at the explicit duration by the
+ * boundary contract, so it must not act as a floor on the duration it follows.
+ * Every opted-in lane is materialized in `project`, so this walks the effective
+ * animation, skips every timeline an opted-in project lane owns, and folds
+ * those lanes back in at their second-to-last key time.
+ *
+ * Returns `animation.inferred_duration()` unchanged, bit for bit, when no lane
+ * of `animation` is opted in, so every existing project keeps byte-identical
+ * duration validation.
+ */
+double inferred_duration_excluding_loop_boundaries(
+    const ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    const runtime::AnimationData& animation);
+
+/** @brief The `.marrow` token for one lane kind, and its inverse. */
+std::string_view timeline_lane_kind_token(TimelineLaneKind kind);
+std::optional<TimelineLaneKind> timeline_lane_kind_from_token(std::string_view token);
 
 } // namespace marrow::editor

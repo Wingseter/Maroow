@@ -144,8 +144,8 @@ bool validate_timeline_graph_shell_smoke(
         marrow::editor::agent_operation_descriptor_count();
     const bool dirty_before = state.session.dirty();
     const bool shell_dirty_before = state.project_dirty;
-    if (operation_count_before != 58U) {
-        std::cerr << "Graph shell smoke requires the exact 58-operation registry.\n";
+    if (operation_count_before != 59U) {
+        std::cerr << "Graph shell smoke requires the exact 59-operation registry.\n";
         return false;
     }
 
@@ -632,8 +632,8 @@ bool validate_timeline_graph_edit_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 58U) {
-        std::cerr << "Graph edit shell smoke requires the exact 58-operation registry.\n";
+    if (operation_count_before != 59U) {
+        std::cerr << "Graph edit shell smoke requires the exact 59-operation registry.\n";
         return false;
     }
 
@@ -1554,8 +1554,8 @@ bool validate_timeline_curve_preset_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 58U) {
-        std::cerr << "Curve preset shell smoke requires the exact 58-operation registry.\n";
+    if (operation_count_before != 59U) {
+        std::cerr << "Curve preset shell smoke requires the exact 59-operation registry.\n";
         return false;
     }
 
@@ -2124,8 +2124,8 @@ bool validate_timeline_graph_easing_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 58U) {
-        std::cerr << "Graph easing shell smoke requires the exact 58-operation registry.\n";
+    if (operation_count_before != 59U) {
+        std::cerr << "Graph easing shell smoke requires the exact 59-operation registry.\n";
         return false;
     }
 
@@ -3138,8 +3138,8 @@ bool validate_timeline_curve_mode_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 58U) {
-        std::cerr << "Curve mode shell smoke requires the exact 58-operation registry.\n";
+    if (operation_count_before != 59U) {
+        std::cerr << "Curve mode shell smoke requires the exact 59-operation registry.\n";
         return false;
     }
 
@@ -3923,6 +3923,652 @@ bool validate_timeline_curve_mode_shell_smoke(
 
     if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
         std::cerr << "Curve mode editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// MAR-172 loop boundary key synchronization.
+// ---------------------------------------------------------------------
+bool validate_timeline_loop_sync_shell_smoke(
+    const std::filesystem::path& project_path) {
+    // Every scenario that touches the preference store isolates it, so a smoke
+    // run can never create, read, or write the real preference directory.
+    using TransformChannel = marrow::editor::TransformTimelineChannel;
+    using InterpolationKind = marrow::runtime::InterpolationKind;
+
+    const ScopedPreferenceIsolation isolation("loop-sync");
+    if (!isolation.installed()) {
+        std::cerr << "Loop sync shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Loop sync smoke", false, true)) {
+        std::cerr << "Loop sync shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 59U) {
+        std::cerr << "Loop sync shell smoke requires the exact 59-operation registry.\n";
+        return false;
+    }
+
+    const auto spine_lane = [] {
+        marrow::editor::TimelineLaneSelector lane;
+        lane.kind = marrow::editor::TimelineLaneKind::Transform;
+        lane.animation_name = "idle";
+        lane.bone_name = "spine";
+        lane.transform_channel = TransformChannel::Rotate;
+        return lane;
+    };
+    const auto stored_spine = [&]() -> const marrow::editor::TransformTimelineEdit* {
+        return state.session.project()->find_transform_timeline_edit(
+            "idle", "spine", TransformChannel::Rotate);
+    };
+    const auto idle_duration = [&]() -> double {
+        const auto* animation = state.session.runtime_data() != nullptr
+            ? state.session.runtime_data()->find_animation("idle")
+            : nullptr;
+        return animation != nullptr ? animation->duration() : -1.0;
+    };
+    const auto boundary_time = [&]() -> double {
+        const auto* lane = stored_spine();
+        return lane != nullptr && !lane->keyframes.empty()
+            ? lane->keyframes.back().time
+            : -1.0;
+    };
+
+    state.session.clear_history();
+
+    // --- Author an explicit duration through the real gesture --------------
+    if (!begin_animation_duration_gesture(&state, "idle") ||
+        !apply_animation_duration_gesture(&state, 1.5) ||
+        !finish_animation_duration_gesture(&state, true) ||
+        std::abs(idle_duration() - 1.5) > 1e-6) {
+        std::cerr << "Loop sync smoke could not author idle's explicit duration.\n";
+        return false;
+    }
+
+    // --- Enable, inside one transaction, and assert the created boundary ---
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Enable loop synchronization",
+            "timeline:loop-sync",
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) {
+            std::cerr << "Loop sync smoke could not open its enable transaction.\n";
+            return false;
+        }
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            transaction.project(),
+            *state.session.runtime_data(),
+            {spine_lane()},
+            true);
+        if (!enabled || !enabled.changed || enabled.created_key_count != 1U) {
+            std::cerr << "Loop sync smoke could not enable spine/rotate: "
+                      << enabled.error << '\n';
+            transaction.cancel();
+            return false;
+        }
+        if (!transaction.refresh_runtime() || !transaction.commit()) {
+            std::cerr << "Loop sync smoke could not commit its enable transaction.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "Enabling loop sync must add exactly one history entry.\n";
+            return false;
+        }
+        const auto* lane = stored_spine();
+        if (lane == nullptr || !lane->loop_sync || lane->keyframes.size() != 4U ||
+            std::abs(boundary_time() - 1.5) > 1e-6) {
+            std::cerr << "Enabling loop sync did not create the boundary key at 1.5.\n";
+            return false;
+        }
+        const auto* row = find_timeline_track(cached_timeline_tracks(&state), "bone:1:Rotate");
+        if (row == nullptr || row->key_times.size() != 4U ||
+            std::abs(row->key_times.back() - 1.5) > 1e-6) {
+            std::cerr << "The rebuilt dopesheet did not show the boundary key.\n";
+            return false;
+        }
+    }
+
+    // --- The auto-extend hole, asserted -----------------------------------
+    // A key authored past the duration on a lane that is NOT opted in grows the
+    // explicit duration through the session's own
+    // `auto_extend_explicit_animation_durations()`, which runs after any
+    // controller code. Only a sync positioned after that growth closes the hole.
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        const std::string before_text =
+            marrow::editor::serialize_project(*state.session.project());
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::AddKeyframe,
+            "Add timeline key",
+            "timeline:add-key",
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) {
+            std::cerr << "Loop sync smoke could not open its auto-extend transaction.\n";
+            return false;
+        }
+        auto* root_lane = marrow::editor::ensure_transform_timeline_edit(
+            *transaction.project(),
+            *state.session.runtime_data(),
+            "idle",
+            "root",
+            TransformChannel::Translate);
+        if (root_lane == nullptr) {
+            std::cerr << "Loop sync smoke could not materialize root/translate.\n";
+            transaction.cancel();
+            return false;
+        }
+        marrow::editor::TransformKeyframeEdit appended;
+        appended.time = 2.0;
+        appended.x = 60.0;
+        appended.y = 0.0;
+        appended.interpolation = marrow::runtime::Interpolation::linear();
+        root_lane->keyframes.push_back(appended);
+        if (!transaction.refresh_runtime()) {
+            std::cerr << "Loop sync smoke could not refresh its auto-extend transaction.\n";
+            return false;
+        }
+        if (!transaction.commit()) {
+            std::cerr << "Loop sync smoke could not commit its auto-extend transaction.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "The auto-extend case must stay one history entry.\n";
+            return false;
+        }
+        if (std::abs(idle_duration() - 2.0) > 1e-6) {
+            std::cerr << "The session's auto-extend did not grow idle to 2.0.\n";
+            return false;
+        }
+        if (std::abs(boundary_time() - 2.0) > 1e-6) {
+            std::cerr << "The managed boundary key is stale at " << boundary_time()
+                      << " while the duration is " << idle_duration()
+                      << "; the session seam is not synchronizing after auto-extend.\n";
+            return false;
+        }
+        const auto* lane = stored_spine();
+        if (lane == nullptr || lane->keyframes.size() != 4U ||
+            std::abs(lane->keyframes[0].time - 0.0) > 1e-6 ||
+            std::abs(lane->keyframes[1].time - 0.5) > 1e-6 ||
+            std::abs(lane->keyframes[2].time - 1.0) > 1e-6) {
+            std::cerr << "The auto-extend case moved a key other than the boundary.\n";
+            return false;
+        }
+        if (!state.session.undo()) {
+            std::cerr << "Loop sync smoke could not undo its auto-extend entry.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before ||
+            std::abs(idle_duration() - 1.5) > 1e-6 ||
+            std::abs(boundary_time() - 1.5) > 1e-6 ||
+            marrow::editor::serialize_project(*state.session.project()) != before_text) {
+            std::cerr << "One undo must restore the duration, the added key, and the "
+                         "boundary key together.\n";
+            return false;
+        }
+    }
+
+
+    // Shared plumbing for the managed-identity cases below.
+    constexpr timeline_graph_model::PlotRect plot{0.0, 0.0, 640.0, 320.0};
+    const timeline_graph_model::View view{0.0, 200.0, 0.0, 10.0};
+    state.timeline_editor.graph_view.view = view;
+    state.timeline_editor.graph_view.needs_fit = false;
+    const auto row_of = [&](std::string_view id) {
+        return find_timeline_track(cached_timeline_tracks(&state), id);
+    };
+    const auto key_of = [&](std::string_view id, std::size_t index)
+        -> std::optional<TimelineKeyRef> {
+        const TimelineTrackRow* row = row_of(id);
+        if (row == nullptr || index >= row->key_times.size()) return std::nullopt;
+        return timeline_key_ref(*row, index);
+    };
+    const auto same_easing = [](const marrow::runtime::Interpolation& left,
+                                const marrow::runtime::Interpolation& right) {
+        if (left.kind() != right.kind()) return false;
+        if (left.kind() != InterpolationKind::CubicBezier) return true;
+        return left.cubic_bezier().cx1 == right.cubic_bezier().cx1 &&
+            left.cubic_bezier().cy1 == right.cubic_bezier().cy1 &&
+            left.cubic_bezier().cx2 == right.cubic_bezier().cx2 &&
+            left.cubic_bezier().cy2 == right.cubic_bezier().cy2;
+    };
+    const auto boundary_mirrors_first = [&]() {
+        const auto* lane = stored_spine();
+        if (lane == nullptr || lane->keyframes.size() < 2U) return false;
+        const auto& first = lane->keyframes.front();
+        const auto& last = lane->keyframes.back();
+        return last.angle == first.angle &&
+            same_easing(last.interpolation, first.interpolation) &&
+            last.curve_mode == first.curve_mode;
+    };
+
+    // --- Criterion 3, five ways, each one history entry ---------------------
+    // 1. A MAR-168 value drag on key 0.
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        const auto first = key_of("bone:1:Rotate", 0U);
+        if (rotate == nullptr || !first.has_value()) {
+            std::cerr << "Loop sync smoke lost its spine Rotate row.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Rotate");
+        state.timeline_editor.selected_keys = {*first};
+        state.timeline_editor.active_key = *first;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Angle;
+        if (!begin_timeline_graph_value_gesture(
+                &state, 7201U, *rotate, GraphComponent::Angle,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(&state, cached_timeline_tracks(&state), 4.0)) {
+            std::cerr << "Loop sync smoke could not drag key 0's value.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A value drag on key 0 must stay one history entry.\n";
+            return false;
+        }
+        if (!boundary_mirrors_first()) {
+            std::cerr << "A value drag on key 0 did not re-mirror the boundary key.\n";
+            return false;
+        }
+    }
+
+    // 2. A MAR-170 preset applied to key 0.
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        const auto first = key_of("bone:1:Rotate", 0U);
+        if (!first.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first};
+        state.timeline_editor.active_key = *first;
+        const auto applied = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), marrow::editor::CurvePreset::EaseIn);
+        if (!applied.applied || applied.skipped_key_count != 0U ||
+            state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A preset on key 0 must apply as one history entry: "
+                      << applied.error << '\n';
+            return false;
+        }
+        if (!boundary_mirrors_first()) {
+            std::cerr << "A preset on key 0 did not re-mirror the boundary key's easing.\n";
+            return false;
+        }
+    }
+
+    // 3. A MAR-169 handle drag on key 0.
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        const auto first = key_of("bone:1:Rotate", 0U);
+        if (rotate == nullptr || !first.has_value()) return false;
+        const auto& projection = cached_timeline_graph_projection(&state, *rotate);
+        if (projection.status != GraphProjectionStatus::Ready ||
+            !projection.track.has_value()) {
+            std::cerr << "Loop sync smoke lost its Rotate projection.\n";
+            return false;
+        }
+        const auto handles = timeline_graph_model::build_handle_geometry(
+            *projection.track, *first, 0U, view, plot);
+        if (!handles.has_value()) {
+            std::cerr << "Loop sync smoke could not build key 0's handles.\n";
+            return false;
+        }
+        std::array<double, 4> dragged = handles->control_points;
+        dragged[1] += 0.2;
+        state.timeline_editor.selected_keys = {*first};
+        state.timeline_editor.active_key = *first;
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 7202U, *rotate, *first, handles->frame, handles->control_points,
+                InterpolationKind::CubicBezier, cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), dragged)) {
+            std::cerr << "Loop sync smoke could not drag key 0's handle.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A handle drag on key 0 must stay one history entry.\n";
+            return false;
+        }
+        if (!boundary_mirrors_first()) {
+            std::cerr << "A handle drag on key 0 did not re-mirror the boundary easing.\n";
+            return false;
+        }
+    }
+
+    // 4. A dopesheet retime of a MIDDLE key leaves the boundary alone.
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        const auto middle = key_of("bone:1:Rotate", 1U);
+        if (!middle.has_value()) return false;
+        state.timeline_editor.selected_keys = {*middle};
+        state.timeline_editor.active_key = *middle;
+        if (!begin_timeline_retime_gesture(
+                &state, 7203U, 0.0F, cached_timeline_tracks(&state)) ||
+            !apply_timeline_retime_delta(
+                &state, cached_timeline_tracks(&state), 0.1, false)) {
+            std::cerr << "Loop sync smoke could not retime a middle key.\n";
+            return false;
+        }
+        finish_timeline_retime_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        const auto* lane = stored_spine();
+        if (state.session.undo_count() != undo_before + 1U || lane == nullptr ||
+            lane->keyframes.size() != 4U ||
+            std::abs(lane->keyframes[1].time - 0.6) > 1e-6 ||
+            std::abs(lane->keyframes.back().time - 1.5) > 1e-6) {
+            std::cerr << "A middle-key retime must move one key and leave the boundary.\n";
+            return false;
+        }
+    }
+
+    // 5. A duration edit moves the boundary key inside its own transaction.
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 1.8) ||
+            !finish_animation_duration_gesture(&state, true)) {
+            std::cerr << "Loop sync smoke could not author a second duration.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U ||
+            std::abs(idle_duration() - 1.8) > 1e-6 ||
+            std::abs(boundary_time() - 1.8) > 1e-6) {
+            std::cerr << "A duration edit must move the boundary key in the same entry: "
+                      << "duration=" << idle_duration()
+                      << " boundary=" << boundary_time() << '\n';
+            return false;
+        }
+    }
+
+    // --- Retime pinning through the gesture --------------------------------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        const auto first = key_of("bone:1:Rotate", 0U);
+        const auto boundary = key_of("bone:1:Rotate", 3U);
+        if (!before.has_value() || !first.has_value() || !boundary.has_value()) {
+            std::cerr << "Loop sync smoke could not capture its pinning baseline.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys = {*first, *boundary};
+        state.timeline_editor.active_key = *boundary;
+        if (!begin_timeline_retime_gesture(
+                &state, 7204U, 0.0F, cached_timeline_tracks(&state))) {
+            std::cerr << "Loop sync smoke could not open its pinning gesture.\n";
+            return false;
+        }
+        (void)apply_timeline_retime_delta(
+            &state, cached_timeline_tracks(&state), -0.2, false);
+        const double applied = state.timeline_editor.retime_gesture.has_value()
+            ? state.timeline_editor.retime_gesture->applied_delta
+            : 0.0;
+        finish_timeline_retime_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (std::abs(applied) > 1e-9 ||
+            state.session.undo_count() != before->undo_count ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                before->project) {
+            std::cerr << "A retime whose selection includes a pinned key must be a no-op.\n";
+            return false;
+        }
+    }
+
+    // --- Selection skip: a preset over the boundary key ---------------------
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        const auto first = key_of("bone:1:Rotate", 0U);
+        const auto boundary = key_of("bone:1:Rotate", 3U);
+        if (!first.has_value() || !boundary.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first, *boundary};
+        state.timeline_editor.active_key = *first;
+        const auto applied = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), marrow::editor::CurvePreset::EaseOut);
+        if (!applied.applied || applied.skipped_key_count != 1U ||
+            applied.compatible_key_count != 1U ||
+            state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A preset spanning the boundary must write one key and skip one: "
+                      << applied.error << " skipped=" << applied.skipped_key_count
+                      << " compatible=" << applied.compatible_key_count << '\n';
+            return false;
+        }
+        if (state.status_message.find("managed loop boundary") == std::string::npos) {
+            std::cerr << "The skip must be reported in the status message: "
+                      << state.status_message << '\n';
+            return false;
+        }
+        if (!boundary_mirrors_first()) {
+            std::cerr << "The skipped boundary key must still mirror key 0's easing.\n";
+            return false;
+        }
+    }
+
+    // --- Removal guard ------------------------------------------------------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        const auto boundary = key_of("bone:1:Rotate", 3U);
+        if (!before.has_value() || !boundary.has_value()) return false;
+        state.timeline_editor.selected_keys = {*boundary};
+        state.timeline_editor.active_key = *boundary;
+        const bool removed =
+            remove_selected_timeline_keys(&state, cached_timeline_tracks(&state));
+        sync_shell_from_editor_session(&state);
+        if (removed || state.session.undo_count() != before->undo_count ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                before->project) {
+            std::cerr << "Removing only the managed boundary key must change nothing.\n";
+            return false;
+        }
+        if (state.status_message.find("managed loop boundary") == std::string::npos) {
+            std::cerr << "The removal guard must report why nothing happened: "
+                      << state.status_message << '\n';
+            return false;
+        }
+
+        const auto first = key_of("bone:1:Rotate", 0U);
+        if (!first.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first};
+        state.timeline_editor.active_key = *first;
+        const bool removed_zero =
+            remove_selected_timeline_keys(&state, cached_timeline_tracks(&state));
+        sync_shell_from_editor_session(&state);
+        if (removed_zero || state.session.undo_count() != before->undo_count ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                before->project) {
+            std::cerr << "Removing an opted-in lane's time-zero key must fail the "
+                         "whole transaction.\n";
+            return false;
+        }
+    }
+
+    // --- Clipboard hygiene --------------------------------------------------
+    {
+        const auto middle = key_of("bone:1:Rotate", 1U);
+        const auto boundary = key_of("bone:1:Rotate", 3U);
+        if (!middle.has_value() || !boundary.has_value()) return false;
+        state.timeline_editor.selected_keys = {*middle, *boundary};
+        state.timeline_editor.active_key = *middle;
+        if (!copy_selected_timeline_keys(&state, cached_timeline_tracks(&state))) {
+            std::cerr << "Loop sync smoke could not copy from the opted-in lane.\n";
+            return false;
+        }
+        const auto& fragment = state.timeline_editor.clipboard.project_fragment;
+        const auto opted_in = [](const auto& edits) {
+            return std::any_of(edits.begin(), edits.end(), [](const auto& edit) {
+                return edit.loop_sync;
+            });
+        };
+        if (opted_in(fragment.transform_timeline_edits) ||
+            opted_in(fragment.slot_color_timeline_edits) ||
+            opted_in(fragment.mesh_deform_timeline_edits)) {
+            std::cerr << "A clipboard fragment must never carry the loop_sync flag.\n";
+            return false;
+        }
+    }
+
+    // --- Paste past the boundary fails the whole transaction ----------------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!before.has_value()) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Rotate");
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        state.timeline_time_seconds = 2.4;
+        const bool pasted = paste_timeline_clipboard(&state, cached_timeline_tracks(&state));
+        sync_shell_from_editor_session(&state);
+        if (pasted || state.session.undo_count() != before->undo_count ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                before->project) {
+            std::cerr << "Pasting past the boundary must fail with the project unchanged.\n";
+            return false;
+        }
+        state.timeline_time_seconds = 0.0;
+    }
+
+    // --- Cancel during a value drag on key 0 --------------------------------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        const auto first = key_of("bone:1:Rotate", 0U);
+        if (!before.has_value() || rotate == nullptr || !first.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first};
+        state.timeline_editor.active_key = *first;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Angle;
+        if (!begin_timeline_graph_value_gesture(
+                &state, 7205U, *rotate, GraphComponent::Angle,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(&state, cached_timeline_tracks(&state), 9.0)) {
+            std::cerr << "Loop sync smoke could not open its cancel gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, false);
+        sync_shell_from_editor_session(&state);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!after.has_value() || after->project != before->project ||
+            after->undo_count != before->undo_count ||
+            after->redo_count != before->redo_count ||
+            after->project_revision != before->project_revision ||
+            after->dirty != before->dirty ||
+            after->dopesheet_key_times != before->dopesheet_key_times) {
+            std::cerr << "Cancelling a value drag must restore the boundary key too.\n";
+            return false;
+        }
+    }
+
+    // --- Materialization of a runtime-only Slot Color lane ------------------
+    {
+        const TimelineTrackRow* color = row_of("slot:0:Color");
+        if (color == nullptr || color->key_times.size() != 3U) {
+            std::cerr << "Loop sync smoke requires the runtime-only body colour lane.\n";
+            return false;
+        }
+        if (state.session.project()->find_slot_color_timeline_edit("idle", "body") !=
+            nullptr) {
+            std::cerr << "The body colour lane must begin as runtime-only data.\n";
+            return false;
+        }
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Enable loop synchronization",
+            "timeline:loop-sync",
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) return false;
+        if (marrow::editor::ensure_slot_color_timeline_edit(
+                *transaction.project(), *state.session.runtime_data(), "idle", "body") ==
+            nullptr) {
+            transaction.cancel();
+            std::cerr << "Loop sync smoke could not materialize the body colour lane.\n";
+            return false;
+        }
+        marrow::editor::TimelineLaneSelector color_lane;
+        color_lane.kind = marrow::editor::TimelineLaneKind::SlotColor;
+        color_lane.animation_name = "idle";
+        color_lane.slot_name = "body";
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            transaction.project(), *state.session.runtime_data(), {color_lane}, true);
+        if (!enabled || !enabled.changed || enabled.created_key_count != 1U) {
+            transaction.cancel();
+            std::cerr << "Enabling loop sync on the colour lane failed: " << enabled.error
+                      << '\n';
+            return false;
+        }
+        if (!transaction.refresh_runtime() || !transaction.commit()) {
+            std::cerr << "Loop sync smoke could not commit the colour lane enable.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const auto* lane =
+            state.session.project()->find_slot_color_timeline_edit("idle", "body");
+        if (lane == nullptr || !lane->loop_sync || lane->keyframes.size() != 4U) {
+            std::cerr << "Materialization must copy every runtime key, not replace them.\n";
+            return false;
+        }
+        if (std::abs(lane->keyframes[0].time - 0.0) > 1e-6 ||
+            std::abs(lane->keyframes[1].time - 0.5) > 1e-6 ||
+            std::abs(lane->keyframes[2].time - 1.0) > 1e-6 ||
+            std::abs(lane->keyframes[3].time - 1.8) > 1e-6) {
+            std::cerr << "The materialized colour lane lost a key time.\n";
+            return false;
+        }
+        if (lane->keyframes[3].color.r != lane->keyframes[0].color.r ||
+            lane->keyframes[3].color.a != lane->keyframes[0].color.a) {
+            std::cerr << "The created colour boundary key did not mirror key 0.\n";
+            return false;
+        }
+    }
+
+    // --- Undo and redo of the enable ---------------------------------------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "slot:0:Color");
+        if (!before.has_value()) return false;
+        if (!state.session.undo()) {
+            std::cerr << "Loop sync smoke could not undo the colour lane enable.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (state.session.project()->find_slot_color_timeline_edit("idle", "body") !=
+            nullptr) {
+            std::cerr << "Undoing the enable must restore the runtime-only lane.\n";
+            return false;
+        }
+        if (!state.session.redo()) {
+            std::cerr << "Loop sync smoke could not redo the colour lane enable.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const auto after = capture_graph_edit_snapshot(&state, "slot:0:Color");
+        if (!after.has_value() || after->project != before->project) {
+            std::cerr << "Redoing the enable must restore the flag and the boundary key.\n";
+            return false;
+        }
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Loop sync editing changed the Agent operation surface.\n";
         return false;
     }
     return true;
