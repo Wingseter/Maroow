@@ -24,10 +24,30 @@ def _bezier_interpolation_schema() -> dict:
     loaders already require. ``cy1``/``cy2`` are unbounded so finite overshoot
     stays authorable. The schema is advisory - the server forwards every call
     verbatim and the C++ primitive remains the sole authority.
+
+    The string form names one of the six fixed MAR-170 curve presets, spelled
+    snake_case only: ``linear``, ``stepped``, ``ease`` ``[0.25, 0.1, 0.25, 1]``,
+    ``ease_in`` ``[0.42, 0, 1, 1]``, ``ease_out`` ``[0, 0, 0.58, 1]``, and
+    ``ease_in_out`` ``[0.42, 0, 0.58, 1]``. None of them overshoots.
     """
     return {
         "oneOf": [
-            {"type": "string", "enum": ["linear", "stepped"]},
+            {
+                "type": "string",
+                "enum": [
+                    "linear",
+                    "stepped",
+                    "ease",
+                    "ease_in",
+                    "ease_out",
+                    "ease_in_out",
+                ],
+                "description": (
+                    "One of the six fixed curve presets: linear, stepped, "
+                    "ease [0.25, 0.1, 0.25, 1], ease_in [0.42, 0, 1, 1], "
+                    "ease_out [0, 0, 0.58, 1], ease_in_out [0.42, 0, 0.58, 1]."
+                ),
+            },
             {
                 "type": "array",
                 "items": [

@@ -13,8 +13,9 @@ parameter-model extension, and the independent MAR-156 user-preference document.
 
 ## `editor-settings.json` v1
 
-Purpose: versioned, user-local editor preferences shared by later curve-default and Recent Projects
-features. This file is not a project or runtime asset and is never embedded in `.marrow`, `.mskl`,
+Purpose: versioned, user-local editor preferences. `default_curve` is consumed by
+MAR-170's remembered default curve; `recent_projects` is round-tripped and its
+Recent Projects UI is still future work. This file is not a project or runtime asset and is never embedded in `.marrow`, `.mskl`,
 `.mbin`, or `.matl`.
 
 The v1 wire document is:
@@ -209,8 +210,10 @@ falls outside `[0, 1]`, because that range is what makes the runtime's
 `X(t) = alpha` inverse single-valued. The editor's authoring path guarantees the
 same predicate: the graph clamps a dragged x control point into `[0, 1]` and the
 shared authoring primitive rejects any out-of-range or non-finite value
-atomically, while `cy1` and `cy2` allow finite overshoot outside `[0, 1]`. No
-field and no version changes as a result.
+atomically, while `cy1` and `cy2` allow finite overshoot outside `[0, 1]`. All
+six fixed MAR-170 curve presets satisfy this by construction, before and after
+`float32` narrowing, and none of them overshoots, so overshoot remains reachable
+only through a manual handle drag. No field and no version changes as a result.
 
 ### `mixing`
 

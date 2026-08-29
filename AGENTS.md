@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-169, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-170 is the next product milestone and depends on MAR-169. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-170, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-171 is the next product milestone and depends on MAR-170. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -33,7 +33,7 @@
 - Vendored dependency/hash/patch verification: `cmake --build build --target marrow_verify_third_party`
 - SDL/Sokol window seam unit tests: `./build/marrow_windowing_tests`
 - SDL pen/pressure unit tests: `./build/marrow_pen_input_tests`
-- Cross-platform preference path and atomic-write tests: `./build/marrow_preference_tests`
+- Cross-platform preference path, atomic-write, fixed curve-preset constant, preset-token, and shell preference-session tests: `./build/marrow_preference_tests`
 - Agent loopback/partial-I/O/repeated-lifecycle transport tests: `./build/marrow_agent_socket_tests`
 - Sokol ImGui setup/frame/shutdown lifecycle probe: `./build/marrow_sokol_imgui_runtime_probe`
 - Typed transient entity selection model: `./build/marrow_selection_tests`
@@ -226,6 +226,68 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-170 Fixed Curve Presets and Remembered Defaults Validation Results
+
+Validated 2026-08-30. Six fixed presets — Linear, Stepped, Ease
+`[0.25, 0.1, 0.25, 1]`, Ease-In `[0.42, 0, 1, 1]`, Ease-Out `[0, 0, 0.58, 1]`,
+and Ease-In-Out `[0.42, 0, 0.58, 1]`, the CSS Easing Level 1 timing functions —
+are declared once as the `constexpr kCurvePresets` table in
+`include/marrow/editor/authoring.hpp` and applied to every compatible selected
+key through MAR-169's single `set_keyframe_interpolation()` primitive, from a
+shared row drawn in both the Graph and Dopesheet toolbars. One application is
+one `EditTransaction`, one previewed `refresh_runtime()`, and one history entry
+whatever the key count; easing-free Draw Order, Event, and Slot Attachment
+selections are skipped and reported by the GUI and still rejected atomically by
+the Agent. MAR-156's never-consumed `editor-settings.json` `default_curve` field
+gains its consumer: the remembered default seeds newly authored Transform,
+Deform, and Slot Color keys and is changed only by the explicit `Default:`
+combo, never as a side effect of applying a preset. The current-preset readout
+is a pure bit-exact `float32` function of the stored curve with no persisted
+marker, so it reads `Custom Bezier` the moment a MAR-169 handle drag moves away
+from a preset and needs no invalidation under undo, redo, or reload. The
+Agent/MCP surface stayed at exactly **57** operations: the growth was four new
+string tokens in one operation's `interpolation` argument vocabulary. Automatic
+and project-local curve handles remain MAR-171.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Preset constants | The six presets are Linear, Stepped, Ease `[0.25, 0.1, 0.25, 1]`, Ease-In `[0.42, 0, 1, 1]`, Ease-Out `[0, 0, 0.58, 1]`, Ease-In-Out `[0.42, 0, 0.58, 1]`; a `static_assert` keeps the table in enum order and every `cx` inside `[0, 1]`, re-asserted at runtime before and after `float32` narrowing; each cubic evaluates finite, non-decreasing, overshoot-free, and exactly `0.0`/`1.0` at the endpoints over a 101-point grid, including Ease-In's `X'(1) = 0` right endpoint | PASS |
+| Preset application | Applying to compatible selected keys is order-independent — the same twelve selectors reversed serialize byte-identically — skips and counts easing-free keys, collapses a duplicate ref instead of turning it into the primitive's hard error, materializes runtime-only tracks, and produces exactly one previewed undoable transaction; re-applying commits nothing and reports `Selected keys already use <name>`; an easing-free-only selection opens no transaction at all | PASS |
+| Remembered default | `default_curve` seeds newly authored Transform, Deform, and Slot Color keys, and a `Stepped` default seeds a Stepped key; pasted keys keep the copied curve and are never reseeded; it is stored atomically in `editor-settings.json` v1 with `recent_projects` and unknown additive fields preserved; missing, malformed, unsupported-version, and unreadable data fall back to Linear, rewrite no curve, and rewrite no file | PASS |
+| Project isolation | Changing and saving the default leaves `serialize_project()`, `dirty()`, `undo_count()`, `redo_count()`, and `project_revision()` byte-identical; `MARROW_CONFIG_HOME` isolates every smoke process, and the real user settings directory did not exist before or after the entire validation run, including two runs of the production `shell_main.cpp` load path against the real resolved path | PASS |
+| Curve identity | The readout is a pure bit-exact `float32` function of the stored curve — comparing against the `double` literals instead makes all four cubic presets read `Custom`, which was proven by inverting the implementation; a preset survives save, reload, `.mskl` export, and the v2 `.mbin` as the same preset; a handle drag makes it read `Custom`; a preset followed by a drag is exactly two undo entries and one undo restores the preset | PASS |
+| Agent and MCP parity | `timeline.set_interpolation` accepts `ease`, `ease_in`, `ease_out`, and `ease_in_out` with matching C++/Python dry-run, validation, affected-key, mutation, and undo behaviour; `ease-in`, `easeIn`, and `bounce` stay rejected with the project byte-identical; the registry stayed at **57** operations and `interpolation_arg()`, `set_transform`, `set_deform_keyframe`, `set_slot_color_keyframe`, and `agent_handlers_editing.cpp` are unchanged | PASS |
+| Compatibility | `.marrow` schema, `.mskl` v1, `.mbin` v2, C ABI v1, `editor-settings.json` v1 (`kEditorSettingsVersion` still `1`), and `SelectionSet` unchanged; only the pre-existing `curve` and `default_curve` fields are written, `src/editor/preferences.cpp` and `include/marrow/editor/preferences.hpp` show a zero-byte diff, and the `authoring.hpp` diff is 61 added lines with 0 removed | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j8` -> configure and all default targets built
+- `./build/marrow_preference_tests` -> `PreferenceStore: 11 cases passed`, including the new `fixed curve preset constants, identity, and well-posedness`, `preset tokens agree with the settings-file vocabulary`, and `shell preference session load, save, fallback, and preservation` cases
+- `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 20 cases passed`; `./build/marrow_timeline_model_tests` -> `Timeline model: 9 cases passed`; `./build/marrow_viewport_interaction_tests` -> `Viewport interaction kernel tests passed.`; `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed; `MAR-170 fixed curve presets validated across transform, deform, and slot-colour families` covering all six presets on a Transform, a Deform, and a Slot Color key with byte-identical scalars, the exactly-one-`interpolation`-field segment-wide assertion, twelve-selector order independence, the double-application no-op, the three easing-free atomic rejections, and a save/reload preset-identity round trip
+- The same smoke exports the preset-edited project and reports `MAR-170 preset export: JSON 14452 bytes, MBIN 4020 bytes`, asserting the exported runtime JSON carries the narrowed Ease-In-Out quadruple on the `arm_l` rotate key at `t = 0.25` and that `curve_preset_of()` still names it Ease-In-Out there. The fixture's own value at that key is `"curve": "linear"`, and the exported file reads `[0.419999986886978, 0, 0.579999983310699, 1]`, so the exported artifact demonstrably carries the authored edit rather than the untouched baseline `14336`/`3984`
+- `./build/marrow_project_smoke --create /tmp/player_idle.marrow` -> minimal project defaults, references, and round trip validated
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new headless `validate_timeline_curve_preset_shell_smoke` scenario and the actual-frame preset frames, which reported `Timeline Graph actual-frame presets: first button=(405,698.5) default=4`. The actual-frame case clicks the reported first preset button with real ImGui mouse events, asserts one history entry and the settled `Linear` readout, asserts the row is drawn-but-disabled with an empty selection and that a click on it changes nothing, and asserts MAR-167/168's `fit_*` and `first_component_*` rectangles are still non-degenerate and still hoverable
+- `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> parameter-mode shell smoke passed
+- `ctest --test-dir build -N` -> `Total Tests: 21`; `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21` in 2.14 s. MAR-170 registers no new CTest.
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j8 && ctest --test-dir build-display --output-on-failure` -> automated Debug display-enabled suite `100% tests passed, 0 tests failed out of 24`, including the 3 display-only tests `marrow.window_host_smoke`, `marrow.gpu_parity_smoke`, and `marrow.editor_display_smoke`
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j8 && ctest --test-dir build-platform-release --output-on-failure` -> automated Release display-enabled suite `100% tests passed, 0 tests failed out of 24`, same 3 display-only tests
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar170.mskl --export-binary /tmp/marrow_mar170.mbin` -> export passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`. This CLI leg exports the unedited fixture, so its JSON `14336` / MBIN `3984` are the untouched baseline by construction; the preset-carrying export is the `/tmp/marrow_mar170_preset.*` pair below
+- `./build/marrow_inspect --compare /tmp/marrow_mar170.mbin /tmp/marrow_mar170.mskl` -> `Comparison: /tmp/marrow_mar170.mskl matches /tmp/marrow_mar170.mbin`; `rotate_keys=10->10`, `translate_keys=6->6`, JSON `14336` bytes, MBIN v2 `3984` bytes with `version=2 optimized=yes animations=3 rotate_channels=4 translate_channels=2 keys=16 sorted=yes`
+- `./build/marrow_inspect --compare /tmp/marrow_mar170_preset.mbin /tmp/marrow_mar170_preset.mskl` -> match on the preset-edited export; `rotation_error=0.00274662deg`, `position_error=0.000811016px`, `rotate_keys=10->10`, `translate_keys=6->6`, JSON `14452` bytes, MBIN v2 `4020` bytes with `version=2 optimized=yes animations=3 rotate_channels=4 translate_channels=2 keys=16 sorted=yes`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar170.mskl /tmp/player_idle.matl` and `./build/marrow_fixture_smoke /tmp/marrow_mar170_preset.mskl /tmp/player_idle.matl` -> both passed with 16 bones, 7 slots, 5 skins, 3 animations, 2 events, 3 draw commands, and 1 clip
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` with 203 `[ OK ]` cases against the **still exactly 57**-operation registry, including the four new preset-token write/read-back/undo sequences, the `stepped` token round trip, the three rejected spellings with a proven-unchanged project, the multi-key single-entry preset call whose one undo restores both keys, and `set_transform` still creating a Linear key
+- `./build/marrow_agent_socket_tests` -> `Agent socket tests: 4 cases passed`; `./build/marrow_c_smoke` -> C ABI loaded 3 commands, 6 indices, and 2 callback events
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py` against `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` -> `mcp test_client: PASSED` with 57/57 exact C++/Python name parity and the `ease_in_out` dry-run/live/read-back/undo sequence asserting `[0.42, 0.0, 0.58, 1.0]` at four decimal places, plus rejection of `ease-in` and of an out-of-range array proving the widened schema did not loosen the C++ gate
+- MCP schema `py_compile`, `cmake --build build --target marrow_verify_third_party`, fixture/`.mskl`/PRD JSON parsing, `git diff --check`, and `git lfs status` -> passed; no LFS object was staged or queued to push
+- `git diff --stat -- include/marrow/c_api src/c_api`, `git diff --stat -- src/editor/project.cpp src/runtime/skeleton_parse.cpp src/runtime/binary.cpp`, and `git diff --stat -- src/editor/preferences.cpp include/marrow/editor/preferences.hpp` -> all empty; `git diff --numstat -- include/marrow/editor/authoring.hpp` -> `61 0`; the `src/editor/agent_dispatch.cpp` diff touches only `interpolation_request_arg()`'s string branch and its error string, and the `tools/mcp/tools/editing.py` diff touches only `_bezier_interpolation_schema()`
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after every gate above, including the two `--agent-port` runs of the production `shell_main.cpp` startup load, which resolves the real path with no override. No `/tmp/marrow-shell-config-*` isolation directory was left behind
+
+The display suites are automated evidence only. This checkpoint adds no manual
+visible-UI, Windows 11, physical-input, or platform qualification credit.
+MAR-192 through MAR-210 remain open, and support qualification remains governed
+by `docs/root1/platform-validation.md`.
 
 ## MAR-169 Graphical Shared Bezier Handle Editing Validation Results
 

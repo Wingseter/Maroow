@@ -2065,4 +2065,109 @@ TimelineInterpolationResult set_keyframe_interpolation(
     return {{true, {}}, resolved.size(), changed_key_count};
 }
 
+
+namespace {
+
+/**
+ * @brief Compile-time proof that the preset table can never violate the format.
+ *
+ * Enum order, non-empty labels, and the `cx in [0, 1]` invariant both loaders
+ * enforce are all checked here, so a preset that would be rejected on load is a
+ * compile error rather than a runtime failure.
+ */
+constexpr bool curve_presets_are_well_formed() {
+    for (std::size_t index = 0U; index < kCurvePresets.size(); ++index) {
+        const CurvePresetDefinition& entry = kCurvePresets[index];
+        if (static_cast<std::size_t>(entry.preset) != index) return false;
+        if (entry.token.empty() || entry.display_name.empty()) return false;
+        if (entry.kind == runtime::InterpolationKind::CubicBezier) {
+            if (!(entry.control_points[0] >= 0.0 && entry.control_points[0] <= 1.0)) {
+                return false;
+            }
+            if (!(entry.control_points[2] >= 0.0 && entry.control_points[2] <= 1.0)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(curve_presets_are_well_formed(),
+              "curve presets must be in enum order and keep cx inside the [0, 1] "
+              "invariant both .marrow and .mskl loaders enforce");
+
+static_assert(
+    kCurvePresets.size() ==
+        static_cast<std::size_t>(CurvePreset::EaseInOut) + 1U,
+    "the preset table must carry exactly one entry per CurvePreset enumerator");
+
+} // namespace
+
+const CurvePresetDefinition& curve_preset_definition(CurvePreset preset) {
+    // No `default` label, so adding an enumerator without a table row becomes a
+    // compiler warning rather than a silent Linear fallback.
+    switch (preset) {
+    case CurvePreset::Linear: return kCurvePresets[0];
+    case CurvePreset::Stepped: return kCurvePresets[1];
+    case CurvePreset::Ease: return kCurvePresets[2];
+    case CurvePreset::EaseIn: return kCurvePresets[3];
+    case CurvePreset::EaseOut: return kCurvePresets[4];
+    case CurvePreset::EaseInOut: return kCurvePresets[5];
+    }
+    return kCurvePresets[0];
+}
+
+runtime::Interpolation curve_preset_interpolation(CurvePreset preset) {
+    const CurvePresetDefinition& definition = curve_preset_definition(preset);
+    switch (definition.kind) {
+    case runtime::InterpolationKind::Linear:
+        return runtime::Interpolation::linear();
+    case runtime::InterpolationKind::Stepped:
+        return runtime::Interpolation::stepped();
+    case runtime::InterpolationKind::CubicBezier:
+        return runtime::Interpolation::cubic_bezier(
+            definition.control_points[0],
+            definition.control_points[1],
+            definition.control_points[2],
+            definition.control_points[3]);
+    }
+    return runtime::Interpolation::linear();
+}
+
+std::optional<CurvePreset> curve_preset_of(const runtime::Interpolation& interpolation) {
+    switch (interpolation.kind()) {
+    case runtime::InterpolationKind::Linear:
+        return CurvePreset::Linear;
+    case runtime::InterpolationKind::Stepped:
+        return CurvePreset::Stepped;
+    case runtime::InterpolationKind::CubicBezier:
+        break;
+    }
+    // The stored curve is float32, so the table's doubles are narrowed before
+    // the comparison. Comparing against the double literals would make a
+    // just-applied preset read Custom.
+    const runtime::CubicBezierControlPoints& stored = interpolation.cubic_bezier();
+    for (const CurvePresetDefinition& entry : kCurvePresets) {
+        if (entry.kind != runtime::InterpolationKind::CubicBezier) continue;
+        if (stored.cx1 ==
+                static_cast<runtime::AnimationScalar>(entry.control_points[0]) &&
+            stored.cy1 ==
+                static_cast<runtime::AnimationScalar>(entry.control_points[1]) &&
+            stored.cx2 ==
+                static_cast<runtime::AnimationScalar>(entry.control_points[2]) &&
+            stored.cy2 ==
+                static_cast<runtime::AnimationScalar>(entry.control_points[3])) {
+            return entry.preset;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<CurvePreset> curve_preset_from_token(std::string_view token) {
+    for (const CurvePresetDefinition& entry : kCurvePresets) {
+        if (entry.token == token) return entry.preset;
+    }
+    return std::nullopt;
+}
+
 } // namespace marrow::editor

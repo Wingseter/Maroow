@@ -43,8 +43,9 @@ auto-key를 2026-07-25에 완료했고 behavior-preserving Task #28 핵심 경�
 single-vertex FFD auto-key MAR-163과 attachment-local multi-vertex FFD MAR-164는 2026-08-16에
 완료했다. MAR-165 shared transform snapping, MAR-166 FFD grid/magnetic vertex snapping과
 MAR-167 synchronized scalar graph view는 2026-08-20에 완료했다. MAR-168 graph point editing과
-MAR-169 graphical shared Bezier handle editing은 2026-08-30에 완료했다. 다음 제품 milestone은
-curve preset과 remembered default를 담당하는 MAR-170이며 dependency는 완료된 MAR-169다.
+MAR-169 graphical shared Bezier handle editing과 MAR-170 fixed curve preset·remembered
+default는 2026-08-30에 완료했다. 다음 제품 milestone은 project-local automatic curve
+handle을 담당하는 MAR-171이며 dependency는 완료된 MAR-170다.
 MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
 
 ---
@@ -89,7 +90,7 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 - **Setup Pose/슬롯 setup 색상은 의도적으로 read-only** — Animation 모드 본 포즈는 항상 playhead auto-key이고, 슬롯 light/attachment는 timeline editor에서 저작한다. 저장되지 않는 preview-only 포즈/색상 입력은 없다.
 - **inherit timeline은 read-only** — project overlay는 MAR-184, 편집 parity는 MAR-185로 미뤘다.
 - **뷰포트는 이동·회전·signed scale·attachment-local multi-vertex FFD와 transform/FFD snap까지 직접 저작** — FFD point/toggle/box sub-selection, common-world-delta group move, world-grid/local-angle/absolute-scale snap, visible nonselected vertex magnetic snap과 live modifier/guide가 구현됐다. 경로 제어점 직접 조작과 entity `SelectionSet`의 group transform은 P1 범위 밖이다.
-- **그래프 view는 값·시간·easing 편집까지 지원** — MAR-167은 effective Transform/Slot RGBA scalar series, actual easing, shared parent selection/active/playhead와 transient navigation을 제공했고, MAR-168은 axis-locked point drag로 active component 값과 parent key 전체 시간 편집을 공용 authoring primitive 위에서 추가했으며, MAR-169는 active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집한다. Preset/auto handle/loop 동기화는 MAR-170~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
+- **그래프 view는 값·시간·easing 편집까지 지원** — MAR-167은 effective Transform/Slot RGBA scalar series, actual easing, shared parent selection/active/playhead와 transient navigation을 제공했고, MAR-168은 axis-locked point drag로 active component 값과 parent key 전체 시간 편집을 공용 authoring primitive 위에서 추가했으며, MAR-169는 active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집하고, MAR-170은 두 timeline tab 공용 row에서 고정 preset 6종을 호환 선택 key 전체에 한 transaction으로 적용하며 기억되는 기본 curve로 새 key를 seed한다. Auto handle과 loop 동기화는 MAR-171~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
 - **제약 파라미터 일부 위젯 없음** — IK softness/compress/stretch, Physics step/x/y/rotate/scaleX/shearX/limit/massInverse (라운드트립은 됨).
 - **제약 삭제/이름변경 불가** — lifecycle schema는 MAR-177, UI·agent surface는 MAR-178, 누락 위젯은 MAR-179 범위다.
 - **Hierarchy와 viewport entity gesture 완료** — MAR-159는 visible row range와 transient anchor를, MAR-160은 typed point hit와 visible active-Bone box selection을 완료했다. 모든 도구는 active item 하나만 편집하며 group transform은 범위 밖이다.
@@ -220,7 +221,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 
 - 단기 제품은 **임포트 리그 기반 애니메이션/후처리 에디터**다.
 - Setup Pose와 슬롯 dark tint는 P0에서 읽기 전용이다. Animation 모드의 R/T/S/shear 변경은 항상 현재 playhead의 키로 영속화한다.
-- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale, MAR-163~164 attachment-local FFD 직접 조작, MAR-165 transform snap과 MAR-166 FFD grid/magnetic vertex snap을 추가했고 MAR-167 synchronized scalar graph view, MAR-168 graph point time/value editing과 MAR-169 graphical shared Bezier handle editing을 완료했다. 다음 직접 제품 milestone은 MAR-170 curve preset/default다.
+- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale, MAR-163~164 attachment-local FFD 직접 조작, MAR-165 transform snap과 MAR-166 FFD grid/magnetic vertex snap을 추가했고 MAR-167 synchronized scalar graph view, MAR-168 graph point time/value editing, MAR-169 graphical shared Bezier handle editing과 MAR-170 fixed curve preset/remembered default를 완료했다. 다음 직접 제품 milestone은 MAR-171 project-local automatic curve handle이다.
 - MAR-154에서 호환 가능한 runtime explicit/inferred/effective duration 경계를, MAR-155에서 editor
   authoring·undo·Agent/MCP를 완료했다. 키 생성·오른쪽 이동은 같은 transaction에서 duration을 자동 연장하되
   키 삭제·왼쪽 이동은 자동 축소하지 않으며 마지막 키보다 짧은 수동 축소를 원자적으로 거부한다. Duration이 없는 기존
@@ -276,7 +277,7 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 플랫폼 전환 코드의 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
 raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
 revision 최종 로컬 매트릭스(MAR-210)다. 이 story들은 상태와 내부 dependency를 유지한 채 별도
-재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~169 및 다음 MAR-170~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
+재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~170 및 다음 MAR-171~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
 `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate에서 제외됐다. 코드·단위 테스트가 구현돼도
 macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/resource/package 증거가
 모두 없으면 story를 done으로 표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는
@@ -284,7 +285,7 @@ macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/res
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD, MAR-164 attachment-local multi-vertex FFD, MAR-165 project viewport transform snapping, MAR-166 FFD vertex snapping, MAR-167 synchronized scalar graph, MAR-168 graph key time/value editing 및 MAR-169 graphical shared Bezier handle editing checkpoint는 통과했다. 다음 제품 chain은 완료된 MAR-169에 의존하는 MAR-170부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD, MAR-164 attachment-local multi-vertex FFD, MAR-165 project viewport transform snapping, MAR-166 FFD vertex snapping, MAR-167 synchronized scalar graph, MAR-168 graph key time/value editing, MAR-169 graphical shared Bezier handle editing 및 MAR-170 fixed curve preset/remembered default checkpoint는 통과했다. 다음 제품 chain은 완료된 MAR-170에 의존하는 MAR-171부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
 
 #### 기반·선택
 
@@ -389,7 +390,7 @@ scalar series다. 전체 gate와 platform qualification 비부여는 `AGENTS.md`
 | MAR-167 | Graph view (완료, 2026-08-20) | 한 focused Transform R/T/S/shear 또는 Slot RGBA parent의 effective scalar series를 component toggle/Fit/wheel·Shift-wheel/middle pan으로 표시하고 dopesheet의 parent selection/active/playhead를 공유한다. Actual outgoing easing을 표시하며 FFD/discrete lane과 persistent state, point drag를 제외한다. |
 | MAR-168 (완료, 2026-08-30) | Graph point editing | 4px dead zone 이후 dominant-axis로 축을 고정해 세로 drag는 active component 값만, 가로 drag는 key 전체 시간과 모든 component를 옮긴다. 시간 충돌·frame snap·stable identity·duration auto-grow는 `retime_keyframes()`를, 값은 새 `offset_keyframe_scalars()`를 하나의 `EditTransaction` 안에서 사용한다. |
 | MAR-169 (완료, 2026-08-30) | Graphical Bezier handles | active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집한다. X는 `[0,1]`로 clamp하고 primitive는 범위 밖·비유한 값을 원자적으로 거부하며, finite Y overshoot는 허용한다. Linear/Stepped는 `[1/3,1/3,2/3,2/3]` seed로 같은 transaction·같은 undo에서 Cubic이 되고, 같은 mutation을 57번째 agent operation `timeline.set_interpolation`으로 노출한다. |
-| MAR-170 | Curve presets/default | Linear, Stepped, Ease, Ease-In, Ease-Out, Ease-In-Out 고정값을 제공하고 마지막 기본 curve를 user preference에 저장한다. |
+| MAR-170 (완료, 2026-08-30) | Curve presets/default | Linear, Stepped, Ease `[0.25,0.1,0.25,1]`, Ease-In `[0.42,0,1,1]`, Ease-Out `[0,0,0.58,1]`, Ease-In-Out `[0.42,0,0.58,1]` 고정값을 `authoring.hpp`의 단일 `constexpr` table로 선언하고, Graph·Dopesheet 공용 row에서 호환 선택 key 전체에 MAR-169 primitive 하나로 적용한다. Easing이 없는 lane은 GUI가 건너뛰고 개수를 보고하며 agent는 원자적으로 거부한다. 현재 preset 표시는 저장된 `float32` 4값의 순수 함수라 handle drag 직후 `Custom`이 된다. 마지막 기본 curve는 MAR-156 `editor-settings.json`의 `default_curve`에 저장하고 project를 더럽히지 않는다. Registry는 57개 그대로이며 `timeline.set_interpolation`의 문자열 token 4개만 늘었다. |
 | MAR-171 | Automatic handles | `.marrow` 전용 manual/auto curve metadata와 driver component를 저장한다. Auto는 driver scalar에 monotone Fritsch–Carlson tangent를 적용하고 handle drag는 manual로 전환한다. |
 | MAR-172 | Persistent loop synchronization | lane별 opt-in metadata를 저장한다. 명시적 duration과 time 0 key가 있을 때만 duration boundary key를 관리하고 첫 값·curve·duration 변화를 같은 transaction에서 동기화한다. |
 | MAR-173 | Selected-key time scaling | 선택 범위 반대 edge를 pivot으로 양의 비율 scaling을 제공한다. Event tie는 보존하고 비-event 충돌·이웃 침범은 원자적으로 거부한다. |
@@ -451,7 +452,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 
 ### 참고: 에이전트(MCP) 표면과의 비대칭
 
-에이전트 표면은 MAR-155 duration과 MAR-169 `timeline.set_interpolation` operation을 포함해 현재 57 ops다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
+에이전트 표면은 MAR-155 duration과 MAR-169 `timeline.set_interpolation` operation을 포함해 현재 57 ops다. MAR-170은 operation을 추가하지 않고 그 operation의 `interpolation` 인자에 preset token 4개만 더했다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
 `parameters.list`, `parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`을
 C++ registry와 Python MCP 도구에 함께 노출했다. Transform/slot/parameter authoring은 GUI와 agent가 base materialization
 또는 candidate runtime build를 포함한 UI-free mutation을 공유한다. GUI는 의도적으로 더 넓은 parameter/group/shape lifecycle과

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -64,7 +65,35 @@ struct TimelineGraphRenderStats {
     bool component_controls_disabled{false};
     timeline_graph_model::SegmentKind active_segment_kind{
         timeline_graph_model::SegmentKind::Linear};
+    // MAR-170 preset row. Appended, never reordered, so MAR-167/168/169's
+    // positional expectations are unaffected. The first button's rectangle lets
+    // an actual-frame smoke aim a real mouse at a real button.
+    bool curve_preset_row_drawn{false};
+    bool curve_preset_row_enabled{false};
+    float first_preset_min_x{0.0f};
+    float first_preset_min_y{0.0f};
+    float first_preset_max_x{0.0f};
+    float first_preset_max_y{0.0f};
+    // A custom curve, or an active key with no outgoing segment, is reported as
+    // kCurvePresets.size().
+    std::size_t active_preset_index{0U};
+    std::size_t default_preset_index{0U};
 };
+
+/**
+ * @brief Draws the six fixed preset buttons and the `Default:` combo.
+ *
+ * Shared by the Graph and Dopesheet toolbars: both read the same
+ * `TimelineEditorState::selected_keys`, so there is exactly one selection
+ * semantics and one place the row's behaviour lives. The row performs no
+ * arithmetic and no mutation of its own — a button click calls
+ * `apply_timeline_curve_preset()` and a combo change calls
+ * `set_shell_default_curve()`. `stats` may be null.
+ */
+void draw_timeline_curve_preset_row(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    TimelineGraphRenderStats* stats);
 
 const TimelineTrackRow* resolve_timeline_graph_track(
     const ShellState& state,

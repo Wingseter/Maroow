@@ -293,6 +293,31 @@ bool render_headless_smoke_frames(
         std::cerr << "Fallback Graph interaction smoke could not resolve Timeline window.\n";
         return false;
     }
+    // The Graph plot has always been taller than the Timeline window, and
+    // MAR-170's appended preset row pushed its top below the visible clip, so
+    // scroll it into view before aiming a real mouse at it. This is the same
+    // nudge the MAR-169 handle section below already performs.
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        fallback_timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+        if (fallback_timeline_window == nullptr) break;
+        const float visible_top = fallback_timeline_window->InnerClipRect.Min.y + 2.0f;
+        const float visible_bottom = fallback_timeline_window->InnerClipRect.Max.y - 2.0f;
+        if (fallback_stats.plot_min_y + 2.0f <= visible_bottom &&
+            fallback_stats.plot_max_y - 2.0f >= visible_top) {
+            break;
+        }
+        const float next_scroll = std::min(
+            fallback_timeline_window->ScrollMax.y,
+            fallback_timeline_window->Scroll.y + 48.0f);
+        if (next_scroll == fallback_timeline_window->Scroll.y) break;
+        ImGui::SetScrollY(fallback_timeline_window, next_scroll);
+        render_graph_frame(&fallback_stats);
+    }
+    fallback_timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+    if (fallback_timeline_window == nullptr) {
+        std::cerr << "Fallback Graph interaction smoke lost its Timeline window.\n";
+        return false;
+    }
     const float fallback_hover_min_x = std::max(
         fallback_stats.plot_min_x + 2.0f,
         fallback_timeline_window->InnerClipRect.Min.x + 2.0f);
@@ -307,7 +332,10 @@ bool render_headless_smoke_frames(
         fallback_timeline_window->InnerClipRect.Max.y - 2.0f);
     if (fallback_hover_min_x > fallback_hover_max_x ||
         fallback_hover_min_y > fallback_hover_max_y) {
-        std::cerr << "Fallback Graph interaction smoke could not locate visible plot space.\n";
+        std::cerr << "Fallback Graph interaction smoke could not locate visible plot space: plot=("
+                  << fallback_stats.plot_min_y << "-" << fallback_stats.plot_max_y
+                  << ") clip=(" << fallback_timeline_window->InnerClipRect.Min.y
+                  << "-" << fallback_timeline_window->InnerClipRect.Max.y << ").\n";
         return false;
     }
     const ImVec2 fallback_plot_center{
@@ -1086,7 +1114,10 @@ bool render_headless_smoke_frames(
         if (!handle_stats.handle_gesture_active ||
             shell_state.timeline_editor.graph_value_gesture.has_value() ||
             shell_state.timeline_editor.retime_gesture.has_value() ||
-            !handle_stats.component_controls_disabled) {
+            !handle_stats.component_controls_disabled ||
+            // MAR-170: the preset row and the Default combo are inert while a
+            // handle drag owns the session.
+            handle_stats.curve_preset_row_enabled) {
             std::cerr << "An actual-frame handle drag did not open the handle gesture: handle="
                       << handle_stats.handle_gesture_active
                       << " value=" << handle_stats.value_gesture_active
@@ -1237,6 +1268,169 @@ bool render_headless_smoke_frames(
                   << handle_stats.second_handle_y << ").\n";
         shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
         render_graph_frame(nullptr);
+    }
+
+    // --- MAR-170: the appended preset row and Default combo, driven with real
+    // ImGui mouse events aimed at real submitted button coordinates. ---
+    {
+        const TimelineTrackRow* preset_row = find_timeline_track(
+            cached_timeline_tracks(&shell_state), "bone:1:Translate");
+        if (preset_row == nullptr || preset_row->key_times.size() < 2U) {
+            std::cerr << "Actual-frame preset smoke lost its Translate row.\n";
+            return false;
+        }
+        const TimelineKeyRef preset_key = timeline_model::key_ref(*preset_row, 0U);
+        shell_state.selected_timeline_track_id = preset_row->id;
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        const auto select_preset_key = [&]() {
+            shell_state.timeline_editor.selected_keys = {preset_key};
+            shell_state.timeline_editor.active_key = preset_key;
+        };
+        select_preset_key();
+        shell_state.preferences.default_curve = marrow::editor::CurvePreset::EaseOut;
+
+        TimelineGraphRenderStats preset_stats;
+        render_graph_frame(nullptr);
+        select_preset_key();
+        render_graph_frame(&preset_stats);
+
+        ImGuiWindow* preset_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+        if (preset_window == nullptr || !preset_stats.curve_preset_row_drawn ||
+            !preset_stats.curve_preset_row_enabled ||
+            !std::isfinite(preset_stats.first_preset_min_x) ||
+            !std::isfinite(preset_stats.first_preset_min_y) ||
+            preset_stats.first_preset_max_x <= preset_stats.first_preset_min_x ||
+            preset_stats.first_preset_max_y <= preset_stats.first_preset_min_y) {
+            std::cerr << "The Graph preset row was not drawn with a usable rectangle: drawn="
+                      << preset_stats.curve_preset_row_drawn
+                      << " enabled=" << preset_stats.curve_preset_row_enabled
+                      << " rect=(" << preset_stats.first_preset_min_x << ","
+                      << preset_stats.first_preset_min_y << ")-("
+                      << preset_stats.first_preset_max_x << ","
+                      << preset_stats.first_preset_max_y << ").\n";
+            return false;
+        }
+        // The default combo reports the remembered preset, and applying a
+        // preset must never change it.
+        if (preset_stats.default_preset_index !=
+            static_cast<std::size_t>(marrow::editor::CurvePreset::EaseOut)) {
+            std::cerr << "The Default combo did not report the remembered curve.\n";
+            return false;
+        }
+        // Appending the row must not have displaced MAR-167/168's widgets or
+        // pushed the plot out of the Timeline window.
+        if (preset_stats.fit_max_x <= preset_stats.fit_min_x ||
+            preset_stats.fit_max_y <= preset_stats.fit_min_y ||
+            preset_stats.first_component_max_x <= preset_stats.first_component_min_x ||
+            preset_stats.first_component_max_y <= preset_stats.first_component_min_y ||
+            preset_stats.plot_min_y >= preset_stats.plot_max_y ||
+            preset_stats.plot_max_y > preset_window->InnerClipRect.Max.y +
+                preset_window->ScrollMax.y + 1.0f) {
+            std::cerr << "Appending the preset row displaced an existing Graph widget.\n";
+            return false;
+        }
+        // Fit and the first component checkbox are still hoverable at their
+        // reported rectangles.
+        io.AddMousePosEvent(
+            (preset_stats.fit_min_x + preset_stats.fit_max_x) * 0.5f,
+            (preset_stats.fit_min_y + preset_stats.fit_max_y) * 0.5f);
+        render_graph_frame(nullptr);
+        if (!ImGui::IsMouseHoveringRect(
+                ImVec2(preset_stats.fit_min_x, preset_stats.fit_min_y),
+                ImVec2(preset_stats.fit_max_x, preset_stats.fit_max_y),
+                false)) {
+            std::cerr << "The Fit button was no longer hoverable after the preset row.\n";
+            return false;
+        }
+
+        // Seed a non-Linear curve through the controller so the first preset
+        // button (Linear) is a genuine change when it is clicked.
+        select_preset_key();
+        const auto seeded = apply_timeline_curve_preset(
+            &shell_state,
+            cached_timeline_tracks(&shell_state),
+            marrow::editor::CurvePreset::EaseInOut);
+        if (!seeded.applied || seeded.changed_key_count != 1U) {
+            std::cerr << "Actual-frame preset smoke could not seed a non-Linear curve.\n";
+            return false;
+        }
+        select_preset_key();
+        render_graph_frame(&preset_stats);
+        if (preset_stats.active_preset_index !=
+            static_cast<std::size_t>(marrow::editor::CurvePreset::EaseInOut)) {
+            std::cerr << "The Outgoing readout did not report the applied preset.\n";
+            return false;
+        }
+
+        const std::size_t preset_undo_before = shell_state.session.undo_count();
+        const ImVec2 preset_click{
+            (preset_stats.first_preset_min_x + preset_stats.first_preset_max_x) * 0.5f,
+            (preset_stats.first_preset_min_y + preset_stats.first_preset_max_y) * 0.5f};
+        io.AddMousePosEvent(preset_click.x, preset_click.y);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        // A SmallButton fires during the release frame, and the row publishes
+        // its readout before the buttons are submitted, so the settled preset
+        // is only visible one frame later.
+        render_graph_frame(nullptr);
+        select_preset_key();
+        render_graph_frame(&preset_stats);
+        if (shell_state.session.undo_count() != preset_undo_before + 1U ||
+            preset_stats.active_preset_index !=
+                static_cast<std::size_t>(marrow::editor::CurvePreset::Linear)) {
+            std::cerr << "Clicking the first preset button did not commit exactly one "
+                         "Linear entry: undo=" << shell_state.session.undo_count() << "/"
+                      << preset_undo_before
+                      << " preset=" << preset_stats.active_preset_index << ".\n";
+            return false;
+        }
+        // Applying a preset must not touch the remembered default.
+        if (shell_state.preferences.default_curve !=
+            marrow::editor::CurvePreset::EaseOut) {
+            std::cerr << "Applying a preset changed the remembered default curve.\n";
+            return false;
+        }
+
+        // With nothing selected the row is disabled and a click is inert.
+        shell_state.timeline_editor.selected_keys.clear();
+        shell_state.timeline_editor.active_key.reset();
+        render_graph_frame(&preset_stats);
+        const std::size_t empty_undo_before = shell_state.session.undo_count();
+        const std::string empty_project_before =
+            marrow::editor::serialize_project(*shell_state.session.project());
+        if (!preset_stats.curve_preset_row_drawn ||
+            preset_stats.curve_preset_row_enabled) {
+            std::cerr << "An empty selection must leave the preset row drawn but "
+                         "disabled.\n";
+            return false;
+        }
+        io.AddMousePosEvent(
+            (preset_stats.first_preset_min_x + preset_stats.first_preset_max_x) * 0.5f,
+            (preset_stats.first_preset_min_y + preset_stats.first_preset_max_y) * 0.5f);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(&preset_stats);
+        if (shell_state.session.undo_count() != empty_undo_before ||
+            marrow::editor::serialize_project(*shell_state.session.project()) !=
+                empty_project_before) {
+            std::cerr << "A click on the disabled preset row changed the project.\n";
+            return false;
+        }
+
+        while (shell_state.session.undo_count() > 0U) {
+            if (!shell_state.session.undo()) break;
+        }
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+        reconcile_timeline_key_selection(
+            &shell_state, cached_timeline_tracks(&shell_state));
+        std::cout << "Timeline Graph actual-frame presets: first button=("
+                  << preset_click.x << "," << preset_click.y << ") default="
+                  << preset_stats.default_preset_index << ".\n";
     }
 
     // MAR-159: the anchor resets only when filter/tree-collapse removes it

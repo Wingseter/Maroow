@@ -1,4 +1,5 @@
 #include "shell_timeline.hpp"
+#include "shell_timeline_graph.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2047,6 +2048,12 @@ static void draw_dopesheet_body(
     if (!paste_enabled) ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::Checkbox("Snap to Frames", &state->timeline_editor.snap_to_frames);
+
+    // MAR-170: the same shared row the Graph tab draws, appended after every
+    // existing Dopesheet toolbar widget so none of them moves. Both tabs read
+    // the same TimelineEditorState::selected_keys, so a Deform key selected
+    // here is a legitimate preset target even though the Graph never plots it.
+    draw_timeline_curve_preset_row(state, tracks, nullptr);
 
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
         !ImGui::GetIO().WantTextInput &&

@@ -127,6 +127,52 @@ marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
     const ShellState& state,
     const TimelineTrackRow& track);
 
+/** @brief Result of one preset application, for status text and tests. */
+struct TimelineCurvePresetResult {
+    bool applied{false};
+    std::size_t changed_key_count{0U};
+    std::size_t compatible_key_count{0U};
+    std::size_t skipped_key_count{0U};  // selected keys with no easing field
+    std::string error;
+};
+
+/**
+ * @brief Applies one fixed preset to every compatible selected key.
+ *
+ * Draw-order, event, and slot-attachment selections are skipped rather than
+ * rejected, duplicates are collapsed, runtime-only tracks are materialized, and
+ * the whole write is one transaction with live preview and one history entry
+ * whatever the key count. A selection with no compatible key, or a selection
+ * already carrying the preset, leaves the project and the history untouched.
+ * Applying a preset never changes the remembered default curve.
+ */
+/**
+ * @brief How many selected keys the preset row would actually write.
+ *
+ * Shares one definition of "compatible selected key" with
+ * `apply_timeline_curve_preset()`, so the row can never be enabled for a
+ * selection the write would refuse. Easing-free lanes and duplicate refs are
+ * excluded exactly as they are on the write path.
+ */
+std::size_t compatible_curve_preset_key_count(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks);
+
+TimelineCurvePresetResult apply_timeline_curve_preset(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    marrow::editor::CurvePreset preset);
+
+/**
+ * @brief The preset the active key's outgoing easing is, or nullopt for custom.
+ *
+ * Recomputed from the stored curve on every call, so it needs no invalidation
+ * and reports `Custom` the moment a handle drag moves away from a preset.
+ */
+std::optional<marrow::editor::CurvePreset> active_outgoing_curve_preset(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks);
+
 bool add_timeline_key_at_playhead(
     ShellState* state,
     const TimelineTrackRow& track);

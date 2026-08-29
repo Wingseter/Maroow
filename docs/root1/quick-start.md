@@ -32,8 +32,8 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169 checkpoints
-or the next MAR-170 product milestone.
+Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170
+checkpoints or the next MAR-171 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -96,7 +96,23 @@ any graph drag is live, so the dragged component cannot be hidden underneath the
 gesture. Escape, leaving the Graph tab, and losing focus cancel an easing drag
 exactly as they cancel a point drag, and one handle drag is one undo entry.
 
-Curve presets and a remembered default curve arrive in MAR-170. FFD and discrete Inherit,
+Both timeline tabs also carry a **Curve:** row of six fixed presets — Linear,
+Stepped, Ease, In, Out, In-Out — and a **Default:** combo. A preset button
+applies its fixed curve to every compatible selected key at once, as a single
+previewed undo entry; Draw Order, Event, and Slot Attachment keys carry no
+easing, so they are skipped and the status line reports how many. The row is
+disabled, not hidden, when the selection contains no compatible key or while a
+drag is live. Each button's tooltip gives the full name and the exact
+`[cx1, cy1, cx2, cy2]`, and the Graph toolbar's **Outgoing:** readout names the
+preset the active key's curve exactly is, or `Custom Bezier` after you drag a
+handle away from one. No preset overshoots; only a manual handle drag can. The
+**Default:** combo chooses the curve that newly added Transform, Deform, and
+Slot Color keys start with. It is stored per user in `editor-settings.json`,
+never in the project, so it never dirties a file and never changes an existing
+key; applying a preset does not change it. Missing, malformed, or
+future-versioned settings fall back to Linear without rewriting the file, and
+pasted keys always keep the curve they were copied with. Automatic and
+project-local curve handles arrive in MAR-171. FFD and discrete Inherit,
 Attachment, Draw Order, and Event lanes show an unsupported empty state instead
 of stale graph data. Graph tab, visibility, Fit, pan, zoom, hover,
 active-component, and drag state are shell-private and are not saved to

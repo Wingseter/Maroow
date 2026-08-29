@@ -27,6 +27,7 @@
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
+#include "shell_preferences.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
@@ -727,6 +728,10 @@ int main(int argc, char** argv) {
     }
 
     ShellState shell_state;
+    // MAR-170: once, before the project opens. The remembered default curve
+    // seeds newly authored keys, so it must be in place before any authoring
+    // path can run, and it never touches the session or the project.
+    load_shell_preferences(&shell_state);
     shell_state.project_path = parse_result.options.project_path;
     shell_state.agent_listen_port = parse_result.options.agent_port;
     reload_project(&shell_state);

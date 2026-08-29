@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <string>
 
 #include "shell_derived_cache.hpp"
+#include "shell_preferences.hpp"
 #include "shell_selection.hpp"
 #include "timeline_controller.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
@@ -1521,6 +1524,587 @@ bool validate_timeline_graph_edit_shell_smoke(
 
     if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
         std::cerr << "Graph value editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
+bool validate_timeline_curve_preset_shell_smoke(
+    const std::filesystem::path& project_path) {
+    using marrow::editor::CurvePreset;
+    using marrow::runtime::AnimationScalar;
+    using marrow::runtime::InterpolationKind;
+
+    // Its own isolated config home, so this scenario can exercise the save path
+    // without seeing — or leaving behind — any other scenario's settings.
+    const ScopedPreferenceIsolation isolation("curve-preset");
+    if (!isolation.installed()) {
+        std::cerr << "Curve preset shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    load_shell_preferences(&state);
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Curve preset smoke", false, true)) {
+        std::cerr << "Curve preset shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 57U) {
+        std::cerr << "Curve preset shell smoke requires the exact 57-operation registry.\n";
+        return false;
+    }
+
+    const auto row_of = [&](std::string_view id) {
+        return find_timeline_track(cached_timeline_tracks(&state), id);
+    };
+    const auto key_of = [&](std::string_view id, std::size_t index)
+        -> std::optional<TimelineKeyRef> {
+        const TimelineTrackRow* row = row_of(id);
+        if (row == nullptr || index >= row->key_times.size()) return std::nullopt;
+        return timeline_key_ref(*row, index);
+    };
+    const auto stored_easing = [&](std::string_view track_id, const TimelineKeyRef& key)
+        -> std::optional<marrow::runtime::Interpolation> {
+        const auto projected = projected_key(&state, track_id, key);
+        if (!projected.has_value()) return std::nullopt;
+        const TimelineTrackRow* row = row_of(track_id);
+        if (row == nullptr) return std::nullopt;
+        const auto& projection = cached_timeline_graph_projection(&state, *row);
+        if (projection.status != GraphProjectionStatus::Ready ||
+            !projection.track.has_value()) {
+            return std::nullopt;
+        }
+        for (const auto& candidate : projection.track->keys) {
+            if (candidate.identity == key) return candidate.outgoing_easing;
+        }
+        return std::nullopt;
+    };
+    const auto is_preset = [](const marrow::runtime::Interpolation& easing,
+                              const std::array<double, 4>& expected) {
+        if (easing.kind() != InterpolationKind::CubicBezier) return false;
+        const auto& points = easing.cubic_bezier();
+        return points.cx1 == static_cast<AnimationScalar>(expected[0]) &&
+            points.cy1 == static_cast<AnimationScalar>(expected[1]) &&
+            points.cx2 == static_cast<AnimationScalar>(expected[2]) &&
+            points.cy2 == static_cast<AnimationScalar>(expected[3]);
+    };
+    constexpr std::array<double, 4> kEase{0.25, 0.1, 0.25, 1.0};
+    constexpr std::array<double, 4> kEaseIn{0.42, 0.0, 1.0, 1.0};
+    constexpr std::array<double, 4> kEaseOut{0.0, 0.0, 0.58, 1.0};
+    constexpr std::array<double, 4> kEaseInOut{0.42, 0.0, 0.58, 1.0};
+
+    // --- Three selected Transform keys, one preset, one history entry, and a
+    // duplicate ref collapsed rather than turned into a hard error. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        const auto second_key = key_of("bone:1:Translate", 1U);
+        const auto third_key = key_of("bone:1:Translate", 2U);
+        if (!first_key.has_value() || !second_key.has_value() ||
+            !third_key.has_value()) {
+            std::cerr << "Curve preset smoke requires three spine Translate keys.\n";
+            return false;
+        }
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        const auto before_first =
+            projected_key(&state, "bone:1:Translate", *first_key);
+        if (!before.has_value() || !before_first.has_value()) {
+            std::cerr << "Curve preset smoke could not capture its baseline.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {
+            *first_key, *second_key, *third_key, *first_key};
+        state.timeline_editor.active_key = *first_key;
+
+        const auto result = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::EaseInOut);
+        if (!result.applied || result.changed_key_count != 3U ||
+            result.compatible_key_count != 3U || result.skipped_key_count != 1U ||
+            !result.error.empty()) {
+            std::cerr << "Applying Ease-In-Out to three Transform keys failed: "
+                      << result.error << " applied=" << result.applied
+                      << " changed=" << result.changed_key_count
+                      << " compatible=" << result.compatible_key_count << '\n';
+            return false;
+        }
+        if (state.session.undo_count() != before->undo_count + 1U) {
+            std::cerr << "One preset application must add exactly one history entry.\n";
+            return false;
+        }
+        for (const auto& key : {*first_key, *second_key, *third_key}) {
+            const auto easing = stored_easing("bone:1:Translate", key);
+            if (!easing.has_value() || !is_preset(*easing, kEaseInOut)) {
+                std::cerr << "A preset did not store its fixed control points in every "
+                             "selected key.\n";
+                return false;
+            }
+        }
+        const auto after_first = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!after_first.has_value() ||
+            after_first->time_seconds != before_first->time_seconds ||
+            after_first->values != before_first->values) {
+            std::cerr << "A preset moved a key in time or changed a scalar.\n";
+            return false;
+        }
+    }
+
+    // --- The remembered default seeds a newly authored Transform key. ---
+    {
+        state.preferences.default_curve = CurvePreset::EaseOut;
+        const TimelineTrackRow* rotate = row_of("bone:2:Rotate");
+        if (rotate == nullptr) {
+            std::cerr << "Curve preset smoke requires an arm_l Rotate track.\n";
+            return false;
+        }
+        if (!scrub_timeline_time(&state, 0.75, "Curve preset smoke", false)) {
+            std::cerr << "Curve preset smoke could not scrub the playhead.\n";
+            return false;
+        }
+        if (!add_timeline_key_at_playhead(&state, *rotate)) {
+            std::cerr << "Curve preset smoke could not add a Transform key.\n";
+            return false;
+        }
+        const auto added = state.timeline_editor.active_key;
+        const auto easing =
+            added.has_value() ? stored_easing("bone:2:Rotate", *added) : std::nullopt;
+        if (!easing.has_value() || !is_preset(*easing, kEaseOut)) {
+            std::cerr << "A newly authored Transform key did not take the remembered "
+                         "default curve.\n";
+            return false;
+        }
+    }
+
+
+    // --- A mixed selection: the Event key is skipped and counted, the two
+    // compatible keys are written, and it is still one history entry. ---
+    {
+        const auto translate_key = key_of("bone:1:Translate", 0U);
+        const auto color_key = key_of("slot:0:Color", 0U);
+        const auto event_key = key_of("global:events", 0U);
+        if (!translate_key.has_value() || !color_key.has_value() ||
+            !event_key.has_value()) {
+            std::cerr << "Curve preset smoke requires Translate, Color, and Event keys.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*translate_key, *event_key, *color_key};
+        state.timeline_editor.active_key = *translate_key;
+        const auto result = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::Ease);
+        if (!result.applied || result.compatible_key_count != 2U ||
+            result.skipped_key_count != 1U || result.changed_key_count != 2U ||
+            state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A mixed selection did not skip exactly one easing-free key: "
+                      << "applied=" << result.applied
+                      << " compatible=" << result.compatible_key_count
+                      << " skipped=" << result.skipped_key_count
+                      << " changed=" << result.changed_key_count << ".\n";
+            return false;
+        }
+        if (state.status_message.find("2 have no easing") != std::string::npos ||
+            state.status_message.find("1 have no easing") == std::string::npos) {
+            std::cerr << "A partial preset application did not report the skipped count: "
+                      << state.status_message << '\n';
+            return false;
+        }
+    }
+
+    // --- Re-applying the same preset commits nothing. ---
+    {
+        const auto translate_key = key_of("bone:1:Translate", 0U);
+        if (!translate_key.has_value()) return false;
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value()) return false;
+        const auto repeat = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::Ease);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (repeat.applied || repeat.changed_key_count != 0U || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "Re-applying a preset a key already carries changed the "
+                         "project or the history.\n";
+            return false;
+        }
+        if (state.status_message != "Selected keys already use Ease") {
+            std::cerr << "Re-applying a preset did not report the already-set message: "
+                      << state.status_message << '\n';
+            return false;
+        }
+    }
+
+    // --- An Event-only selection opens no transaction. ---
+    {
+        const auto event_key = key_of("global:events", 0U);
+        if (!event_key.has_value()) return false;
+        state.timeline_editor.selected_keys = {*event_key};
+        state.timeline_editor.active_key = *event_key;
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value()) return false;
+        const auto result = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::EaseIn);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (result.applied || result.compatible_key_count != 0U || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after) ||
+            state.status_message !=
+                "Select one or more Transform, Deform, or Slot Color keys") {
+            std::cerr << "An easing-free selection did not fail closed without a "
+                         "transaction: " << state.status_message << '\n';
+            return false;
+        }
+    }
+
+    // --- Criterion 5: the easing is segment-wide. Displaying component Y and
+    // applying a preset changes the X segment identically, because the
+    // primitive has no component parameter. ---
+    {
+        const auto translate_key = key_of("bone:1:Translate", 1U);
+        if (!translate_key.has_value()) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Y;
+        const auto before_y = projected_key(&state, "bone:1:Translate", *translate_key);
+        if (!before_y.has_value()) return false;
+        const auto result = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::EaseIn);
+        if (!result.applied || result.changed_key_count != 1U) {
+            std::cerr << "A preset applied while displaying Y did not write.\n";
+            return false;
+        }
+        state.timeline_editor.graph_view.active_component = GraphComponent::X;
+        const auto after_x = projected_key(&state, "bone:1:Translate", *translate_key);
+        const auto easing = stored_easing("bone:1:Translate", *translate_key);
+        if (!after_x.has_value() || !easing.has_value() ||
+            !is_preset(*easing, kEaseIn) ||
+            after_x->values[0] != before_y->values[0] ||
+            after_x->values[1] != before_y->values[1] ||
+            after_x->time_seconds != before_y->time_seconds) {
+            std::cerr << "A preset applied while displaying Y did not change the X "
+                         "segment identically.\n";
+            return false;
+        }
+    }
+
+    // --- Undo then redo restores the curve with a bit-identical selection. ---
+    {
+        const auto translate_key = key_of("bone:1:Translate", 0U);
+        if (!translate_key.has_value()) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value()) return false;
+        const auto result = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::EaseOut);
+        if (!result.applied) return false;
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        reconcile_timeline_key_selection(&state, cached_timeline_tracks(&state));
+        const auto undone = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!undone.has_value() || undone->project != before->project ||
+            undone->graph_segment_kinds != before->graph_segment_kinds ||
+            undone->graph_control_points != before->graph_control_points ||
+            undone->dopesheet_key_times != before->dopesheet_key_times ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*translate_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*translate_key))) {
+            std::cerr << "Undoing a preset did not restore the curve and the selection.\n";
+            return false;
+        }
+        if (!state.session.redo()) return false;
+        sync_shell_from_editor_session(&state);
+        reconcile_timeline_key_selection(&state, cached_timeline_tracks(&state));
+        const auto redone = stored_easing("bone:1:Translate", *translate_key);
+        if (!redone.has_value() || !is_preset(*redone, kEaseOut) ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*translate_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*translate_key))) {
+            std::cerr << "Redoing a preset did not restore the curve and the selection.\n";
+            return false;
+        }
+    }
+
+    // --- A preset followed by a MAR-169 handle drag is exactly two history
+    // entries, and the readout goes Custom the moment the drag moves. ---
+    {
+        constexpr timeline_graph_model::PlotRect plot{0.0, 0.0, 640.0, 320.0};
+        const timeline_graph_model::View view{0.0, 200.0, 0.0, 10.0};
+        state.timeline_editor.graph_view.view = view;
+        state.timeline_editor.graph_view.needs_fit = false;
+        const auto translate_key = key_of("bone:1:Translate", 0U);
+        if (!translate_key.has_value()) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Y;
+
+        const std::size_t undo_before = state.session.undo_count();
+        const auto applied = apply_timeline_curve_preset(
+            &state, cached_timeline_tracks(&state), CurvePreset::Ease);
+        if (!applied.applied) {
+            std::cerr << "The preset-then-drag case could not apply Ease.\n";
+            return false;
+        }
+        if (active_outgoing_curve_preset(state, cached_timeline_tracks(&state)) !=
+            std::optional<CurvePreset>(CurvePreset::Ease)) {
+            std::cerr << "The current-preset readout did not report a just-applied "
+                         "preset.\n";
+            return false;
+        }
+
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr) {
+            std::cerr << "The preset-then-drag case lost its Translate row.\n";
+            return false;
+        }
+        const auto& projection = cached_timeline_graph_projection(&state, *translate);
+        if (projection.status != GraphProjectionStatus::Ready ||
+            !projection.track.has_value()) {
+            std::cerr << "The preset-then-drag case lost its Translate projection.\n";
+            return false;
+        }
+        const auto handles = timeline_graph_model::build_handle_geometry(
+            *projection.track, *translate_key, 1U, view, plot);
+        if (!handles.has_value() ||
+            handles->kind != timeline_graph_model::SegmentKind::Cubic) {
+            std::cerr << "A preset-applied segment did not expose cubic handles.\n";
+            return false;
+        }
+        std::array<double, 4> dragged = handles->control_points;
+        dragged[1] += 0.25;
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 5151U, *translate, *translate_key, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), dragged)) {
+            std::cerr << "The preset-then-drag case could not run a handle drag.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        if (state.session.undo_count() != undo_before + 2U) {
+            std::cerr << "A preset followed by a handle drag was not two history "
+                         "entries: " << state.session.undo_count() << "/"
+                      << undo_before << ".\n";
+            return false;
+        }
+        if (active_outgoing_curve_preset(state, cached_timeline_tracks(&state))
+                .has_value()) {
+            std::cerr << "A curve dragged away from a preset did not read as Custom.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        reconcile_timeline_key_selection(&state, cached_timeline_tracks(&state));
+        const auto restored = stored_easing("bone:1:Translate", *translate_key);
+        if (!restored.has_value() || !is_preset(*restored, kEase) ||
+            active_outgoing_curve_preset(state, cached_timeline_tracks(&state)) !=
+                std::optional<CurvePreset>(CurvePreset::Ease)) {
+            std::cerr << "One undo after a handle drag did not restore the preset.\n";
+            return false;
+        }
+    }
+
+    // --- The remembered default seeds new Deform and Slot Color keys too, and
+    // a Stepped default seeds a Stepped key. ---
+    {
+        state.preferences.default_curve = CurvePreset::EaseOut;
+        const auto* skeleton = state.session.runtime_data();
+        if (skeleton == nullptr) return false;
+
+        const TimelineTrackRow* color = row_of("slot:0:Color");
+        const TimelineTrackRow* deform = row_of("slot:0:deform:body_mesh");
+        if (color == nullptr || deform == nullptr) {
+            std::cerr << "Curve preset smoke requires Slot Color and Deform rows.\n";
+            return false;
+        }
+        if (!scrub_timeline_time(&state, 0.8, "Curve preset smoke", false) ||
+            !add_timeline_key_at_playhead(&state, *color) ||
+            !add_timeline_key_at_playhead(&state, *deform)) {
+            std::cerr << "Curve preset smoke could not add Color and Deform keys.\n";
+            return false;
+        }
+        const auto seeded_easing_at = [&](bool deform_family, double time)
+            -> std::optional<marrow::runtime::Interpolation> {
+            const auto* animation = state.session.runtime_data()->find_animation("idle");
+            if (animation == nullptr) return std::nullopt;
+            if (deform_family) {
+                for (const auto& timeline : animation->mesh_deform_timelines) {
+                    if (timeline.slot_index != 0U ||
+                        timeline.attachment_name != "body_mesh") {
+                        continue;
+                    }
+                    for (const auto& keyframe : timeline.keyframes) {
+                        if (std::abs(static_cast<double>(keyframe.time) - time) <= 1e-6) {
+                            return keyframe.interpolation;
+                        }
+                    }
+                }
+                return std::nullopt;
+            }
+            for (const auto& timeline : animation->slot_color_timelines) {
+                if (timeline.slot_index != 0U) continue;
+                for (const auto& keyframe : timeline.keyframes) {
+                    if (std::abs(static_cast<double>(keyframe.time) - time) <= 1e-6) {
+                        return keyframe.interpolation;
+                    }
+                }
+            }
+            return std::nullopt;
+        };
+        const auto color_easing = seeded_easing_at(false, 0.8);
+        const auto deform_easing = seeded_easing_at(true, 0.8);
+        if (!color_easing.has_value() || !deform_easing.has_value() ||
+            !is_preset(*color_easing, kEaseOut) || !is_preset(*deform_easing, kEaseOut)) {
+            std::cerr << "New Slot Color and Deform keys did not take the remembered "
+                         "default curve.\n";
+            return false;
+        }
+
+        state.preferences.default_curve = CurvePreset::Stepped;
+        const TimelineTrackRow* rotate = row_of("bone:2:Rotate");
+        if (rotate == nullptr || !scrub_timeline_time(&state, 0.9, "Curve preset smoke", false) ||
+            !add_timeline_key_at_playhead(&state, *rotate)) {
+            std::cerr << "Curve preset smoke could not add a Stepped-default key.\n";
+            return false;
+        }
+        const auto added = state.timeline_editor.active_key;
+        const auto stepped = added.has_value()
+            ? stored_easing("bone:2:Rotate", *added)
+            : std::nullopt;
+        if (!stepped.has_value() || stepped->kind() != InterpolationKind::Stepped) {
+            std::cerr << "A Stepped default did not seed a Stepped new key.\n";
+            return false;
+        }
+    }
+
+    // --- Paste reproduces a key; it is never reseeded with the default. ---
+    {
+        const auto translate_key = key_of("bone:1:Translate", 0U);
+        if (!translate_key.has_value()) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        state.preferences.default_curve = CurvePreset::EaseIn;
+        if (!apply_timeline_curve_preset(
+                 &state, cached_timeline_tracks(&state), CurvePreset::EaseIn)
+                 .applied) {
+            std::cerr << "The paste case could not author its Ease-In source key.\n";
+            return false;
+        }
+        if (!copy_selected_timeline_keys(&state, cached_timeline_tracks(&state))) {
+            std::cerr << "The paste case could not copy its Ease-In key.\n";
+            return false;
+        }
+        state.preferences.default_curve = CurvePreset::Stepped;
+        if (!scrub_timeline_time(&state, 0.95, "Curve preset smoke", false) ||
+            !paste_timeline_clipboard(&state, cached_timeline_tracks(&state))) {
+            std::cerr << "The paste case could not paste its clipboard.\n";
+            return false;
+        }
+        const TimelineTrackRow* pasted_row = row_of("bone:1:Translate");
+        std::optional<TimelineKeyRef> pasted;
+        if (pasted_row != nullptr) {
+            for (std::size_t index = 0U; index < pasted_row->key_times.size(); ++index) {
+                if (std::abs(pasted_row->key_times[index] - 0.95) <= 1e-6) {
+                    pasted = timeline_key_ref(*pasted_row, index);
+                    break;
+                }
+            }
+        }
+        const auto pasted_easing = pasted.has_value()
+            ? stored_easing("bone:1:Translate", *pasted)
+            : std::optional<marrow::runtime::Interpolation>{};
+        if (!pasted_easing.has_value() || !is_preset(*pasted_easing, kEaseIn)) {
+            std::cerr << "A pasted key was reseeded with the remembered default "
+                         "instead of keeping the copied curve.\n";
+            return false;
+        }
+    }
+
+    // --- Changing and storing the default never touches the project. ---
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value()) return false;
+        const std::filesystem::path settings_path = isolation.settings_path();
+        if (std::filesystem::exists(settings_path)) {
+            std::cerr << "A load-only preference session must create no settings file.\n";
+            return false;
+        }
+        if (!set_shell_default_curve(&state, CurvePreset::EaseInOut)) {
+            std::cerr << "Storing a new default curve failed: " << state.error_message
+                      << '\n';
+            return false;
+        }
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "Changing the default curve dirtied the project.\n";
+            return false;
+        }
+        if (!std::filesystem::exists(settings_path)) {
+            std::cerr << "An explicit default change did not write the settings file.\n";
+            return false;
+        }
+        const auto parsed = marrow::runtime::json::load_document(settings_path);
+        const marrow::runtime::json::Value* token =
+            parsed ? marrow::runtime::json::find_member(
+                         parsed.document->root, "default_curve")
+                   : nullptr;
+        if (!parsed || token == nullptr || !token->is_string() ||
+            token->as_string() != "ease_in_out") {
+            std::cerr << "The stored settings file did not carry the ease_in_out token.\n";
+            return false;
+        }
+        // Re-selecting the value already stored performs no write at all.
+        const auto written_at =
+            std::filesystem::last_write_time(settings_path);
+        if (!set_shell_default_curve(&state, CurvePreset::EaseInOut) ||
+            std::filesystem::last_write_time(settings_path) != written_at) {
+            std::cerr << "Re-selecting the stored default curve rewrote the file.\n";
+            return false;
+        }
+    }
+
+    // --- A malformed settings file falls back to Linear and rewrites nothing. ---
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value()) return false;
+        const std::filesystem::path settings_path = isolation.settings_path();
+        const std::string malformed = "{ not json at all";
+        {
+            std::ofstream output(settings_path, std::ios::binary | std::ios::trunc);
+            output << malformed;
+        }
+        load_shell_preferences(&state);
+        if (state.preferences.default_curve != CurvePreset::Linear ||
+            state.preference_status !=
+                marrow::editor::PreferenceLoadStatus::Malformed) {
+            std::cerr << "A malformed settings file did not fall back to Linear.\n";
+            return false;
+        }
+        std::ifstream input(settings_path, std::ios::binary);
+        const std::string reread(
+            (std::istreambuf_iterator<char>(input)),
+            std::istreambuf_iterator<char>());
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (reread != malformed || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "Loading a malformed settings file repaired it or changed a "
+                         "keyframe.\n";
+            return false;
+        }
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Curve preset application changed the Agent operation surface.\n";
         return false;
     }
     return true;

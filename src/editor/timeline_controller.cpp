@@ -545,7 +545,11 @@ marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
     const TimelineTrackRow& track) {
     marrow::editor::TransformKeyframeEdit keyframe;
     keyframe.time = state.timeline_time_seconds;
-    keyframe.interpolation = marrow::runtime::Interpolation::linear();
+    // MAR-170: a newly authored continuous segment takes the remembered
+    // default. The preference supplies a token, never a number, so the value
+    // can only ever be one of six compile-time-verified constants.
+    keyframe.interpolation =
+        marrow::editor::curve_preset_interpolation(state.preferences.default_curve);
 
     if (!state.preview_skeleton || !track.bone_index.has_value() ||
         *track.bone_index >= state.preview_skeleton->bone_poses().size() ||
@@ -604,7 +608,8 @@ marrow::editor::DeformKeyframeEdit sample_deform_keyframe(
     const TimelineTrackRow& track) {
     marrow::editor::DeformKeyframeEdit keyframe;
     keyframe.time = state.timeline_time_seconds;
-    keyframe.interpolation = marrow::runtime::Interpolation::linear();
+    keyframe.interpolation =
+        marrow::editor::curve_preset_interpolation(state.preferences.default_curve);
 
     if (!state.load_result || !state.preview_skeleton || !track.slot_index.has_value() ||
         !track.deform_attachment_name.has_value()) {
@@ -1081,7 +1086,8 @@ bool add_timeline_key_at_playhead(
             } else if constexpr (std::is_same_v<Key, marrow::editor::EventKeyframeEdit>) {
                 new_key = sample_event_keyframe(*state);
             } else if constexpr (std::is_same_v<Key, marrow::editor::SlotColorKeyframeEdit>) {
-                new_key.interpolation = marrow::runtime::Interpolation::linear();
+                new_key.interpolation = marrow::editor::curve_preset_interpolation(
+                    state->preferences.default_curve);
                 if (track.slot_index.has_value() && state->preview_skeleton &&
                     *track.slot_index < state->preview_skeleton->slot_states().size()) {
                     new_key.color =
@@ -1148,6 +1154,236 @@ bool add_timeline_key_at_playhead(
         }
     }
     return committed;
+}
+
+namespace {
+
+bool same_timeline_key_selector(
+    const marrow::editor::TimelineKeySelector& left,
+    const marrow::editor::TimelineKeySelector& right) {
+    return left.kind == right.kind && left.animation_name == right.animation_name &&
+        left.bone_name == right.bone_name &&
+        left.transform_channel == right.transform_channel &&
+        left.slot_name == right.slot_name &&
+        left.attachment_name == right.attachment_name && left.time == right.time &&
+        left.same_time_ordinal == right.same_time_ordinal;
+}
+
+bool timeline_key_kind_carries_easing(marrow::editor::TimelineKeyKind kind) {
+    switch (kind) {
+    case marrow::editor::TimelineKeyKind::Transform:
+    case marrow::editor::TimelineKeyKind::Deform:
+    case marrow::editor::TimelineKeyKind::SlotColor:
+        return true;
+    case marrow::editor::TimelineKeyKind::DrawOrder:
+    case marrow::editor::TimelineKeyKind::Event:
+    case marrow::editor::TimelineKeyKind::SlotAttachment:
+        return false;
+    }
+    return false;
+}
+
+/**
+ * @brief The compatible selected keys, in selection order, de-duplicated.
+ *
+ * One definition shared by the preset row's enabled state and the write, so the
+ * buttons can never be enabled for a selection the write would refuse. Order is
+ * the selection order, which is stable, and every write is an identical
+ * absolute value, which together make the result independent of it.
+ */
+std::vector<marrow::editor::TimelineKeySelector> collect_curve_preset_selectors(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks,
+    std::vector<std::string>* track_ids_out) {
+    std::vector<marrow::editor::TimelineKeySelector> selectors;
+    selectors.reserve(state.timeline_editor.selected_keys.size());
+    for (const TimelineKeyRef& key : state.timeline_editor.selected_keys) {
+        const TimelineTrackRow* track = nullptr;
+        std::optional<std::size_t> key_index;
+        for (const TimelineTrackRow& candidate : tracks) {
+            if (!timeline_track_is_editable(candidate)) continue;
+            const auto index = timeline_key_index(candidate, key);
+            if (!index.has_value()) continue;
+            track = &candidate;
+            key_index = index;
+            break;
+        }
+        if (track == nullptr || !key_index.has_value()) continue;
+        const auto selector = timeline_key_selector(state, *track, *key_index);
+        if (!selector.has_value()) continue;
+        // The GUI skips easing-free lanes and reports the count; the Agent
+        // rejects them. A dopesheet box selection routinely spans an Event lane,
+        // so rejecting the whole command would make the feature unusable there.
+        if (!timeline_key_kind_carries_easing(selector->kind)) continue;
+        // Two refs can resolve to the same parent key, and the primitive
+        // rejects a duplicate selector atomically, so collapsing here is
+        // required rather than defensive.
+        bool duplicate = false;
+        for (const auto& existing : selectors) {
+            if (same_timeline_key_selector(existing, *selector)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        selectors.push_back(*selector);
+        if (track_ids_out != nullptr) track_ids_out->push_back(track->id);
+    }
+    return selectors;
+}
+
+} // namespace
+
+std::size_t compatible_curve_preset_key_count(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    return collect_curve_preset_selectors(state, tracks, nullptr).size();
+}
+
+TimelineCurvePresetResult apply_timeline_curve_preset(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    marrow::editor::CurvePreset preset) {
+    TimelineCurvePresetResult result;
+    if (state == nullptr) return result;
+    const marrow::editor::CurvePresetDefinition& definition =
+        marrow::editor::curve_preset_definition(preset);
+    const std::string display(definition.display_name);
+
+    if (!state->load_result || state->load_result.project == nullptr ||
+        selected_animation(*state) == nullptr) {
+        result.error = "Applying a curve preset requires an open animation.";
+        return result;
+    }
+    // MAR-170 opens no gesture of its own and never a second transaction, so a
+    // live drag simply owns the session until it finishes.
+    if (authoring_gesture_active(*state)) {
+        result.error = "Finish the active edit before applying a curve preset.";
+        return result;
+    }
+
+    std::vector<std::string> selector_track_ids;
+    const std::vector<marrow::editor::TimelineKeySelector> selectors =
+        collect_curve_preset_selectors(*state, tracks, &selector_track_ids);
+    result.compatible_key_count = selectors.size();
+    result.skipped_key_count =
+        state->timeline_editor.selected_keys.size() - selectors.size();
+
+    if (selectors.empty()) {
+        state->status_message =
+            "Select one or more Transform, Deform, or Slot Color keys";
+        return result;
+    }
+
+    const std::string label = selectors.size() == 1U
+        ? "Apply " + display + " curve"
+        : "Apply " + display + " curve to " + std::to_string(selectors.size()) + " keys";
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        label,
+        "timeline:curve-preset",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        result.error = transaction.error()->format();
+        state->error_message = result.error;
+        return result;
+    }
+
+    // Materialize every selected track before the write, so a preset applies to
+    // an imported runtime-only track by copying it into the project.
+    for (const std::string& track_id : selector_track_ids) {
+        const TimelineTrackRow* track = find_timeline_track(tracks, track_id);
+        if (track == nullptr || !visit_editable_timeline_keys(state, *track, [](auto&) {})) {
+            transaction.cancel();
+            sync_shell_from_editor_session(state);
+            result.error = "Could not materialize a selected timeline track.";
+            state->error_message = result.error;
+            state->status_message = "Failed to apply curve preset";
+            return result;
+        }
+    }
+
+    const marrow::editor::TimelineInterpolationResult written =
+        marrow::editor::set_keyframe_interpolation(
+            transaction.project(), selectors, definition.kind, definition.control_points);
+    if (!written) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        result.error = written.error;
+        state->error_message = result.error;
+        state->status_message = "Failed to apply curve preset: " + written.error;
+        return result;
+    }
+    if (!written.changed) {
+        // A no-change application is not a failure and must not add history.
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->status_message = "Selected keys already use " + display;
+        return result;
+    }
+
+    // "Previewed" for a discrete click means the runtime and preview are
+    // re-evaluated before the commit, so a failure cancels the whole thing.
+    const marrow::editor::SessionResult refresh = transaction.refresh_runtime();
+    if (!refresh) {
+        result.error = refresh.error->format();
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = result.error;
+        state->status_message = "Curve preset preview failed";
+        return result;
+    }
+
+    const marrow::editor::SessionResult committed = transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!committed) {
+        result.error = committed.error->format();
+        state->error_message = result.error;
+        state->status_message = "Failed to apply curve preset";
+        return result;
+    }
+
+    result.applied = true;
+    result.changed_key_count = written.changed_key_count;
+    // A preset writes only `interpolation`, so no key moves in time and every
+    // TimelineKeyRef stays bit-identical; the selection needs no rebuild.
+    const std::string key_noun = selectors.size() == 1U ? " key" : " keys";
+    if (result.skipped_key_count == 0U) {
+        state->status_message = "Applied " + display + " to " +
+            std::to_string(selectors.size()) + key_noun;
+    } else {
+        state->status_message = "Applied " + display + " to " +
+            std::to_string(selectors.size()) + " of " +
+            std::to_string(state->timeline_editor.selected_keys.size()) +
+            " selected keys; " + std::to_string(result.skipped_key_count) +
+            " have no easing";
+    }
+    return result;
+}
+
+std::optional<marrow::editor::CurvePreset> active_outgoing_curve_preset(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (!state.timeline_editor.active_key.has_value()) return std::nullopt;
+    const marrow::runtime::AnimationData* animation = selected_animation(state);
+    const TimelineTrackRow* track = selected_timeline_track(state, tracks);
+    if (animation == nullptr || track == nullptr) return std::nullopt;
+    const auto projection = timeline_graph_model::project_track(*animation, *track);
+    if (projection.status != timeline_graph_model::ProjectionStatus::Ready ||
+        !projection.track.has_value()) {
+        return std::nullopt;
+    }
+    const auto& keys = projection.track->keys;
+    const auto found = std::find_if(
+        keys.begin(), keys.end(), [&](const timeline_graph_model::Key& key) {
+            return key.identity == *state.timeline_editor.active_key;
+        });
+    // A last key has no outgoing segment, so it names no preset at all.
+    if (found == keys.end() || std::next(found) == keys.end()) return std::nullopt;
+    return marrow::editor::curve_preset_of(found->outgoing_easing);
 }
 
 std::vector<std::size_t> selected_indices_for_track(

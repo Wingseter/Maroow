@@ -1,14 +1,17 @@
 #include "shell_timeline_graph.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "imgui.h"
 
+#include "shell_preferences.hpp"
 #include "shell_selection.hpp"
 #include "timeline_controller.hpp"
 
@@ -231,12 +234,14 @@ const char* outgoing_kind_label(
     if (it == track.keys.end() || std::next(it) == track.keys.end()) {
         return "No outgoing segment";
     }
-    switch (it->outgoing_easing.kind()) {
-    case marrow::runtime::InterpolationKind::Linear: return "Linear";
-    case marrow::runtime::InterpolationKind::Stepped: return "Stepped";
-    case marrow::runtime::InterpolationKind::CubicBezier: return "Cubic";
-    }
-    return "No outgoing segment";
+    // MAR-170: the readout is a pure function of the stored curve, recomputed
+    // every frame, so it needs no invalidation and reads Custom Bezier the
+    // moment a handle drag moves away from a preset.
+    const auto preset = marrow::editor::curve_preset_of(it->outgoing_easing);
+    if (!preset.has_value()) return "Custom Bezier";
+    // Every table display_name is a string literal, so .data() is
+    // null-terminated and outlives the call.
+    return marrow::editor::curve_preset_definition(*preset).display_name.data();
 }
 
 bool fit_graph_view(
@@ -377,6 +382,105 @@ std::array<bool, 4> available_components(
 }
 
 } // namespace
+
+void draw_timeline_curve_preset_row(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    TimelineGraphRenderStats* stats) {
+    if (state == nullptr) return;
+    const auto& presets = marrow::editor::kCurvePresets;
+    // Short button labels; the tooltip carries the full name and the exact
+    // quadruple, so the row stays narrow without hiding the constants.
+    static constexpr std::array<const char*, 6> kShortLabels{
+        "Linear", "Stepped", "Ease", "In", "Out", "In-Out"};
+
+    const std::size_t compatible =
+        compatible_curve_preset_key_count(*state, tracks);
+    const bool gesture_live = authoring_gesture_active(*state);
+    const bool enabled = compatible > 0U && !gesture_live;
+    if (stats != nullptr) {
+        stats->curve_preset_row_drawn = true;
+        stats->curve_preset_row_enabled = enabled;
+        stats->default_preset_index =
+            static_cast<std::size_t>(state->preferences.default_curve);
+        const auto active = active_outgoing_curve_preset(*state, tracks);
+        stats->active_preset_index = active.has_value()
+            ? static_cast<std::size_t>(*active)
+            : presets.size();
+    }
+
+    ImGui::TextDisabled("Curve:");
+    ImGui::BeginDisabled(!enabled);
+    std::optional<marrow::editor::CurvePreset> requested;
+    for (std::size_t index = 0U; index < presets.size(); ++index) {
+        ImGui::SameLine();
+        ImGui::PushID(static_cast<int>(index));
+        const bool clicked = ImGui::SmallButton(kShortLabels[index]);
+        if (index == 0U && stats != nullptr) {
+            const ImVec2 item_min = ImGui::GetItemRectMin();
+            const ImVec2 item_max = ImGui::GetItemRectMax();
+            stats->first_preset_min_x = item_min.x;
+            stats->first_preset_min_y = item_min.y;
+            stats->first_preset_max_x = item_max.x;
+            stats->first_preset_max_y = item_max.y;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            const auto& definition = presets[index];
+            if (definition.kind == marrow::runtime::InterpolationKind::CubicBezier) {
+                ImGui::SetTooltip(
+                    "%s  [%g, %g, %g, %g]",
+                    std::string(definition.display_name).c_str(),
+                    definition.control_points[0],
+                    definition.control_points[1],
+                    definition.control_points[2],
+                    definition.control_points[3]);
+            } else {
+                ImGui::SetTooltip("%s", std::string(definition.display_name).c_str());
+            }
+        }
+        if (clicked) requested = presets[index].preset;
+        ImGui::PopID();
+    }
+    ImGui::EndDisabled();
+    if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "Select one or more Transform, Deform, or Slot Color keys");
+    }
+    if (requested.has_value()) {
+        apply_timeline_curve_preset(state, tracks, *requested);
+    }
+
+    // The remembered default. It is changed only here: applying a preset must
+    // never have a persistent, cross-project side effect.
+    ImGui::SameLine();
+    ImGui::TextDisabled("Default:");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(gesture_live);
+    const auto& current_default =
+        marrow::editor::curve_preset_definition(state->preferences.default_curve);
+    const std::string current_default_label(current_default.display_name);
+    ImGui::SetNextItemWidth(
+        ImGui::CalcTextSize("Ease-In-Out").x + ImGui::GetFrameHeight() +
+        ImGui::GetStyle().FramePadding.x * 4.0f);
+    if (ImGui::BeginCombo("##curve_default", current_default_label.c_str())) {
+        for (const auto& definition : presets) {
+            const std::string label(definition.display_name);
+            const bool selected = definition.preset == state->preferences.default_curve;
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                set_shell_default_curve(state, definition.preset);
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "Seeds newly added Transform, Deform, and Slot Color keys. Stored per "
+            "user in editor-settings.json; it never changes existing keys and never "
+            "modifies the project.");
+    }
+}
 
 const TimelineTrackRow* resolve_timeline_graph_track(
     const ShellState& state,
@@ -944,6 +1048,12 @@ TimelineGraphRenderStats draw_timeline_graph_body(
         ImGui::TextUnformatted(
             "Dragging a handle edits that one shared curve for every component of the key.");
     }
+    ImGui::TextUnformatted(
+        "A preset applies to every compatible selected key and, like a handle drag, writes each key's single shared easing.");
+
+    // MAR-170: appended after every existing widget, so no MAR-167/168/169
+    // rectangle the actual-frame smokes aim at moves.
+    draw_timeline_curve_preset_row(state, tracks, &stats);
 
     const float total_width = std::max(160.0f, ImGui::GetContentRegionAvail().x);
     constexpr float kPlotHeight = 340.0f;

@@ -624,6 +624,52 @@ async def test(parameter_only=False):
     )
     assert restored["scene_delta"]["keys"][0]["previous_interpolation"] == original_curve
 
+    # MAR-170: the four new preset tokens share this one operation. The registry
+    # stays at 57; only this argument's vocabulary grew.
+    require_ok(
+        "timeline.set_interpolation ease_in_out preset",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "ease_in_out"},
+        ),
+    )
+    read_back = require_ok(
+        "timeline.set_interpolation preset read-back",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "linear", "dry_run": True},
+        ),
+    )
+    stored_preset = read_back["scene_delta"]["keys"][0]["previous_interpolation"]
+    assert [round(value, 4) for value in stored_preset] == [0.42, 0.0, 0.58, 1.0]
+
+    require_rejected(
+        "timeline.set_interpolation rejects hyphenated preset tokens",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "ease-in"},
+        ),
+    )
+    require_rejected(
+        "timeline.set_interpolation still rejects an out-of-range array",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": [1.5, 0.0, 0.8, 1.0]},
+        ),
+    )
+    require_ok("undo timeline preset", await client.send_command("undo"))
+    after_preset_undo = require_ok(
+        "timeline.set_interpolation after preset undo",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "ease", "dry_run": True},
+        ),
+    )
+    assert (
+        after_preset_undo["scene_delta"]["keys"][0]["previous_interpolation"]
+        == original_curve
+    )
+
     require_ok(
         "set_transform dry-run",
         await client.send_command(

@@ -14,6 +14,7 @@
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/session.hpp"
 #include "agent_dispatch_internal.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor {
 
@@ -292,7 +293,8 @@ bool interpolation_request_arg(
     std::array<double, 4>* control_points_out,
     std::string* error_out) {
     const std::string missing = std::string(name) +
-        " is required and must be linear, stepped, or a 4-number bezier array.";
+        " is required and must be linear, stepped, ease, ease_in, ease_out, "
+        "ease_in_out, or a 4-number bezier array.";
     const json::Value* value = json::find_member(args, name);
     if (value == nullptr || value->is_null()) {
         *error_out = missing;
@@ -307,6 +309,17 @@ bool interpolation_request_arg(
         if (value->as_string() == "stepped") {
             *kind_out = marrow::runtime::InterpolationKind::Stepped;
             *control_points_out = {0.0, 0.0, 1.0, 1.0};
+            return true;
+        }
+        // MAR-170: the four remaining fixed presets, resolved through the one
+        // table that owns the numbers. snake_case only — no hyphenated aliases.
+        // Linear and Stepped keep their own branches above so their historical
+        // {0, 0, 1, 1} control-point echo is byte-identical to MAR-169's.
+        if (const auto preset =
+                marrow::editor::curve_preset_from_token(value->as_string())) {
+            const auto& definition = marrow::editor::curve_preset_definition(*preset);
+            *kind_out = definition.kind;
+            *control_points_out = definition.control_points;
             return true;
         }
         *error_out = missing;

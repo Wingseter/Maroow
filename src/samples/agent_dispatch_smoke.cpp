@@ -1570,6 +1570,149 @@ int main(int argc, char** argv) {
             "a rejected easing request mutated the project");
     }
 
+
+    // --- MAR-170: the four new preset tokens on the same operation. The
+    // registry stays at 57; only this one argument's vocabulary grew. ---
+    {
+        const char* kTranslateKey =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.0}";
+        const char* kSecondKey =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.5}";
+        const auto previous_curve = [&](const DispatchObservation& observation)
+            -> const json::Value* {
+            const json::Value* keys = member(observation.scene_delta(), "keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&keys->as_array()[0], "previous_interpolation");
+        };
+        const auto curve_is_string = [&](const json::Value* curve,
+                                         std::string_view expected) {
+            return curve != nullptr && curve->is_string() &&
+                curve->as_string() == expected;
+        };
+        const auto curve_matches = [&](const json::Value* curve,
+                                       const std::array<double, 4>& expected) {
+            if (curve == nullptr || !curve->is_array() ||
+                curve->as_array().size() != 4U) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                const json::Value& value = curve->as_array()[index];
+                if (!value.is_number() ||
+                    std::abs(value.as_number() - expected[index]) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        // Spelled out literally: a test that reads kCurvePresets proves nothing.
+        const std::array<std::pair<const char*, std::array<double, 4>>, 4> kTokens{{
+            {"ease", {0.25, 0.1, 0.25, 1.0}},
+            {"ease_in", {0.42, 0.0, 1.0, 1.0}},
+            {"ease_out", {0.0, 0.0, 0.58, 1.0}},
+            {"ease_in_out", {0.42, 0.0, 0.58, 1.0}},
+        }};
+
+        for (const auto& [token, expected] : kTokens) {
+            harness.invoke(
+                std::string("timeline.set_interpolation ") + token,
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kTranslateKey + "],\"interpolation\":\"" + token + "\"}}");
+            const DispatchObservation read_back = harness.invoke(
+                std::string("timeline.set_interpolation ") + token + " read-back",
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+            harness.expect(
+                curve_matches(previous_curve(read_back), expected),
+                std::string("timeline.set_interpolation ") + token,
+                std::string("the ") + token +
+                    " preset token did not store its fixed control points");
+            harness.invoke(
+                std::string("undo ") + token, "{\"op\":\"undo\"}");
+        }
+
+        // "linear" and "stepped" behave exactly as before.
+        harness.invoke(
+            "timeline.set_interpolation stepped preset token",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"stepped\"}}");
+        const DispatchObservation stepped_read_back = harness.invoke(
+            "timeline.set_interpolation stepped read-back",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(stepped_read_back), "stepped"),
+            "timeline.set_interpolation stepped preset token",
+            "the stepped token no longer stores a stepped curve");
+        harness.invoke("undo stepped preset token", "{\"op\":\"undo\"}");
+
+        // Hyphenated and camelCase spellings stay rejected: one spelling per
+        // concept, and the rejection must leave the project untouched.
+        for (const char* rejected : {"ease-in", "easeIn", "bounce"}) {
+            harness.invoke(
+                std::string("timeline.set_interpolation rejects ") + rejected,
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kTranslateKey + "],\"interpolation\":\"" + rejected + "\"}}",
+                false,
+                "invalid_request");
+        }
+        const DispatchObservation after_token_rejections = harness.invoke(
+            "timeline.set_interpolation unchanged after token rejections",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_token_rejections), "linear"),
+            "timeline.set_interpolation token rejection atomicity",
+            "a rejected preset token mutated the project");
+
+        // One multi-key preset call is one history entry, and undo restores
+        // every key.
+        harness.invoke(
+            "timeline.set_interpolation multi-key preset",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "," + kSecondKey +
+                "],\"interpolation\":\"ease_in_out\"}}");
+        harness.invoke("undo multi-key preset", "{\"op\":\"undo\"}");
+        const DispatchObservation after_multi_undo = harness.invoke(
+            "timeline.set_interpolation multi-key undo read-back",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"ease\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_multi_undo), "linear"),
+            "timeline.set_interpolation multi-key preset undo",
+            "one undo did not restore every key a multi-key preset wrote");
+        const DispatchObservation second_after_multi_undo = harness.invoke(
+            "timeline.set_interpolation multi-key undo second key",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kSecondKey + "],\"interpolation\":\"ease\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(second_after_multi_undo), "stepped"),
+            "timeline.set_interpolation multi-key preset undo",
+            "one undo did not restore the second key a multi-key preset wrote");
+
+        // set_transform still creates a Linear key: a headless agent's output
+        // must not depend on the invoking human's preference file.
+        harness.invoke(
+            "set_transform without interpolation",
+            "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"channel\":\"translate\",\"time\":0.875,"
+            "\"x\":3,\"y\":4}}");
+        const DispatchObservation seeded = harness.invoke(
+            "set_transform default easing read-back",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.875}],"
+            "\"interpolation\":\"ease\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(seeded), "linear"),
+            "set_transform default easing",
+            "an agent-created key no longer defaults to Linear");
+        harness.invoke("undo agent-created key", "{\"op\":\"undo\"}");
+    }
+
     // Two merge-enabled transform edits must form one undo group. Temporary
     // JSON/binary comparison gives an implementation-independent key count.
     harness.invoke(

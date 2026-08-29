@@ -163,6 +163,28 @@ exposed to the Agent registry and the Python MCP facade as
 `timeline.set_interpolation`, calling the identical primitive, which is what
 makes their behaviour structurally rather than coincidentally the same.
 
+MAR-170 adds six fixed curve presets on top of that primitive without adding an
+operation. Linear, Stepped, Ease `[0.25, 0.1, 0.25, 1]`, Ease-In
+`[0.42, 0, 1, 1]`, Ease-Out `[0, 0, 0.58, 1]`, and Ease-In-Out
+`[0.42, 0, 0.58, 1]` are source constants declared once in
+`include/marrow/editor/authoring.hpp`, and the GUI, the Agent, and the MCP
+facade all reach them through the same `set_keyframe_interpolation()` call, so
+`timeline.set_interpolation` simply gained four string tokens. Applying a preset
+writes every compatible key in the current timeline selection as one previewed
+transaction and one undo entry; the GUI skips easing-free lanes and reports the
+count while the Agent still rejects them, because a dopesheet box selection is
+built loosely and a scripted selector list is not. Every preset satisfies
+`cx2 >= cx1` and `0 <= cy1 <= cy2 <= 1`, so no preset can overshoot — overshoot
+remains reachable only through a manual handle drag. The "current preset"
+readout is a pure function of the four stored floats, compared bit-exactly in
+`float32` with no epsilon and no persisted marker, so it goes `Custom` the
+moment a handle drag moves away from a preset and survives undo, redo, and
+reload with nothing to invalidate. The remembered default curve that seeds newly
+authored Transform, Deform, and Slot Color keys lives in the user-local
+`editor-settings.json`, never in the project: it changes no existing data, and
+two animators may reasonably want different defaults. Applying a preset does not
+change it; only the explicit `Default:` control does.
+
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active
 `EditorSession`, while live Alt and platform Cmd/Ctrl state flows only through

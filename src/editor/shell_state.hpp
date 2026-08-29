@@ -19,6 +19,7 @@
 #include "timeline_model.hpp"
 #include "viewport_interaction_kernel.hpp"
 #include "viewport_renderer.hpp"
+#include "marrow/editor/preferences.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
@@ -768,6 +769,14 @@ struct ShellState {
     std::array<char, 128> hierarchy_filter{};
     // Active Constraints type tab: 0=IK 1=Path 2=Transform 3=Physics.
     int constraints_tab{0};
+    // MAR-170: user-local editor settings, loaded once at startup. Never
+    // participates in project history, dirty state, or revisions, and no
+    // project, runtime, or agent path reads or writes them.
+    marrow::editor::EditorPreferences preferences{};
+    marrow::editor::PreferenceLoadStatus preference_status{
+        marrow::editor::PreferenceLoadStatus::FirstRun};
+    std::filesystem::path preference_path;
+    std::string preference_diagnostic;
     // Agent surface — optional, closed by default (Ctrl+L / toolbar toggle).
     // The socket can be turned on/off at runtime from the panel.
     AgentSocketServer* agent_server{nullptr};

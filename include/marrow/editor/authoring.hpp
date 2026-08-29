@@ -3,10 +3,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "marrow/editor/preferences.hpp"
 #include "marrow/editor/project.hpp"
 
 namespace marrow::editor {
@@ -245,5 +247,64 @@ TimelineInterpolationResult set_keyframe_interpolation(
     const std::vector<TimelineKeySelector>& selectors,
     runtime::InterpolationKind kind,
     const std::array<double, 4>& control_points = {0.0, 0.0, 1.0, 1.0});
+
+
+/**
+ * @brief One fixed, deterministic easing preset.
+ *
+ * `control_points` is unused for Linear and Stepped, whose stored easing
+ * carries none. The four cubic quadruples are the CSS Easing Level 1 timing
+ * functions, reproduced exactly.
+ */
+struct CurvePresetDefinition {
+    CurvePreset preset{CurvePreset::Linear};
+    std::string_view token;         // the editor-settings.json token
+    std::string_view display_name;  // "Ease-In-Out"
+    runtime::InterpolationKind kind{runtime::InterpolationKind::Linear};
+    std::array<double, 4> control_points{};
+};
+
+/**
+ * @brief The six fixed presets in stable enum, UI, and identity-search order.
+ *
+ * This is the only place the preset numbers exist. A file-local
+ * `static_assert` in `authoring.cpp` proves at compile time that the table is
+ * in enum order and that every cubic entry keeps `cx1`/`cx2` inside [0, 1] —
+ * the invariant the `.marrow` and `.mskl` loaders enforce.
+ */
+inline constexpr std::array<CurvePresetDefinition, 6> kCurvePresets{{
+    {CurvePreset::Linear, "linear", "Linear",
+     runtime::InterpolationKind::Linear, {0.0, 0.0, 0.0, 0.0}},
+    {CurvePreset::Stepped, "stepped", "Stepped",
+     runtime::InterpolationKind::Stepped, {0.0, 0.0, 0.0, 0.0}},
+    {CurvePreset::Ease, "ease", "Ease",
+     runtime::InterpolationKind::CubicBezier, {0.25, 0.1, 0.25, 1.0}},
+    {CurvePreset::EaseIn, "ease_in", "Ease-In",
+     runtime::InterpolationKind::CubicBezier, {0.42, 0.0, 1.0, 1.0}},
+    {CurvePreset::EaseOut, "ease_out", "Ease-Out",
+     runtime::InterpolationKind::CubicBezier, {0.0, 0.0, 0.58, 1.0}},
+    {CurvePreset::EaseInOut, "ease_in_out", "Ease-In-Out",
+     runtime::InterpolationKind::CubicBezier, {0.42, 0.0, 0.58, 1.0}},
+}};
+
+/** @brief The definition of one preset; total over the closed enum. */
+const CurvePresetDefinition& curve_preset_definition(CurvePreset preset);
+
+/** @brief The runtime easing one preset denotes. */
+runtime::Interpolation curve_preset_interpolation(CurvePreset preset);
+
+/**
+ * @brief Names the preset an easing exactly equals, or nullopt for a custom curve.
+ *
+ * Cubic control points are compared bit-exactly after narrowing the table's
+ * doubles to `runtime::AnimationScalar`, so a preset written by this editor
+ * always reads back as that preset, including after save, reload, and export.
+ * There is no epsilon: an approximate match would name a hand-dragged curve
+ * "Ease" when a save/reload would show different numbers.
+ */
+std::optional<CurvePreset> curve_preset_of(const runtime::Interpolation& interpolation);
+
+/** @brief Parses one preset token; the same six tokens `editor-settings.json` uses. */
+std::optional<CurvePreset> curve_preset_from_token(std::string_view token);
 
 } // namespace marrow::editor
