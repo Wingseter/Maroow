@@ -338,11 +338,44 @@ word "retime" rather than the operation name and a single label cannot reproduce
 them byte-identically for both callers. Both additions are what kept the
 inverted gates meaningful.
 
-**One coverage gap, stated rather than implied.** The Agent response's 256-entry
-`keys` cap is asserted only through `keys_truncated == false` on a three-key
-call; no case builds a selection larger than 256. This matches MAR-172's own
-precedent for its identical `lanes` cap, and the truncation branch is the same
-`std::min` shape, but it is untested on both surfaces.
+**Review follow-up.** Four findings were raised and closed. The dopesheet
+readout re-derived its span from the **already-scaled** tracks each frame, so it
+printed `span 0.625s -> 0.781s` from the second frame on where §9.5 specifies
+`0.500s -> 0.625s` — a wrong number on the feature's headline affordance that no
+headless case could see. The text now comes from `timeline_scale_readout()` in
+the controller, derived from the gesture's own pre-drag `pivot_time` and
+`edge_original_time`, and the shell smoke asserts it verbatim after three
+applied frames and in the RangeEnd direction; restoring the old derivation makes
+that case print `span 1.250s -> 1.562s` and fail. `scale_keyframe_times()`'s
+Doxygen block had a second block between it and its declaration, so the
+primitive carrying the whole reject-not-clamp contract had no generated
+documentation; it is reattached. The Agent response's `previous_time` echoed the
+**request** rather than reading the project, which made the read-back-after-undo
+assertion tautological — its only teeth were resolution failure. `previous_times`
+is now carried on `TimelineScaleResult` from the primitive's resolved snapshot,
+and a new case asks for `0.5000009` and `0.9999993` — inside the resolver's
+one-microsecond identity window — and requires the report to come back as the
+stored `0.5` and `1.0`; restoring the echo fails it. **The Agent's snap still
+derives its moved edge from caller-supplied times** (`agent_handlers_editing.cpp`),
+bounded by that same one-microsecond window and with no accumulation, because
+resolving before the snap touches the mutation path and wants its own gate.
+
+**One known limitation, recorded in design §7.4 rather than patched.** The
+commit-time drift check compares `float32` track times against a **flat**
+`kKeyTimeEpsilon`, while a `float32` ulp doubles with every binade: the enforced
+margin is ~8 ulps at 1 s, ~1 ulp at 8 s, and under one above 16 s. It is
+fail-safe — it cancels with rollback and can never write a drifted time — and
+unreachable with fixtures topping out near 2 s, but a legitimate long-clip drag
+could cancel spuriously. Scaling the tolerance with key magnitude changes what
+"drifted" means for every clip, so it is a deliberate future decision with its
+own long-clip fixture, not a constant edit inside MAR-173.
+
+**The Agent response's 256-entry `keys` cap is safe by construction, not merely
+untested.** `keys_truncated` is `selectors.size() > std::min(selectors.size(),
+256)`, which is true exactly when the size exceeds 256, and the 4096 cap rejects
+before any larger call reaches it, so silent truncation is not expressible. No
+case builds a selection larger than 256, matching MAR-172's precedent for its
+identical `lanes` cap.
 
 No manual-visible-UI, Windows 11, or physical-input qualification credit is
 claimed. MAR-192 through MAR-210 stay open.

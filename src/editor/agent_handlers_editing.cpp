@@ -2031,18 +2031,6 @@ AgentDispatchResult handle_timeline_editing_operation(
                 }
             }
         };
-        // The times each selector currently names, in selector order, so the
-        // response can report `previous_time` without re-resolving afterwards.
-        const auto snapshot_times = [&](const ProjectData& project) {
-            std::vector<double> times;
-            times.reserve(selectors.size());
-            for (const TimelineKeySelector& selector : selectors) {
-                times.push_back(selector.time);
-            }
-            (void)project;
-            return times;
-        };
-
         // Snapping reshapes the ratio so the MOVED edge lands on a frame
         // boundary; interior keys keep the ratio's exact placement, because
         // quantizing them would stop the result from being a scale at all.
@@ -2073,10 +2061,13 @@ AgentDispatchResult handle_timeline_editing_operation(
             return marrow::editor::scale_keyframe_times(
                 project, selectors, *pivot, applied_request);
         };
+        // `previous_time` comes from the primitive's resolved snapshot, not
+        // from the request: a selector's `time` only has to identify a key
+        // within the resolver's one-microsecond window, so echoing it would
+        // report what the caller asked for rather than what the project holds.
         const auto response_delta =
-            [&](const marrow::editor::TimelineScaleResult& result,
-                bool dry_run,
-                const std::vector<double>& previous_times) {
+            [&](const marrow::editor::TimelineScaleResult& result, bool dry_run) {
+                const std::vector<double>& previous_times = result.previous_times;
                 json::Value::Object response;
                 response.emplace("dry_run", bool_value(dry_run));
                 response.emplace("requested_scale", number_value(*requested_scale));
@@ -2148,7 +2139,6 @@ AgentDispatchResult handle_timeline_editing_operation(
 
         if (bool_arg(args, "dry_run")) {
             ProjectData candidate = *session.project();
-            const std::vector<double> previous_times = snapshot_times(candidate);
             const marrow::editor::TimelineScaleResult result = apply(&candidate);
             if (!result) {
                 return make_error(
@@ -2161,7 +2151,7 @@ AgentDispatchResult handle_timeline_editing_operation(
                 "Timeline key scaling validated.",
                 op,
                 spec,
-                response_delta(result, true, previous_times));
+                response_delta(result, true));
         }
 
         auto transaction = session.begin_edit({
@@ -2175,7 +2165,6 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (!transaction) {
             return make_error(transaction.error()->format(), op, spec, "transaction_active");
         }
-        const std::vector<double> previous_times = snapshot_times(*transaction.project());
         const marrow::editor::TimelineScaleResult result = apply(transaction.project());
         if (!result) {
             const std::string error = result.error;
@@ -2204,7 +2193,7 @@ AgentDispatchResult handle_timeline_editing_operation(
             "Scaled timeline keys successfully.",
             op,
             spec,
-            response_delta(result, false, previous_times));
+            response_delta(result, false));
     }
 
     if (op == "set_event_keyframe") {

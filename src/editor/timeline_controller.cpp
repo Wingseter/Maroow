@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -2599,6 +2600,25 @@ std::string_view timeline_scale_rejection(const ShellState& state) {
     return state.timeline_editor.scale_gesture.has_value()
         ? std::string_view(state.timeline_editor.scale_gesture->rejection)
         : std::string_view{};
+}
+
+std::string timeline_scale_readout(const ShellState& state) {
+    if (!state.timeline_editor.scale_gesture.has_value()) {
+        return {};
+    }
+    const TimelineScaleGesture& gesture = *state.timeline_editor.scale_gesture;
+    const double original_span =
+        std::abs(gesture.edge_original_time - gesture.pivot_time);
+    char line[192]{};
+    std::snprintf(
+        line,
+        sizeof(line),
+        "Scale %.3fx   span %.3fs -> %.3fs   (pivot %.3fs)",
+        gesture.applied_scale,
+        original_span,
+        original_span * gesture.applied_scale,
+        gesture.pivot_time);
+    return std::string(line);
 }
 
 bool apply_timeline_scale_ratio(

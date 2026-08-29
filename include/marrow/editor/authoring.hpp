@@ -501,7 +501,35 @@ struct TimelineScaleResult : AuthoringResult {
     double scaled_span{0.0};
     std::size_t key_count{0U};
     std::size_t moved_key_count{0U};
+    /**
+     * @brief The time each selector actually resolved to, in selector order.
+     *
+     * A selector's own `time` only has to identify a key within the resolver's
+     * one-microsecond window, and a shell selector carries it narrowed to
+     * `float32`, so it is an identity rather than a value. Reporting surfaces
+     * that echo the request instead of reading this are reporting what the
+     * caller asked for, not what the project holds. Empty on a rejection.
+     */
+    std::vector<double> previous_times;
 };
+
+/**
+ * @brief Why a selection cannot be scaled at all, or empty when it can.
+ *
+ * Reports only the **selection-shaped** refusals a caller can fix before
+ * dragging — a key pinned by loop synchronization, and a selection naming part
+ * of an event tie. It deliberately reports no collision, because a collision
+ * depends on the ratio and is decided per frame by `scale_keyframe_times()`,
+ * which stays the sole authority on whether one call is legal.
+ *
+ * The GUI calls this to refuse to arm a drag with a message, rather than
+ * letting the first frame fail; both answers come from the same private
+ * predicates the primitive uses, so the two surfaces cannot disagree about
+ * which key is pinned or which tie is split.
+ */
+std::string timeline_scale_selection_refusal(
+    const ProjectData& project,
+    const std::vector<TimelineKeySelector>& selectors);
 
 /**
  * @brief Atomically scales persisted key times about one edge of their range.
@@ -526,24 +554,6 @@ struct TimelineScaleResult : AuthoringResult {
  * and re-resolve automatic curves afterwards inside the same transaction. A
  * rejected edit leaves the project unchanged.
  */
-/**
- * @brief Why a selection cannot be scaled at all, or empty when it can.
- *
- * Reports only the **selection-shaped** refusals a caller can fix before
- * dragging — a key pinned by loop synchronization, and a selection naming part
- * of an event tie. It deliberately reports no collision, because a collision
- * depends on the ratio and is decided per frame by `scale_keyframe_times()`,
- * which stays the sole authority on whether one call is legal.
- *
- * The GUI calls this to refuse to arm a drag with a message, rather than
- * letting the first frame fail; both answers come from the same private
- * predicates the primitive uses, so the two surfaces cannot disagree about
- * which key is pinned or which tie is split.
- */
-std::string timeline_scale_selection_refusal(
-    const ProjectData& project,
-    const std::vector<TimelineKeySelector>& selectors);
-
 TimelineScaleResult scale_keyframe_times(
     ProjectData* project,
     const std::vector<TimelineKeySelector>& selectors,

@@ -4675,8 +4675,22 @@ bool validate_timeline_scale_shell_smoke(
             std::cerr << "The gesture did not record its applied ratio.\n";
             return false;
         }
+        // The readout's spans must stay anchored to the PRE-DRAG range. Three
+        // frames have already been applied, so a readout that re-derived its
+        // span from the current tracks would compound the ratio and print
+        // `span 0.781s -> 0.977s` here instead of `span 1.000s -> 1.250s`.
+        if (timeline_scale_readout(state) !=
+            "Scale 1.250x   span 1.000s -> 1.250s   (pivot 0.000s)") {
+            std::cerr << "Wrong scale readout after three frames: '"
+                      << timeline_scale_readout(state) << "'\n";
+            return false;
+        }
         finish_timeline_scale_gesture(&state, true);
         sync_shell_from_editor_session(&state);
+        if (!timeline_scale_readout(state).empty()) {
+            std::cerr << "A finished gesture must report no readout.\n";
+            return false;
+        }
         const std::vector<double> times = spine_times();
         if (state.session.undo_count() != undo_before + 1U || times.size() != 3U ||
             times[0] != 0.0 || !near_time(times[1], 0.625) ||
@@ -4743,6 +4757,12 @@ bool validate_timeline_scale_shell_smoke(
         }
         if (spine_times().back() != 1.0) {
             std::cerr << "The RangeEnd pivot key moved mid-drag.\n";
+            return false;
+        }
+        if (timeline_scale_readout(state) !=
+            "Scale 0.500x   span 1.000s -> 0.500s   (pivot 1.000s)") {
+            std::cerr << "Wrong RangeEnd scale readout: '"
+                      << timeline_scale_readout(state) << "'\n";
             return false;
         }
         finish_timeline_scale_gesture(&state, true);

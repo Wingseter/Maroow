@@ -2414,10 +2414,18 @@ TimelineScaleResult scale_keyframe_times(
         }
     }
 
+    // The times the selectors actually resolved to, so a reporting caller can
+    // read what the project holds rather than echoing what it asked for.
+    std::vector<double> previous_times;
+    previous_times.reserve(resolved.size());
+    for (const ResolvedTimelineKey& key : resolved) {
+        previous_times.push_back(key.original_time);
+    }
+
     const double scaled_span = original_span * scale;
     if (std::abs(scale - 1.0) <= 1e-12 || !moved) {
         return {{false, {}}, pivot_time, 1.0, original_span, original_span,
-                resolved.size(), 0U};
+                resolved.size(), 0U, std::move(previous_times)};
     }
 
     std::size_t moved_key_count = 0U;
@@ -2433,7 +2441,7 @@ TimelineScaleResult scale_keyframe_times(
     sort_retimed_timelines(&candidate, resolved);
     *project = std::move(candidate);
     return {{true, {}}, pivot_time, scale, original_span, scaled_span,
-            resolved.size(), moved_key_count};
+            resolved.size(), moved_key_count, std::move(previous_times)};
 }
 
 TimelineScalarOffsetResult offset_keyframe_scalars(

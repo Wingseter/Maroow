@@ -2529,6 +2529,36 @@ int main(int argc, char** argv) {
             "timeline.scale_key_times undo",
             "one undo did not restore every key time");
 
+        // `previous_time` must be a PROJECT read, not an echo of the request.
+        // A selector's `time` only has to identify a key within the resolver's
+        // one-microsecond window, so this asks for 0.5000009 and 0.9999993 and
+        // requires the report to come back as the stored 0.5 and 1.0. An echo
+        // would return the offsets verbatim and pass every equality above,
+        // which is what made the read-back assertion tautological before.
+        const DispatchObservation offset_selectors = harness.invoke(
+            "timeline.scale_key_times reports resolved times, not the request",
+            "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.0},"
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.5000009},"
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.9999993}],\"scale\":1.25,"
+            "\"pivot\":\"start\",\"dry_run\":true}}");
+        const json::Value* offset_previous =
+            member(key_entry(offset_selectors, 1U), "previous_time");
+        const json::Value* offset_last =
+            member(key_entry(offset_selectors, 2U), "previous_time");
+        harness.expect(
+            offset_previous != nullptr && offset_previous->is_number() &&
+                offset_previous->as_number() == 0.5 && offset_last != nullptr &&
+                offset_last->is_number() && offset_last->as_number() == 1.0 &&
+                key_number_is(member(key_entry(offset_selectors, 1U), "time"), 0.625) &&
+                number_member(offset_selectors.scene_delta(), "original_span") ==
+                    std::optional<double>(1.0),
+            "timeline.scale_key_times resolved-time reporting",
+            "previous_time echoed the requested time instead of reading the project");
+
         // Snapping reshapes the ratio, and only on request.
         const DispatchObservation snapped = harness.invoke(
             "timeline.scale_key_times snapped dry run",

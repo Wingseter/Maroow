@@ -461,22 +461,20 @@ void draw_timeline_selection_range_bar(
 
     if (state->timeline_editor.scale_gesture.has_value()) {
         const TimelineScaleGesture& gesture = *state->timeline_editor.scale_gesture;
-        char readout[192]{};
-        std::snprintf(
-            readout,
-            sizeof(readout),
-            "Scale %.3fx   span %.3fs -> %.3fs   (pivot %.3fs)",
-            gesture.applied_scale,
-            span.maximum_time - span.minimum_time,
-            (span.maximum_time - span.minimum_time) * gesture.applied_scale,
-            gesture.pivot_time);
+        // Formatted in the controller, from the gesture's own pre-drag pivot and
+        // edge: `span` here is rebuilt from the ALREADY-SCALED tracks, so using
+        // it would compound the ratio from the second frame on.
+        const std::string readout = timeline_scale_readout(*state);
         draw_list->AddText(
-            ImVec2(rect_min.x + 4.0f, rect_min.y - 1.0f), IM_COL32_WHITE, readout);
+            ImVec2(rect_min.x + 4.0f, rect_min.y - 1.0f),
+            IM_COL32_WHITE,
+            readout.c_str());
         if (!gesture.rejection.empty()) {
             // A rejection during a live drag is transient state, not an event,
             // so it is reported here rather than in the status bar.
             draw_list->AddText(
-                ImVec2(rect_min.x + 4.0f + ImGui::CalcTextSize(readout).x + 8.0f,
+                ImVec2(rect_min.x + 4.0f +
+                           ImGui::CalcTextSize(readout.c_str()).x + 8.0f,
                        rect_min.y - 1.0f),
                 IM_COL32(0xff, 0x54, 0x50, 0xff),
                 gesture.rejection.c_str());

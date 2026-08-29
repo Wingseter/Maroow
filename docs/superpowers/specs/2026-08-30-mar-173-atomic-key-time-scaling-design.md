@@ -688,6 +688,46 @@ greater than `kKeyTimeEpsilon` **cancels instead of committing**, with
 frames through `apply_timeline_scale_ratio()` and asserts the commit path
 accepts.
 
+### 7.4 Known limitation: the drift tolerance does not scale with key magnitude
+
+**As built, the drift check is far tighter than the `2·N·u` bound above implies,
+and this is recorded rather than silently relied on.** The check reads both the
+expected and the actual time from the rebuilt `TimelineTrackRow::key_times`,
+which the runtime stores as `float32`, and compares them against a **flat**
+`kKeyTimeEpsilon` of `1e-6` s. A `float32` ulp is not flat — it doubles with
+every binade:
+
+| key time | `float32` ulp | as a fraction of `kKeyTimeEpsilon` |
+| --- | --- | --- |
+| 1 s | `2^-23` = 1.19e-7 | 0.12 |
+| 2 s | `2^-22` = 2.38e-7 | 0.24 |
+| 4 s | `2^-21` = 4.77e-7 | 0.48 |
+| 8 s | `2^-20` = 9.54e-7 | **0.95** |
+| 16 s | `2^-19` = 1.91e-6 | **1.91** |
+
+So the enforced margin is roughly eight ulps at 1 s, one ulp at 8 s, and **less
+than one ulp above 16 s**, where a single narrowing of a correctly computed time
+can exceed the tolerance on its own. The `double` composition error the analysis
+above bounds at ~2.2e-12 is six orders of magnitude smaller and is not what
+would trip the check; the `float32` round trip through the runtime rows is.
+
+**The failure is fail-safe and currently unreachable.** Tripping the check
+*cancels* the gesture with full rollback — it can never write a drifted time —
+and every fixture in the suite tops out near 2 s, where the margin is still
+about four ulps. But a legitimate long-clip drag on a key past roughly 8 s could
+cancel with `"Timeline scale drifted; the edit was discarded"` while nothing is
+actually wrong, which would read to an animator as the editor refusing a valid
+edit.
+
+**Scaling the tolerance with key magnitude is a deliberate future decision, not
+an oversight.** The obvious repair — comparing against
+`max(kKeyTimeEpsilon, k · ulp(expected))` — changes what "drifted" means for
+every clip, not only long ones, so it wants its own story with its own inverted
+gate and its own long-clip fixture rather than a quiet constant edit inside
+MAR-173. Tightening or loosening the constant here without that fixture would
+trade a reachable false cancel for an unreachable missed detection with no test
+able to tell the two apart.
+
 ## 8. Interaction With Everything Already Built
 
 ### 8.1 MAR-168 — the gesture and transaction model
@@ -1721,7 +1761,9 @@ transaction, and the two layers are independently sufficient.
     every other authoring path, and it keeps one drag model across the graph and
     the dopesheet rather than two.
 
-12. **Commit-time drift is enforced, not merely bounded.** §7.3's error analysis
+12. **Commit-time drift is enforced, not merely bounded.** §7.4 records the one
+    place this bites: the tolerance is flat while a `float32` ulp is not, so the
+    enforced margin thins from eight ulps at 1 s to under one above 16 s. §7.3's error analysis
     shows the incremental composition is safe by six orders of magnitude, but an
     argument in a document does not fail a build. Re-deriving every key's expected
     time at commit and cancelling on a deviation greater than `kKeyTimeEpsilon`

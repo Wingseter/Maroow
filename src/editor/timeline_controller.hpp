@@ -313,6 +313,18 @@ void finish_timeline_scale_gesture(ShellState* state, bool commit);
 std::string_view timeline_scale_rejection(const ShellState& state);
 
 /**
+ * @brief The live scale gesture's readout line, or empty when none is live.
+ *
+ * The spans are derived from the gesture's own `pivot_time` and
+ * `edge_original_time`, both captured before the first frame. Deriving them
+ * from the current tracks instead would be correct only on frame one, because
+ * from frame two the tracks already carry the applied ratio and the line would
+ * compound it. The text lives here rather than in the draw function so the
+ * headless smoke can assert it without an ImGui frame.
+ */
+std::string timeline_scale_readout(const ShellState& state);
+
+/**
  * @brief Opens one live transaction that offsets a single graph component.
  *
  * The gesture edits `component` on every selected key that belongs to `track`,
