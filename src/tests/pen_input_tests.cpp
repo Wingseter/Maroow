@@ -10,8 +10,10 @@
 namespace {
 
 int failures = 0;
+int checks = 0;
 
 void expect(bool condition, const char* message) {
+    ++checks;
     if (!condition) {
         ++failures;
         std::cerr << "FAIL: " << message << '\n';
@@ -63,6 +65,34 @@ int main() {
     expect(mediator.state().stroke_pressure() == 1.0f,
            "non-finite pressure must retain the last valid value");
 
+    // A sentinel pressure makes a rejected non-finite axis distinguishable
+    // from a clamped one: clamping would yield 1.0 for +inf and 0.0 for -inf.
+    expect(mediator.process(pen_event(PointerEventKind::PenAxis, 11, 0.25f)),
+           "the owner pen axis must accept a sentinel pressure");
+    expect(std::abs(mediator.state().stroke_pressure() - 0.25f) < 1e-6f,
+           "the sentinel pressure must reach the active stroke");
+    expect(mediator.process(pen_event(
+               PointerEventKind::PenAxis,
+               11,
+               std::numeric_limits<float>::quiet_NaN())),
+           "NaN owner metadata may be observed without mutation");
+    expect(std::abs(mediator.state().stroke_pressure() - 0.25f) < 1e-6f,
+           "NaN pressure must be rejected, not clamped");
+    expect(mediator.process(pen_event(
+               PointerEventKind::PenAxis,
+               11,
+               std::numeric_limits<float>::infinity())),
+           "positive-infinite owner metadata may be observed without mutation");
+    expect(std::abs(mediator.state().stroke_pressure() - 0.25f) < 1e-6f,
+           "positive infinity must be rejected, not clamped to one");
+    expect(mediator.process(pen_event(
+               PointerEventKind::PenAxis,
+               11,
+               -std::numeric_limits<float>::infinity())),
+           "negative-infinite owner metadata may be observed without mutation");
+    expect(std::abs(mediator.state().stroke_pressure() - 0.25f) < 1e-6f,
+           "negative infinity must be rejected, not clamped to zero");
+
     expect(mediator.process(pen_event(PointerEventKind::PenUp, 11)),
            "the owner pen up must release the stroke");
     expect(mediator.state().stroke_pressure() == 1.0f,
@@ -79,6 +109,23 @@ int main() {
     expect(!mediator.state().down && !mediator.state().proximity &&
                mediator.state().active_pen_id == 0,
            "focus loss must cancel pointer ownership");
+
+    // Lifting the pen out of range cancels the stroke the same way focus loss
+    // does, so no owner can stay latched once the tip leaves proximity.
+    expect(mediator.process(pen_event(PointerEventKind::PenDown, 33, 0.75f)),
+           "a fresh pen down must acquire ownership before the proximity test");
+    expect(mediator.state().down && mediator.state().proximity &&
+               mediator.state().active_pen_id == 33,
+           "an owned pen stroke must report down, proximity, and its pen id");
+    expect(mediator.process(pen_event(PointerEventKind::PenProximityOut, 33)),
+           "the owner pen proximity-out must be accepted");
+    expect(!mediator.state().down && !mediator.state().proximity &&
+               mediator.state().active_pen_id == 0,
+           "proximity-out must release down, proximity, and stroke ownership");
+    expect(mediator.state().stroke_pressure() == 1.0f,
+           "a proximity-out pointer must fall back to mouse-equivalent pressure");
+    expect(mediator.process(pen_event(PointerEventKind::PenDown, 44)),
+           "a different pen must acquire ownership after proximity-out");
 
     expect(pressure_scaled_strength(0.8, 0.0, 0.5) == 0.0,
            "zero pressure must produce a no-op stamp");
@@ -114,7 +161,7 @@ int main() {
            "ordinary SDL mouse motion must preserve mouse pressure parity");
 
     if (failures == 0) {
-        std::cout << "Pen input: 6 cases passed\n";
+        std::cout << "Pen input: " << checks << " cases passed\n";
     }
     return failures == 0 ? 0 : 1;
 }
