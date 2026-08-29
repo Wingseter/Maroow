@@ -112,6 +112,20 @@ bool interpolation_request_arg(
     marrow::runtime::InterpolationKind* kind_out,
     std::array<double, 4>* control_points_out,
     std::string* error_out);
+/**
+ * @brief Parses a curve-mode request into a mode plus an optional driver.
+ *
+ * A missing `mode` is an error rather than a silent default, because guessing
+ * a mode for the caller's whole selection would be destructive. A driver
+ * supplied with `manual` is rejected rather than ignored: it would record an
+ * intent the mode says is inactive, and the shell never produces that pair.
+ * This constructs nothing, so a rejected request touches no shared state.
+ */
+bool curve_mode_request_arg(
+    const json::Value& args,
+    marrow::editor::TimelineCurveMode* mode_out,
+    std::optional<marrow::editor::TimelineScalarComponent>* driver_out,
+    std::string* error_out);
 bool parse_number_array(
     const json::Value& args,
     std::string_view name,

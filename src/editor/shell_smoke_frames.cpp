@@ -1449,6 +1449,159 @@ bool render_headless_smoke_frames(
                   << preset_stats.default_preset_index << ".\n";
     }
 
+    // --- MAR-171: the appended curve-mode row and the auto handle overlay,
+    // driven with real ImGui mouse events aimed at real submitted coordinates.
+    {
+        const TimelineTrackRow* mode_row = find_timeline_track(
+            cached_timeline_tracks(&shell_state), "bone:1:Translate");
+        if (mode_row == nullptr || mode_row->key_times.size() < 2U) {
+            std::cerr << "Actual-frame curve-mode smoke lost its Translate row.\n";
+            return false;
+        }
+        const TimelineKeyRef mode_key = timeline_model::key_ref(*mode_row, 0U);
+        shell_state.selected_timeline_track_id = mode_row->id;
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        const auto select_mode_key = [&]() {
+            shell_state.timeline_editor.selected_keys = {mode_key};
+            shell_state.timeline_editor.active_key = mode_key;
+        };
+        select_mode_key();
+
+        TimelineGraphRenderStats mode_stats;
+        render_graph_frame(nullptr);
+        select_mode_key();
+        render_graph_frame(&mode_stats);
+
+        // The appended row displaced nothing: every rectangle MAR-167 through
+        // MAR-170 aim at is still finite and still inside the plot's window.
+        if (!mode_stats.curve_mode_row_drawn || !mode_stats.curve_mode_row_enabled ||
+            !std::isfinite(mode_stats.first_curve_mode_min_x) ||
+            !std::isfinite(mode_stats.first_curve_mode_min_y) ||
+            mode_stats.first_curve_mode_max_x <= mode_stats.first_curve_mode_min_x ||
+            mode_stats.auto_curve_mode_max_x <= mode_stats.auto_curve_mode_min_x ||
+            !std::isfinite(mode_stats.fit_min_x) ||
+            !std::isfinite(mode_stats.first_component_min_x) ||
+            !std::isfinite(mode_stats.first_preset_min_x) ||
+            mode_stats.fit_max_x <= mode_stats.fit_min_x ||
+            mode_stats.first_component_max_x <= mode_stats.first_component_min_x ||
+            mode_stats.first_preset_max_x <= mode_stats.first_preset_min_x ||
+            mode_stats.plot_max_x <= mode_stats.plot_min_x) {
+            std::cerr << "The curve-mode row was not drawn beside every earlier "
+                         "toolbar rectangle.\n";
+            return false;
+        }
+
+        // Clicking the reported `Auto` button commits exactly one entry and the
+        // next frame reports the active key as automatic.
+        const std::size_t mode_undo_before = shell_state.session.undo_count();
+        const ImVec2 auto_click{
+            (mode_stats.auto_curve_mode_min_x + mode_stats.auto_curve_mode_max_x) * 0.5f,
+            (mode_stats.auto_curve_mode_min_y + mode_stats.auto_curve_mode_max_y) * 0.5f};
+        io.AddMousePosEvent(auto_click.x, auto_click.y);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        // A SmallButton fires during the release frame and the row publishes its
+        // readout before the buttons are submitted, so the settled mode is only
+        // visible one frame later.
+        render_graph_frame(nullptr);
+        select_mode_key();
+        render_graph_frame(&mode_stats);
+        if (shell_state.session.undo_count() != mode_undo_before + 1U ||
+            !mode_stats.active_key_auto) {
+            std::cerr << "Clicking Auto did not commit exactly one automatic entry: undo="
+                      << shell_state.session.undo_count() << "/" << mode_undo_before
+                      << " auto=" << mode_stats.active_key_auto << ".\n";
+            return false;
+        }
+        {
+            const auto* edit = shell_state.session.project()
+                ->find_transform_timeline_edit(
+                    "idle", "spine",
+                    marrow::editor::TransformTimelineChannel::Translate);
+            if (edit == nullptr || edit->keyframes.empty() ||
+                edit->keyframes.front().curve_mode !=
+                    marrow::editor::TimelineCurveMode::Auto ||
+                edit->keyframes.front().interpolation.kind() !=
+                    marrow::runtime::InterpolationKind::CubicBezier ||
+                edit->keyframes.front().interpolation.cubic_bezier().cx1 !=
+                    static_cast<marrow::runtime::AnimationScalar>(1.0 / 3.0) ||
+                edit->keyframes.front().interpolation.cubic_bezier().cx2 !=
+                    static_cast<marrow::runtime::AnimationScalar>(2.0 / 3.0)) {
+                std::cerr << "The Auto button did not store a resolved automatic curve.\n";
+                return false;
+            }
+        }
+
+        // Pressing the reported auto handle, moving 30 px, and releasing demotes
+        // the segment in exactly one entry.
+        if (!mode_stats.handles_drawn ||
+            !std::isfinite(mode_stats.first_handle_x) ||
+            !std::isfinite(mode_stats.first_handle_y)) {
+            std::cerr << "An automatic key did not publish its handle coordinates.\n";
+            return false;
+        }
+        const std::size_t drag_undo_before = shell_state.session.undo_count();
+        io.AddMousePosEvent(mode_stats.first_handle_x, mode_stats.first_handle_y);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(nullptr);
+        io.AddMousePosEvent(
+            mode_stats.first_handle_x + 30.0f, mode_stats.first_handle_y - 30.0f);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(nullptr);
+        select_mode_key();
+        render_graph_frame(&mode_stats);
+        if (shell_state.session.undo_count() != drag_undo_before + 1U ||
+            mode_stats.active_key_auto) {
+            std::cerr << "Dragging an auto handle did not demote it in exactly one "
+                         "entry: undo=" << shell_state.session.undo_count() << "/"
+                      << drag_undo_before << " auto=" << mode_stats.active_key_auto
+                      << ".\n";
+            return false;
+        }
+
+        // With nothing selected the row is disabled and a click is inert.
+        shell_state.timeline_editor.selected_keys.clear();
+        shell_state.timeline_editor.active_key.reset();
+        render_graph_frame(&mode_stats);
+        const std::size_t inert_undo_before = shell_state.session.undo_count();
+        const std::string inert_project_before =
+            marrow::editor::serialize_project(*shell_state.session.project());
+        if (!mode_stats.curve_mode_row_drawn || mode_stats.curve_mode_row_enabled) {
+            std::cerr << "An empty selection must leave the curve-mode row drawn but "
+                         "disabled.\n";
+            return false;
+        }
+        io.AddMousePosEvent(
+            (mode_stats.auto_curve_mode_min_x + mode_stats.auto_curve_mode_max_x) * 0.5f,
+            (mode_stats.auto_curve_mode_min_y + mode_stats.auto_curve_mode_max_y) * 0.5f);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(&mode_stats);
+        if (shell_state.session.undo_count() != inert_undo_before ||
+            marrow::editor::serialize_project(*shell_state.session.project()) !=
+                inert_project_before) {
+            std::cerr << "A click on the disabled curve-mode row changed the project.\n";
+            return false;
+        }
+
+        while (shell_state.session.undo_count() > 0U) {
+            if (!shell_state.session.undo()) break;
+        }
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+        reconcile_timeline_key_selection(
+            &shell_state, cached_timeline_tracks(&shell_state));
+        std::cout << "Timeline Graph actual-frame curve mode: Auto button=("
+                  << auto_click.x << "," << auto_click.y << ") driver="
+                  << mode_stats.active_driver_index << ".\n";
+    }
+
     // MAR-159: the anchor resets only when filter/tree-collapse removes it
     // from the visible order. A Hierarchy window whose dock tab is hidden
     // renders no rows at all; that degenerate frame must not clear it.

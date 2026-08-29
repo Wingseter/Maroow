@@ -1,6 +1,8 @@
 #include "timeline_model.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <iostream>
 #include <limits>
 #include <set>
@@ -8,6 +10,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "curve_auto.hpp"
 
 #include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
@@ -376,6 +380,214 @@ void test_graph_value_gesture_completion_reuse(TestSuite& suite) {
         "a non-finite requested or applied delta must reject the increment");
 }
 
+/**
+ * @brief MAR-171: the pure monotone Fritsch-Carlson resolver.
+ *
+ * Every expected number is spelled out literally rather than recomputed from
+ * `curve_auto`'s own constants, because a test that reads the constant it is
+ * checking proves nothing.
+ */
+void test_automatic_curve_control_points(TestSuite& suite) {
+    using marrow::editor::curve_auto::Sample;
+    using marrow::editor::curve_auto::segment_control_points;
+    using Points = std::array<double, 4>;
+
+    constexpr double kX1 = 1.0 / 3.0;
+    constexpr double kX2 = 2.0 / 3.0;
+
+    const auto samples_from = [](const std::vector<double>& values,
+                                 double spacing = 0.5) {
+        std::vector<Sample> samples;
+        samples.reserve(values.size());
+        for (std::size_t index = 0U; index < values.size(); ++index) {
+            samples.push_back(
+                Sample{static_cast<double>(index) * spacing, values[index]});
+        }
+        return samples;
+    };
+
+    // Fewer than two samples yield no segment at all, which is not an error.
+    const auto empty = segment_control_points({});
+    suite.expect(
+        empty.has_value() && empty->empty(),
+        "an empty sample list must produce an empty vector, not an error");
+    const auto single = segment_control_points({Sample{0.0, 5.0}});
+    suite.expect(
+        single.has_value() && single->empty(),
+        "a one-sample track has no segment and must produce an empty vector");
+
+    // Two points determine a line: a monotone interpolant with no further
+    // information is exactly the straight normalized ramp.
+    const auto pair = segment_control_points({Sample{0.0, 0.0}, Sample{1.0, 10.0}});
+    suite.expect(
+        pair.has_value() && pair->size() == 1U && near((*pair)[0][0], kX1, 1e-12) &&
+            near((*pair)[0][1], kX1, 1e-12) && near((*pair)[0][2], kX2, 1e-12) &&
+            near((*pair)[0][3], kX2, 1e-12),
+        "two samples must resolve to exactly the linear-equivalent curve");
+
+    // The design's worked fixture example: spine rotate 0/8/-2 over 0.5 s steps.
+    const auto fixture = segment_control_points(
+        {Sample{0.0, 0.0}, Sample{0.5, 8.0}, Sample{1.0, -2.0}});
+    suite.expect(
+        fixture.has_value() && fixture->size() == 2U &&
+            near((*fixture)[0][0], kX1, 1e-12) && near((*fixture)[0][1], kX1, 1e-12) &&
+            near((*fixture)[0][2], kX2, 1e-12) && near((*fixture)[0][3], 1.0, 1e-12),
+        "the fixture example's first segment must be [1/3, 1/3, 2/3, 1]");
+    suite.expect(
+        fixture.has_value() && fixture->size() == 2U &&
+            near((*fixture)[1][0], kX1, 1e-12) && near((*fixture)[1][1], 0.0, 1e-12) &&
+            near((*fixture)[1][2], kX2, 1e-12) && near((*fixture)[1][3], kX2, 1e-12),
+        "the fixture example's second segment must be [1/3, 0, 2/3, 2/3]");
+
+    // The format invariant, checked bit-exactly and after float32 narrowing.
+    const auto x_constants_hold = [&](const std::vector<Points>& entries) {
+        for (const Points& entry : entries) {
+            if (entry[0] != kX1 || entry[2] != kX2) return false;
+            const auto narrowed_x1 =
+                static_cast<marrow::runtime::AnimationScalar>(entry[0]);
+            const auto narrowed_x2 =
+                static_cast<marrow::runtime::AnimationScalar>(entry[2]);
+            if (!(narrowed_x1 > 0.0f && narrowed_x1 < 1.0f)) return false;
+            if (!(narrowed_x2 > 0.0f && narrowed_x2 < 1.0f)) return false;
+        }
+        return true;
+    };
+    const auto y_in_unit_range = [&](const std::vector<Points>& entries) {
+        for (const Points& entry : entries) {
+            for (const std::size_t index : {1U, 3U}) {
+                if (!std::isfinite(entry[index])) return false;
+                if (entry[index] < 0.0 || entry[index] > 1.0) return false;
+            }
+        }
+        return true;
+    };
+
+    const auto ramp = segment_control_points(samples_from({0.0, 1.0, 3.0, 6.0, 10.0}));
+    const auto spiky = segment_control_points(samples_from({0.0, 10.0, 0.5, 11.0, 0.0}));
+    const auto plateau = segment_control_points(samples_from({5.0, 5.0, 9.0}));
+    const auto repeated = segment_control_points(samples_from({5.0, 5.0, 5.0}));
+    suite.expect(
+        ramp.has_value() && spiky.has_value() && plateau.has_value() &&
+            repeated.has_value() && x_constants_hold(*ramp) &&
+            x_constants_hold(*spiky) && x_constants_hold(*plateau) &&
+            x_constants_hold(*repeated),
+        "every automatic curve must store cx1 = 1/3 and cx2 = 2/3 bit-exactly");
+    suite.expect(
+        ramp.has_value() && spiky.has_value() && plateau.has_value() &&
+            repeated.has_value() && y_in_unit_range(*ramp) &&
+            y_in_unit_range(*spiky) && y_in_unit_range(*plateau) &&
+            y_in_unit_range(*repeated),
+        "every automatic cy must stay inside [0, 1], so no curve overshoots");
+
+    suite.expect(
+        plateau.has_value() && plateau->size() == 2U &&
+            near((*plateau)[0][1], kX1, 1e-12) && near((*plateau)[0][3], kX2, 1e-12),
+        "a flat segment must resolve to the neutral linear-equivalent curve");
+    suite.expect(
+        plateau.has_value() && plateau->size() == 2U && (*plateau)[1][1] == 0.0,
+        "a plateau must zero the shared tangent of the following segment");
+    suite.expect(
+        repeated.has_value() && repeated->size() == 2U &&
+            near((*repeated)[0][1], kX1, 1e-12) &&
+            near((*repeated)[0][3], kX2, 1e-12) &&
+            near((*repeated)[1][1], kX1, 1e-12) &&
+            near((*repeated)[1][3], kX2, 1e-12),
+        "a fully repeated series must resolve to two exactly linear segments");
+
+    // Monotonicity asserted against the real runtime solver, not the formula.
+    bool sampling_is_monotone = true;
+    if (spiky.has_value()) {
+        for (const Points& entry : *spiky) {
+            const auto easing = marrow::runtime::Interpolation::cubic_bezier(
+                entry[0], entry[1], entry[2], entry[3]);
+            double previous = -1.0;
+            for (int step = 0; step <= 100; ++step) {
+                const double alpha = static_cast<double>(step) / 100.0;
+                const double value = static_cast<double>(
+                    easing.transform(static_cast<marrow::runtime::AnimationScalar>(alpha)));
+                if (!std::isfinite(value) || value < previous - 1e-6 ||
+                    value < -1e-6 || value > 1.0 + 1e-6) {
+                    sampling_is_monotone = false;
+                }
+                previous = value;
+            }
+            if (easing.transform(0.0f) != 0.0f || easing.transform(1.0f) != 1.0f) {
+                sampling_is_monotone = false;
+            }
+        }
+    }
+    suite.expect(
+        spiky.has_value() && sampling_is_monotone,
+        "every resolved curve must sample finite, non-decreasing, and inside [0, 1]");
+
+    // The clamp actually fires on a raw tangent ratio outside the disk.
+    const auto clamped = segment_control_points(samples_from({0.0, 1.0, 1.0001}));
+    bool clamp_holds = clamped.has_value() && !clamped->empty();
+    if (clamped.has_value()) {
+        for (const Points& entry : *clamped) {
+            const double a = entry[1] * 3.0;
+            const double b = (1.0 - entry[3]) * 3.0;
+            if (std::hypot(a, b) > 3.0 + 1e-9) clamp_holds = false;
+        }
+    }
+    suite.expect(clamp_holds, "the Fritsch-Carlson disk clamp must bound every tangent");
+
+    // The std::hypot path: sqrt(a*a + b*b) would overflow and zero both sides.
+    const auto extreme = segment_control_points(samples_from({0.0, 1e-300, 1e300}));
+    suite.expect(
+        extreme.has_value() && x_constants_hold(*extreme) && y_in_unit_range(*extreme),
+        "an extreme secant ratio must still produce finite in-range control points");
+
+    // Scale invariance: a and b are ratios, so the stored bytes cannot move.
+    const auto scaled = segment_control_points(
+        {Sample{0.0, 0.0}, Sample{500.0, -56.0}, Sample{1000.0, 14.0}});
+    bool scale_invariant = scaled.has_value() && fixture.has_value() &&
+        scaled->size() == fixture->size();
+    if (scale_invariant) {
+        for (std::size_t index = 0U; index < scaled->size(); ++index) {
+            for (std::size_t axis = 0U; axis < 4U; ++axis) {
+                if ((*scaled)[index][axis] != (*fixture)[index][axis]) {
+                    scale_invariant = false;
+                }
+            }
+        }
+    }
+    suite.expect(
+        scale_invariant,
+        "scaling every time by 1000 and every value by -7 must be bit-identical");
+
+    // Determinism.
+    const auto repeat_call = segment_control_points(samples_from({0.0, 10.0, 0.5, 11.0, 0.0}));
+    bool deterministic = repeat_call.has_value() && spiky.has_value() &&
+        repeat_call->size() == spiky->size();
+    if (deterministic) {
+        for (std::size_t index = 0U; index < repeat_call->size(); ++index) {
+            for (std::size_t axis = 0U; axis < 4U; ++axis) {
+                if ((*repeat_call)[index][axis] != (*spiky)[index][axis]) {
+                    deterministic = false;
+                }
+            }
+        }
+    }
+    suite.expect(deterministic, "two calls on the same input must be bit-identical");
+
+    // Rejections, each atomic.
+    const double nan_value = std::numeric_limits<double>::quiet_NaN();
+    const double infinity = std::numeric_limits<double>::infinity();
+    suite.expect(
+        !segment_control_points({Sample{0.0, 0.0}, Sample{nan_value, 1.0}}).has_value(),
+        "a non-finite time must reject the whole track");
+    suite.expect(
+        !segment_control_points({Sample{0.0, 0.0}, Sample{1.0, infinity}}).has_value(),
+        "a non-finite value must reject the whole track");
+    suite.expect(
+        !segment_control_points({Sample{1.0, 0.0}, Sample{0.5, 1.0}}).has_value(),
+        "a non-increasing time pair must reject the whole track");
+    suite.expect(
+        !segment_control_points({Sample{0.0, 0.0}, Sample{1e-7, 1.0}}).has_value(),
+        "a segment shorter than the key time epsilon must reject the whole track");
+}
+
 } // namespace
 
 int main() {
@@ -404,6 +616,9 @@ int main() {
     });
     suite.run("graph value gesture completion reuse", [&] {
         test_graph_value_gesture_completion_reuse(suite);
+    });
+    suite.run("automatic curve control points", [&] {
+        test_automatic_curve_control_points(suite);
     });
     return suite.finish();
 }

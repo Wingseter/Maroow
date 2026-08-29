@@ -150,6 +150,62 @@ json::Value timeline_key_curve_value(
     return json::Value{};
 }
 
+/**
+ * @brief The recorded curve mode and driver of one key, for the Agent echo.
+ *
+ * Only Transform and Slot Color keys carry curve intent; every other family
+ * reports nothing at all, which is what makes `previous_mode` absent rather
+ * than a guessed "manual" for a key that could never have one.
+ */
+std::optional<std::pair<
+    marrow::editor::TimelineCurveMode,
+    marrow::editor::TimelineScalarComponent>>
+timeline_key_curve_intent(
+    const ProjectData& project,
+    const TimelineKeySelector& selector) {
+    const auto matching = [&](const auto& keyframes) -> const auto* {
+        for (const auto& keyframe : keyframes) {
+            if (std::abs(keyframe.time - selector.time) <= kKeyTimeEpsilon) {
+                return &keyframe;
+            }
+        }
+        return decltype(&keyframes.front()){nullptr};
+    };
+    if (selector.kind == TimelineKeyKind::Transform) {
+        const auto* edit = project.find_transform_timeline_edit(
+            selector.animation_name, selector.bone_name, selector.transform_channel);
+        if (edit == nullptr || edit->keyframes.empty()) return std::nullopt;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return std::make_pair(keyframe->curve_mode, keyframe->curve_driver);
+        }
+        return std::nullopt;
+    }
+    if (selector.kind == TimelineKeyKind::SlotColor) {
+        const auto* edit = project.find_slot_color_timeline_edit(
+            selector.animation_name, selector.slot_name);
+        if (edit == nullptr || edit->keyframes.empty()) return std::nullopt;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return std::make_pair(keyframe->curve_mode, keyframe->curve_driver);
+        }
+    }
+    return std::nullopt;
+}
+
+/**
+ * @brief Recomputes every automatic curve of the project inside `transaction`.
+ *
+ * MAR-171: a scripted call is not in a per-frame loop, so the Agent resolves
+ * the whole project rather than one animation. A failure cancels the caller's
+ * transaction, rolling back its own mutation too, because a partially resolved
+ * project is exactly the staleness automatic curves exist to remove.
+ * @return an error string when the resolve failed; empty on success.
+ */
+std::string resolve_agent_auto_curves(ProjectData* project) {
+    const marrow::editor::TimelineAutoCurveResult result =
+        marrow::editor::resolve_automatic_curves(project, {});
+    return result ? std::string() : result.error;
+}
+
 bool same_curve_value(const json::Value& left, const json::Value& right) {
     if (left.is_string() && right.is_string()) {
         return left.as_string() == right.as_string();
@@ -430,6 +486,16 @@ AgentDispatchResult handle_editing_operation(
             transaction.cancel();
             return make_error("No changes made.", op, spec, "no_change");
         }
+        // MAR-171: a duration change moves no key today, so this resolves
+        // nothing (§18.3 asserts it). The seam is wired because criterion 3
+        // names duration and because MAR-172's managed boundary key will live
+        // at `duration`.
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -567,6 +633,12 @@ AgentDispatchResult handle_editing_operation(
             *time,
             patch);
 
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -633,6 +705,12 @@ AgentDispatchResult handle_editing_operation(
         }
         edit->keyframes.erase(key_it);
 
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -857,6 +935,12 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (!result.changed) {
             transaction.cancel();
             return make_error("No changes made.", op, spec, "no_change");
+        }
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
         }
         if (auto commit = commit_or_error(
                 transaction,
@@ -1132,6 +1216,12 @@ AgentDispatchResult handle_timeline_editing_operation(
             return make_error("No changes made.", op, spec, "no_change");
         }
         const std::vector<json::Value> current = collect_previous(*transaction.project());
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto commit = commit_or_error(
                 transaction,
                 op,
@@ -1141,6 +1231,296 @@ AgentDispatchResult handle_timeline_editing_operation(
         }
         return make_success(
             "Set timeline key easing successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous, current));
+    }
+
+    if (op == "timeline.set_curve_mode") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.set_curve_mode requires an 'args' object.", op, spec);
+        }
+        const json::Value* keys_value = json::find_member(*args, "keys");
+        if (keys_value == nullptr || !keys_value->is_array() ||
+            keys_value->as_array().empty()) {
+            return make_error(
+                "timeline.set_curve_mode requires a non-empty keys(array).", op, spec);
+        }
+        if (keys_value->as_array().size() > 4096U) {
+            return make_error(
+                "timeline.set_curve_mode accepts at most 4096 keys.", op, spec);
+        }
+
+        std::vector<TimelineKeySelector> selectors;
+        selectors.reserve(keys_value->as_array().size());
+        for (std::size_t index = 0U; index < keys_value->as_array().size(); ++index) {
+            const json::Value& key_value = keys_value->as_array()[index];
+            if (!key_value.is_object()) {
+                return make_error(
+                    "timeline.set_curve_mode key " + std::to_string(index) +
+                        " must be an object.",
+                    op,
+                    spec);
+            }
+            const auto kind = string_arg_any(key_value, {"kind", "type"});
+            const auto animation = string_arg(key_value, "animation");
+            const auto time = number_arg(key_value, "time");
+            if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
+                return make_error(
+                    "timeline.set_curve_mode key " + std::to_string(index) +
+                        " requires kind, animation, and time.",
+                    op,
+                    spec);
+            }
+
+            TimelineKeySelector selector;
+            selector.animation_name = std::string(*animation);
+            selector.time = *time;
+            if (*kind == "transform") {
+                const auto bone = string_arg(key_value, "bone");
+                const auto channel = string_arg(key_value, "channel");
+                if (!bone.has_value() || !channel.has_value()) {
+                    return make_error(
+                        "Transform curve-mode keys require bone and channel.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::Transform;
+                selector.bone_name = std::string(*bone);
+                if (*channel == "rotate") {
+                    selector.transform_channel = TransformTimelineChannel::Rotate;
+                } else if (*channel == "translate") {
+                    selector.transform_channel = TransformTimelineChannel::Translate;
+                } else if (*channel == "scale") {
+                    selector.transform_channel = TransformTimelineChannel::Scale;
+                } else if (*channel == "shear") {
+                    selector.transform_channel = TransformTimelineChannel::Shear;
+                } else {
+                    return make_error(
+                        "Transform curve-mode channel must be rotate, translate, scale, "
+                        "or shear.",
+                        op,
+                        spec);
+                }
+            } else if (*kind == "slot_color") {
+                const auto slot = string_arg(key_value, "slot");
+                if (!slot.has_value()) {
+                    return make_error(
+                        "Slot-colour curve-mode keys require slot.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::SlotColor;
+                selector.slot_name = std::string(*slot);
+            } else if (*kind == "deform") {
+                // Deliberately narrower than timeline.set_interpolation: a
+                // deform key's value is a vertex-offset vector with no
+                // canonical scalar to drive a tangent.
+                return make_error(
+                    "timeline.set_curve_mode does not support deform keys: a deform "
+                    "key's value has no canonical scalar to drive a tangent.",
+                    op,
+                    spec);
+            } else if (*kind == "draw_order" || *kind == "event" ||
+                       *kind == "slot_attachment") {
+                return make_error(
+                    "timeline.set_curve_mode does not support " + std::string(*kind) +
+                        " keys: they carry no easing at all.",
+                    op,
+                    spec);
+            } else {
+                return make_error(
+                    "Unknown timeline curve-mode key kind: " + std::string(*kind),
+                    op,
+                    spec);
+            }
+            selectors.push_back(std::move(selector));
+        }
+
+        marrow::editor::TimelineCurveMode requested_mode =
+            marrow::editor::TimelineCurveMode::Manual;
+        std::optional<marrow::editor::TimelineScalarComponent> requested_driver;
+        std::string mode_error;
+        if (!curve_mode_request_arg(
+                *args, &requested_mode, &requested_driver, &mode_error)) {
+            return make_error(mode_error, op, spec);
+        }
+
+        const auto materialize = [&](ProjectData* project) {
+            for (const TimelineKeySelector& selector : selectors) {
+                if (selector.kind == TimelineKeyKind::Transform) {
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name,
+                        selector.transform_channel);
+                } else if (selector.kind == TimelineKeyKind::SlotColor) {
+                    (void)ensure_slot_color_timeline_edit(
+                        *project, skeleton, selector.animation_name, selector.slot_name);
+                }
+            }
+        };
+        // Previous intent and curves are read from the materialized candidate,
+        // so a runtime-only track reports its runtime state rather than
+        // "not found".
+        struct PreviousIntent {
+            json::Value mode;
+            json::Value driver;
+            json::Value curve;
+        };
+        const auto collect_previous = [&](const ProjectData& project) {
+            std::vector<PreviousIntent> previous;
+            previous.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                PreviousIntent entry;
+                entry.curve = timeline_key_curve_value(project, selector);
+                const auto intent = timeline_key_curve_intent(project, selector);
+                if (intent.has_value()) {
+                    entry.mode = string_value(std::string(
+                        marrow::editor::curve_mode_token(intent->first)));
+                    entry.driver =
+                        intent->first == marrow::editor::TimelineCurveMode::Auto
+                        ? string_value(std::string(
+                              marrow::editor::curve_driver_token(intent->second)))
+                        : json::Value{};
+                }
+                previous.push_back(std::move(entry));
+            }
+            return previous;
+        };
+        const auto response_delta =
+            [&](const marrow::editor::TimelineCurveModeResult& result,
+                bool dry_run,
+                const std::vector<PreviousIntent>& previous,
+                const std::vector<json::Value>& current) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace(
+                    "mode",
+                    string_value(std::string(
+                        marrow::editor::curve_mode_token(requested_mode))));
+                response.emplace(
+                    "driver",
+                    requested_driver.has_value()
+                        ? string_value(std::string(marrow::editor::curve_driver_token(
+                              *requested_driver)))
+                        : json::Value{});
+                response.emplace("key_count", number_value(result.key_count));
+                response.emplace(
+                    "changed_key_count", number_value(result.changed_key_count));
+                response.emplace(
+                    "resolved_key_count", number_value(result.resolved_key_count));
+                constexpr std::size_t kMaxReportedKeys = 256U;
+                const std::size_t reported =
+                    std::min(selectors.size(), kMaxReportedKeys);
+                response.emplace(
+                    "keys_truncated", bool_value(selectors.size() > reported));
+                json::Value::Array keys;
+                keys.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    json::Value::Object entry;
+                    const TimelineKeySelector& selector = selectors[index];
+                    entry.emplace(
+                        "kind", string_value(timeline_key_kind_name(selector.kind)));
+                    entry.emplace("animation", string_value(selector.animation_name));
+                    if (selector.kind == TimelineKeyKind::Transform) {
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(selector.transform_channel))));
+                    } else {
+                        entry.emplace("slot", string_value(selector.slot_name));
+                    }
+                    entry.emplace("time", number_value(selector.time));
+                    entry.emplace(
+                        "previous_mode",
+                        index < previous.size() ? previous[index].mode : json::Value{});
+                    entry.emplace(
+                        "previous_driver",
+                        index < previous.size() ? previous[index].driver : json::Value{});
+                    entry.emplace(
+                        "previous_interpolation",
+                        index < previous.size() ? previous[index].curve : json::Value{});
+                    entry.emplace(
+                        "interpolation",
+                        index < current.size() ? current[index] : json::Value{});
+                    const bool changed = index < previous.size() &&
+                        index < current.size() &&
+                        !same_curve_value(previous[index].curve, current[index]);
+                    entry.emplace("changed", bool_value(changed));
+                    keys.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("keys", array_value(std::move(keys)));
+                return object_value(std::move(response));
+            };
+        const auto collect_curves = [&](const ProjectData& project) {
+            std::vector<json::Value> curves;
+            curves.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                curves.push_back(timeline_key_curve_value(project, selector));
+            }
+            return curves;
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            materialize(&candidate);
+            const std::vector<PreviousIntent> previous = collect_previous(candidate);
+            const marrow::editor::TimelineCurveModeResult result =
+                marrow::editor::set_keyframe_curve_mode(
+                    &candidate, selectors, requested_mode, requested_driver);
+            if (!result && !result.error.empty()) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            const std::vector<json::Value> current = collect_curves(candidate);
+            return make_success(
+                "Timeline curve mode validated.",
+                op,
+                spec,
+                response_delta(result, true, previous, current));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            selectors.size() == 1U
+                ? "Set timeline curve mode via Agent"
+                : "Set timeline curve modes via Agent",
+            "timeline:curve-mode",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        materialize(transaction.project());
+        const std::vector<PreviousIntent> previous =
+            collect_previous(*transaction.project());
+        const marrow::editor::TimelineCurveModeResult result =
+            marrow::editor::set_keyframe_curve_mode(
+                transaction.project(), selectors, requested_mode, requested_driver);
+        if (!result && !result.error.empty()) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const std::vector<json::Value> current = collect_curves(*transaction.project());
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to set timeline curve mode: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Set timeline curve mode successfully.",
             op,
             spec,
             response_delta(result, false, previous, current));
@@ -1607,6 +1987,12 @@ AgentDispatchResult handle_timeline_editing_operation(
         key_it->time = *time;
         key_it->color = *color;
         key_it->interpolation = *interpolation;
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,

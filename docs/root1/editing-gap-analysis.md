@@ -20,7 +20,7 @@ Maroow 에디터의 강점은 **"이미 존재하는 리그 위에서의 애니�
 편집 P0 이후에는 트랜스폼 auto-key, 본/IK 타깃 이동 기즈모, 슬롯/디폼/이벤트/드로우오더 키잉,
 다중 키 선택·리타임·복사/잘라내기/붙여넣기, 애니메이션 CRUD, 4종 제약 저작, 웨이트 페인팅,
 어니언 스킨, 트랜잭션 기반 언두를 제공한다. MAR-122~128 이후에는 typed parameter/group/shape/deformer,
-ArtPath, expression/lip-sync, Parameter Modeling mode와 57개 에이전트 오퍼레이션까지 제공한다.
+ArtPath, expression/lip-sync, Parameter Modeling mode와 58개 에이전트 오퍼레이션까지 제공한다.
 
 현재 Spine/Live2D 대비 가장 큰 **미해결** 격차는 세 가지다:
 
@@ -43,9 +43,9 @@ auto-key를 2026-07-25에 완료했고 behavior-preserving Task #28 핵심 경�
 single-vertex FFD auto-key MAR-163과 attachment-local multi-vertex FFD MAR-164는 2026-08-16에
 완료했다. MAR-165 shared transform snapping, MAR-166 FFD grid/magnetic vertex snapping과
 MAR-167 synchronized scalar graph view는 2026-08-20에 완료했다. MAR-168 graph point editing과
-MAR-169 graphical shared Bezier handle editing과 MAR-170 fixed curve preset·remembered
-default는 2026-08-30에 완료했다. 다음 제품 milestone은 project-local automatic curve
-handle을 담당하는 MAR-171이며 dependency는 완료된 MAR-170다.
+MAR-169 graphical shared Bezier handle editing, MAR-170 fixed curve preset·remembered
+default와 MAR-171 project-local automatic curve handle은 2026-08-30에 완료했다. 다음 제품
+milestone은 loop boundary key 동기화를 담당하는 MAR-172이며 dependency는 완료된 MAR-171이다.
 MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
 
 ---
@@ -82,8 +82,8 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 | 어니언 스킨 | 프레임/키프레임 모드, 전후 개수, 스텝, 앵커 | `shell_viewport_ui.cpp` |
 | 임포트/익스포트 | PSD→리그 생성, Spine JSON/atlas 임포트, 아틀라스 패킹, `.mskl`/`.mbin`/`.matl` 익스포트 | `psd_import.cpp` 등 |
 | Parameter modeling | raw direct/final preview, 1D shape, 2D warp/rotation, full lattice·pivot gesture, expression/lip-sync, ArtPath runtime/render | `shell_parameters.cpp`, `parameter_project_model.cpp`, `parameter_model.cpp` |
-| 에이전트 표면 | 57개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 32). Animation CRUD·duration·atomic timeline retime·timeline interpolation·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
-| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 57-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
+| 에이전트 표면 | 58개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 33). Animation CRUD·duration·atomic timeline retime·timeline interpolation·timeline curve mode·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
+| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 58-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
 
 ### 남아 있는 의도적 제한/부분 구현
 
@@ -189,7 +189,7 @@ Agent/MCP dry-run을 연결했다. 키 생성·오른쪽 이동은 명시 경계
 | Runtime | finite raw direct와 final composed buffer, discrete round/optional clamp, 1D endpoint/linear shape, bilinear warp, rotation pivot/influence, one-level deformer chain과 dependency cache |
 | Renderer | attachment-local final mesh offset, skeleton scale/mirror를 반영한 ArtPath root overlay, deterministic cap/join tessellation, atlas-free preparation과 cache 실패 원자성 |
 | Project/Editor | 일곱 optional parameter family의 typed·lossless save/reload/export, transient non-dirty preview, CRUD, 3×3 full lattice/pivot gesture, confirmed atomic keyform capture |
-| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration과 MAR-169 timeline interpolation operation 포함 현재 57-op parity |
+| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration, MAR-169 timeline interpolation과 MAR-171 timeline curve mode operation 포함 현재 58-op parity |
 | Compatibility/성능 | `.mskl` v1, `.mbin` v2, C ABI v1 유지. CTest 11/11, runtime 4/4, editor 5/5, 200 skeleton `frame_ms=4.45`/`score=100`, parameter `0.07us`/deformer `0.51us` |
 
 MAR-122~128 checkpoint 당시 29개 runtime/renderer unit, parameter project save/reload와 JSON↔MBIN compare,
@@ -277,7 +277,7 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 플랫폼 전환 코드의 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
 raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
 revision 최종 로컬 매트릭스(MAR-210)다. 이 story들은 상태와 내부 dependency를 유지한 채 별도
-재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~170 및 다음 MAR-171~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
+재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~171 및 다음 MAR-172~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
 `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate에서 제외됐다. 코드·단위 테스트가 구현돼도
 macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/resource/package 증거가
 모두 없으면 story를 done으로 표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는
@@ -391,7 +391,7 @@ scalar series다. 전체 gate와 platform qualification 비부여는 `AGENTS.md`
 | MAR-168 (완료, 2026-08-30) | Graph point editing | 4px dead zone 이후 dominant-axis로 축을 고정해 세로 drag는 active component 값만, 가로 drag는 key 전체 시간과 모든 component를 옮긴다. 시간 충돌·frame snap·stable identity·duration auto-grow는 `retime_keyframes()`를, 값은 새 `offset_keyframe_scalars()`를 하나의 `EditTransaction` 안에서 사용한다. |
 | MAR-169 (완료, 2026-08-30) | Graphical Bezier handles | active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집한다. X는 `[0,1]`로 clamp하고 primitive는 범위 밖·비유한 값을 원자적으로 거부하며, finite Y overshoot는 허용한다. Linear/Stepped는 `[1/3,1/3,2/3,2/3]` seed로 같은 transaction·같은 undo에서 Cubic이 되고, 같은 mutation을 57번째 agent operation `timeline.set_interpolation`으로 노출한다. |
 | MAR-170 (완료, 2026-08-30) | Curve presets/default | Linear, Stepped, Ease `[0.25,0.1,0.25,1]`, Ease-In `[0.42,0,1,1]`, Ease-Out `[0,0,0.58,1]`, Ease-In-Out `[0.42,0,0.58,1]` 고정값을 `authoring.hpp`의 단일 `constexpr` table로 선언하고, Graph·Dopesheet 공용 row에서 호환 선택 key 전체에 MAR-169 primitive 하나로 적용한다. Easing이 없는 lane은 GUI가 건너뛰고 개수를 보고하며 agent는 원자적으로 거부한다. 현재 preset 표시는 저장된 `float32` 4값의 순수 함수라 handle drag 직후 `Custom`이 된다. 마지막 기본 curve는 MAR-156 `editor-settings.json`의 `default_curve`에 저장하고 project를 더럽히지 않는다. Registry는 57개 그대로이며 `timeline.set_interpolation`의 문자열 token 4개만 늘었다. |
-| MAR-171 | Automatic handles | `.marrow` 전용 manual/auto curve metadata와 driver component를 저장한다. Auto는 driver scalar에 monotone Fritsch–Carlson tangent를 적용하고 handle drag는 manual로 전환한다. |
+| MAR-171 (완료, 2026-08-30) | Automatic handles | Transform·Slot Color keyframe에만 `curve_mode`(`manual`|`auto`)와 `curve_driver` 두 optional field를 `.marrow` 전용으로 추가한다. 두 field가 없는 기존 project는 byte 단위로 동일하고, manual key는 아무것도 직렬화하지 않는다. Auto는 순수 translation unit `src/editor/curve_auto.cpp`의 monotone Fritsch–Carlson tangent를 기존 공용 `curve` field에 즉시 해석해 쓴다. 정규화 항등식이 `cx1 = 1/3`, `cx2 = 2/3`을 주므로 `cx ∈ [0, 1]` 형식 불변식이 clamp 없이 성립하고 `cy ∈ [0, 1]`도 disk 조건에서 따라 나와 automatic curve는 overshoot할 수 없다. 재계산은 이웃을 무효화한 바로 그 transaction 안에서 animation 전체를 대상으로 하며 history entry는 하나다. 절대 easing 쓰기는 `set_keyframe_interpolation()` 내부에서 manual로 강등하므로 handle drag·preset·inspector·agent가 모두 상속한다. Auto key의 왕복 drag는 강등 자체가 저작이라 commit하고, manual key의 왕복 drag는 여전히 cancel이다. Deform은 정규 scalar가 없어 제외하며 field 부재로 compile time에 강제된다. Load·save·export는 해석하지 않아 stale 쌍은 합법 data다. Registry는 `timeline.set_curve_mode`로 58이 됐고 두 field는 runtime file에 들어가지 않는다. |
 | MAR-172 | Persistent loop synchronization | lane별 opt-in metadata를 저장한다. 명시적 duration과 time 0 key가 있을 때만 duration boundary key를 관리하고 첫 값·curve·duration 변화를 같은 transaction에서 동기화한다. |
 | MAR-173 | Selected-key time scaling | 선택 범위 반대 edge를 pivot으로 양의 비율 scaling을 제공한다. Event tie는 보존하고 비-event 충돌·이웃 침범은 원자적으로 거부한다. |
 | MAR-174 | Preview playback speed | transient 0.05×~8×와 0.25/0.5/1/2× preset을 제공하고 reverse와 합성한다. project dirty/history에는 포함하지 않는다. |
@@ -452,7 +452,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 
 ### 참고: 에이전트(MCP) 표면과의 비대칭
 
-에이전트 표면은 MAR-155 duration과 MAR-169 `timeline.set_interpolation` operation을 포함해 현재 57 ops다. MAR-170은 operation을 추가하지 않고 그 operation의 `interpolation` 인자에 preset token 4개만 더했다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
+에이전트 표면은 MAR-155 duration, MAR-169 `timeline.set_interpolation`과 MAR-171 `timeline.set_curve_mode` operation을 포함해 현재 58 ops다. MAR-170은 operation을 추가하지 않고 그 operation의 `interpolation` 인자에 preset token 4개만 더했다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
 `parameters.list`, `parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`을
 C++ registry와 Python MCP 도구에 함께 노출했다. Transform/slot/parameter authoring은 GUI와 agent가 base materialization
 또는 candidate runtime build를 포함한 UI-free mutation을 공유한다. GUI는 의도적으로 더 넓은 parameter/group/shape lifecycle과

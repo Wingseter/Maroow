@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -73,12 +74,38 @@ struct DebugOverlaySettings {
     bool bounding_boxes{false};
 };
 
+/** @brief One editable scalar channel of a persisted timeline key. */
+enum class TimelineScalarComponent : std::uint8_t {
+    Angle,
+    X,
+    Y,
+    Red,
+    Green,
+    Blue,
+    Alpha,
+};
+
+/**
+ * @brief Authored intent for one key's outgoing easing.
+ *
+ * `Manual` is the pre-MAR-171 behaviour and the default for every keyframe and
+ * every project that omits the field: the stored `interpolation` is exactly
+ * what the animator put there. `Auto` records that the stored easing is a
+ * derived value the editor recomputes from the neighbouring keys of the
+ * driver's series. The stored easing remains authoritative for every reader,
+ * including both file formats and the runtime; the mode records only why the
+ * numbers are what they are, and is never exported.
+ */
+enum class TimelineCurveMode : std::uint8_t { Manual, Auto };
+
 struct TransformKeyframeEdit {
     double time{0.0};
     double angle{0.0};
     double x{0.0};
     double y{0.0};
     runtime::Interpolation interpolation{};
+    TimelineCurveMode curve_mode{TimelineCurveMode::Manual};
+    TimelineScalarComponent curve_driver{TimelineScalarComponent::Angle};
 };
 
 struct TransformTimelineEdit {
@@ -192,6 +219,8 @@ struct SlotColorKeyframeEdit {
     double time{0.0};
     runtime::SlotColor color{};
     runtime::Interpolation interpolation{};
+    TimelineCurveMode curve_mode{TimelineCurveMode::Manual};
+    TimelineScalarComponent curve_driver{TimelineScalarComponent::Red};
 };
 
 struct SlotColorTimelineEdit {

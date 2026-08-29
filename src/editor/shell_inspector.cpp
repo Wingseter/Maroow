@@ -1,6 +1,7 @@
 #include "shell_inspector.hpp"
 
 #include "shell_derived_cache.hpp"
+#include "timeline_controller.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -426,6 +427,19 @@ bool apply_inspector_transform_drag(
             // MAR-170: an Inspector edit at a time with no key authors one.
             marrow::editor::curve_preset_interpolation(
                 state->preferences.default_curve));
+        // MAR-171: an Inspector transform edit moves a driver value, so the
+        // automatic curves that read it are recomputed in the same gesture.
+        std::string auto_curve_error;
+        if (!resolve_timeline_auto_curves(
+                gesture.transaction.project(),
+                state->selected_animation_name,
+                &auto_curve_error)) {
+            finish_inspector_transform_gesture(state, false);
+            state->error_message = auto_curve_error;
+            state->status_message =
+                "Failed to update automatic curves: " + auto_curve_error;
+            return false;
+        }
         const marrow::editor::SessionResult refresh =
             gesture.transaction.refresh_runtime();
         if (!refresh) {

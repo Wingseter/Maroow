@@ -59,6 +59,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"animation.set_duration", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.retime_keyframes", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.set_interpolation", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.set_curve_mode", "edit", true, false, true, true, &handle_editing_operation},
     {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_event_keyframe", "edit", true, false, true, true, &handle_editing_operation},
@@ -284,6 +285,44 @@ std::optional<marrow::runtime::Interpolation> interpolation_arg(
     }
     return marrow::runtime::Interpolation::cubic_bezier(
         coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+}
+
+bool curve_mode_request_arg(
+    const json::Value& args,
+    marrow::editor::TimelineCurveMode* mode_out,
+    std::optional<marrow::editor::TimelineScalarComponent>* driver_out,
+    std::string* error_out) {
+    const json::Value* mode_value = json::find_member(args, "mode");
+    if (mode_value == nullptr || !mode_value->is_string()) {
+        *error_out = "mode is required and must be 'manual' or 'auto'.";
+        return false;
+    }
+    const auto mode = marrow::editor::curve_mode_from_token(mode_value->as_string());
+    if (!mode.has_value()) {
+        *error_out = "mode is required and must be 'manual' or 'auto'.";
+        return false;
+    }
+    *mode_out = *mode;
+    *driver_out = std::nullopt;
+
+    const json::Value* driver_value = json::find_member(args, "driver");
+    if (driver_value == nullptr || driver_value->is_null()) return true;
+    if (*mode != marrow::editor::TimelineCurveMode::Auto) {
+        *error_out = "driver requires mode 'auto'.";
+        return false;
+    }
+    if (!driver_value->is_string()) {
+        *error_out = "driver must be one of angle, x, y, r, g, b, a.";
+        return false;
+    }
+    const auto driver =
+        marrow::editor::curve_driver_from_token(driver_value->as_string());
+    if (!driver.has_value()) {
+        *error_out = "driver must be one of angle, x, y, r, g, b, a.";
+        return false;
+    }
+    *driver_out = *driver;
+    return true;
 }
 
 bool interpolation_request_arg(

@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-170, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-171 is the next product milestone and depends on MAR-170. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-171, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-172 is the next product milestone and depends on MAR-171. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -158,7 +158,7 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (57 operations, including parameter, animation-duration, and timeline-interpolation authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (58 operations, including parameter, animation-duration, timeline-interpolation, and timeline-curve-mode authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
@@ -226,6 +226,91 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-171 Project-Local Automatic Curve Handles Validation Results
+
+Validated 2026-08-30. A Transform or Slot Color keyframe can now record the
+intent "my outgoing easing is whatever a monotone interpolant through my
+neighbours says it should be", as two optional, additive, `.marrow`-only
+members — `curve_mode` (`manual` | `auto`) and `curve_driver` (which scalar
+series drives the computation). Both are absent from every existing project, so
+every existing project keeps today's manual behaviour byte for byte. An
+automatic key's easing is resolved eagerly into the pre-existing `curve` field
+by a pure monotone **Fritsch–Carlson** interpolant living in the new
+`ProjectData`-free translation unit `src/editor/curve_auto.cpp`, and it is
+recomputed inside the *same transaction* as the neighbour-time, neighbour-value,
+insertion, deletion, paste, retime, gizmo-drag, Inspector-field, or duration
+change that invalidated it — one edit, one history entry. Writing any absolute
+easing demotes the key to manual, and the rule lives inside
+`set_keyframe_interpolation()` itself so MAR-169's handle drag, MAR-170's
+presets, the numeric inspector, and the Agent all inherit it and none can forget
+it. The registry grows to exactly **58** operations with `timeline.set_curve_mode`
+and its matching MCP tool. `.mskl` v1, `.mbin` v2, C ABI v1, and
+`editor-settings.json` v1 are unchanged, and neither new field ever reaches a
+runtime file.
+
+**The algebra removes the format risk.** Normalizing a cubic Hermite segment to
+the unit square gives `cx1 = 1/3` and `cx2 = 2/3` *identically* — not by
+clamping — so `X(t) = t` exactly, the runtime's inverse is the identity, and the
+`cx ∈ [0, 1]` invariant both loaders enforce holds unconditionally before and
+after `float32` narrowing. Fritsch–Carlson's `a² + b² ≤ 9` bounds `a, b ∈ [0, 3]`,
+so `cy1 = a/3` and `cy2 = 1 − b/3` are both in `[0, 1]`: an automatic curve can
+**never overshoot**. Overshoot in Marrow stays reachable only through MAR-169's
+manual handle drag.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Algorithm and the `cx` invariant | Every returned entry has `cx1 == 1.0/3.0` and `cx2 == 2.0/3.0` bit-exactly and both narrow strictly inside `(0, 1)`; the fixture's `spine` rotate series `(0,0),(0.5,8),(1,-2)` resolves to exactly `[1/3, 1/3, 2/3, 1]` and `[1/3, 0, 2/3, 2/3]` to `1e-12`; two samples give exactly `[1/3, 1/3, 2/3, 2/3]`; zero and one sample give an empty vector rather than an error; a `static_assert` pins both constants | PASS |
+| Monotonicity, flatness, and no overshoot | Sampling `runtime::Interpolation::cubic_bezier(...).transform(alpha)` over a 101-point grid on every segment of the spiky series `{0, 10, 0.5, 11, 0}` is finite, non-decreasing within `1e-6`, inside `[0, 1]`, and exactly `0.0`/`1.0` at the endpoints; a flat segment resolves to the neutral `[1/3, 1/3, 2/3, 2/3]` and a plateau still zeroes the following segment's shared tangent; `{5,5,5}` gives two exactly linear segments; the disk clamp fires on `{0, 1, 1.0001}`; `{0, 1e-300, 1e300}` still returns finite in-range points; scaling every time by 1000 and every value by −7 is bitwise identical; two calls on one input are bitwise identical; a non-finite time, a non-finite value, a non-increasing pair, and a `1e-7` s segment each reject the whole track | PASS |
+| Additive, default-absent `.marrow` storage | The untouched fixture serializes with neither `curve_mode` nor `curve_driver` and round-trips byte-identically; an automatic key writes the pair exactly once each while a manual key with a non-default driver in memory writes neither; both fields survive save and reload on Transform and Slot Color keys; six malformed documents are each rejected with the exact keyframe-scoped JSON path and message — a numeric `curve_mode`, `"automatic"`, a numeric `curve_driver`, `"z"`, `"x"` on a rotate key, and a driver on a manual key; `validate_project_for_save()` re-rejects an `Angle` driver on a slot-colour key | PASS |
+| Same-transaction recomputation | A graph value drag, an `add_timeline_key_at_playhead()` between two automatic keys, a `remove_selected_timeline_keys()` on the middle key, and a dopesheet retime each add exactly **one** history entry with the automatic curves already updated inside it, asserted against literal expected control points for the post-edit neighbourhood; a paste carries the copied mode and driver and resolves against its **new** neighbours; a Deform-only selection opens no transaction; re-applying the same mode and driver adds no history entry and leaves the bytes identical; a resolver rejection cancels the enclosing transaction, rolling back its materialization too | PASS |
+| Demotion, and why it is not MAR-169's rule | `set_keyframe_interpolation()` sets `Manual` on every key it writes and reports `changed == true` **even when the four control points are byte-identical**, because the demotion is itself the authored change; a drag away and exactly back on an automatic key therefore commits one entry with byte-identical points, while the same round trip on a manual key still commits **zero** entries, preserving MAR-169's net-state rule; a MAR-170 preset on an automatic key demotes it in the preset's own single transaction; the numeric `Bezier X1..Y2` inspector, which writes `interpolation` directly, carries the same one-line demotion | PASS |
+| Agent and MCP parity at 58 | `timeline.set_curve_mode` sits immediately after `timeline.set_interpolation` as (`edit`, mutating, not review, dry-run supported); its dry run reports each key's `previous_mode`, `previous_driver` (`null` for a manual key), and `previous_interpolation` without touching the session; the live call reports `changed_key_count` and `resolved_key_count` in one history entry; a second identical call returns `no_change`; ten rejection cases — missing `mode`, `"automatic"`, an unknown driver, a driver with `"manual"`, a driver the family does not own, a `deform` key, a `draw_order` key, a duplicate selector, an empty `keys` array, and an unresolvable selector (`not_found`) — each leave the project provably unchanged; the demotion is proven through the Agent surface by a follow-up dry run reading `previous_mode == "manual"` | PASS |
+| Export neutrality, on the mutated project | The smoke exports the project it just authored — automatic on `spine` rotate keys 0 and 1 and on `arm_l` rotate key 0 — and asserts the exported `.mskl` carries `cx1 == float(1/3)`, `cy1 == float(1/3)`, `cx2 == float(2/3)`, `cy2 == 1.0f` on `spine` rotate key 0, that `arm_l` key 0 exports a 4-number array where the fixture stores the string `"linear"`, that reading the file **as text** finds neither `curve_mode` nor `curve_driver`, and that the JSON is strictly larger than a baseline exported in the same run. Pointing the same block at the untouched baseline makes assertion 3 fail before any byte count is consulted, which was verified by inverting it | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, and C ABI v1 unchanged with a zero-byte diff on `src/runtime/**`, `include/marrow/runtime/**`, `include/marrow/c_api/**`, and `src/c_api/**`; `editor-settings.json` v1 unchanged with a zero-byte diff on `src/editor/preferences.cpp` and `include/marrow/editor/preferences.hpp` and no new preference field; `DeformKeyframeEdit` gains no member, so the Deform exclusion is compile-enforced; no field is added on the timeline-edit (lane) object, leaving that namespace unclaimed for MAR-172 | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j10` -> configure and all default targets built; `cmake --build build --target marrow_verify_third_party` -> vendored SDL3, zlib, Dear ImGui, Sokol, sokol_imgui, and sokol-shdc hashes verified; `cmake --build build --target marrow_constraint_warning_check` -> built
+- `./build/marrow_timeline_model_tests` -> `Timeline model: 10 cases passed`, including the new `automatic curve control points` case. Its teeth were proven three ways by inverting production code: replacing the flat-segment convention with `[1/3, 0, 2/3, 1]` fails 2 assertions, disabling the disk clamp fails 2, and evaluating the clamp as `sqrt(a*a + b*b)` on the raw tangent ratio instead of `std::hypot` on the tangents fails the extreme-ratio case
+- `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 20 cases passed`; `./build/marrow_preference_tests` -> `PreferenceStore: 11 cases passed` (unchanged; MAR-171 touches no preference code); `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`; `./build/marrow_viewport_interaction_tests` -> passed; `./build/marrow_windowing_tests` -> `Windowing: 4 cases passed`; `./build/marrow_pen_input_tests` -> `Pen input: 34 cases passed`; `./build/marrow_unit_tests` -> all runtime and renderer unit tests passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting `MAR-171 auto export: JSON 14631 bytes, MBIN 4056 bytes (baseline JSON 14336 bytes).` and `MAR-171 automatic curve storage validated as additive, default-absent, and strictly re-validated.` The exported artifact is **295 bytes larger** than the baseline measured in the same run, so it demonstrably carries the authored automatic curves rather than the untouched baseline
+- `./build/marrow_project_smoke --create /tmp/player_idle.marrow` -> minimal project defaults, references, and round trip validated; `./build/marrow_parameter_project_smoke assets/fixtures/parameter_face_basic.marrow` -> passed; `python3 -m json.tool` on both fixtures -> parsed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new headless `validate_timeline_curve_mode_shell_smoke` scenario and the actual-frame curve-mode frames, which reported `Timeline Graph actual-frame curve mode: Auto button=(499,698.5) driver=7`. The actual-frame case clicks the reported `Auto` button with real ImGui mouse events and asserts one history entry plus a stored curve whose `cx` pair is exactly `float(1/3)`/`float(2/3)`, then presses the reported auto handle, moves 30 px, releases, and asserts the segment demoted in exactly one more entry; with nothing selected the row is drawn-but-disabled and a click on it changes nothing; MAR-167/168/169/170's `fit_*`, `first_component_*`, `first_preset_*`, and plot rectangles are all still non-degenerate
+- `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> parameter-mode shell smoke passed; `./build/marrow_editor_shell --verify-launch-focus` -> verified
+- `ctest --test-dir build -N` -> `Total Tests: 21`; `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21`; `-L runtime` -> 4/4; `-L editor` -> 11/11; `-R marrow.renderer_link_boundary` -> 1/1. MAR-171 registers no new CTest
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j10 && ctest --test-dir build-display --output-on-failure` -> automated Debug display-enabled suite `100% tests passed, 0 tests failed out of 24` in 14.01 s, including the 3 display-only tests; `-L windowing` -> 3/3; `-L display` -> 3/3
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j10 && ctest --test-dir build-platform-release --output-on-failure` -> automated Release display-enabled suite `100% tests passed, 0 tests failed out of 24` in 7.30 s
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar171.mskl --export-binary /tmp/marrow_mar171.mbin` -> export passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`. This CLI leg exports the unedited fixture, so its JSON `14336` / MBIN `3984` are the untouched baseline by construction; the automatic-curve-carrying export is the `/tmp/marrow_mar171_auto.*` pair
+- `./build/marrow_inspect --compare /tmp/marrow_mar171_auto.mbin /tmp/marrow_mar171_auto.mskl` -> `Comparison: /tmp/marrow_mar171_auto.mskl matches /tmp/marrow_mar171_auto.mbin`; JSON `14631` bytes, MBIN v2 `4056` bytes with `version=2 optimized=yes animations=3 rotate_channels=4 translate_channels=2 keys=16 sorted=yes`
+- `rg -c 'curve_mode|curve_driver' /tmp/marrow_mar171_auto.mskl` -> **no match**, the direct proof of export neutrality; `wc -c /tmp/marrow_mar171_auto.mskl /tmp/marrow_mar171_export_baseline.mskl` -> `14631` vs `14336`; `python3 -m json.tool /tmp/marrow_mar171_auto.mskl` -> parsed; `./build/marrow_fixture_smoke /tmp/marrow_mar171.mskl /tmp/player_idle.matl` -> passed
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` with 227 `[ OK ]` cases against the exact **58**-operation registry, including the new `timeline.set_curve_mode` expectation row immediately after `timeline.set_interpolation` and its dry-run/live/read-back/`no_change`/demotion/undo sequence plus ten rejection cases with a proven-unchanged project
+- `./build/marrow_agent_socket_tests` -> `Agent socket tests: 4 cases passed`; `./build/marrow_c_smoke` -> C ABI loaded 3 commands, 6 indices, and 2 callback events
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py` against `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` -> `mcp test_client: PASSED` with **58/58** exact C++/Python name parity, the explicit `timeline.set_curve_mode` registry metadata row, and a dry-run/live/read-back/undo sequence asserting the resolved `[0.3333, 0.3333, 0.6667, 1.0]` at four decimal places plus rejection of `"automatic"`, of an `angle` driver on a `slot_color` key, of a `deform` key, and of a driver supplied with `"manual"`. Removing the new MCP tool makes the client fail on `assert len(mcp_names) == 58`, which was verified
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only` against `parameter_face_basic.marrow` -> `mcp parameter test_client: PASSED`; MCP schema `py_compile` -> passed
+- `git diff --stat -- include/marrow/c_api src/c_api`, `-- src/runtime include/marrow/runtime`, `-- src/editor/preferences.cpp include/marrow/editor/preferences.hpp`, and `-- src/tests/preference_store_tests.cpp` -> **all empty**; `./build/marrow_inspect assets/fixtures/player_idle.mbin` -> `version=2`; `git diff --check` -> clean; `git lfs status` -> no LFS object staged or queued to push (the tracked patterns are `*.png`, `*.psd`, `*.otf`, `*.mbin`; no modified file matches one)
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after every gate above, including the three `--agent-port` runs of the production `shell_main.cpp` startup load, which resolves the real path with no override. The new `validate_timeline_curve_mode_shell_smoke` scenario installs its own `ScopedPreferenceIsolation` even though MAR-171 reads no preference, so it cannot resolve that path at all
+
+**One divergence from the design, found by the Task 4 export test and recorded
+rather than glossed.** The design's §8.6 assumed `build_runtime_document()`
+builds transform keyframes through a `build_runtime_*` function of its own, as
+it does for slot colour, and the plan therefore forbade any change to the export
+path. It does not: the `.marrow` and `.mskl` transform keyframe shapes were
+identical, so the export **reused the project serializer**
+`build_transform_keyframes_value()`. The first run of the export test caught
+this immediately — `MAR-171 leaked a project-local field into the runtime
+export` — and the fix is a dedicated `build_runtime_transform_keyframes_value()`
+that emits a fixed member list, exactly mirroring
+`build_runtime_slot_color_keyframes_value()`. The export path is now
+structurally incapable of carrying a project-local keyframe field, which is what
+§8.6 claimed all along. `git diff -- src/editor/project.cpp | rg 'build_runtime'`
+is therefore **not** empty, contrary to the plan's gate; the four hits are that
+new function and its single call site.
+
+The display suites are automated evidence only. This checkpoint adds no manual
+visible-UI, Windows 11, physical-input, or platform qualification credit.
+MAR-192 through MAR-210 remain open, and support qualification remains governed
+by `docs/root1/platform-validation.md`.
 
 ## MAR-170 Fixed Curve Presets and Remembered Defaults Validation Results
 

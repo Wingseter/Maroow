@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 57> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 58> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -70,6 +70,7 @@ constexpr std::array<OperationExpectation, 57> kExpectedOperations{{
     {"animation.set_duration", "edit", true, false, true},
     {"timeline.retime_keyframes", "edit", true, false, true},
     {"timeline.set_interpolation", "edit", true, false, true},
+    {"timeline.set_curve_mode", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
     {"set_event_keyframe", "edit", true, false, true},
@@ -1711,6 +1712,212 @@ int main(int argc, char** argv) {
             "set_transform default easing",
             "an agent-created key no longer defaults to Linear");
         harness.invoke("undo agent-created key", "{\"op\":\"undo\"}");
+    }
+
+    // --- MAR-171: timeline.set_curve_mode, the 58th operation. ---
+    {
+        const char* kSpineRotate =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.0}";
+        const char* kSpineRotateSecond =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.5}";
+        const auto first_key_member = [&](const DispatchObservation& observation,
+                                          std::string_view name)
+            -> const json::Value* {
+            const json::Value* keys = member(observation.scene_delta(), "keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&keys->as_array()[0], name);
+        };
+        const auto string_is = [](const json::Value* value, std::string_view expected) {
+            return value != nullptr && value->is_string() &&
+                value->as_string() == expected;
+        };
+        const auto curve_matches = [&](const json::Value* curve,
+                                       const std::array<double, 4>& expected) {
+            if (curve == nullptr || !curve->is_array() ||
+                curve->as_array().size() != 4U) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                const json::Value& value = curve->as_array()[index];
+                if (!value.is_number() ||
+                    std::abs(value.as_number() - expected[index]) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        // The design's §6.6 worked example, spelled out rather than recomputed.
+        const std::array<double, 4> kSegment0{
+            1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 1.0};
+
+        // A dry run reports the current mode, driver, and curve of every
+        // selected key without touching the session.
+        const DispatchObservation dry_run = harness.invoke(
+            "timeline.set_curve_mode dry run",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"angle\","
+                "\"dry_run\":true}}");
+        harness.expect(
+            bool_member(dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(dry_run.scene_delta(), "key_count") ==
+                    std::optional<double>(1.0) &&
+                string_is(member(dry_run.scene_delta(), "mode"), "auto") &&
+                string_is(member(dry_run.scene_delta(), "driver"), "angle") &&
+                string_is(first_key_member(dry_run, "previous_mode"), "manual") &&
+                first_key_member(dry_run, "previous_driver") != nullptr &&
+                first_key_member(dry_run, "previous_driver")->is_null(),
+            "timeline.set_curve_mode dry run",
+            "the dry run did not report the current mode and driver of each key");
+
+        const DispatchObservation live = harness.invoke(
+            "timeline.set_curve_mode live",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "," + kSpineRotateSecond +
+                "],\"mode\":\"auto\",\"driver\":\"angle\"}}");
+        harness.expect(
+            number_member(live.scene_delta(), "changed_key_count") ==
+                    std::optional<double>(2.0) &&
+                number_member(live.scene_delta(), "resolved_key_count") ==
+                    std::optional<double>(2.0) &&
+                bool_member(live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false),
+            "timeline.set_curve_mode live",
+            "a live curve-mode write did not report its changed and resolved counts");
+
+        const DispatchObservation read_back = harness.invoke(
+            "timeline.set_curve_mode read-back",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"angle\","
+                "\"dry_run\":true}}");
+        harness.expect(
+            string_is(first_key_member(read_back, "previous_mode"), "auto") &&
+                string_is(first_key_member(read_back, "previous_driver"), "angle") &&
+                curve_matches(
+                    first_key_member(read_back, "previous_interpolation"), kSegment0),
+            "timeline.set_curve_mode read-back",
+            "the resolved curve and recorded intent did not survive the live write");
+
+        // A second identical live call changes nothing at all.
+        harness.invoke(
+            "timeline.set_curve_mode no_change",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "," + kSpineRotateSecond +
+                "],\"mode\":\"auto\",\"driver\":\"angle\"}}",
+            false,
+            "no_change");
+
+        // timeline.set_interpolation on an auto key demotes it, proven through
+        // the Agent surface by the next dry run's previous_mode.
+        harness.invoke(
+            "timeline.set_interpolation demotes an auto key",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"interpolation\":\"ease\"}}");
+        const DispatchObservation demoted = harness.invoke(
+            "timeline.set_curve_mode after demotion",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"angle\","
+                "\"dry_run\":true}}");
+        harness.expect(
+            string_is(first_key_member(demoted, "previous_mode"), "manual"),
+            "timeline.set_interpolation demotion",
+            "writing an absolute easing did not demote the key to manual");
+        harness.invoke("undo the demotion", "{\"op\":\"undo\"}");
+
+        // A neighbour retime changes an auto key's curve in one history entry
+        // that one undo fully reverses.
+        const DispatchObservation before_retime = harness.invoke(
+            "timeline.set_curve_mode before retime",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"dry_run\":true}}");
+        harness.expect(
+            curve_matches(
+                first_key_member(before_retime, "previous_interpolation"), kSegment0),
+            "timeline.set_curve_mode undo",
+            "one undo did not restore the resolved curve");
+
+        // Explicit reconciliation: re-applying `auto` to already-auto keys
+        // succeeds and reports resolver work with no intent change.
+        harness.invoke(
+            "timeline.retime_keyframes moves an auto neighbour",
+            std::string("{\"op\":\"timeline.retime_keyframes\",\"args\":{\"keys\":[") +
+                kSpineRotateSecond + "],\"delta\":0.25}}");
+        harness.invoke("undo the neighbour retime", "{\"op\":\"undo\"}");
+
+        // Rejections, each leaving the project untouched.
+        struct CurveModeRejection {
+            const char* label;
+            std::string request;
+        };
+        const std::vector<CurveModeRejection> rejections{
+            {"missing mode",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "]}}"},
+            {"unknown mode",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"automatic\"}}"},
+            {"unknown driver",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"z\"}}"},
+            {"driver with manual",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"manual\",\"driver\":\"angle\"}}"},
+            {"driver the family does not own",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"x\"}}"},
+            {"a deform key",
+             "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":["
+             "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+             "\"attachment\":\"body_mesh\",\"time\":0.0}],\"mode\":\"auto\"}}"},
+            {"a draw_order key",
+             "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":["
+             "{\"kind\":\"draw_order\",\"animation\":\"idle\",\"time\":0.0}],"
+             "\"mode\":\"auto\"}}"},
+            {"a duplicate selector",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "," + kSpineRotate + "],\"mode\":\"auto\"}}"},
+            {"an empty keys array",
+             "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[],"
+             "\"mode\":\"auto\"}}"},
+        };
+        for (const CurveModeRejection& rejection : rejections) {
+            harness.invoke(
+                std::string("timeline.set_curve_mode rejects ") + rejection.label,
+                rejection.request,
+                false,
+                "invalid_request");
+        }
+        harness.invoke(
+            "timeline.set_curve_mode rejects an unresolvable selector",
+            "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":9.75}],\"mode\":\"auto\"}}",
+            false,
+            "not_found");
+
+        const DispatchObservation after_rejections = harness.invoke(
+            "timeline.set_curve_mode unchanged after rejections",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"dry_run\":true}}");
+        harness.expect(
+            string_is(first_key_member(after_rejections, "previous_mode"), "auto") &&
+                curve_matches(
+                    first_key_member(after_rejections, "previous_interpolation"),
+                    kSegment0),
+            "timeline.set_curve_mode rejection atomicity",
+            "a rejected curve-mode request mutated the project");
+
+        // Back to manual so the rest of the smoke sees the fixture's curves.
+        harness.invoke(
+            "timeline.set_curve_mode back to manual",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "," + kSpineRotateSecond + "],\"mode\":\"manual\"}}");
+        harness.invoke("undo back to manual", "{\"op\":\"undo\"}");
+        harness.invoke("undo the automatic application", "{\"op\":\"undo\"}");
     }
 
     // Two merge-enabled transform edits must form one undo group. Temporary

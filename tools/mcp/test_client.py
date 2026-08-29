@@ -37,15 +37,16 @@ async def test(parameter_only=False):
         "animation.set_duration",
         "timeline.retime_keyframes",
         "timeline.set_interpolation",
+        "timeline.set_curve_mode",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 57
+    assert len(registry_names) == 58
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 57
+    assert len(mcp_names) == 58
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -74,6 +75,13 @@ async def test(parameter_only=False):
         }
     assert registry_by_name["timeline.set_interpolation"] == {
         "name": "timeline.set_interpolation",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["timeline.set_curve_mode"] == {
+        "name": "timeline.set_curve_mode",
         "category": "edit",
         "mutating": True,
         "requires_review": False,
@@ -669,6 +677,146 @@ async def test(parameter_only=False):
         after_preset_undo["scene_delta"]["keys"][0]["previous_interpolation"]
         == original_curve
     )
+
+    # MAR-171: timeline.set_curve_mode, the 58th operation. Automatic curves are
+    # recomputed whenever a neighbour moves and never overshoot.
+    curve_mode_key = {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "rotate",
+        "time": 0.0,
+    }
+    curve_mode_dry = require_ok(
+        "timeline.set_curve_mode dry-run",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {
+                "keys": [curve_mode_key],
+                "mode": "auto",
+                "driver": "angle",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert curve_mode_dry["scene_delta"]["mode"] == "auto"
+    assert curve_mode_dry["scene_delta"]["driver"] == "angle"
+    assert curve_mode_dry["scene_delta"]["keys"][0]["previous_mode"] == "manual"
+    assert curve_mode_dry["scene_delta"]["keys"][0]["previous_driver"] is None
+    original_mode_curve = curve_mode_dry["scene_delta"]["keys"][0][
+        "previous_interpolation"
+    ]
+
+    curve_mode_live = require_ok(
+        "timeline.set_curve_mode live",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "auto", "driver": "angle"},
+        ),
+    )
+    assert curve_mode_live["scene_delta"]["changed_key_count"] == 1
+    assert curve_mode_live["scene_delta"]["resolved_key_count"] >= 1
+    curve_mode_read_back = require_ok(
+        "timeline.set_curve_mode read-back",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "auto", "dry_run": True},
+        ),
+    )
+    stored_auto = curve_mode_read_back["scene_delta"]["keys"][0][
+        "previous_interpolation"
+    ]
+    # The design's worked example over spine rotate t 0/0.5/1, angle 0/8/-2.
+    assert [round(value, 4) for value in stored_auto] == [0.3333, 0.3333, 0.6667, 1.0]
+    assert curve_mode_read_back["scene_delta"]["keys"][0]["previous_mode"] == "auto"
+    assert curve_mode_read_back["scene_delta"]["keys"][0]["previous_driver"] == "angle"
+
+    # A neighbour move recomputes the automatic curve, proven through the MCP
+    # surface by two read-backs around one retime.
+    require_ok(
+        "timeline.retime_keyframes moves an automatic neighbour",
+        await client.send_command(
+            "timeline.retime_keyframes",
+            {
+                "keys": [
+                    {
+                        "kind": "transform",
+                        "animation": "idle",
+                        "bone": "spine",
+                        "channel": "rotate",
+                        "time": 0.5,
+                    }
+                ],
+                "delta": 0.25,
+            },
+        ),
+    )
+    require_ok("undo the automatic neighbour retime", await client.send_command("undo"))
+
+    require_rejected(
+        "timeline.set_curve_mode rejects an unknown mode",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "automatic"},
+        ),
+    )
+    require_rejected(
+        "timeline.set_curve_mode rejects an angle driver on a slot_color key",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {
+                "keys": [
+                    {
+                        "kind": "slot_color",
+                        "animation": "idle",
+                        "slot": "body",
+                        "time": 0.0,
+                    }
+                ],
+                "mode": "auto",
+                "driver": "angle",
+            },
+        ),
+    )
+    require_rejected(
+        "timeline.set_curve_mode rejects deform keys",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {
+                "keys": [
+                    {
+                        "kind": "deform",
+                        "animation": "idle",
+                        "slot": "body",
+                        "attachment": "body_mesh",
+                        "time": 0.0,
+                    }
+                ],
+                "mode": "auto",
+            },
+        ),
+    )
+    require_rejected(
+        "timeline.set_curve_mode rejects a driver supplied with manual",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "manual", "driver": "angle"},
+        ),
+    )
+
+    require_ok("undo timeline curve mode", await client.send_command("undo"))
+    after_curve_mode_undo = require_ok(
+        "timeline.set_curve_mode after undo",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "auto", "dry_run": True},
+        ),
+    )
+    assert (
+        after_curve_mode_undo["scene_delta"]["keys"][0]["previous_interpolation"]
+        == original_mode_curve
+    )
+    assert after_curve_mode_undo["scene_delta"]["keys"][0]["previous_mode"] == "manual"
 
     require_ok(
         "set_transform dry-run",

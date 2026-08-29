@@ -213,7 +213,12 @@ shared authoring primitive rejects any out-of-range or non-finite value
 atomically, while `cy1` and `cy2` allow finite overshoot outside `[0, 1]`. All
 six fixed MAR-170 curve presets satisfy this by construction, before and after
 `float32` narrowing, and none of them overshoots, so overshoot remains reachable
-only through a manual handle drag. No field and no version changes as a result.
+only through a manual handle drag. Every MAR-171 **automatic** curve satisfies it
+by construction too, and for a stronger reason: normalizing a cubic Hermite
+segment to the unit square produces `cx1 = 1/3` and `cx2 = 2/3` identically, not
+by clamping, so `X(t) = t` exactly and the inverse is the identity. The same
+algebra bounds `cy1` and `cy2` into `[0, 1]`, so an automatic curve can never
+overshoot either. No field and no version changes as a result.
 
 ### `mixing`
 
@@ -786,6 +791,58 @@ Editor-side overrides that have not yet been exported into runtime assets:
 - slot attachment edits
 
 The exported runtime path merges these edits back into the `.mskl` animation layout.
+
+#### `curve_mode` and `curve_driver` (MAR-171, project-local)
+
+A **bone transform** keyframe object and a **slot light-color** keyframe object
+may each carry two optional string members beside the `curve` field they
+qualify:
+
+| Member | Values | Absent means |
+| --- | --- | --- |
+| `curve_mode` | `"manual"` \| `"auto"` | `"manual"` |
+| `curve_driver` | `"angle"` \| `"x"` \| `"y"` \| `"r"` \| `"g"` \| `"b"` \| `"a"` | the family's lowest-indexed component |
+
+`curve_mode` records *why* the stored `curve` holds the numbers it holds.
+`"manual"` is the pre-MAR-171 behaviour: the stored easing is exactly what the
+animator put there. `"auto"` records that the stored easing is a derived value
+the editor recomputes from the driver's neighbouring keys whenever they move.
+The stored `curve` remains authoritative for every reader — both file formats,
+the runtime, and any older editor build — so a build that has never heard of
+these members reads the file correctly.
+
+`curve_driver` names which scalar series drives the computation, and must be one
+the keyframe's own family owns:
+
+| Family | Authorable drivers |
+| --- | --- |
+| `rotate` | `angle` |
+| `translate`, `scale`, `shear` | `x`, `y` |
+| slot color | `r`, `g`, `b`, `a` |
+
+Mesh deform, draw-order, event, and slot-attachment keyframes carry **no** curve
+mode at all. A deform key's value is a vertex-offset vector with no canonical
+scalar to drive a tangent, and the discrete families carry no easing.
+
+Validation is strict rather than lenient. A non-string or unknown `curve_mode`,
+a non-string or unknown `curve_driver`, a driver the family does not own, and a
+`curve_driver` present while `curve_mode` is absent or `"manual"` are each a
+load error with the keyframe's own JSON path. Accepting and silently dropping a
+driver would lose authored data on the next save; accepting and silently keeping
+one would create an in-memory state that never round-trips.
+
+The serializer writes the pair **only** when `curve_mode` is `"auto"`, so a
+project with no automatic key serializes byte-identically to a pre-MAR-171
+build. Neither member ever enters `.mskl` or `.mbin`: the runtime sees only the
+resolved `curve`, `.mskl` stays version 1, and `.mbin` stays version 2. Loading
+never resolves, so a hand-edited document may legally hold `"curve_mode":
+"auto"` beside a `curve` the editor would not produce; the stored numbers win,
+and `timeline.set_curve_mode` is the explicit way to reconcile them.
+
+Keyframe objects have never preserved unknown members — the parser builds a
+fresh record and the serializer builds a fresh object — so this is the one
+`.marrow.snap` discipline MAR-171 cannot reproduce. That is pre-existing
+behaviour, unchanged here, and recorded as a known limitation.
 
 ### `mesh_edits`
 

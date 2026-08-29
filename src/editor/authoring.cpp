@@ -1,15 +1,19 @@
 #include "marrow/editor/authoring.hpp"
 
+#include "curve_auto.hpp"
 #include "timeline_model.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
 #include <sstream>
+#include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace marrow::editor {
 namespace {
@@ -285,12 +289,48 @@ bool finite_animation_scalar(double value) {
 }
 
 /**
- * @brief Reports whether `component` is authorable on the resolved key family.
+ * @brief Reports whether `component` is authorable on one timeline family.
  *
  * Rotate owns Angle; Translate, Scale, and Shear own X and Y; Slot Color owns
  * the four channels. Deform, Draw Order, Event, and Slot Attachment keys own
- * none. Times and interpolations are never named here.
+ * none. `channel` is read only for Transform. This is the single definition
+ * `read_scalar_component()` and `curve_driver_is_authorable()` share, so an
+ * offset and an automatic curve driver can never disagree about a family.
  */
+bool family_owns_scalar_component(
+    TimelineKeyKind kind,
+    TransformTimelineChannel channel,
+    TimelineScalarComponent component) {
+    switch (kind) {
+    case TimelineKeyKind::Transform:
+        if (channel == TransformTimelineChannel::Rotate) {
+            return component == TimelineScalarComponent::Angle;
+        }
+        return component == TimelineScalarComponent::X ||
+            component == TimelineScalarComponent::Y;
+    case TimelineKeyKind::SlotColor:
+        switch (component) {
+        case TimelineScalarComponent::Red:
+        case TimelineScalarComponent::Green:
+        case TimelineScalarComponent::Blue:
+        case TimelineScalarComponent::Alpha:
+            return true;
+        case TimelineScalarComponent::Angle:
+        case TimelineScalarComponent::X:
+        case TimelineScalarComponent::Y:
+            return false;
+        }
+        return false;
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return false;
+    }
+    return false;
+}
+
+/** @brief Reads one authorable scalar of a resolved key; never `time`, never easing. */
 bool read_scalar_component(
     const ProjectData& project,
     const ResolvedTimelineKey& resolved,
@@ -300,21 +340,16 @@ bool read_scalar_component(
     case TimelineKeyKind::Transform: {
         const auto& timeline = project.transform_timeline_edits[resolved.timeline_index];
         const auto& keyframe = timeline.keyframes[resolved.key_index];
-        const bool rotate = timeline.channel == TransformTimelineChannel::Rotate;
-        if (rotate) {
-            if (component != TimelineScalarComponent::Angle) return false;
+        if (!family_owns_scalar_component(resolved.kind, timeline.channel, component)) {
+            return false;
+        }
+        if (timeline.channel == TransformTimelineChannel::Rotate) {
             *value_out = keyframe.angle;
             return true;
         }
-        if (component == TimelineScalarComponent::X) {
-            *value_out = keyframe.x;
-            return true;
-        }
-        if (component == TimelineScalarComponent::Y) {
-            *value_out = keyframe.y;
-            return true;
-        }
-        return false;
+        *value_out =
+            component == TimelineScalarComponent::X ? keyframe.x : keyframe.y;
+        return true;
     }
     case TimelineKeyKind::SlotColor: {
         const auto& keyframe =
@@ -1949,6 +1984,115 @@ void write_key_interpolation(
 }
 
 /**
+ * @brief Reads the recorded curve mode of a resolved key, or nullptr.
+ *
+ * Deform keys deliberately carry no curve mode: a vertex-offset vector has no
+ * canonical scalar to drive a tangent, so the exclusion is enforced by the
+ * missing member rather than by a branch. The discrete families carry no
+ * easing at all.
+ */
+const TimelineCurveMode* read_key_curve_mode(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        return &project.transform_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .curve_mode;
+    case TimelineKeyKind::SlotColor:
+        return &project.slot_color_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .curve_mode;
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return nullptr;
+    }
+    return nullptr;
+}
+
+/** @brief Writes the recorded curve mode of a key that carries one. */
+void write_key_curve_mode(
+    ProjectData* project,
+    const ResolvedTimelineKey& resolved,
+    TimelineCurveMode mode) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        project->transform_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .curve_mode = mode;
+        return;
+    case TimelineKeyKind::SlotColor:
+        project->slot_color_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .curve_mode = mode;
+        return;
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return;
+    }
+}
+
+/** @brief Reads the recorded curve driver of a resolved key, or nullptr. */
+const TimelineScalarComponent* read_key_curve_driver(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        return &project.transform_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .curve_driver;
+    case TimelineKeyKind::SlotColor:
+        return &project.slot_color_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .curve_driver;
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return nullptr;
+    }
+    return nullptr;
+}
+
+/** @brief Writes the recorded curve driver of a key that carries one. */
+void write_key_curve_driver(
+    ProjectData* project,
+    const ResolvedTimelineKey& resolved,
+    TimelineScalarComponent driver) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        project->transform_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .curve_driver = driver;
+        return;
+    case TimelineKeyKind::SlotColor:
+        project->slot_color_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .curve_driver = driver;
+        return;
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return;
+    }
+}
+
+/** @brief The Transform channel of a resolved key; Rotate for every other family. */
+TransformTimelineChannel resolved_key_channel(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    if (resolved.kind != TimelineKeyKind::Transform) {
+        return TransformTimelineChannel::Rotate;
+    }
+    return project.transform_timeline_edits[resolved.timeline_index].channel;
+}
+
+/**
  * @brief Validates one cubic control point value.
  *
  * The finiteness test must precede the range test: `NaN < 0.0` and
@@ -2050,7 +2194,14 @@ TimelineInterpolationResult set_keyframe_interpolation(
     std::size_t changed_key_count = 0U;
     for (const ResolvedTimelineKey& key : resolved) {
         const runtime::Interpolation* current = read_key_interpolation(candidate, key);
-        if (current != nullptr && !same_interpolation(*current, interpolation)) {
+        const bool easing_changed =
+            current != nullptr && !same_interpolation(*current, interpolation);
+        // MAR-171: writing an absolute easing takes the key off its
+        // neighbours, so the demotion is itself an authored change even when
+        // the four control points land on their previous values.
+        const TimelineCurveMode* mode = read_key_curve_mode(candidate, key);
+        const bool demoted = mode != nullptr && *mode != TimelineCurveMode::Manual;
+        if (easing_changed || demoted) {
             ++changed_key_count;
         }
     }
@@ -2060,6 +2211,7 @@ TimelineInterpolationResult set_keyframe_interpolation(
 
     for (const ResolvedTimelineKey& key : resolved) {
         write_key_interpolation(&candidate, key, interpolation);
+        write_key_curve_mode(&candidate, key, TimelineCurveMode::Manual);
     }
     *project = std::move(candidate);
     return {{true, {}}, resolved.size(), changed_key_count};
@@ -2168,6 +2320,341 @@ std::optional<CurvePreset> curve_preset_from_token(std::string_view token) {
         if (entry.token == token) return entry.preset;
     }
     return std::nullopt;
+}
+
+namespace {
+
+/** @brief The seven driver tokens, in `TimelineScalarComponent` enum order. */
+constexpr std::array<std::string_view, 7> kCurveDriverTokens{
+    "angle", "x", "y", "r", "g", "b", "a"};
+
+} // namespace
+
+std::string_view curve_mode_token(TimelineCurveMode mode) {
+    return mode == TimelineCurveMode::Auto ? "auto" : "manual";
+}
+
+std::optional<TimelineCurveMode> curve_mode_from_token(std::string_view token) {
+    if (token == "manual") return TimelineCurveMode::Manual;
+    if (token == "auto") return TimelineCurveMode::Auto;
+    return std::nullopt;
+}
+
+std::string_view curve_driver_token(TimelineScalarComponent driver) {
+    const auto index = static_cast<std::size_t>(driver);
+    return index < kCurveDriverTokens.size() ? kCurveDriverTokens[index]
+                                             : kCurveDriverTokens[0];
+}
+
+std::optional<TimelineScalarComponent> curve_driver_from_token(std::string_view token) {
+    for (std::size_t index = 0U; index < kCurveDriverTokens.size(); ++index) {
+        if (kCurveDriverTokens[index] == token) {
+            return static_cast<TimelineScalarComponent>(index);
+        }
+    }
+    return std::nullopt;
+}
+
+TimelineScalarComponent default_curve_driver(
+    TimelineKeyKind kind,
+    TransformTimelineChannel channel) {
+    // The family's lowest-indexed component, which is the same rule the graph
+    // uses when `graph_view.active_component` is unset.
+    if (kind == TimelineKeyKind::SlotColor) return TimelineScalarComponent::Red;
+    if (channel == TransformTimelineChannel::Rotate) {
+        return TimelineScalarComponent::Angle;
+    }
+    return TimelineScalarComponent::X;
+}
+
+bool curve_driver_is_authorable(
+    TimelineKeyKind kind,
+    TransformTimelineChannel channel,
+    TimelineScalarComponent driver) {
+    return family_owns_scalar_component(kind, channel, driver);
+}
+
+namespace {
+
+/** @brief A human-readable name for one track, used only in resolver errors. */
+std::string transform_track_label(const TransformTimelineEdit& edit) {
+    std::string channel;
+    switch (edit.channel) {
+    case TransformTimelineChannel::Rotate:
+        channel = "rotate";
+        break;
+    case TransformTimelineChannel::Translate:
+        channel = "translate";
+        break;
+    case TransformTimelineChannel::Scale:
+        channel = "scale";
+        break;
+    case TransformTimelineChannel::Shear:
+        channel = "shear";
+        break;
+    }
+    return "bone '" + edit.bone_name + "' " + channel;
+}
+
+/**
+ * @brief The first segment index the resolver cannot use, for the error text.
+ *
+ * `segment_control_points()` rejects the whole track without naming a segment,
+ * so the message is built here from the same three conditions.
+ */
+std::size_t first_unusable_segment(const std::vector<curve_auto::Sample>& samples) {
+    for (std::size_t index = 0U; index + 1U < samples.size(); ++index) {
+        const curve_auto::Sample& from = samples[index];
+        const curve_auto::Sample& to = samples[index + 1U];
+        if (!std::isfinite(from.time_seconds) || !std::isfinite(from.value) ||
+            !std::isfinite(to.time_seconds) || !std::isfinite(to.value)) {
+            return index;
+        }
+        if (to.time_seconds - from.time_seconds <= curve_auto::kMinimumSegmentSeconds) {
+            return index;
+        }
+    }
+    return 0U;
+}
+
+/**
+ * @brief Resolves one track's automatic segments in place.
+ *
+ * Segment `i` is resolved from key `i`'s own driver over the whole track's
+ * series for that component, so mixed drivers on one track are well defined and
+ * a driver change is local to its own segment. The four passes run once per
+ * distinct driver present, at most four times.
+ */
+template <typename Keyframes, typename ReadComponent>
+bool resolve_track_automatic_curves(
+    Keyframes* keyframes,
+    ReadComponent&& read_component,
+    std::string_view animation_name,
+    const std::string& track_label,
+    std::size_t* auto_key_count,
+    std::size_t* resolved_key_count,
+    std::string* error_out) {
+    const std::size_t count = keyframes->size();
+    if (count < 2U) return true;
+
+    std::set<TimelineScalarComponent> drivers;
+    for (std::size_t index = 0U; index + 1U < count; ++index) {
+        if ((*keyframes)[index].curve_mode != TimelineCurveMode::Auto) continue;
+        drivers.insert((*keyframes)[index].curve_driver);
+        ++*auto_key_count;
+    }
+    if (drivers.empty()) return true;
+
+    std::map<TimelineScalarComponent, std::vector<std::array<double, 4>>> resolved;
+    for (const TimelineScalarComponent driver : drivers) {
+        std::vector<curve_auto::Sample> samples;
+        samples.reserve(count);
+        for (const auto& keyframe : *keyframes) {
+            samples.push_back(
+                curve_auto::Sample{keyframe.time, read_component(keyframe, driver)});
+        }
+        auto control_points = curve_auto::segment_control_points(samples);
+        if (!control_points.has_value()) {
+            *error_out = "Automatic curves for animation '" +
+                std::string(animation_name) + "' " + track_label + " segment " +
+                std::to_string(first_unusable_segment(samples)) +
+                " need finite, strictly increasing key times at least 1 us apart.";
+            return false;
+        }
+        resolved.emplace(driver, std::move(*control_points));
+    }
+
+    for (std::size_t index = 0U; index + 1U < count; ++index) {
+        auto& keyframe = (*keyframes)[index];
+        if (keyframe.curve_mode != TimelineCurveMode::Auto) continue;
+        const auto& points = resolved.at(keyframe.curve_driver)[index];
+        const runtime::Interpolation easing = runtime::Interpolation::cubic_bezier(
+            points[0], points[1], points[2], points[3]);
+        if (!same_interpolation(keyframe.interpolation, easing)) {
+            keyframe.interpolation = easing;
+            ++*resolved_key_count;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TimelineAutoCurveResult resolve_automatic_curves(
+    ProjectData* project,
+    std::string_view animation_name) {
+    if (project == nullptr) {
+        return {{false, "Timeline authoring requires an open project."}, 0U, 0U};
+    }
+
+    ProjectData candidate = *project;
+    std::size_t auto_key_count = 0U;
+    std::size_t resolved_key_count = 0U;
+    std::string error;
+
+    for (TransformTimelineEdit& edit : candidate.transform_timeline_edits) {
+        if (!animation_name.empty() && edit.animation_name != animation_name) continue;
+        const bool rotate = edit.channel == TransformTimelineChannel::Rotate;
+        const auto read_component = [rotate](
+                                        const TransformKeyframeEdit& keyframe,
+                                        TimelineScalarComponent driver) {
+            if (rotate) return keyframe.angle;
+            return driver == TimelineScalarComponent::Y ? keyframe.y : keyframe.x;
+        };
+        if (!resolve_track_automatic_curves(
+                &edit.keyframes,
+                read_component,
+                edit.animation_name,
+                transform_track_label(edit),
+                &auto_key_count,
+                &resolved_key_count,
+                &error)) {
+            return {{false, std::move(error)}, 0U, 0U};
+        }
+    }
+    for (SlotColorTimelineEdit& edit : candidate.slot_color_timeline_edits) {
+        if (!animation_name.empty() && edit.animation_name != animation_name) continue;
+        const auto read_component = [](const SlotColorKeyframeEdit& keyframe,
+                                       TimelineScalarComponent driver) {
+            switch (driver) {
+            case TimelineScalarComponent::Green:
+                return static_cast<double>(keyframe.color.g);
+            case TimelineScalarComponent::Blue:
+                return static_cast<double>(keyframe.color.b);
+            case TimelineScalarComponent::Alpha:
+                return static_cast<double>(keyframe.color.a);
+            case TimelineScalarComponent::Red:
+            case TimelineScalarComponent::Angle:
+            case TimelineScalarComponent::X:
+            case TimelineScalarComponent::Y:
+                break;
+            }
+            return static_cast<double>(keyframe.color.r);
+        };
+        if (!resolve_track_automatic_curves(
+                &edit.keyframes,
+                read_component,
+                edit.animation_name,
+                "slot '" + edit.slot_name + "' color",
+                &auto_key_count,
+                &resolved_key_count,
+                &error)) {
+            return {{false, std::move(error)}, 0U, 0U};
+        }
+    }
+
+    if (resolved_key_count == 0U) {
+        return {{false, {}}, auto_key_count, 0U};
+    }
+    *project = std::move(candidate);
+    return {{true, {}}, auto_key_count, resolved_key_count};
+}
+
+TimelineCurveModeResult set_keyframe_curve_mode(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    TimelineCurveMode mode,
+    std::optional<TimelineScalarComponent> driver) {
+    if (project == nullptr) {
+        return {{false, "Timeline authoring requires an open project."}, 0U, 0U, 0U};
+    }
+    if (selectors.empty()) {
+        return {{false, "At least one timeline key is required."}, 0U, 0U, 0U};
+    }
+    if (mode != TimelineCurveMode::Auto && driver.has_value()) {
+        return {{false, "A curve driver requires automatic curve mode."}, 0U, 0U, 0U};
+    }
+
+    ProjectData candidate = *project;
+    std::vector<ResolvedTimelineKey> resolved;
+    resolved.reserve(selectors.size());
+    std::vector<TimelineScalarComponent> effective_drivers;
+    effective_drivers.reserve(selectors.size());
+    std::set<std::tuple<int, std::size_t, std::size_t>> identities;
+    std::vector<std::string> animations;
+    for (const TimelineKeySelector& selector : selectors) {
+        if (selector.animation_name.empty() || !std::isfinite(selector.time) ||
+            selector.time < 0.0) {
+            return {{false, "Timeline selectors require an animation and non-negative finite time."},
+                    0U,
+                    0U,
+                    0U};
+        }
+        std::string error;
+        const auto key = resolve_timeline_key(candidate, selector, &error);
+        if (!key.has_value()) {
+            return {{false, std::move(error)}, 0U, 0U, 0U};
+        }
+        const auto identity = std::make_tuple(
+            static_cast<int>(key->kind), key->timeline_index, key->key_index);
+        if (!identities.insert(identity).second) {
+            return {{false, "A timeline key was selected more than once."}, 0U, 0U, 0U};
+        }
+        if (read_key_curve_mode(candidate, *key) == nullptr) {
+            return {{false,
+                     "Only transform and slot colour keys carry a curve mode; a deform "
+                     "key's value has no canonical scalar to drive a tangent."},
+                    0U,
+                    0U,
+                    0U};
+        }
+        const TransformTimelineChannel channel =
+            resolved_key_channel(candidate, *key);
+        const TimelineScalarComponent effective =
+            driver.value_or(default_curve_driver(key->kind, channel));
+        if (!curve_driver_is_authorable(key->kind, channel, effective)) {
+            return {{false, "The curve driver must name a component this timeline owns."},
+                    0U,
+                    0U,
+                    0U};
+        }
+        if (std::find(animations.begin(), animations.end(), selector.animation_name) ==
+            animations.end()) {
+            animations.push_back(selector.animation_name);
+        }
+        resolved.push_back(*key);
+        effective_drivers.push_back(effective);
+    }
+
+    std::size_t changed_key_count = 0U;
+    for (std::size_t index = 0U; index < resolved.size(); ++index) {
+        const TimelineCurveMode* current_mode =
+            read_key_curve_mode(candidate, resolved[index]);
+        if (*current_mode != mode) {
+            ++changed_key_count;
+            continue;
+        }
+        // A manual key records no driver at all, so re-applying `Manual` can
+        // never differ and there is exactly one representation of "manual".
+        if (mode != TimelineCurveMode::Auto) continue;
+        const TimelineScalarComponent* current_driver =
+            read_key_curve_driver(candidate, resolved[index]);
+        if (*current_driver != effective_drivers[index]) ++changed_key_count;
+    }
+    for (std::size_t index = 0U; index < resolved.size(); ++index) {
+        write_key_curve_mode(&candidate, resolved[index], mode);
+        if (mode == TimelineCurveMode::Auto) {
+            write_key_curve_driver(&candidate, resolved[index], effective_drivers[index]);
+        }
+    }
+
+    // Resolving inside the candidate keeps the whole write atomic: a rejected
+    // resolve leaves `*project` exactly as it was, mode included.
+    std::size_t resolved_key_count = 0U;
+    for (const std::string& animation : animations) {
+        const TimelineAutoCurveResult result =
+            resolve_automatic_curves(&candidate, animation);
+        if (!result) {
+            return {{false, result.error}, 0U, 0U, 0U};
+        }
+        resolved_key_count += result.resolved_key_count;
+    }
+
+    if (changed_key_count == 0U && resolved_key_count == 0U) {
+        return {{false, {}}, resolved.size(), 0U, 0U};
+    }
+    *project = std::move(candidate);
+    return {{true, {}}, resolved.size(), changed_key_count, resolved_key_count};
 }
 
 } // namespace marrow::editor

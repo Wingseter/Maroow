@@ -113,8 +113,25 @@ that has no key yet. Editing a key that already exists never changes its curve. 
 never in the project, so it never dirties a file and never changes an existing
 key; applying a preset does not change it. Missing, malformed, or
 future-versioned settings fall back to Linear without rewriting the file, and
-pasted keys always keep the curve they were copied with. Automatic and
-project-local curve handles arrive in MAR-171. FFD and discrete Inherit,
+pasted keys always keep the curve they were copied with.
+
+The Graph toolbar carries one more row, **Curve mode:**, with `Manual` and
+`Auto` buttons and a `Driver:` combo. `Manual` is what every key has always
+been: the stored easing is exactly what you put there. `Auto` records that the
+easing should be whatever a smooth curve through the driver's neighbouring keys
+says it should be, and the editor keeps that promise — move a neighbour in time
+or value, add one, delete one, paste one, or drag a bone, and the affected
+curves are recomputed inside that same edit, so it is still one undo step. An
+automatic key's handles are drawn hollow and amber instead of filled and blue,
+and grabbing one switches that segment back to manual in the same drag, because
+you have just said the curve should stop following its neighbours. Automatic
+curves never overshoot; only a manual handle drag can. The `Driver:` combo picks
+which series drives the shape — `Angle` for a rotate key, `X`/`Y` for
+translate, scale, and shear, and `Red`/`Green`/`Blue`/`Alpha` for a slot colour
+— and is disabled when the selection spans families that share no component.
+Mesh deform keys have no automatic mode: a vertex-offset vector has no single
+number to compute a tangent from. Loop-boundary key synchronization arrives in
+MAR-172. FFD and discrete Inherit,
 Attachment, Draw Order, and Event lanes show an unsupported empty state instead
 of stale graph data. Graph tab, visibility, Fit, pan, zoom, hover,
 active-component, and drag state are shell-private and are not saved to

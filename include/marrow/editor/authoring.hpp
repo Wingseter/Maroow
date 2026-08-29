@@ -189,16 +189,10 @@ TimelineRetimeResult retime_keyframes(
     bool snap_to_frames,
     double frames_per_second);
 
-/** @brief One editable scalar channel of a persisted timeline key. */
-enum class TimelineScalarComponent : std::uint8_t {
-    Angle,
-    X,
-    Y,
-    Red,
-    Green,
-    Blue,
-    Alpha,
-};
+// `TimelineScalarComponent` now lives in `marrow/editor/project.hpp`, because
+// `TransformKeyframeEdit` and `SlotColorKeyframeEdit` store one as a curve
+// driver. This header includes that one, so every existing include site is
+// unaffected.
 
 struct TimelineScalarOffsetResult : AuthoringResult {
     double applied_delta{0.0};
@@ -241,6 +235,12 @@ struct TimelineInterpolationResult : AuthoringResult {
  * rejected. Callers materialize imported runtime-only tracks through the
  * shared `ensure_*_timeline_edit` project operations first. A rejected edit
  * leaves the project unchanged.
+ *
+ * MAR-171 side effect: **every key this writes becomes
+ * `TimelineCurveMode::Manual`**, and `changed_key_count` counts a key whose
+ * mode changed even when its four control points did not. Writing an absolute
+ * easing is exactly the act of taking a key off its neighbours, so the rule
+ * lives here rather than at the four call sites that could each forget it.
  */
 TimelineInterpolationResult set_keyframe_interpolation(
     ProjectData* project,
@@ -306,5 +306,66 @@ std::optional<CurvePreset> curve_preset_of(const runtime::Interpolation& interpo
 
 /** @brief Parses one preset token; the same six tokens `editor-settings.json` uses. */
 std::optional<CurvePreset> curve_preset_from_token(std::string_view token);
+
+/** @brief The `.marrow` token for one curve mode, and its inverse. */
+std::string_view curve_mode_token(TimelineCurveMode mode);
+std::optional<TimelineCurveMode> curve_mode_from_token(std::string_view token);
+/** @brief The `.marrow` token for one driver component, and its inverse. */
+std::string_view curve_driver_token(TimelineScalarComponent driver);
+std::optional<TimelineScalarComponent> curve_driver_from_token(std::string_view token);
+/** @brief The lowest-indexed component a family owns, used as its default driver. */
+TimelineScalarComponent default_curve_driver(
+    TimelineKeyKind kind,
+    TransformTimelineChannel channel);
+/** @brief Reports whether `driver` is authorable on that family. */
+bool curve_driver_is_authorable(
+    TimelineKeyKind kind,
+    TransformTimelineChannel channel,
+    TimelineScalarComponent driver);
+
+struct TimelineCurveModeResult : AuthoringResult {
+    std::size_t key_count{0U};
+    std::size_t changed_key_count{0U};   // mode or driver differed
+    std::size_t resolved_key_count{0U};  // stored easing rewritten
+};
+
+/**
+ * @brief Atomically records manual/automatic curve intent on persisted keys.
+ *
+ * Only Transform and Slot Color keys carry curve intent: a deform key's value
+ * is a vertex-offset vector with no canonical scalar to drive a tangent, and
+ * the discrete families carry no easing at all. `driver` must name a component
+ * the selected key's family owns; `std::nullopt` selects that family's
+ * lowest-indexed component. `Manual` records intent only and never writes a
+ * driver, so there is exactly one representation of a manual key. Setting
+ * `Auto` immediately resolves every affected automatic curve of every animation
+ * the selectors name, so the stored easing and the recorded intent never
+ * disagree after a successful call. A rejected edit leaves the project
+ * unchanged.
+ */
+TimelineCurveModeResult set_keyframe_curve_mode(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    TimelineCurveMode mode,
+    std::optional<TimelineScalarComponent> driver = std::nullopt);
+
+struct TimelineAutoCurveResult : AuthoringResult {
+    std::size_t auto_key_count{0U};      // auto keys with an outgoing segment
+    std::size_t resolved_key_count{0U};  // keys whose stored curve changed
+};
+
+/**
+ * @brief Recomputes every automatic curve of one animation, or of the project.
+ *
+ * Callers run this inside the transaction that changed a key time, a key value,
+ * a key's existence, or an explicit duration, so one edit stays one history
+ * entry. Tracks with no automatic key are skipped untouched. A track whose
+ * driver series is non-finite, or which contains a segment shorter than the key
+ * time epsilon, rejects the whole call atomically rather than resolving part of
+ * it. This never demotes a key and never writes a manual key.
+ */
+TimelineAutoCurveResult resolve_automatic_curves(
+    ProjectData* project,
+    std::string_view animation_name = {});
 
 } // namespace marrow::editor

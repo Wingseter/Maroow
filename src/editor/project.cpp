@@ -1,5 +1,8 @@
 #include "marrow/editor/project.hpp"
 #include "atlas_packer.hpp"
+// The curve-mode and driver tokens have exactly one definition, shared by this
+// parser/serializer, the Agent handler, and the shell.
+#include "marrow/editor/authoring.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1650,6 +1653,87 @@ std::optional<LoadError> parse_interpolation(
     return std::nullopt;
 }
 
+/**
+ * @brief Parses the optional MAR-171 `curve_mode` / `curve_driver` pair.
+ *
+ * Both members are absent from every pre-MAR-171 document, and absence means
+ * `Manual` with the family's default driver. A driver on a manual key is a load
+ * error rather than silently dropped or silently kept: dropping would lose
+ * authored data on the next save and keeping would create an in-memory state
+ * that never round trips. `channel` is read only for Transform keys.
+ */
+std::optional<LoadError> parse_curve_intent(
+    const Document& document,
+    const Value& keyframe_value,
+    std::string_view keyframe_path,
+    TimelineKeyKind kind,
+    TransformTimelineChannel channel,
+    TimelineCurveMode* mode_out,
+    TimelineScalarComponent* driver_out) {
+    *mode_out = TimelineCurveMode::Manual;
+    *driver_out = default_curve_driver(kind, channel);
+
+    const Value* mode_value = find_optional_member(keyframe_value, "curve_mode");
+    if (mode_value != nullptr) {
+        const std::string mode_path = std::string(keyframe_path) + ".curve_mode";
+        const auto parsed = mode_value->is_string()
+            ? curve_mode_from_token(mode_value->as_string())
+            : std::nullopt;
+        if (!parsed.has_value()) {
+            return validation_error(
+                document,
+                mode_value->location(),
+                mode_path,
+                "curve_mode must be 'manual' or 'auto'");
+        }
+        *mode_out = *parsed;
+    }
+
+    const Value* driver_value = find_optional_member(keyframe_value, "curve_driver");
+    if (driver_value == nullptr) {
+        return std::nullopt;
+    }
+    const std::string driver_path = std::string(keyframe_path) + ".curve_driver";
+    if (*mode_out != TimelineCurveMode::Auto) {
+        return validation_error(
+            document,
+            driver_value->location(),
+            driver_path,
+            "curve_driver requires curve_mode 'auto'");
+    }
+    const auto parsed_driver = driver_value->is_string()
+        ? curve_driver_from_token(driver_value->as_string())
+        : std::nullopt;
+    if (!parsed_driver.has_value()) {
+        return validation_error(
+            document,
+            driver_value->location(),
+            driver_path,
+            "curve_driver must be one of angle, x, y, r, g, b, a");
+    }
+    if (!curve_driver_is_authorable(kind, channel, *parsed_driver)) {
+        return validation_error(
+            document,
+            driver_value->location(),
+            driver_path,
+            "curve_driver must name a component this timeline owns");
+    }
+    *driver_out = *parsed_driver;
+    return std::nullopt;
+}
+
+/** @brief Emits the MAR-171 pair only for an automatic key, so manual stays absent. */
+void emit_curve_intent(
+    Value::Object* keyframe_object,
+    TimelineCurveMode mode,
+    TimelineScalarComponent driver) {
+    if (mode != TimelineCurveMode::Auto) return;
+    keyframe_object->emplace(
+        "curve_mode", make_string_value(std::string(curve_mode_token(mode))));
+    keyframe_object->emplace(
+        "curve_driver", make_string_value(std::string(curve_driver_token(driver))));
+}
+
 Value build_interpolation_value(const runtime::Interpolation& interpolation) {
     switch (interpolation.kind()) {
     case runtime::InterpolationKind::Linear:
@@ -1727,6 +1811,16 @@ std::optional<LoadError> parse_transform_keyframes(
         }
         if (const auto error = parse_interpolation(
                 document, keyframe_value, keyframe_path, &keyframe.interpolation)) {
+            return error;
+        }
+        if (const auto error = parse_curve_intent(
+                document,
+                keyframe_value,
+                keyframe_path,
+                TimelineKeyKind::Transform,
+                channel,
+                &keyframe.curve_mode,
+                &keyframe.curve_driver)) {
             return error;
         }
         if (has_previous_time && keyframe.time <= previous_time) {
@@ -2588,6 +2682,16 @@ std::optional<LoadError> parse_slot_color_keyframes(
         keyframe.color = runtime::SlotColor{r, g, b, a};
         if (const auto error = parse_interpolation(
                 document, keyframe_value, keyframe_path, &keyframe.interpolation)) {
+            return error;
+        }
+        if (const auto error = parse_curve_intent(
+                document,
+                keyframe_value,
+                keyframe_path,
+                TimelineKeyKind::SlotColor,
+                TransformTimelineChannel::Rotate,
+                &keyframe.curve_mode,
+                &keyframe.curve_driver)) {
             return error;
         }
         if (has_previous_time && keyframe.time <= previous_time) {
@@ -3508,9 +3612,38 @@ Value build_transform_keyframes_value(
             keyframe_object.emplace("angle", make_number_value(keyframe.angle));
         }
         keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        emit_curve_intent(&keyframe_object, keyframe.curve_mode, keyframe.curve_driver);
         keyframes.push_back(make_object_value(std::move(keyframe_object)));
     }
 
+    return make_array_value(std::move(keyframes));
+}
+
+/**
+ * @brief The runtime `.mskl` shape of one transform timeline.
+ *
+ * The `.marrow` and `.mskl` transform keyframe shapes were identical until
+ * MAR-171, so the export reused the project serializer. They no longer are: the
+ * project object may carry `curve_mode` and `curve_driver`, which are authoring
+ * intent the runtime has no concept of. This builder emits a fixed member list
+ * exactly as `build_runtime_slot_color_keyframes_value()` does, so a future
+ * additive `.marrow` keyframe field cannot leak into a runtime file either.
+ */
+Value build_runtime_transform_keyframes_value(const TransformTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const TransformKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        if (is_vector_channel(edit.channel)) {
+            keyframe_object.emplace("x", make_number_value(keyframe.x));
+            keyframe_object.emplace("y", make_number_value(keyframe.y));
+        } else {
+            keyframe_object.emplace("angle", make_number_value(keyframe.angle));
+        }
+        keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
     return make_array_value(std::move(keyframes));
 }
 
@@ -3617,6 +3750,7 @@ Value build_slot_color_keyframes_value(const SlotColorTimelineEdit& edit) {
         color_object.emplace("a", make_number_value(keyframe.color.a));
         keyframe_object.emplace("color", make_object_value(std::move(color_object)));
         keyframe_object.emplace("curve", build_interpolation_value(keyframe.interpolation));
+        emit_curve_intent(&keyframe_object, keyframe.curve_mode, keyframe.curve_driver);
         keyframes.push_back(make_object_value(std::move(keyframe_object)));
     }
     return make_array_value(std::move(keyframes));
@@ -4683,7 +4817,7 @@ Document build_runtime_document(
         Value* bone_value = ensure_object_member(bones_value, edit.bone_name);
         if (bone_value != nullptr) {
             bone_value->as_object()[std::string(transform_channel_json_key(edit.channel))] =
-                build_transform_keyframes_value(edit);
+                build_runtime_transform_keyframes_value(edit);
         }
     }
 
@@ -4805,6 +4939,34 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
             error_out->message =
                 "project snap steps must be finite and greater than zero";
             return false;
+        }
+    }
+
+    // MAR-171 re-validates driver authorability here for the same reason the
+    // snap block re-validates its steps: the loader's gate protects documents,
+    // and this one protects a project mutated in memory.
+    for (const TransformTimelineEdit& edit : project.transform_timeline_edits) {
+        for (const TransformKeyframeEdit& keyframe : edit.keyframes) {
+            if (keyframe.curve_mode != TimelineCurveMode::Auto) continue;
+            if (!curve_driver_is_authorable(
+                    TimelineKeyKind::Transform, edit.channel, keyframe.curve_driver)) {
+                error_out->message =
+                    "automatic curve drivers must name a component the timeline owns";
+                return false;
+            }
+        }
+    }
+    for (const SlotColorTimelineEdit& edit : project.slot_color_timeline_edits) {
+        for (const SlotColorKeyframeEdit& keyframe : edit.keyframes) {
+            if (keyframe.curve_mode != TimelineCurveMode::Auto) continue;
+            if (!curve_driver_is_authorable(
+                    TimelineKeyKind::SlotColor,
+                    TransformTimelineChannel::Rotate,
+                    keyframe.curve_driver)) {
+                error_out->message =
+                    "automatic curve drivers must name a component the timeline owns";
+                return false;
+            }
         }
     }
 

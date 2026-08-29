@@ -1133,6 +1133,17 @@ bool add_timeline_key_at_playhead(
         state->status_message = "The selected timeline is read-only";
         return false;
     }
+    // MAR-171: a new neighbour invalidates the automatic curves on either side
+    // of it, and the recomputation belongs to this same transaction.
+    std::string auto_curve_error;
+    if (!resolve_timeline_auto_curves(
+            transaction.project(), track.animation_name, &auto_curve_error)) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
+    }
     const bool committed = finish_timeline_transaction(
         state, std::move(transaction), "Added key at playhead", true);
     if (committed) {
@@ -1386,6 +1397,306 @@ std::optional<marrow::editor::CurvePreset> active_outgoing_curve_preset(
     return marrow::editor::curve_preset_of(found->outgoing_easing);
 }
 
+bool resolve_timeline_auto_curves(
+    marrow::editor::ProjectData* project,
+    std::string_view animation_name,
+    std::string* error_out) {
+    if (project == nullptr) return true;
+    const marrow::editor::TimelineAutoCurveResult result =
+        marrow::editor::resolve_automatic_curves(project, animation_name);
+    if (!result) {
+        if (error_out != nullptr) *error_out = result.error;
+        return false;
+    }
+    return true;
+}
+
+namespace {
+
+/**
+ * @brief The compatible selected keys for a curve-mode write, de-duplicated.
+ *
+ * One definition shared by the row's enabled state and the write, exactly as
+ * MAR-170's preset selector does. The family set is deliberately narrower than
+ * the preset row's: Deform carries an easing but no addressable scalar series,
+ * so it has no driver and therefore no automatic mode.
+ */
+std::vector<marrow::editor::TimelineKeySelector> collect_curve_mode_selectors(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks,
+    std::vector<std::string>* track_ids_out) {
+    std::vector<marrow::editor::TimelineKeySelector> selectors;
+    selectors.reserve(state.timeline_editor.selected_keys.size());
+    for (const TimelineKeyRef& key : state.timeline_editor.selected_keys) {
+        const TimelineTrackRow* track = nullptr;
+        std::optional<std::size_t> key_index;
+        for (const TimelineTrackRow& candidate : tracks) {
+            if (!timeline_track_is_editable(candidate)) continue;
+            const auto index = timeline_key_index(candidate, key);
+            if (!index.has_value()) continue;
+            track = &candidate;
+            key_index = index;
+            break;
+        }
+        if (track == nullptr || !key_index.has_value()) continue;
+        const auto selector = timeline_key_selector(state, *track, *key_index);
+        if (!selector.has_value()) continue;
+        if (selector->kind != marrow::editor::TimelineKeyKind::Transform &&
+            selector->kind != marrow::editor::TimelineKeyKind::SlotColor) {
+            continue;
+        }
+        bool duplicate = false;
+        for (const auto& existing : selectors) {
+            if (same_timeline_key_selector(existing, *selector)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        selectors.push_back(*selector);
+        if (track_ids_out != nullptr) track_ids_out->push_back(track->id);
+    }
+    return selectors;
+}
+
+/** @brief The display name of one driver component, for status text. */
+std::string_view curve_driver_display_name(
+    marrow::editor::TimelineScalarComponent driver) {
+    switch (driver) {
+    case marrow::editor::TimelineScalarComponent::Angle:
+        return "Angle";
+    case marrow::editor::TimelineScalarComponent::X:
+        return "X";
+    case marrow::editor::TimelineScalarComponent::Y:
+        return "Y";
+    case marrow::editor::TimelineScalarComponent::Red:
+        return "Red";
+    case marrow::editor::TimelineScalarComponent::Green:
+        return "Green";
+    case marrow::editor::TimelineScalarComponent::Blue:
+        return "Blue";
+    case marrow::editor::TimelineScalarComponent::Alpha:
+        return "Alpha";
+    }
+    return "Angle";
+}
+
+} // namespace
+
+std::size_t compatible_curve_mode_key_count(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    return collect_curve_mode_selectors(state, tracks, nullptr).size();
+}
+
+TimelineCurveModeApplyResult apply_timeline_curve_mode(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    marrow::editor::TimelineCurveMode mode,
+    std::optional<marrow::editor::TimelineScalarComponent> driver) {
+    TimelineCurveModeApplyResult result;
+    if (state == nullptr) return result;
+    const bool automatic = mode == marrow::editor::TimelineCurveMode::Auto;
+
+    if (!state->load_result || state->load_result.project == nullptr ||
+        selected_animation(*state) == nullptr) {
+        result.error = "Setting a curve mode requires an open animation.";
+        return result;
+    }
+    // MAR-171 opens no gesture of its own and never a second transaction, so a
+    // live drag simply owns the session until it finishes.
+    if (authoring_gesture_active(*state)) {
+        result.error = "Finish the active edit before changing the curve mode.";
+        return result;
+    }
+
+    std::vector<std::string> selector_track_ids;
+    const std::vector<marrow::editor::TimelineKeySelector> selectors =
+        collect_curve_mode_selectors(*state, tracks, &selector_track_ids);
+    result.compatible_key_count = selectors.size();
+    result.skipped_key_count =
+        state->timeline_editor.selected_keys.size() - selectors.size();
+
+    if (selectors.empty()) {
+        state->status_message = "Select one or more Transform or Slot Color keys";
+        return result;
+    }
+
+    const std::string label = automatic
+        ? (selectors.size() == 1U
+               ? std::string("Set automatic curve")
+               : "Set automatic curves on " + std::to_string(selectors.size()) + " keys")
+        : (selectors.size() == 1U
+               ? std::string("Set manual curve")
+               : "Set manual curves on " + std::to_string(selectors.size()) + " keys");
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        label,
+        "timeline:curve-mode",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        result.error = transaction.error()->format();
+        state->error_message = result.error;
+        return result;
+    }
+
+    // Materialize every selected track before the write, so a curve mode
+    // applies to an imported runtime-only track by copying it into the project.
+    for (const std::string& track_id : selector_track_ids) {
+        const TimelineTrackRow* track = find_timeline_track(tracks, track_id);
+        if (track == nullptr || !visit_editable_timeline_keys(state, *track, [](auto&) {})) {
+            transaction.cancel();
+            sync_shell_from_editor_session(state);
+            result.error = "Could not materialize a selected timeline track.";
+            state->error_message = result.error;
+            state->status_message = "Failed to set curve mode";
+            return result;
+        }
+    }
+
+    const marrow::editor::TimelineCurveModeResult written =
+        marrow::editor::set_keyframe_curve_mode(
+            transaction.project(), selectors, mode, driver);
+    if (!written) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        result.error = written.error;
+        state->error_message = result.error;
+        state->status_message = "Failed to set curve mode: " + written.error;
+        return result;
+    }
+    if (!written.changed) {
+        // A no-change application is not a failure and must not add history.
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->status_message = automatic
+            ? "Selected keys already use automatic curves"
+            : "Selected keys already use manual curves";
+        return result;
+    }
+
+    const marrow::editor::SessionResult refresh = transaction.refresh_runtime();
+    if (!refresh) {
+        result.error = refresh.error->format();
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = result.error;
+        state->status_message = "Curve mode preview failed";
+        return result;
+    }
+
+    const marrow::editor::SessionResult committed = transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!committed) {
+        result.error = committed.error->format();
+        state->error_message = result.error;
+        state->status_message = "Failed to set curve mode";
+        return result;
+    }
+
+    result.applied = true;
+    result.changed_key_count = written.changed_key_count;
+    result.resolved_key_count = written.resolved_key_count;
+    // A curve mode writes only intent and easing, so no key moves in time and
+    // every TimelineKeyRef stays bit-identical; the selection needs no rebuild.
+    const std::string key_noun = selectors.size() == 1U ? " key" : " keys";
+    const std::string driven = automatic
+        ? " driven by " +
+            std::string(curve_driver_display_name(
+                driver.value_or(marrow::editor::TimelineScalarComponent::Angle)))
+        : std::string();
+    const std::string verb = automatic ? " to automatic curves" : " to manual curves";
+    if (result.skipped_key_count == 0U) {
+        state->status_message = "Set " + std::to_string(selectors.size()) + key_noun +
+            verb + (driver.has_value() ? driven : std::string());
+    } else {
+        state->status_message = "Set " + std::to_string(selectors.size()) + " of " +
+            std::to_string(state->timeline_editor.selected_keys.size()) +
+            " selected keys" + verb + "; " +
+            std::to_string(result.skipped_key_count) + " have no curve mode";
+    }
+    return result;
+}
+
+namespace {
+
+/** @brief The active key's project-domain selector, or nullopt. */
+std::optional<marrow::editor::TimelineKeySelector> active_key_selector(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (!state.timeline_editor.active_key.has_value()) return std::nullopt;
+    const TimelineTrackRow* track = selected_timeline_track(state, tracks);
+    if (track == nullptr) return std::nullopt;
+    const auto key_index = timeline_key_index(*track, *state.timeline_editor.active_key);
+    if (!key_index.has_value()) return std::nullopt;
+    return timeline_key_selector(state, *track, *key_index);
+}
+
+} // namespace
+
+std::optional<marrow::editor::TimelineCurveMode> active_outgoing_curve_mode(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (!state.load_result || state.load_result.project == nullptr) return std::nullopt;
+    const auto selector = active_key_selector(state, tracks);
+    if (!selector.has_value()) return std::nullopt;
+    if (selector->kind == marrow::editor::TimelineKeyKind::Transform) {
+        const auto* edit = state.load_result.project->find_transform_timeline_edit(
+            selector->animation_name, selector->bone_name, selector->transform_channel);
+        if (edit == nullptr) return std::nullopt;
+        for (const auto& keyframe : edit->keyframes) {
+            if (std::abs(keyframe.time - selector->time) <= 1e-6) {
+                return keyframe.curve_mode;
+            }
+        }
+        return std::nullopt;
+    }
+    if (selector->kind == marrow::editor::TimelineKeyKind::SlotColor) {
+        const auto* edit = state.load_result.project->find_slot_color_timeline_edit(
+            selector->animation_name, selector->slot_name);
+        if (edit == nullptr) return std::nullopt;
+        for (const auto& keyframe : edit->keyframes) {
+            if (std::abs(keyframe.time - selector->time) <= 1e-6) {
+                return keyframe.curve_mode;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<marrow::editor::TimelineScalarComponent> active_outgoing_curve_driver(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (!state.load_result || state.load_result.project == nullptr) return std::nullopt;
+    const auto selector = active_key_selector(state, tracks);
+    if (!selector.has_value()) return std::nullopt;
+    if (selector->kind == marrow::editor::TimelineKeyKind::Transform) {
+        const auto* edit = state.load_result.project->find_transform_timeline_edit(
+            selector->animation_name, selector->bone_name, selector->transform_channel);
+        if (edit == nullptr) return std::nullopt;
+        for (const auto& keyframe : edit->keyframes) {
+            if (std::abs(keyframe.time - selector->time) <= 1e-6) {
+                return keyframe.curve_driver;
+            }
+        }
+        return std::nullopt;
+    }
+    if (selector->kind == marrow::editor::TimelineKeyKind::SlotColor) {
+        const auto* edit = state.load_result.project->find_slot_color_timeline_edit(
+            selector->animation_name, selector->slot_name);
+        if (edit == nullptr) return std::nullopt;
+        for (const auto& keyframe : edit->keyframes) {
+            if (std::abs(keyframe.time - selector->time) <= 1e-6) {
+                return keyframe.curve_driver;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::vector<std::size_t> selected_indices_for_track(
     const ShellState& state,
     const TimelineTrackRow& track) {
@@ -1478,6 +1789,18 @@ bool remove_selected_timeline_keys(
                 }
             }
         });
+    }
+    // MAR-171: a disappearing neighbour invalidates the automatic curves that
+    // read it, inside this same transaction.
+    std::string auto_curve_error;
+    if (removed_count > 0U &&
+        !resolve_timeline_auto_curves(
+            transaction.project(), state->selected_animation_name, &auto_curve_error)) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
     }
     const bool committed = finish_timeline_transaction(
         state,
@@ -1762,6 +2085,18 @@ bool paste_timeline_clipboard(
         }
     }
 
+    // MAR-171: pasted keys keep their copied mode and driver, and the paste
+    // gives them new neighbours, so their segments resolve here.
+    std::string auto_curve_error;
+    if (pasted_count > 0U &&
+        !resolve_timeline_auto_curves(
+            transaction.project(), state->selected_animation_name, &auto_curve_error)) {
+        transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
+    }
     const bool committed = finish_timeline_transaction(
         state,
         std::move(transaction),
@@ -1934,6 +2269,18 @@ bool apply_timeline_retime_delta(
         return false;
     }
     if (!retime.changed) return true;
+
+    // MAR-171: moving a key time changes every neighbouring segment's spacing.
+    std::string auto_curve_error;
+    if (!resolve_timeline_auto_curves(
+            gesture.transaction.project(),
+            state->selected_animation_name,
+            &auto_curve_error)) {
+        finish_timeline_retime_gesture(state, false);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
+    }
 
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
@@ -2220,6 +2567,19 @@ bool apply_timeline_graph_value_delta(
     }
     if (!offset.changed) return true;
 
+    // MAR-171: a driver value moved, so every automatic curve that reads it is
+    // recomputed inside this same gesture transaction.
+    std::string auto_curve_error;
+    if (!resolve_timeline_auto_curves(
+            gesture.transaction.project(),
+            state->selected_animation_name,
+            &auto_curve_error)) {
+        finish_timeline_graph_value_gesture(state, false);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
+    }
+
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
@@ -2266,6 +2626,48 @@ bool same_control_points(
         if (std::abs(left[index] - right[index]) > 1e-12) return false;
     }
     return true;
+}
+
+/**
+ * @brief The recorded curve mode of one pressed graph key.
+ *
+ * A key on an unmaterialized runtime-only track has never been authored, so it
+ * is `Manual`, which is exactly what MAR-169's net-state `changed` rule wants
+ * for it.
+ */
+marrow::editor::TimelineCurveMode pressed_key_curve_mode(
+    const ShellState& state,
+    const TimelineTrackRow& track,
+    const TimelineKeyRef& key) {
+    if (!state.load_result || state.load_result.project == nullptr) {
+        return marrow::editor::TimelineCurveMode::Manual;
+    }
+    const auto key_index = timeline_key_index(track, key);
+    if (!key_index.has_value()) return marrow::editor::TimelineCurveMode::Manual;
+    const auto selector = timeline_key_selector(state, track, *key_index);
+    if (!selector.has_value()) return marrow::editor::TimelineCurveMode::Manual;
+    if (selector->kind == marrow::editor::TimelineKeyKind::Transform) {
+        const auto* edit = state.load_result.project->find_transform_timeline_edit(
+            selector->animation_name, selector->bone_name, selector->transform_channel);
+        if (edit != nullptr) {
+            for (const auto& keyframe : edit->keyframes) {
+                if (std::abs(keyframe.time - selector->time) <= 1e-6) {
+                    return keyframe.curve_mode;
+                }
+            }
+        }
+    } else if (selector->kind == marrow::editor::TimelineKeyKind::SlotColor) {
+        const auto* edit = state.load_result.project->find_slot_color_timeline_edit(
+            selector->animation_name, selector->slot_name);
+        if (edit != nullptr) {
+            for (const auto& keyframe : edit->keyframes) {
+                if (std::abs(keyframe.time - selector->time) <= 1e-6) {
+                    return keyframe.curve_mode;
+                }
+            }
+        }
+    }
+    return marrow::editor::TimelineCurveMode::Manual;
 }
 
 } // namespace
@@ -2330,6 +2732,7 @@ bool begin_timeline_graph_handle_gesture(
     gesture.original_kind = original_kind;
     gesture.original_control_points = seed_control_points;
     gesture.applied_control_points = seed_control_points;
+    gesture.original_mode = pressed_key_curve_mode(*state, track, key);
     gesture.transaction = std::move(transaction);
     state->timeline_editor.graph_handle_gesture.emplace(std::move(gesture));
     return true;
@@ -2456,8 +2859,12 @@ bool apply_timeline_graph_handle_control_points(
     // stored Cubic points completes as a cancel; a drag that returns to the
     // seed of a Linear or Stepped segment still counts as changed, because the
     // authored kind genuinely became Cubic.
+    // MAR-171 extends the rule: a drag on an AUTOMATIC key is an authored
+    // change even when the points land back on their starting values, because
+    // the key stops tracking its neighbours. See the design §9.4.
     gesture.changed =
         gesture.original_kind != marrow::runtime::InterpolationKind::CubicBezier ||
+        gesture.original_mode == marrow::editor::TimelineCurveMode::Auto ||
         !same_control_points(
             requested_control_points, gesture.original_control_points);
     return true;

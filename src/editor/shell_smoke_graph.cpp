@@ -143,8 +143,8 @@ bool validate_timeline_graph_shell_smoke(
         marrow::editor::agent_operation_descriptor_count();
     const bool dirty_before = state.session.dirty();
     const bool shell_dirty_before = state.project_dirty;
-    if (operation_count_before != 57U) {
-        std::cerr << "Graph shell smoke requires the exact 57-operation registry.\n";
+    if (operation_count_before != 58U) {
+        std::cerr << "Graph shell smoke requires the exact 58-operation registry.\n";
         return false;
     }
 
@@ -631,8 +631,8 @@ bool validate_timeline_graph_edit_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 57U) {
-        std::cerr << "Graph edit shell smoke requires the exact 57-operation registry.\n";
+    if (operation_count_before != 58U) {
+        std::cerr << "Graph edit shell smoke requires the exact 58-operation registry.\n";
         return false;
     }
 
@@ -1553,8 +1553,8 @@ bool validate_timeline_curve_preset_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 57U) {
-        std::cerr << "Curve preset shell smoke requires the exact 57-operation registry.\n";
+    if (operation_count_before != 58U) {
+        std::cerr << "Curve preset shell smoke requires the exact 58-operation registry.\n";
         return false;
     }
 
@@ -2123,8 +2123,8 @@ bool validate_timeline_graph_easing_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 57U) {
-        std::cerr << "Graph easing shell smoke requires the exact 57-operation registry.\n";
+    if (operation_count_before != 58U) {
+        std::cerr << "Graph easing shell smoke requires the exact 58-operation registry.\n";
         return false;
     }
 
@@ -3101,6 +3101,723 @@ bool validate_timeline_graph_easing_shell_smoke(
 
     if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
         std::cerr << "Graph easing editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief MAR-171: project-local automatic curve mode through the shell.
+ *
+ * Controller-level only: no ImGui, no rendered frame. The actual-frame cases
+ * live in `shell_smoke_frames.cpp`.
+ */
+bool validate_timeline_curve_mode_shell_smoke(
+    const std::filesystem::path& project_path) {
+    using marrow::editor::TimelineCurveMode;
+    using marrow::editor::TimelineScalarComponent;
+    using marrow::runtime::AnimationScalar;
+    using marrow::runtime::InterpolationKind;
+    using TransformChannel = marrow::editor::TransformTimelineChannel;
+
+    // Its own isolated config home, so nothing here can resolve - or create -
+    // the real preference directory.
+    const ScopedPreferenceIsolation isolation("curve-mode");
+    if (!isolation.installed()) {
+        std::cerr << "Curve mode shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Curve mode smoke", false, true)) {
+        std::cerr << "Curve mode shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 58U) {
+        std::cerr << "Curve mode shell smoke requires the exact 58-operation registry.\n";
+        return false;
+    }
+
+    const auto row_of = [&](std::string_view id) {
+        return find_timeline_track(cached_timeline_tracks(&state), id);
+    };
+    const auto key_of = [&](std::string_view id, std::size_t index)
+        -> std::optional<TimelineKeyRef> {
+        const TimelineTrackRow* row = row_of(id);
+        if (row == nullptr || index >= row->key_times.size()) return std::nullopt;
+        return timeline_key_ref(*row, index);
+    };
+    const auto deform_track_id = [&]() -> std::optional<std::string> {
+        for (const TimelineTrackRow& row : cached_timeline_tracks(&state)) {
+            if (row.id.find(":deform:") != std::string::npos) return row.id;
+        }
+        return std::nullopt;
+    };
+    // The stored easing of one project key, read straight from the project so
+    // no projection cache can mask a missing write.
+    const auto stored = [&](std::string_view bone,
+                            marrow::editor::TransformTimelineChannel channel,
+                            std::size_t index)
+        -> std::optional<marrow::editor::TransformKeyframeEdit> {
+        const auto* edit = state.session.project()->find_transform_timeline_edit(
+            "idle", bone, channel);
+        if (edit == nullptr || index >= edit->keyframes.size()) return std::nullopt;
+        return edit->keyframes[index];
+    };
+    const auto curve_is = [](const marrow::runtime::Interpolation& easing,
+                             const std::array<double, 4>& expected) {
+        if (easing.kind() != InterpolationKind::CubicBezier) return false;
+        const auto& points = easing.cubic_bezier();
+        return points.cx1 == static_cast<AnimationScalar>(expected[0]) &&
+            points.cy1 == static_cast<AnimationScalar>(expected[1]) &&
+            points.cx2 == static_cast<AnimationScalar>(expected[2]) &&
+            points.cy2 == static_cast<AnimationScalar>(expected[3]);
+    };
+    const auto same_easing = [](const marrow::runtime::Interpolation& left,
+                                const marrow::runtime::Interpolation& right) {
+        if (left.kind() != right.kind()) return false;
+        if (left.kind() != InterpolationKind::CubicBezier) return true;
+        return left.cubic_bezier().cx1 == right.cubic_bezier().cx1 &&
+            left.cubic_bezier().cy1 == right.cubic_bezier().cy1 &&
+            left.cubic_bezier().cx2 == right.cubic_bezier().cx2 &&
+            left.cubic_bezier().cy2 == right.cubic_bezier().cy2;
+    };
+    constexpr double kThird = 1.0 / 3.0;
+    constexpr double kTwoThirds = 2.0 / 3.0;
+    // The design's §6.6 worked example over spine rotate (t 0/0.5/1,
+    // angle 0/8/-2), spelled out rather than recomputed from the resolver.
+    const std::array<double, 4> kSpineSegment0{kThird, kThird, kTwoThirds, 1.0};
+    const std::array<double, 4> kSpineSegment1{kThird, 0.0, kTwoThirds, kTwoThirds};
+    const std::array<double, 4> kLinearEquivalent{kThird, kThird, kTwoThirds, kTwoThirds};
+
+    // --- Three spine Rotate keys, one application, one history entry -------
+    {
+        const auto first = key_of("bone:1:Rotate", 0U);
+        const auto second = key_of("bone:1:Rotate", 1U);
+        const auto third = key_of("bone:1:Rotate", 2U);
+        if (!first.has_value() || !second.has_value() || !third.has_value()) {
+            std::cerr << "Curve mode smoke requires three spine Rotate keys.\n";
+            return false;
+        }
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!before.has_value()) {
+            std::cerr << "Curve mode smoke could not capture its Rotate baseline.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Rotate");
+        state.timeline_editor.selected_keys = {*first, *second, *third};
+        state.timeline_editor.active_key = *first;
+
+        const auto applied = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        if (!applied.applied || applied.changed_key_count != 3U ||
+            applied.compatible_key_count != 3U || applied.skipped_key_count != 0U ||
+            applied.resolved_key_count != 2U || !applied.error.empty()) {
+            std::cerr << "Applying Auto to three spine Rotate keys failed: "
+                      << applied.error << " changed=" << applied.changed_key_count
+                      << " resolved=" << applied.resolved_key_count << '\n';
+            return false;
+        }
+        if (state.session.undo_count() != before->undo_count + 1U) {
+            std::cerr << "One curve-mode application must add exactly one history entry.\n";
+            return false;
+        }
+        const auto key0 = stored("spine", TransformChannel::Rotate, 0U);
+        const auto key1 = stored("spine", TransformChannel::Rotate, 1U);
+        const auto key2 = stored("spine", TransformChannel::Rotate, 2U);
+        if (!key0.has_value() || !key1.has_value() || !key2.has_value() ||
+            key0->curve_mode != TimelineCurveMode::Auto ||
+            key0->curve_driver != TimelineScalarComponent::Angle ||
+            !curve_is(key0->interpolation, kSpineSegment0) ||
+            !curve_is(key1->interpolation, kSpineSegment1) ||
+            key2->curve_mode != TimelineCurveMode::Auto) {
+            std::cerr << "Auto did not store the design's worked-example curves.\n";
+            return false;
+        }
+        // Every key's time and angle byte-identical: the resolver writes only
+        // the easing.
+        if (key0->time != 0.0 || key0->angle != 0.0 || key1->time != 0.5 ||
+            key1->angle != 8.0 || key2->time != 1.0 || key2->angle != -2.0) {
+            std::cerr << "A curve-mode application moved a key time or value.\n";
+            return false;
+        }
+        // Re-applying the same mode and driver is a no-change.
+        const std::string after_text =
+            marrow::editor::serialize_project(*state.session.project());
+        const std::size_t undo_after = state.session.undo_count();
+        const auto again = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        if (again.applied || state.session.undo_count() != undo_after ||
+            marrow::editor::serialize_project(*state.session.project()) != after_text) {
+            std::cerr << "Re-applying the same curve mode must add no history entry.\n";
+            return false;
+        }
+
+        // Undo restores mode, driver, and every resolved curve with the
+        // selection bit-identical; redo restores them again.
+        const auto selection_before = state.timeline_editor.selected_keys;
+        const auto active_before = state.timeline_editor.active_key;
+        if (!state.session.undo() ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                before->project) {
+            std::cerr << "Undo did not restore the pre-application project bytes.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (state.timeline_editor.selected_keys != selection_before ||
+            !(state.timeline_editor.active_key == active_before)) {
+            std::cerr << "A curve-mode undo rewrote the timeline selection.\n";
+            return false;
+        }
+        if (!state.session.redo() ||
+            marrow::editor::serialize_project(*state.session.project()) != after_text) {
+            std::cerr << "Redo did not restore the resolved curves.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+    }
+
+    // --- A mixed selection skips the easing-free lane rather than failing ---
+    {
+        const auto rotate_key = key_of("bone:1:Rotate", 0U);
+        const auto color_key = key_of("slot:0:Color", 0U);
+        const auto event_key = key_of("global:events", 0U);
+        if (!rotate_key.has_value() || !color_key.has_value() ||
+            !event_key.has_value()) {
+            std::cerr << "Curve mode smoke requires a Rotate, Color, and Event key.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        state.selected_timeline_track_id = std::string("slot:0:Color");
+        state.timeline_editor.selected_keys = {*color_key, *event_key};
+        state.timeline_editor.active_key = *color_key;
+        const auto applied = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            std::nullopt);
+        if (!applied.applied || applied.compatible_key_count != 1U ||
+            applied.skipped_key_count != 1U ||
+            state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A mixed selection must skip the Event key in one entry: "
+                      << applied.error << '\n';
+            return false;
+        }
+        // Materialization copied every runtime key into the project rather than
+        // replacing the track with the one edited key.
+        const auto* color = state.session.project()->find_slot_color_timeline_edit(
+            "idle", "body");
+        if (color == nullptr || color->keyframes.size() != 3U ||
+            color->keyframes[0].curve_mode != TimelineCurveMode::Auto ||
+            color->keyframes[0].curve_driver != TimelineScalarComponent::Red) {
+            std::cerr << "Auto on a runtime-only slot colour track did not materialize it.\n";
+            return false;
+        }
+    }
+
+    // --- A Deform-only selection opens no transaction ----------------------
+    {
+        const auto deform_id = deform_track_id();
+        if (!deform_id.has_value()) {
+            std::cerr << "Curve mode smoke requires a deform track.\n";
+            return false;
+        }
+        const auto deform_key = key_of(*deform_id, 0U);
+        if (!deform_key.has_value()) {
+            std::cerr << "Curve mode smoke requires a deform key.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        const std::string before_text =
+            marrow::editor::serialize_project(*state.session.project());
+        state.selected_timeline_track_id = *deform_id;
+        state.timeline_editor.selected_keys = {*deform_key};
+        state.timeline_editor.active_key = *deform_key;
+        const auto applied = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            std::nullopt);
+        if (applied.applied || applied.compatible_key_count != 0U ||
+            applied.skipped_key_count != 1U ||
+            state.session.undo_count() != undo_before ||
+            marrow::editor::serialize_project(*state.session.project()) != before_text) {
+            std::cerr << "A Deform-only selection must open no transaction.\n";
+            return false;
+        }
+    }
+
+    // --- The four recomputation triggers, each exactly one history entry ---
+    {
+        // `bone:0:Translate` is the fixture's only strictly monotone driver, so
+        // it is the only track on which a neighbour move is observable at all:
+        // Fritsch-Carlson zeroes a local extremum's tangent whatever the
+        // spacing is, which makes the spine tracks spacing-invariant.
+        const auto first = key_of("bone:0:Translate", 0U);
+        const auto second = key_of("bone:0:Translate", 1U);
+        if (!first.has_value() || !second.has_value()) {
+            std::cerr << "Curve mode smoke requires two root Translate keys.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:0:Translate");
+        state.timeline_editor.selected_keys = {*first, *second};
+        state.timeline_editor.active_key = *first;
+        const auto seeded = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            TimelineScalarComponent::X);
+        if (!seeded.applied) {
+            std::cerr << "Curve mode smoke could not seed the root Translate track: "
+                      << seeded.error << '\n';
+            return false;
+        }
+        // t 0/0.5/1 with x 0/20/40 is a straight line, so both segments are
+        // exactly the linear-equivalent curve before any trigger fires.
+        const auto seeded_key0 = stored("root", TransformChannel::Translate, 0U);
+        if (!seeded_key0.has_value() ||
+            !curve_is(seeded_key0->interpolation, kLinearEquivalent)) {
+            std::cerr << "The seeded root Translate curve was not linear-equivalent.\n";
+            return false;
+        }
+
+        // Trigger 1: a MAR-168 graph value drag on the neighbouring key.
+        {
+            const std::size_t undo_before = state.session.undo_count();
+            const TimelineTrackRow* row = row_of("bone:0:Translate");
+            state.timeline_editor.selected_keys = {*second};
+            state.timeline_editor.active_key = *second;
+            if (row == nullptr ||
+                !begin_timeline_graph_value_gesture(
+                    &state, 7101U, *row, GraphComponent::X,
+                    cached_timeline_tracks(&state)) ||
+                !apply_timeline_graph_value_delta(
+                    &state, cached_timeline_tracks(&state), 10.0)) {
+                std::cerr << "Curve mode smoke could not run a graph value drag.\n";
+                return false;
+            }
+            finish_timeline_graph_value_gesture(&state, true);
+            // x becomes 0/30/40: d0 = 60, d1 = 20, so a = 1 and b = 2/3 on
+            // segment 0 and a = 2, b = 1 on segment 1.
+            const auto key0 = stored("root", TransformChannel::Translate, 0U);
+            const auto key1 = stored("root", TransformChannel::Translate, 1U);
+            if (state.session.undo_count() != undo_before + 1U || !key0.has_value() ||
+                !key1.has_value() ||
+                !curve_is(key0->interpolation,
+                          {kThird, kThird, kTwoThirds, 1.0 - (2.0 / 3.0) / 3.0}) ||
+                !curve_is(key1->interpolation,
+                          {kThird, kTwoThirds, kTwoThirds, kTwoThirds})) {
+                std::cerr << "A neighbour value drag did not re-resolve inside one entry.\n";
+                return false;
+            }
+        }
+
+        // Trigger 2: `add_timeline_key_at_playhead()` between two auto keys.
+        {
+            const std::size_t undo_before = state.session.undo_count();
+            const auto before_key0 = stored("root", TransformChannel::Translate, 0U);
+            const TimelineTrackRow* row = row_of("bone:0:Translate");
+            if (row == nullptr || before_key0 == std::nullopt ||
+                !scrub_timeline_time(&state, 0.25, "Curve mode smoke", false) ||
+                !add_timeline_key_at_playhead(&state, *row_of("bone:0:Translate"))) {
+                std::cerr << "Curve mode smoke could not add a key at the playhead.\n";
+                return false;
+            }
+            const auto* edit =
+                state.session.project()->find_transform_timeline_edit(
+                    "idle", "root", TransformChannel::Translate);
+            const auto key0 = stored("root", TransformChannel::Translate, 0U);
+            if (state.session.undo_count() != undo_before + 1U || edit == nullptr ||
+                edit->keyframes.size() != 4U || !key0.has_value() ||
+                // A newly authored key is always manual (§9.5).
+                edit->keyframes[1].curve_mode != TimelineCurveMode::Manual ||
+                // The inserted neighbour sits on the curved path rather than on
+                // the straight secant, so segment 0 genuinely re-resolves.
+                same_easing(key0->interpolation, before_key0->interpolation)) {
+                std::cerr << "Adding a key between two auto keys did not re-resolve.\n";
+                return false;
+            }
+        }
+
+        // Trigger 3: `remove_selected_timeline_keys()` on the middle key.
+        {
+            const std::size_t undo_before = state.session.undo_count();
+            const auto inserted = key_of("bone:0:Translate", 1U);
+            if (!inserted.has_value()) {
+                std::cerr << "Curve mode smoke lost the inserted key.\n";
+                return false;
+            }
+            state.timeline_editor.selected_keys = {*inserted};
+            state.timeline_editor.active_key = *inserted;
+            if (!remove_selected_timeline_keys(&state, cached_timeline_tracks(&state))) {
+                std::cerr << "Curve mode smoke could not remove the middle key.\n";
+                return false;
+            }
+            // Back to x 0/30/40 over t 0/0.5/1, so segment 0 returns to the
+            // value trigger 1 produced.
+            const auto key0 = stored("root", TransformChannel::Translate, 0U);
+            if (state.session.undo_count() != undo_before + 1U || !key0.has_value() ||
+                !curve_is(key0->interpolation,
+                          {kThird, kThird, kTwoThirds, 1.0 - (2.0 / 3.0) / 3.0})) {
+                std::cerr << "Removing a neighbour did not re-resolve inside one entry.\n";
+                return false;
+            }
+        }
+
+        // Trigger 4: a dopesheet retime of the neighbouring key.
+        {
+            const std::size_t undo_before = state.session.undo_count();
+            const auto middle = key_of("bone:0:Translate", 1U);
+            if (!middle.has_value()) {
+                std::cerr << "Curve mode smoke lost the middle key before the retime.\n";
+                return false;
+            }
+            state.timeline_editor.selected_keys = {*middle};
+            state.timeline_editor.active_key = *middle;
+            if (!begin_timeline_retime_gesture(
+                    &state, 7102U, 0.0f, cached_timeline_tracks(&state)) ||
+                !apply_timeline_retime_delta(
+                    &state, cached_timeline_tracks(&state), 0.25, false)) {
+                std::cerr << "Curve mode smoke could not retime the middle key.\n";
+                return false;
+            }
+            finish_timeline_retime_gesture(&state, true);
+            // t 0/0.75/1 with x 0/30/40 makes both secants 40, so both segments
+            // return to the exactly linear curve.
+            const auto key0 = stored("root", TransformChannel::Translate, 0U);
+            const auto key1 = stored("root", TransformChannel::Translate, 1U);
+            if (state.session.undo_count() != undo_before + 1U || !key0.has_value() ||
+                !key1.has_value() ||
+                !curve_is(key0->interpolation, kLinearEquivalent) ||
+                !curve_is(key1->interpolation, kLinearEquivalent)) {
+                std::cerr << "A neighbour retime did not re-resolve inside one entry.\n";
+                return false;
+            }
+        }
+
+        // Paste carries the copied mode and driver and resolves against the
+        // pasted key's NEW neighbours, with no new code at all: the clipboard
+        // holds a whole ProjectData fragment.
+        {
+            const auto source = key_of("bone:0:Translate", 0U);
+            if (!source.has_value()) {
+                std::cerr << "Curve mode smoke lost the paste source key.\n";
+                return false;
+            }
+            state.selected_timeline_track_id = std::string("bone:0:Translate");
+            state.timeline_editor.selected_keys = {*source};
+            state.timeline_editor.active_key = *source;
+            if (!copy_selected_timeline_keys(&state, cached_timeline_tracks(&state))) {
+                std::cerr << "Curve mode smoke could not copy an automatic key.\n";
+                return false;
+            }
+            const std::size_t undo_before = state.session.undo_count();
+            if (!scrub_timeline_time(&state, 0.4, "Curve mode smoke", false) ||
+                !paste_timeline_clipboard(&state, cached_timeline_tracks(&state))) {
+                std::cerr << "Curve mode smoke could not paste the automatic key.\n";
+                return false;
+            }
+            const auto* edit = state.session.project()->find_transform_timeline_edit(
+                "idle", "root", TransformChannel::Translate);
+            const marrow::editor::TransformKeyframeEdit* pasted = nullptr;
+            if (edit != nullptr) {
+                for (const auto& keyframe : edit->keyframes) {
+                    if (std::abs(keyframe.time - 0.4) <= 1e-6) pasted = &keyframe;
+                }
+            }
+            if (state.session.undo_count() != undo_before + 1U || pasted == nullptr ||
+                pasted->curve_mode != TimelineCurveMode::Auto ||
+                pasted->curve_driver != TimelineScalarComponent::X ||
+                pasted->interpolation.kind() != InterpolationKind::CubicBezier) {
+                std::cerr << "A pasted automatic key lost its mode, driver, or curve.\n";
+                return false;
+            }
+        }
+    }
+
+    // --- MAR-169's handle drag demotes, and the demotion IS the change -----
+    {
+        constexpr timeline_graph_model::PlotRect plot{0.0, 0.0, 640.0, 320.0};
+        const timeline_graph_model::View view{0.0, 200.0, 0.0, 10.0};
+        state.timeline_editor.graph_view.view = view;
+        state.timeline_editor.graph_view.needs_fit = false;
+        const auto handles_for = [&](std::string_view track_id,
+                                     const TimelineKeyRef& key,
+                                     std::size_t component_index)
+            -> std::optional<timeline_graph_model::HandleGeometry> {
+            const TimelineTrackRow* row = row_of(track_id);
+            if (row == nullptr) return std::nullopt;
+            const auto& projection = cached_timeline_graph_projection(&state, *row);
+            if (projection.status != GraphProjectionStatus::Ready ||
+                !projection.track.has_value()) {
+                return std::nullopt;
+            }
+            return timeline_graph_model::build_handle_geometry(
+                *projection.track, key, component_index, view, plot);
+        };
+
+        const auto first = key_of("bone:1:Translate", 0U);
+        const auto second = key_of("bone:1:Translate", 1U);
+        if (!first.has_value() || !second.has_value()) {
+            std::cerr << "Curve mode smoke requires two spine Translate keys.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*first, *second};
+        state.timeline_editor.active_key = *first;
+        const auto seeded = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            TimelineScalarComponent::X);
+        if (!seeded.applied) {
+            std::cerr << "Curve mode smoke could not seed the spine Translate track: "
+                      << seeded.error << '\n';
+            return false;
+        }
+        // The Graph displays Y while the keys are driven by X, which is what
+        // makes "the driver never decides which bytes are written" observable.
+        state.timeline_editor.graph_view.active_component = GraphComponent::Y;
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        const auto seeded_second = stored("spine", TransformChannel::Translate, 1U);
+        if (!before.has_value() || !seeded_second.has_value()) {
+            std::cerr << "Curve mode smoke could not capture its drag baseline.\n";
+            return false;
+        }
+        const auto handles = handles_for("bone:1:Translate", *first, 1U);
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr || !handles.has_value()) {
+            std::cerr << "Curve mode smoke could not build auto handle geometry.\n";
+            return false;
+        }
+        const std::array<double, 4> dragged{0.2, 0.15, 0.8, 0.85};
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 7201U, *translate, *first, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), dragged)) {
+            std::cerr << "Curve mode smoke could not drag an auto key's handle.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        const auto dragged_key = stored("spine", TransformChannel::Translate, 0U);
+        const auto neighbour = stored("spine", TransformChannel::Translate, 1U);
+        if (state.session.undo_count() != before->undo_count + 1U ||
+            !dragged_key.has_value() || !neighbour.has_value() ||
+            dragged_key->curve_mode != TimelineCurveMode::Manual ||
+            !curve_is(dragged_key->interpolation, dragged) ||
+            neighbour->curve_mode != TimelineCurveMode::Auto ||
+            !same_easing(neighbour->interpolation, seeded_second->interpolation)) {
+            std::cerr << "A handle drag must demote only the dragged key, in one entry.\n";
+            return false;
+        }
+        // The one shared curve reprojects identically on X and Y.
+        const auto x_handles = handles_for("bone:1:Translate", *first, 0U);
+        const auto y_handles = handles_for("bone:1:Translate", *first, 1U);
+        if (!x_handles.has_value() || !y_handles.has_value() ||
+            x_handles->control_points != y_handles->control_points) {
+            std::cerr << "The demoted key's shared curve differed between components.\n";
+            return false;
+        }
+
+        // Drag away and exactly back on an AUTO key still commits, because the
+        // key no longer tracks its neighbours. Deliberately different from
+        // MAR-169's net-state rule, which the manual case below still proves.
+        {
+            const auto auto_key = key_of("bone:1:Translate", 1U);
+            if (!auto_key.has_value()) {
+                std::cerr << "Curve mode smoke lost the second Translate key.\n";
+                return false;
+            }
+            state.timeline_editor.selected_keys = {*auto_key};
+            state.timeline_editor.active_key = *auto_key;
+            const auto auto_handles = handles_for("bone:1:Translate", *auto_key, 1U);
+            const TimelineTrackRow* row = row_of("bone:1:Translate");
+            const std::size_t undo_before = state.session.undo_count();
+            const auto before_key = stored("spine", TransformChannel::Translate, 1U);
+            if (row == nullptr || !auto_handles.has_value() || !before_key.has_value() ||
+                !begin_timeline_graph_handle_gesture(
+                    &state, 7202U, *row, *auto_key, auto_handles->frame,
+                    auto_handles->control_points, InterpolationKind::CubicBezier,
+                    cached_timeline_tracks(&state)) ||
+                !apply_timeline_graph_handle_control_points(
+                    &state, cached_timeline_tracks(&state), {0.4, 0.6, 0.6, 0.4}) ||
+                !apply_timeline_graph_handle_control_points(
+                    &state, cached_timeline_tracks(&state),
+                    auto_handles->control_points)) {
+                std::cerr << "Curve mode smoke could not round-trip an auto handle drag.\n";
+                return false;
+            }
+            finish_timeline_graph_handle_gesture(&state, true);
+            const auto after_key = stored("spine", TransformChannel::Translate, 1U);
+            if (state.session.undo_count() != undo_before + 1U || !after_key.has_value() ||
+                after_key->curve_mode != TimelineCurveMode::Manual ||
+                !same_easing(after_key->interpolation, before_key->interpolation)) {
+                std::cerr << "An auto handle drag that returns must still commit its demotion.\n";
+                return false;
+            }
+        }
+
+        // Drag away and exactly back on a MANUAL key is still a cancel.
+        {
+            const auto manual_key = key_of("bone:1:Translate", 1U);
+            const auto manual_handles =
+                handles_for("bone:1:Translate", *manual_key, 1U);
+            const TimelineTrackRow* row = row_of("bone:1:Translate");
+            const std::size_t undo_before = state.session.undo_count();
+            if (row == nullptr || !manual_key.has_value() ||
+                !manual_handles.has_value() ||
+                !begin_timeline_graph_handle_gesture(
+                    &state, 7203U, *row, *manual_key, manual_handles->frame,
+                    manual_handles->control_points, InterpolationKind::CubicBezier,
+                    cached_timeline_tracks(&state)) ||
+                !apply_timeline_graph_handle_control_points(
+                    &state, cached_timeline_tracks(&state), {0.4, 0.6, 0.6, 0.4}) ||
+                !apply_timeline_graph_handle_control_points(
+                    &state, cached_timeline_tracks(&state),
+                    manual_handles->control_points)) {
+                std::cerr << "Curve mode smoke could not round-trip a manual handle drag.\n";
+                return false;
+            }
+            finish_timeline_graph_handle_gesture(&state, true);
+            if (state.session.undo_count() != undo_before) {
+                std::cerr << "MAR-169's net-state rule must still cancel a manual round trip.\n";
+                return false;
+            }
+        }
+
+        // Cancelling a live drag on an auto key restores the mode too.
+        {
+            const auto auto_key = key_of("bone:1:Translate", 0U);
+            state.timeline_editor.selected_keys = {*auto_key};
+            state.timeline_editor.active_key = *auto_key;
+            const auto reseed = apply_timeline_curve_mode(
+                &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+                TimelineScalarComponent::X);
+            if (!reseed.applied) {
+                std::cerr << "Curve mode smoke could not reseed for the cancel case: "
+                          << reseed.error << '\n';
+                return false;
+            }
+            const auto cancel_before =
+                capture_graph_edit_snapshot(&state, "bone:1:Translate");
+            const auto cancel_handles =
+                handles_for("bone:1:Translate", *auto_key, 1U);
+            const TimelineTrackRow* row = row_of("bone:1:Translate");
+            if (row == nullptr || !cancel_before.has_value() ||
+                !cancel_handles.has_value() ||
+                !begin_timeline_graph_handle_gesture(
+                    &state, 7204U, *row, *auto_key, cancel_handles->frame,
+                    cancel_handles->control_points, InterpolationKind::CubicBezier,
+                    cached_timeline_tracks(&state)) ||
+                !apply_timeline_graph_handle_control_points(
+                    &state, cached_timeline_tracks(&state), {0.1, 0.9, 0.9, 0.1})) {
+                std::cerr << "Curve mode smoke could not open the cancel drag.\n";
+                return false;
+            }
+            cancel_authoring_gestures(&state, "Curve mode smoke");
+            const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+            const auto restored = stored("spine", TransformChannel::Translate, 0U);
+            if (!after.has_value() || !restored.has_value() ||
+                after->project != cancel_before->project ||
+                after->undo_count != cancel_before->undo_count ||
+                after->redo_count != cancel_before->redo_count ||
+                after->project_revision != cancel_before->project_revision ||
+                after->dirty != cancel_before->dirty ||
+                after->dopesheet_key_times != cancel_before->dopesheet_key_times ||
+                after->graph_values != cancel_before->graph_values ||
+                after->graph_segment_kinds != cancel_before->graph_segment_kinds ||
+                after->graph_control_points != cancel_before->graph_control_points ||
+                restored->curve_mode != TimelineCurveMode::Auto) {
+                std::cerr << "Cancelling an auto-key handle drag did not restore the mode.\n";
+                return false;
+            }
+        }
+
+        // A MAR-170 preset applied to an auto key demotes it through the same
+        // primitive rule, in the preset's single transaction.
+        {
+            const auto auto_key = key_of("bone:1:Translate", 0U);
+            state.timeline_editor.selected_keys = {*auto_key};
+            state.timeline_editor.active_key = *auto_key;
+            const std::size_t undo_before = state.session.undo_count();
+            const auto preset = apply_timeline_curve_preset(
+                &state, cached_timeline_tracks(&state),
+                marrow::editor::CurvePreset::EaseInOut);
+            const auto after = stored("spine", TransformChannel::Translate, 0U);
+            if (!preset.applied || state.session.undo_count() != undo_before + 1U ||
+                !after.has_value() ||
+                after->curve_mode != TimelineCurveMode::Manual ||
+                !curve_is(after->interpolation, {0.42, 0.0, 0.58, 1.0})) {
+                std::cerr << "A preset on an auto key must demote it in one entry.\n";
+                return false;
+            }
+        }
+    }
+
+    // --- Fail closed: a zero-duration segment cancels the whole transaction -
+    {
+        marrow::editor::TransformTimelineEdit degenerate;
+        degenerate.animation_name = "idle";
+        degenerate.bone_name = "arm_l";
+        degenerate.channel = TransformChannel::Translate;
+        degenerate.keyframes.push_back(
+            {0.0, 0.0, 1.0, 2.0, marrow::runtime::Interpolation::linear()});
+        degenerate.keyframes.push_back(
+            {1e-7, 0.0, 5.0, 6.0, marrow::runtime::Interpolation::linear()});
+        degenerate.keyframes.front().curve_mode = TimelineCurveMode::Auto;
+        degenerate.keyframes.front().curve_driver = TimelineScalarComponent::X;
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "Inject a degenerate track",
+                "curve-mode-smoke:inject",
+                false,
+                marrow::editor::EditImpact::Project});
+            if (!transaction) {
+                std::cerr << "Curve mode smoke could not inject a degenerate track.\n";
+                return false;
+            }
+            transaction.project()->transform_timeline_edits.push_back(degenerate);
+            if (!transaction.commit()) {
+                std::cerr << "Curve mode smoke could not commit its degenerate track.\n";
+                return false;
+            }
+            sync_shell_from_editor_session(&state);
+        }
+
+        // `bone:1:Scale` is still a runtime-only track, so a successful call
+        // would both materialize it and write intent. The resolver's rejection
+        // must roll back the materialization too.
+        const auto scale_key = key_of("bone:1:Scale", 0U);
+        if (!scale_key.has_value()) {
+            std::cerr << "Curve mode smoke requires a spine Scale key.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        const std::string before_text =
+            marrow::editor::serialize_project(*state.session.project());
+        state.selected_timeline_track_id = std::string("bone:1:Scale");
+        state.timeline_editor.selected_keys = {*scale_key};
+        state.timeline_editor.active_key = *scale_key;
+        const auto failed = apply_timeline_curve_mode(
+            &state, cached_timeline_tracks(&state), TimelineCurveMode::Auto,
+            TimelineScalarComponent::X);
+        if (failed.applied || failed.error.empty() ||
+            state.session.undo_count() != undo_before ||
+            marrow::editor::serialize_project(*state.session.project()) != before_text) {
+            std::cerr << "A zero-duration segment must fail the whole application: "
+                      << failed.error << '\n';
+            return false;
+        }
+        if (state.session.project()->find_transform_timeline_edit(
+                "idle", "spine", TransformChannel::Scale) != nullptr) {
+            std::cerr << "A failed curve-mode application left its materialization behind.\n";
+            return false;
+        }
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Curve mode editing changed the Agent operation surface.\n";
         return false;
     }
     return true;

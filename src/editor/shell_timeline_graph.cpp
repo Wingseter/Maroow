@@ -30,6 +30,11 @@ constexpr ImU32 kGraphActiveCenter = IM_COL32(0xe6, 0xea, 0xf2, 0xff);
 // it stays distinguishable from the gold selection ring at any component hue.
 constexpr ImU32 kGraphHandleTangent = IM_COL32(0x9a, 0xd8, 0xff, 0x80);
 constexpr ImU32 kGraphHandleFill = IM_COL32(0x9a, 0xd8, 0xff, 0xff);
+// MAR-171: an automatic key's handles read as "derived, not authored" —
+// hollow rather than filled, and amber rather than light blue, so they stay
+// distinguishable from the gold selection ring by shape as well as hue.
+constexpr ImU32 kAutoHandleTangent = IM_COL32(0xf0, 0xc0, 0x60, 0x80);
+constexpr ImU32 kAutoHandleStroke = IM_COL32(0xf0, 0xc0, 0x60, 0xff);
 constexpr float kGraphHandleHalfExtent = 4.0f;
 constexpr double kGraphHandleHitRadius = 7.0;
 
@@ -488,6 +493,180 @@ void draw_timeline_curve_preset_row(
             "Seeds newly added Transform, Deform, and Slot Color keys. Stored per "
             "user in editor-settings.json; it never changes existing keys and never "
             "modifies the project.");
+    }
+}
+
+
+namespace {
+
+/** @brief The display name of one driver component. */
+const char* curve_driver_display_label(
+    marrow::editor::TimelineScalarComponent driver) {
+    switch (driver) {
+    case marrow::editor::TimelineScalarComponent::Angle: return "Angle";
+    case marrow::editor::TimelineScalarComponent::X: return "X";
+    case marrow::editor::TimelineScalarComponent::Y: return "Y";
+    case marrow::editor::TimelineScalarComponent::Red: return "Red";
+    case marrow::editor::TimelineScalarComponent::Green: return "Green";
+    case marrow::editor::TimelineScalarComponent::Blue: return "Blue";
+    case marrow::editor::TimelineScalarComponent::Alpha: return "Alpha";
+    }
+    return "Angle";
+}
+
+} // namespace
+
+void draw_timeline_curve_mode_row(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    TimelineGraphRenderStats* stats) {
+    if (state == nullptr) return;
+    using marrow::editor::TimelineCurveMode;
+    using marrow::editor::TimelineScalarComponent;
+
+    const std::size_t compatible = compatible_curve_mode_key_count(*state, tracks);
+    const bool gesture_live = authoring_gesture_active(*state);
+    const bool enabled = compatible > 0U && !gesture_live;
+
+    // The drivers every compatible selected family owns. A Rotate key and a
+    // Slot Color key together own no component in common, so the combo is
+    // disabled rather than offering a driver one of them would reject.
+    const auto& selection = state->timeline_editor.selected_keys;
+    bool has_rotate = false;
+    bool has_vector = false;
+    bool has_color = false;
+    for (const TimelineKeyRef& key : selection) {
+        for (const TimelineTrackRow& row : tracks) {
+            if (!timeline_track_is_editable(row)) continue;
+            if (!timeline_key_index(row, key).has_value()) continue;
+            if (row.transform_channel.has_value()) {
+                if (*row.transform_channel ==
+                    marrow::editor::TransformTimelineChannel::Rotate) {
+                    has_rotate = true;
+                } else {
+                    has_vector = true;
+                }
+            } else if (row.id.find(":Color") != std::string::npos) {
+                has_color = true;
+            }
+            break;
+        }
+    }
+    std::vector<TimelineScalarComponent> drivers;
+    const int family_count =
+        (has_rotate ? 1 : 0) + (has_vector ? 1 : 0) + (has_color ? 1 : 0);
+    if (family_count == 1) {
+        if (has_rotate) {
+            drivers = {TimelineScalarComponent::Angle};
+        } else if (has_vector) {
+            drivers = {TimelineScalarComponent::X, TimelineScalarComponent::Y};
+        } else {
+            drivers = {
+                TimelineScalarComponent::Red, TimelineScalarComponent::Green,
+                TimelineScalarComponent::Blue, TimelineScalarComponent::Alpha};
+        }
+    }
+    const bool driver_enabled = enabled && !drivers.empty();
+    if (std::find(drivers.begin(), drivers.end(), state->timeline_editor.curve_driver) ==
+        drivers.end()) {
+        state->timeline_editor.curve_driver =
+            drivers.empty() ? TimelineScalarComponent::Angle : drivers.front();
+    }
+
+    if (stats != nullptr) {
+        stats->curve_mode_row_drawn = true;
+        stats->curve_mode_row_enabled = enabled;
+        const auto mode = active_outgoing_curve_mode(*state, tracks);
+        const auto driver = active_outgoing_curve_driver(*state, tracks);
+        stats->active_key_auto = mode.has_value() && *mode == TimelineCurveMode::Auto;
+        stats->active_driver_index = stats->active_key_auto && driver.has_value()
+            ? static_cast<std::size_t>(*driver)
+            : kCurveDriverCount;
+    }
+
+    ImGui::TextDisabled("Curve mode:");
+    ImGui::BeginDisabled(!enabled);
+    std::optional<TimelineCurveMode> requested;
+    ImGui::SameLine();
+    const bool manual_clicked = ImGui::SmallButton("Manual");
+    if (stats != nullptr) {
+        const ImVec2 item_min = ImGui::GetItemRectMin();
+        const ImVec2 item_max = ImGui::GetItemRectMax();
+        stats->first_curve_mode_min_x = item_min.x;
+        stats->first_curve_mode_min_y = item_min.y;
+        stats->first_curve_mode_max_x = item_max.x;
+        stats->first_curve_mode_max_y = item_max.y;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        std::string tooltip(
+            "Manual  the stored easing is exactly what you put there");
+        if (gesture_live) {
+            tooltip += "\nFinish the active edit before changing the curve mode";
+        } else if (compatible == 0U) {
+            tooltip += "\nSelect one or more Transform or Slot Color keys";
+        }
+        ImGui::SetTooltip("%s", tooltip.c_str());
+    }
+    if (manual_clicked) requested = TimelineCurveMode::Manual;
+    ImGui::SameLine();
+    const bool auto_clicked = ImGui::SmallButton("Auto");
+    if (stats != nullptr) {
+        const ImVec2 item_min = ImGui::GetItemRectMin();
+        const ImVec2 item_max = ImGui::GetItemRectMax();
+        stats->auto_curve_mode_min_x = item_min.x;
+        stats->auto_curve_mode_min_y = item_min.y;
+        stats->auto_curve_mode_max_x = item_max.x;
+        stats->auto_curve_mode_max_y = item_max.y;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        std::string tooltip(
+            "Auto  the easing is recomputed from the driver's neighbouring keys "
+            "whenever they move, and never overshoots. Dragging a handle switches "
+            "the segment back to manual.");
+        if (gesture_live) {
+            tooltip += "\nFinish the active edit before changing the curve mode";
+        } else if (compatible == 0U) {
+            tooltip += "\nSelect one or more Transform or Slot Color keys";
+        }
+        ImGui::SetTooltip("%s", tooltip.c_str());
+    }
+    if (auto_clicked) requested = TimelineCurveMode::Auto;
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("Driver:");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!driver_enabled);
+    ImGui::SetNextItemWidth(
+        ImGui::CalcTextSize("Alpha").x + ImGui::GetFrameHeight() +
+        ImGui::GetStyle().FramePadding.x * 4.0f);
+    if (ImGui::BeginCombo(
+            "##curve_driver",
+            curve_driver_display_label(state->timeline_editor.curve_driver))) {
+        for (const TimelineScalarComponent driver : drivers) {
+            const bool selected = driver == state->timeline_editor.curve_driver;
+            if (ImGui::Selectable(curve_driver_display_label(driver), selected)) {
+                state->timeline_editor.curve_driver = driver;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !driver_enabled) {
+        ImGui::SetTooltip(
+            "Select keys of one timeline family to choose a driver");
+    }
+
+    if (requested.has_value()) {
+        apply_timeline_curve_mode(
+            state,
+            tracks,
+            *requested,
+            *requested == TimelineCurveMode::Auto && !drivers.empty()
+                ? std::optional<TimelineScalarComponent>(
+                      state->timeline_editor.curve_driver)
+                : std::nullopt);
     }
 }
 
@@ -1044,9 +1223,25 @@ TimelineGraphRenderStats draw_timeline_graph_body(
     stats.fit_max_y = fit_item_max.y;
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextDisabled(
-        "Outgoing: %s",
-        outgoing_kind_label(track, state->timeline_editor.active_key));
+    // MAR-171 composes a mode clause on top of MAR-170's preset name.
+    {
+        std::string readout(
+            outgoing_kind_label(track, state->timeline_editor.active_key));
+        const auto mode = active_outgoing_curve_mode(*state, tracks);
+        const auto driver = active_outgoing_curve_driver(*state, tracks);
+        if (mode.has_value()) {
+            if (*mode == marrow::editor::TimelineCurveMode::Auto) {
+                readout += std::string(" \u00b7 Auto (") +
+                    curve_driver_display_label(
+                        driver.value_or(
+                            marrow::editor::TimelineScalarComponent::Angle)) +
+                    ")";
+            } else {
+                readout += " \u00b7 Manual";
+            }
+        }
+        ImGui::TextDisabled("Outgoing: %s", readout.c_str());
+    }
 
     if (track.components.size() == 1U) {
         ImGui::TextUnformatted(
@@ -1059,10 +1254,14 @@ TimelineGraphRenderStats draw_timeline_graph_body(
     }
     ImGui::TextUnformatted(
         "A preset applies to every compatible selected key and, like a handle drag, writes each key's single shared easing.");
+    ImGui::TextUnformatted(
+        "An automatic curve is computed from the driver's own series and is still that key's one shared easing.");
 
     // MAR-170: appended after every existing widget, so no MAR-167/168/169
     // rectangle the actual-frame smokes aim at moves.
     draw_timeline_curve_preset_row(state, tracks, &stats);
+    // MAR-171: appended after MAR-170's row, for the same reason.
+    draw_timeline_curve_mode_row(state, tracks, &stats);
 
     const float total_width = std::max(160.0f, ImGui::GetContentRegionAvail().x);
     constexpr float kPlotHeight = 340.0f;
@@ -1300,15 +1499,25 @@ TimelineGraphRenderStats draw_timeline_graph_body(
         const ImVec2 second(
             static_cast<float>(handles->second_handle.x),
             static_cast<float>(handles->second_handle.y));
-        draw_list->AddLine(start_anchor, first, kGraphHandleTangent, 1.0f);
-        draw_list->AddLine(end_anchor, second, kGraphHandleTangent, 1.0f);
+        // MAR-171: an automatic segment's handles are hollow amber. They stay
+        // fully grabbable, and grabbing one demotes the segment to manual.
+        const bool automatic = stats.active_key_auto;
+        draw_list->AddLine(
+            start_anchor, first,
+            automatic ? kAutoHandleTangent : kGraphHandleTangent, 1.0f);
+        draw_list->AddLine(
+            end_anchor, second,
+            automatic ? kAutoHandleTangent : kGraphHandleTangent, 1.0f);
         for (const ImVec2& handle : {first, second}) {
-            draw_list->AddRectFilled(
-                ImVec2(handle.x - kGraphHandleHalfExtent,
-                       handle.y - kGraphHandleHalfExtent),
-                ImVec2(handle.x + kGraphHandleHalfExtent,
-                       handle.y + kGraphHandleHalfExtent),
-                kGraphHandleFill);
+            const ImVec2 top_left(
+                handle.x - kGraphHandleHalfExtent, handle.y - kGraphHandleHalfExtent);
+            const ImVec2 bottom_right(
+                handle.x + kGraphHandleHalfExtent, handle.y + kGraphHandleHalfExtent);
+            if (automatic) {
+                draw_list->AddRect(top_left, bottom_right, kAutoHandleStroke);
+            } else {
+                draw_list->AddRectFilled(top_left, bottom_right, kGraphHandleFill);
+            }
         }
     }
     if (geometry->playhead_x.has_value()) {

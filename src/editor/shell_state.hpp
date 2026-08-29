@@ -640,6 +640,11 @@ struct TimelineGraphHandleGesture {
     // The authored easing at the press. `changed` is measured against this, so
     // a drag that travels and comes back completes as a cancel.
     std::array<double, 4> original_control_points{};
+    // MAR-171: the curve mode at the press. A drag on an automatic key is an
+    // authored change even when the control points land back on their starting
+    // values, because the key stops tracking its neighbours.
+    marrow::editor::TimelineCurveMode original_mode{
+        marrow::editor::TimelineCurveMode::Manual};
     std::array<double, 4> applied_control_points{};
     bool clamped_x{false};
     bool materialized{false};
@@ -684,6 +689,11 @@ struct TimelineEditorState {
     TimelineGraphViewState graph_view{};
     TimelineGraphProjectionCache graph_cache{};
     TimelineClipboard clipboard;
+    // MAR-171: the driver the Graph tab's `Driver:` combo currently offers. It
+    // is UI state only — a project never stores it, and applying a mode writes
+    // it onto the selected keys rather than reading it back.
+    marrow::editor::TimelineScalarComponent curve_driver{
+        marrow::editor::TimelineScalarComponent::Angle};
     std::optional<TimelineBoxSelection> box_selection;
     std::optional<TimelineRetimeGesture> retime_gesture;
     std::optional<TimelineGraphPointDrag> graph_drag;

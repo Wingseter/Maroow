@@ -192,6 +192,24 @@ preference module stays as isolated as MAR-156 left it. The seed initializes an
 inserted key; a gesture that lands on an existing key leaves its curve alone. Applying a preset does not
 change it; only the explicit `Default:` control does.
 
+MAR-171 adds the other half of the pair. A Transform or Slot Color key can
+record **curve mode** — project-local authoring intent, stored only in
+`.marrow` — saying whether its stored easing is a number the animator put there
+(`manual`) or a derived value the editor recomputes from the driver's
+neighbouring keys (`auto`). The runtime and both runtime formats only ever see
+the resolved easing: `curve_mode` and `curve_driver` never enter `.mskl` or
+`.mbin`, and a build that has never heard of them reads the file correctly.
+Resolution is eager and transactional — an automatic curve is recomputed inside
+the very transaction that moved its neighbours, so one edit remains one undo
+entry and a saved project never disagrees with its own export. The interpolant
+is monotone Fritsch–Carlson, whose normalization produces `cx1 = 1/3` and
+`cx2 = 2/3` identically rather than by clamping; the same algebra keeps `cy`
+inside `[0, 1]`, so an automatic curve can never overshoot and overshoot stays
+reachable only through a manual handle drag. Writing any absolute easing — a
+handle drag, a preset, the numeric inspector, or the Agent — demotes the key to
+manual, and the rule lives inside the one primitive that writes an absolute
+easing so no caller can forget it.
+
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active
 `EditorSession`, while live Alt and platform Cmd/Ctrl state flows only through

@@ -1,5 +1,7 @@
 #include "viewport_interaction_controller.hpp"
 
+#include "timeline_controller.hpp"
+
 #include "shell_preview.hpp"
 #include "shell_project_panels.hpp"
 
@@ -826,6 +828,19 @@ bool update_translate_gesture(
         // MAR-170: a gizmo drag at a time with no key authors one.
         marrow::editor::curve_preset_interpolation(
             state->preferences.default_curve));
+    // MAR-171: a gizmo drag moves a driver value, so every automatic curve of
+    // this animation is recomputed inside the same gesture transaction.
+    {
+        std::string auto_curve_error;
+        if (!marrow::editor::shell::resolve_timeline_auto_curves(
+                gesture.transaction.project(),
+                gesture.animation_name,
+                &auto_curve_error)) {
+            finish_transform_gesture(state, false);
+            state->error_message = auto_curve_error;
+            return false;
+        }
+    }
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
@@ -989,6 +1004,19 @@ bool update_rotate_gesture(
         // MAR-170: a gizmo drag at a time with no key authors one.
         marrow::editor::curve_preset_interpolation(
             state->preferences.default_curve));
+    // MAR-171: a gizmo drag moves a driver value, so every automatic curve of
+    // this animation is recomputed inside the same gesture transaction.
+    {
+        std::string auto_curve_error;
+        if (!marrow::editor::shell::resolve_timeline_auto_curves(
+                gesture.transaction.project(),
+                gesture.animation_name,
+                &auto_curve_error)) {
+            finish_transform_gesture(state, false);
+            state->error_message = auto_curve_error;
+            return false;
+        }
+    }
     const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
     if (!refresh) {
         const std::string error = refresh.error->format();
@@ -1151,6 +1179,19 @@ bool update_scale_gesture(
         // MAR-170: a gizmo drag at a time with no key authors one.
         marrow::editor::curve_preset_interpolation(
             state->preferences.default_curve));
+    // MAR-171: a gizmo drag moves a driver value, so every automatic curve of
+    // this animation is recomputed inside the same gesture transaction.
+    {
+        std::string auto_curve_error;
+        if (!marrow::editor::shell::resolve_timeline_auto_curves(
+                gesture.transaction.project(),
+                gesture.animation_name,
+                &auto_curve_error)) {
+            finish_transform_gesture(state, false);
+            state->error_message = auto_curve_error;
+            return false;
+        }
+    }
     const marrow::editor::SessionResult refresh =
         gesture.transaction.refresh_runtime();
     if (!refresh) {

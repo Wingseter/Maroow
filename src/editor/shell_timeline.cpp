@@ -1567,6 +1567,11 @@ void draw_transform_timeline_editor(
                         break;
                     }
                     }
+                    // MAR-171: this inspector writes `interpolation` directly
+                    // rather than through `set_keyframe_interpolation()`, so it
+                    // carries the demotion itself. Leaving it out would let the
+                    // next neighbour edit silently discard this authored curve.
+                    editable_key.curve_mode = marrow::editor::TimelineCurveMode::Manual;
                     commit_project_change(
                         previous_project,
                         EditActionKind::EditProperty,
@@ -1619,6 +1624,9 @@ void draw_transform_timeline_editor(
                                         static_cast<double>(bezier.cy1),
                                         static_cast<double>(bezier.cx2),
                                         static_cast<double>(bezier.cy2));
+                                // MAR-171: an absolute easing write demotes.
+                                editable_key.curve_mode =
+                                    marrow::editor::TimelineCurveMode::Manual;
                             }
                         });
                 };

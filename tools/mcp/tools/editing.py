@@ -63,6 +63,45 @@ def _bezier_interpolation_schema() -> dict:
     }
 
 
+def _timeline_curve_mode_key_schema() -> dict:
+    """Only the two families that carry both an easing and a scalar series.
+
+    Deliberately not a reuse of ``_timeline_interpolation_key_schema()``, which
+    also admits ``deform``: a deform key's value is a vertex-offset vector with
+    no canonical scalar to drive a tangent, so it has no automatic curve mode.
+    """
+    common = {
+        "animation": {"type": "string", "minLength": 1},
+        "time": {"type": "number", "minimum": 0},
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "time"],
+            },
+        ]
+    }
+
+
 def _timeline_interpolation_key_schema() -> dict:
     """Only the three families whose keys carry an ``interpolation`` field.
 
@@ -574,6 +613,38 @@ def get_tools() -> list[types.Tool]:
                     "dry_run": {"type": "boolean"},
                 },
                 "required": ["keys", "interpolation"],
+            },
+        ),
+        types.Tool(
+            name="timeline.set_curve_mode",
+            description=(
+                "Record manual or automatic curve intent on transform and slot-colour "
+                "timeline keys. An automatic key's easing is recomputed from the "
+                "driver's neighbouring keys whenever they move, and never overshoots "
+                "its segment endpoints; dragging a handle, applying a preset, or "
+                "writing an absolute easing switches that segment back to manual. "
+                "`driver` names which scalar series drives the computation and is "
+                "rejected with `manual`; omitted, it is the family's lowest-indexed "
+                "component. Deform keys have no automatic mode. A dry run reports each "
+                "key's current mode, driver, and curve without mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_curve_mode_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "mode": {"type": "string", "enum": ["manual", "auto"]},
+                    "driver": {
+                        "type": "string",
+                        "enum": ["angle", "x", "y", "r", "g", "b", "a"],
+                    },
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["keys", "mode"],
             },
         ),
         types.Tool(

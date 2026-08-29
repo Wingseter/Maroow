@@ -173,6 +173,66 @@ std::optional<marrow::editor::CurvePreset> active_outgoing_curve_preset(
     const ShellState& state,
     const std::vector<TimelineTrackRow>& tracks);
 
+/** @brief Result of one curve-mode application, for status text and tests. */
+struct TimelineCurveModeApplyResult {
+    bool applied{false};
+    std::size_t changed_key_count{0U};
+    std::size_t resolved_key_count{0U};
+    std::size_t compatible_key_count{0U};
+    std::size_t skipped_key_count{0U};  // selected keys with no curve mode
+    std::string error;
+};
+
+/**
+ * @brief How many selected keys the curve-mode row would actually write.
+ *
+ * Shares one definition of "compatible selected key" with
+ * `apply_timeline_curve_mode()`, so the row can never be enabled for a
+ * selection the write would refuse. Deform is compatible with MAR-170's preset
+ * row but NOT with this one: a deform key's value is a vertex-offset vector
+ * with no canonical scalar to drive a tangent.
+ */
+std::size_t compatible_curve_mode_key_count(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks);
+
+/**
+ * @brief Applies one curve mode to every compatible selected key.
+ *
+ * Deform, draw-order, event, and slot-attachment selections are skipped rather
+ * than rejected, duplicates are collapsed, runtime-only tracks are materialized,
+ * and the whole write plus its automatic resolution is one transaction with
+ * live preview and one history entry.
+ */
+TimelineCurveModeApplyResult apply_timeline_curve_mode(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    marrow::editor::TimelineCurveMode mode,
+    std::optional<marrow::editor::TimelineScalarComponent> driver);
+
+/**
+ * @brief Resolves the animation's automatic curves inside the caller's open
+ *        transaction.
+ *
+ * Every timeline transaction that can change a Transform or Slot Color key's
+ * time, value, or existence calls this after its own mutation and before
+ * `refresh_runtime()`, so one edit stays one history entry.
+ * @return false with `*error_out` set when the resolve failed; the caller
+ *         cancels.
+ */
+bool resolve_timeline_auto_curves(
+    marrow::editor::ProjectData* project,
+    std::string_view animation_name,
+    std::string* error_out);
+
+/** @brief The active key's recorded curve mode and effective driver. */
+std::optional<marrow::editor::TimelineCurveMode> active_outgoing_curve_mode(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks);
+std::optional<marrow::editor::TimelineScalarComponent> active_outgoing_curve_driver(
+    const ShellState& state,
+    const std::vector<TimelineTrackRow>& tracks);
+
 bool add_timeline_key_at_playhead(
     ShellState* state,
     const TimelineTrackRow& track);

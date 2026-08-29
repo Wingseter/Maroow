@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -3607,6 +3609,1001 @@ bool validate_mar170_curve_presets(
     return true;
 }
 
+/**
+ * @brief MAR-171: project-local automatic curve mode, driver, and resolution.
+ *
+ * The two `.marrow` keyframe fields are optional and absent by default, so the
+ * first block proves a project with no automatic key serializes byte for byte
+ * as it did before this story existed.
+ */
+bool validate_mar171_automatic_curves(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::TimelineCurveMode;
+    using marrow::editor::TimelineKeyKind;
+    using marrow::editor::TimelineKeySelector;
+    using marrow::editor::TimelineScalarComponent;
+    using marrow::editor::TransformTimelineChannel;
+    using marrow::runtime::InterpolationKind;
+
+    std::error_code ignored;
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    // Saving to a temp directory needs the referenced runtime assets resolved
+    // absolutely, exactly as MAR-169's round trip does.
+    const auto rebase = [&](const std::filesystem::path& destination) {
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = destination;
+        return project;
+    };
+
+    // The fixture authors no slot-colour timeline, so the two slot-colour
+    // cases below build one on the real `body` slot.
+    const auto make_body_color_track = [] {
+        marrow::editor::SlotColorTimelineEdit color;
+        color.animation_name = "idle";
+        color.slot_name = "body";
+        color.keyframes.push_back(
+            {0.0, marrow::runtime::SlotColor{1.0, 1.0, 1.0, 1.0},
+             marrow::runtime::Interpolation::linear()});
+        color.keyframes.push_back(
+            {0.5, marrow::runtime::SlotColor{0.5, 0.75, 1.0, 0.25},
+             marrow::runtime::Interpolation::linear()});
+        color.keyframes.push_back(
+            {1.0, marrow::runtime::SlotColor{0.25, 0.5, 1.0, 1.0},
+             marrow::runtime::Interpolation::linear()});
+        return color;
+    };
+
+    // --- Default-off, byte for byte -------------------------------------
+    const auto default_off_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar171_default_off_" + path_token + ".marrow");
+    const marrow::editor::ProjectData default_off_project = rebase(default_off_path);
+    const std::string untouched_text =
+        marrow::editor::serialize_project(default_off_project);
+    if (untouched_text.find("curve_mode") != std::string::npos ||
+        untouched_text.find("curve_driver") != std::string::npos) {
+        std::cerr << "MAR-171 serialized a curve-mode field into an untouched project.\n";
+        return false;
+    }
+    const auto default_off_saved =
+        marrow::editor::save_project(default_off_project, default_off_path);
+    if (!default_off_saved) {
+        std::cerr << default_off_saved.error->format() << '\n';
+        return false;
+    }
+    const auto default_off_reloaded = marrow::editor::load_project(default_off_path);
+    std::filesystem::remove(default_off_path, ignored);
+    if (!default_off_reloaded) {
+        std::cerr << default_off_reloaded.error->format();
+        return false;
+    }
+    if (marrow::editor::serialize_project(*default_off_reloaded.project) !=
+        untouched_text) {
+        std::cerr << "MAR-171 broke load/save byte stability on an untouched project.\n";
+        return false;
+    }
+
+    // --- The two fields serialize only for an automatic key --------------
+    const auto round_trip_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar171_round_trip_" + path_token + ".marrow");
+    {
+        marrow::editor::ProjectData project = rebase(round_trip_path);
+        auto* rotate = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        auto* arm = project.find_transform_timeline_edit(
+            "idle", "arm_l", TransformTimelineChannel::Rotate);
+        if (rotate == nullptr || rotate->keyframes.empty() || arm == nullptr ||
+            arm->keyframes.empty()) {
+            std::cerr << "MAR-171 storage needs the fixture's spine and arm_l rotate tracks.\n";
+            return false;
+        }
+        rotate->keyframes.front().curve_mode = TimelineCurveMode::Auto;
+        rotate->keyframes.front().curve_driver = TimelineScalarComponent::Angle;
+        // A manual key with a non-default driver in memory must serialize
+        // neither field, so there is exactly one on-disk shape for "manual".
+        arm->keyframes.front().curve_mode = TimelineCurveMode::Manual;
+        arm->keyframes.front().curve_driver = TimelineScalarComponent::Y;
+
+        const std::string text = marrow::editor::serialize_project(project);
+        const auto count_of = [&](std::string_view needle) {
+            std::size_t total = 0U;
+            for (std::size_t at = text.find(needle); at != std::string::npos;
+                 at = text.find(needle, at + needle.size())) {
+                ++total;
+            }
+            return total;
+        };
+        if (count_of("\"curve_mode\"") != 1U || count_of("\"curve_driver\"") != 1U) {
+            std::cerr << "MAR-171 must serialize the pair exactly once, on the auto key.\n";
+            return false;
+        }
+
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        std::filesystem::remove(round_trip_path, ignored);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* reloaded_rotate = reloaded.project->find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        const auto* reloaded_arm = reloaded.project->find_transform_timeline_edit(
+            "idle", "arm_l", TransformTimelineChannel::Rotate);
+        if (reloaded_rotate == nullptr || reloaded_rotate->keyframes.empty() ||
+            reloaded_rotate->keyframes.front().curve_mode != TimelineCurveMode::Auto ||
+            reloaded_rotate->keyframes.front().curve_driver !=
+                TimelineScalarComponent::Angle) {
+            std::cerr << "MAR-171 curve mode and driver did not survive save and reload.\n";
+            return false;
+        }
+        if (reloaded_arm == nullptr || reloaded_arm->keyframes.empty() ||
+            reloaded_arm->keyframes.front().curve_mode != TimelineCurveMode::Manual ||
+            reloaded_arm->keyframes.front().curve_driver !=
+                TimelineScalarComponent::Angle) {
+            std::cerr << "MAR-171 must reload a manual key with its family-default driver.\n";
+            return false;
+        }
+    }
+
+    // --- Slot Color round trip -------------------------------------------
+    const auto color_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar171_color_" + path_token + ".marrow");
+    {
+        marrow::editor::ProjectData project = rebase(color_path);
+        // The fixture has no authored slot-colour track, so the round trip
+        // authors one on a real slot rather than skipping the family.
+        project.slot_color_timeline_edits.push_back(make_body_color_track());
+        auto* color = project.find_slot_color_timeline_edit("idle", "body");
+        color->keyframes.front().curve_mode = TimelineCurveMode::Auto;
+        color->keyframes.front().curve_driver = TimelineScalarComponent::Alpha;
+        const auto saved = marrow::editor::save_project(project, color_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(color_path);
+        std::filesystem::remove(color_path, ignored);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* reloaded_color =
+            reloaded.project->find_slot_color_timeline_edit("idle", "body");
+        if (reloaded_color == nullptr || reloaded_color->keyframes.empty() ||
+            reloaded_color->keyframes.front().curve_mode != TimelineCurveMode::Auto ||
+            reloaded_color->keyframes.front().curve_driver !=
+                TimelineScalarComponent::Alpha) {
+            std::cerr << "MAR-171 slot-colour curve intent did not round trip.\n";
+            return false;
+        }
+    }
+
+    // --- Load validation, each with its own JSON path ---------------------
+    {
+        marrow::editor::ProjectData project = rebase(round_trip_path);
+        auto* rotate = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        rotate->keyframes.front().curve_mode = TimelineCurveMode::Auto;
+        rotate->keyframes.front().curve_driver = TimelineScalarComponent::Angle;
+        const auto base_document = marrow::runtime::json::parse_document(
+            marrow::editor::serialize_project(project), "mar171");
+        if (!base_document) {
+            std::cerr << "MAR-171 could not reparse its own serialized project.\n";
+            return false;
+        }
+        const auto locate_keyframe = [&](marrow::runtime::json::Document* document)
+            -> marrow::runtime::json::Value* {
+            auto* edits = marrow::runtime::json::find_member(
+                document->root, "timeline_edits");
+            auto* animations = edits != nullptr
+                ? marrow::runtime::json::find_member(*edits, "animations")
+                : nullptr;
+            auto* idle = animations != nullptr
+                ? marrow::runtime::json::find_member(*animations, "idle")
+                : nullptr;
+            auto* bones = idle != nullptr
+                ? marrow::runtime::json::find_member(*idle, "bones")
+                : nullptr;
+            auto* spine = bones != nullptr
+                ? marrow::runtime::json::find_member(*bones, "spine")
+                : nullptr;
+            auto* rotate_value = spine != nullptr
+                ? marrow::runtime::json::find_member(*spine, "rotate")
+                : nullptr;
+            if (rotate_value == nullptr || !rotate_value->is_array() ||
+                rotate_value->as_array().empty()) {
+                return nullptr;
+            }
+            return &rotate_value->as_array().front();
+        };
+
+        struct MalformedCase {
+            const char* label;
+            const char* member;
+            marrow::runtime::json::Value value;
+            bool drop_mode;
+            const char* expected_message;
+        };
+        const std::string keyframe_path =
+            "$.timeline_edits.animations.idle.bones.spine.rotate[0]";
+        const std::vector<MalformedCase> cases{
+            {"a numeric curve_mode", "curve_mode",
+             marrow::runtime::json::Value(3.0, {}), false,
+             "curve_mode must be 'manual' or 'auto'"},
+            {"an unknown curve_mode token", "curve_mode",
+             marrow::runtime::json::Value(std::string("automatic"), {}), false,
+             "curve_mode must be 'manual' or 'auto'"},
+            {"a numeric curve_driver", "curve_driver",
+             marrow::runtime::json::Value(7.0, {}), false,
+             "curve_driver must be one of angle, x, y, r, g, b, a"},
+            {"an unknown curve_driver token", "curve_driver",
+             marrow::runtime::json::Value(std::string("z"), {}), false,
+             "curve_driver must be one of angle, x, y, r, g, b, a"},
+            {"a driver the family does not own", "curve_driver",
+             marrow::runtime::json::Value(std::string("x"), {}), false,
+             "curve_driver must name a component this timeline owns"},
+            {"a driver on a manual key", "curve_driver",
+             marrow::runtime::json::Value(std::string("angle"), {}), true,
+             "curve_driver requires curve_mode 'auto'"},
+        };
+        for (const MalformedCase& malformed : cases) {
+            auto document = *base_document.document;
+            auto* keyframe = locate_keyframe(&document);
+            if (keyframe == nullptr) {
+                std::cerr << "MAR-171 load validation could not locate the keyframe.\n";
+                return false;
+            }
+            keyframe->as_object()[malformed.member] = malformed.value;
+            if (malformed.drop_mode) keyframe->as_object().erase("curve_mode");
+            const auto loaded = marrow::editor::load_project(document);
+            if (loaded) {
+                std::cerr << "MAR-171 loader accepted " << malformed.label << ".\n";
+                return false;
+            }
+            const std::string message = loaded.error->message;
+            const std::string want_path =
+                keyframe_path + "." + std::string(malformed.member);
+            if (message.find(want_path) != 0U ||
+                message.find(malformed.expected_message) == std::string::npos) {
+                std::cerr << "MAR-171 rejected " << malformed.label
+                          << " with the wrong path or message: " << message << '\n';
+                return false;
+            }
+        }
+    }
+
+    // --- validate_project_for_save() re-validates the driver ---------------
+    {
+        const auto invalid_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar171_invalid_driver_" + path_token + ".marrow");
+        marrow::editor::ProjectData project = rebase(invalid_path);
+        project.slot_color_timeline_edits.push_back(make_body_color_track());
+        auto* color = project.find_slot_color_timeline_edit("idle", "body");
+        color->keyframes.front().curve_mode = TimelineCurveMode::Auto;
+        color->keyframes.front().curve_driver = TimelineScalarComponent::Angle;
+        const auto saved = marrow::editor::save_project(project, invalid_path);
+        std::filesystem::remove(invalid_path, ignored);
+        if (saved) {
+            std::cerr << "MAR-171 saver accepted an Angle driver on a slot-colour key.\n";
+            return false;
+        }
+        if (saved.error->message.find(
+                "automatic curve drivers must name a component the timeline owns") ==
+            std::string::npos) {
+            std::cerr << "MAR-171 driver-authorability message was wrong: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The two authoring primitives.
+    // ------------------------------------------------------------------
+    constexpr double kThird = 1.0 / 3.0;
+    constexpr double kTwoThirds = 2.0 / 3.0;
+    const auto narrowed = [](double value) {
+        return static_cast<double>(
+            static_cast<marrow::runtime::AnimationScalar>(value));
+    };
+    const auto curve_is = [&](const marrow::runtime::Interpolation& easing,
+                              const std::array<double, 4>& expected) {
+        if (easing.kind() != InterpolationKind::CubicBezier) return false;
+        const auto& points = easing.cubic_bezier();
+        return static_cast<double>(points.cx1) == narrowed(expected[0]) &&
+            static_cast<double>(points.cy1) == narrowed(expected[1]) &&
+            static_cast<double>(points.cx2) == narrowed(expected[2]) &&
+            static_cast<double>(points.cy2) == narrowed(expected[3]);
+    };
+    // The design's §6.6 worked example over the fixture's spine rotate keys
+    // (t = 0, 0.5, 1 and angle = 0, 8, -2), spelled out rather than recomputed.
+    const std::array<double, 4> kSegment0{kThird, kThird, kTwoThirds, 1.0};
+    const std::array<double, 4> kSegment1{kThird, 0.0, kTwoThirds, kTwoThirds};
+
+    const auto spine_selector = [](double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::Transform;
+        selector.animation_name = "idle";
+        selector.bone_name = "spine";
+        selector.transform_channel = TransformTimelineChannel::Rotate;
+        selector.time = time;
+        return selector;
+    };
+    const auto spine_rotate = [](const marrow::editor::ProjectData& project) {
+        return project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+    };
+
+    // --- Round trip through the primitive, then through the file ---------
+    {
+        const auto primitive_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar171_primitive_" + path_token + ".marrow");
+        marrow::editor::ProjectData project = rebase(primitive_path);
+        const auto applied = marrow::editor::set_keyframe_curve_mode(
+            &project,
+            {spine_selector(0.0), spine_selector(0.5)},
+            TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        if (!applied || !applied.changed || applied.key_count != 2U ||
+            applied.changed_key_count != 2U || applied.resolved_key_count != 2U) {
+            std::cerr << "MAR-171 primitive did not author two automatic keys: "
+                      << applied.error << '\n';
+            return false;
+        }
+        const auto* track = spine_rotate(project);
+        if (track == nullptr || track->keyframes.size() != 3U ||
+            !curve_is(track->keyframes[0].interpolation, kSegment0) ||
+            !curve_is(track->keyframes[1].interpolation, kSegment1)) {
+            std::cerr << "MAR-171 did not store the design's worked-example curves.\n";
+            return false;
+        }
+        // The last key has no outgoing segment, so its stored easing is left
+        // byte-identical even when its own mode becomes automatic.
+        const marrow::runtime::Interpolation last_before =
+            track->keyframes[2].interpolation;
+        const auto last = marrow::editor::set_keyframe_curve_mode(
+            &project,
+            {spine_selector(1.0)},
+            TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        const auto* after_last = spine_rotate(project);
+        if (!last || !last.changed || last.resolved_key_count != 0U ||
+            after_last->keyframes[2].curve_mode != TimelineCurveMode::Auto ||
+            after_last->keyframes[2].interpolation.kind() != last_before.kind()) {
+            std::cerr << "MAR-171 must record a last key's mode without writing its easing.\n";
+            return false;
+        }
+
+        const auto saved = marrow::editor::save_project(project, primitive_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(primitive_path);
+        std::filesystem::remove(primitive_path, ignored);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* reloaded_track = spine_rotate(*reloaded.project);
+        if (reloaded_track == nullptr ||
+            reloaded_track->keyframes[0].curve_mode != TimelineCurveMode::Auto ||
+            reloaded_track->keyframes[0].curve_driver != TimelineScalarComponent::Angle ||
+            !curve_is(reloaded_track->keyframes[0].interpolation, kSegment0) ||
+            !curve_is(reloaded_track->keyframes[1].interpolation, kSegment1)) {
+            std::cerr << "MAR-171 resolved curves did not survive save and reload.\n";
+            return false;
+        }
+    }
+
+    // --- Atomic rejections ------------------------------------------------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        project.slot_color_timeline_edits.push_back(make_body_color_track());
+        const std::string snapshot = marrow::editor::serialize_project(project);
+
+        TimelineKeySelector deform;
+        deform.kind = TimelineKeyKind::Deform;
+        deform.animation_name = "idle";
+        deform.slot_name = "body";
+        deform.attachment_name = "body_mesh";
+        deform.time = 0.0;
+        TimelineKeySelector draw_order;
+        draw_order.kind = TimelineKeyKind::DrawOrder;
+        draw_order.animation_name = "idle";
+        draw_order.time = 0.0;
+        TimelineKeySelector event;
+        event.kind = TimelineKeyKind::Event;
+        event.animation_name = "idle";
+        event.time = 0.25;
+        TimelineKeySelector attachment;
+        attachment.kind = TimelineKeyKind::SlotAttachment;
+        attachment.animation_name = "idle";
+        attachment.slot_name = "body";
+        attachment.time = 0.0;
+        TimelineKeySelector color;
+        color.kind = TimelineKeyKind::SlotColor;
+        color.animation_name = "idle";
+        color.slot_name = "body";
+        color.time = 0.0;
+        TimelineKeySelector unresolvable = spine_selector(9.75);
+
+        struct RejectionCase {
+            const char* label;
+            std::vector<TimelineKeySelector> selectors;
+            TimelineScalarComponent driver;
+        };
+        const std::vector<RejectionCase> rejections{
+            {"a Deform selector", {deform}, TimelineScalarComponent::Angle},
+            {"a Draw Order selector", {draw_order}, TimelineScalarComponent::Angle},
+            {"an Event selector", {event}, TimelineScalarComponent::Angle},
+            {"a Slot Attachment selector", {attachment}, TimelineScalarComponent::Angle},
+            {"an unresolvable selector", {unresolvable}, TimelineScalarComponent::Angle},
+            {"a duplicated selector",
+             {spine_selector(0.0), spine_selector(0.0)},
+             TimelineScalarComponent::Angle},
+            {"an empty selector list", {}, TimelineScalarComponent::Angle},
+            {"a driver the family does not own",
+             {spine_selector(0.0)},
+             TimelineScalarComponent::X},
+            {"a slot-colour driver on a rotate key",
+             {spine_selector(0.0)},
+             TimelineScalarComponent::Alpha},
+            {"an Angle driver on a slot-colour key",
+             {color},
+             TimelineScalarComponent::Angle},
+        };
+        for (const RejectionCase& rejection : rejections) {
+            marrow::editor::ProjectData candidate = project;
+            const auto result = marrow::editor::set_keyframe_curve_mode(
+                &candidate, rejection.selectors, TimelineCurveMode::Auto,
+                rejection.driver);
+            if (result || result.error.empty()) {
+                std::cerr << "MAR-171 accepted " << rejection.label << ".\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(candidate) != snapshot) {
+                std::cerr << "MAR-171 mutated the project while rejecting "
+                          << rejection.label << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // --- Segment-wide identity: the driver selects a series to read, never
+    // --- which bytes are written. -----------------------------------------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        marrow::editor::TransformTimelineEdit translate;
+        translate.animation_name = "idle";
+        translate.bone_name = "spine";
+        translate.channel = TransformTimelineChannel::Translate;
+        translate.keyframes.push_back(
+            {0.0, 0.0, 0.0, 0.0, marrow::runtime::Interpolation::linear()});
+        translate.keyframes.push_back(
+            {0.5, 0.0, 4.0, 9.0, marrow::runtime::Interpolation::linear()});
+        translate.keyframes.push_back(
+            {1.0, 0.0, 6.0, 1.0, marrow::runtime::Interpolation::linear()});
+        project.transform_timeline_edits.push_back(std::move(translate));
+
+        const auto count_easing_differences =
+            [](const marrow::editor::ProjectData& before,
+               const marrow::editor::ProjectData& after) {
+                std::size_t differences = 0U;
+                for (std::size_t edit = 0U;
+                     edit < before.transform_timeline_edits.size();
+                     ++edit) {
+                    const auto& left = before.transform_timeline_edits[edit].keyframes;
+                    const auto& right = after.transform_timeline_edits[edit].keyframes;
+                    for (std::size_t key = 0U; key < left.size(); ++key) {
+                        const auto& a = left[key].interpolation;
+                        const auto& b = right[key].interpolation;
+                        if (a.kind() != b.kind()) {
+                            ++differences;
+                            continue;
+                        }
+                        if (a.kind() != InterpolationKind::CubicBezier) continue;
+                        if (a.cubic_bezier().cx1 != b.cubic_bezier().cx1 ||
+                            a.cubic_bezier().cy1 != b.cubic_bezier().cy1 ||
+                            a.cubic_bezier().cx2 != b.cubic_bezier().cx2 ||
+                            a.cubic_bezier().cy2 != b.cubic_bezier().cy2) {
+                            ++differences;
+                        }
+                    }
+                }
+                return differences;
+            };
+        TimelineKeySelector translate_key;
+        translate_key.kind = TimelineKeyKind::Transform;
+        translate_key.animation_name = "idle";
+        translate_key.bone_name = "spine";
+        translate_key.transform_channel = TransformTimelineChannel::Translate;
+        translate_key.time = 0.0;
+
+        marrow::editor::ProjectData by_y = project;
+        const auto y_applied = marrow::editor::set_keyframe_curve_mode(
+            &by_y, {translate_key}, TimelineCurveMode::Auto,
+            TimelineScalarComponent::Y);
+        marrow::editor::ProjectData by_x = project;
+        const auto x_applied = marrow::editor::set_keyframe_curve_mode(
+            &by_x, {translate_key}, TimelineCurveMode::Auto,
+            TimelineScalarComponent::X);
+        if (!y_applied || !x_applied ||
+            count_easing_differences(project, by_y) != 1U ||
+            count_easing_differences(project, by_x) != 1U) {
+            std::cerr << "MAR-171 must write exactly one shared easing per driver.\n";
+            return false;
+        }
+        const auto* y_track = by_y.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Translate);
+        const auto* x_track = by_x.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Translate);
+        const auto& y_curve = y_track->keyframes.front().interpolation.cubic_bezier();
+        const auto& x_curve = x_track->keyframes.front().interpolation.cubic_bezier();
+        if (y_curve.cy1 == x_curve.cy1 && y_curve.cy2 == x_curve.cy2) {
+            std::cerr << "MAR-171 driver choice must change the resolved curve.\n";
+            return false;
+        }
+    }
+
+    // --- Neighbour recomputation, demotion, no-change, and re-resolve -----
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        const auto seeded = marrow::editor::set_keyframe_curve_mode(
+            &project, {spine_selector(0.0), spine_selector(0.5)},
+            TimelineCurveMode::Auto, TimelineScalarComponent::Angle);
+        if (!seeded) {
+            std::cerr << "MAR-171 could not seed the recomputation cases: "
+                      << seeded.error << '\n';
+            return false;
+        }
+
+        // Re-applying the same mode and driver is a no-change.
+        marrow::editor::ProjectData idempotent = project;
+        const std::string idempotent_snapshot =
+            marrow::editor::serialize_project(idempotent);
+        const auto again = marrow::editor::set_keyframe_curve_mode(
+            &idempotent, {spine_selector(0.0), spine_selector(0.5)},
+            TimelineCurveMode::Auto, TimelineScalarComponent::Angle);
+        if (!again || again.changed ||
+            marrow::editor::serialize_project(idempotent) != idempotent_snapshot) {
+            std::cerr << "MAR-171 must report no change when nothing moved.\n";
+            return false;
+        }
+
+        // Writing an absolute easing demotes, and reports the change even when
+        // the four control points are byte-identical - the demotion IS the
+        // change. This is deliberately different from MAR-169's net-state rule
+        // for a manual key, which still holds below.
+        marrow::editor::ProjectData demoted = project;
+        const auto identical = marrow::editor::set_keyframe_interpolation(
+            &demoted, {spine_selector(0.0)}, InterpolationKind::CubicBezier,
+            {narrowed(kSegment0[0]), narrowed(kSegment0[1]),
+             narrowed(kSegment0[2]), narrowed(kSegment0[3])});
+        const auto* demoted_track = spine_rotate(demoted);
+        if (!identical || !identical.changed || identical.changed_key_count != 1U ||
+            demoted_track->keyframes[0].curve_mode != TimelineCurveMode::Manual ||
+            !curve_is(demoted_track->keyframes[0].interpolation, kSegment0)) {
+            std::cerr << "MAR-171 demotion must report a change on byte-identical points.\n";
+            return false;
+        }
+        const std::string demoted_snapshot = marrow::editor::serialize_project(demoted);
+        const auto after_demotion =
+            marrow::editor::resolve_automatic_curves(&demoted, "idle");
+        if (!after_demotion || after_demotion.resolved_key_count != 0U ||
+            marrow::editor::serialize_project(demoted) != demoted_snapshot) {
+            std::cerr << "MAR-171 resolver must leave a demoted key alone.\n";
+            return false;
+        }
+        // MAR-169's rule is preserved for a manual key: a byte-identical
+        // rewrite still reports no change.
+        const auto manual_rewrite = marrow::editor::set_keyframe_interpolation(
+            &demoted, {spine_selector(0.0)}, InterpolationKind::CubicBezier,
+            {narrowed(kSegment0[0]), narrowed(kSegment0[1]),
+             narrowed(kSegment0[2]), narrowed(kSegment0[3])});
+        if (manual_rewrite.changed || manual_rewrite.changed_key_count != 0U) {
+            std::cerr << "MAR-171 must not break MAR-169's net-state rule for manual keys.\n";
+            return false;
+        }
+
+    }
+
+    // --- Neighbour recomputation, over a monotone driver whose curve really
+    // --- depends on the spacing and the values. ---------------------------
+    {
+        // The fixture's spine rotate series peaks at key 1, and Fritsch-Carlson
+        // zeroes a local extremum's tangent whatever the spacing is, so this
+        // case needs a strictly monotone driver to be able to observe a change
+        // at all.
+        marrow::editor::ProjectData base = *project_result.project;
+        marrow::editor::TransformTimelineEdit ramp;
+        ramp.animation_name = "idle";
+        ramp.bone_name = "spine";
+        ramp.channel = TransformTimelineChannel::Translate;
+        ramp.keyframes.push_back(
+            {0.0, 0.0, 0.0, 0.0, marrow::runtime::Interpolation::linear()});
+        ramp.keyframes.push_back(
+            {0.5, 0.0, 4.0, 0.0, marrow::runtime::Interpolation::linear()});
+        ramp.keyframes.push_back(
+            {1.0, 0.0, 10.0, 0.0, marrow::runtime::Interpolation::linear()});
+        base.transform_timeline_edits.push_back(std::move(ramp));
+
+        TimelineKeySelector ramp_key;
+        ramp_key.kind = TimelineKeyKind::Transform;
+        ramp_key.animation_name = "idle";
+        ramp_key.bone_name = "spine";
+        ramp_key.transform_channel = TransformTimelineChannel::Translate;
+        const auto ramp_selector = [&](double time) {
+            TimelineKeySelector selector = ramp_key;
+            selector.time = time;
+            return selector;
+        };
+        const auto ramp_track = [](const marrow::editor::ProjectData& project) {
+            return project.find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Translate);
+        };
+        const auto seeded = marrow::editor::set_keyframe_curve_mode(
+            &base, {ramp_selector(0.0), ramp_selector(0.5)},
+            TimelineCurveMode::Auto, TimelineScalarComponent::X);
+        if (!seeded || seeded.resolved_key_count != 2U) {
+            std::cerr << "MAR-171 could not seed the monotone ramp: " << seeded.error << '\n';
+            return false;
+        }
+        const marrow::runtime::Interpolation seeded_first =
+            ramp_track(base)->keyframes[0].interpolation;
+        const marrow::runtime::Interpolation seeded_second =
+            ramp_track(base)->keyframes[1].interpolation;
+        const auto same_easing = [](const marrow::runtime::Interpolation& left,
+                                    const marrow::runtime::Interpolation& right) {
+            if (left.kind() != right.kind()) return false;
+            if (left.kind() != InterpolationKind::CubicBezier) return true;
+            return left.cubic_bezier().cx1 == right.cubic_bezier().cx1 &&
+                left.cubic_bezier().cy1 == right.cubic_bezier().cy1 &&
+                left.cubic_bezier().cx2 == right.cubic_bezier().cx2 &&
+                left.cubic_bezier().cy2 == right.cubic_bezier().cy2;
+        };
+
+        // A retime of the middle key changes the spacing, so both neighbouring
+        // segments resolve to different values inside the same call.
+        marrow::editor::ProjectData retimed = base;
+        const auto retime = marrow::editor::retime_keyframes(
+            &retimed, {ramp_selector(0.5)}, 0.25, false, 30.0);
+        if (!retime || !retime.changed) {
+            std::cerr << "MAR-171 could not retime the middle key: " << retime.error << '\n';
+            return false;
+        }
+        const auto retimed_resolve =
+            marrow::editor::resolve_automatic_curves(&retimed, "idle");
+        if (!retimed_resolve || retimed_resolve.auto_key_count != 2U ||
+            retimed_resolve.resolved_key_count != 2U) {
+            std::cerr << "MAR-171 did not re-resolve both segments after a neighbour retime: "
+                      << retimed_resolve.error << '\n';
+            return false;
+        }
+        if (same_easing(ramp_track(retimed)->keyframes[0].interpolation, seeded_first) ||
+            same_easing(ramp_track(retimed)->keyframes[1].interpolation, seeded_second)) {
+            std::cerr << "MAR-171 left a curve unchanged after a retime.\n";
+            return false;
+        }
+
+        // A value change on the middle key does the same.
+        marrow::editor::ProjectData offset_project = base;
+        const auto offset = marrow::editor::offset_keyframe_scalars(
+            &offset_project, {ramp_selector(0.5)}, TimelineScalarComponent::X, 20.0);
+        if (!offset || !offset.changed) {
+            std::cerr << "MAR-171 could not offset the middle key: " << offset.error << '\n';
+            return false;
+        }
+        const auto offset_resolve =
+            marrow::editor::resolve_automatic_curves(&offset_project, "idle");
+        if (!offset_resolve || offset_resolve.resolved_key_count != 2U ||
+            same_easing(
+                ramp_track(offset_project)->keyframes[0].interpolation, seeded_first) ||
+            same_easing(
+                ramp_track(offset_project)->keyframes[1].interpolation, seeded_second)) {
+            std::cerr << "MAR-171 did not re-resolve after a neighbour value change.\n";
+            return false;
+        }
+
+        // Explicit reconciliation: a neighbour perturbed without resolving is
+        // repaired by re-applying the mode, which reports resolver work with no
+        // intent change at all.
+        marrow::editor::ProjectData stale = base;
+        auto* stale_track = stale.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Translate);
+        stale_track->keyframes[1].x = 9.5;
+        const auto reconciled = marrow::editor::set_keyframe_curve_mode(
+            &stale, {ramp_selector(0.0)}, TimelineCurveMode::Auto,
+            TimelineScalarComponent::X);
+        if (!reconciled || !reconciled.changed || reconciled.changed_key_count != 0U ||
+            reconciled.resolved_key_count == 0U) {
+            std::cerr << "MAR-171 explicit reconciliation must report resolver work only.\n";
+            return false;
+        }
+    }
+
+    // --- Fail closed on a zero-duration segment ---------------------------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        // An EARLIER track carries automatic keys whose stored curves the
+        // resolver would rewrite, so a resolver that wrote before it rejected
+        // would leave those rewrites behind and this case would see them.
+        auto* seeded_track = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        seeded_track->keyframes[0].curve_mode = TimelineCurveMode::Auto;
+        seeded_track->keyframes[0].curve_driver = TimelineScalarComponent::Angle;
+        seeded_track->keyframes[1].curve_mode = TimelineCurveMode::Auto;
+        seeded_track->keyframes[1].curve_driver = TimelineScalarComponent::Angle;
+        marrow::editor::TransformTimelineEdit degenerate;
+        degenerate.animation_name = "idle";
+        degenerate.bone_name = "arm_l";
+        degenerate.channel = TransformTimelineChannel::Translate;
+        degenerate.keyframes.push_back(
+            {0.0, 0.0, 1.0, 2.0, marrow::runtime::Interpolation::linear()});
+        degenerate.keyframes.push_back(
+            {1e-7, 0.0, 5.0, 6.0, marrow::runtime::Interpolation::linear()});
+        degenerate.keyframes.back().curve_mode = TimelineCurveMode::Auto;
+        degenerate.keyframes.front().curve_mode = TimelineCurveMode::Auto;
+        degenerate.keyframes.front().curve_driver = TimelineScalarComponent::X;
+        degenerate.keyframes.back().curve_driver = TimelineScalarComponent::X;
+        project.transform_timeline_edits.push_back(std::move(degenerate));
+        const std::string snapshot = marrow::editor::serialize_project(project);
+        // Sanity: without the degenerate track the resolver really does
+        // rewrite the seeded curves, so the atomicity assertion below has
+        // something to observe.
+        {
+            marrow::editor::ProjectData healthy = project;
+            healthy.transform_timeline_edits.pop_back();
+            const auto healthy_resolve =
+                marrow::editor::resolve_automatic_curves(&healthy, "idle");
+            if (!healthy_resolve || healthy_resolve.resolved_key_count == 0U) {
+                std::cerr << "MAR-171 atomicity case has nothing to leak.\n";
+                return false;
+            }
+        }
+        marrow::editor::ProjectData candidate = project;
+        const auto rejected =
+            marrow::editor::resolve_automatic_curves(&candidate, "idle");
+        if (rejected || rejected.error.empty() ||
+            marrow::editor::serialize_project(candidate) != snapshot) {
+            std::cerr << "MAR-171 must reject a zero-duration segment atomically.\n";
+            return false;
+        }
+        if (rejected.error.find("idle") == std::string::npos ||
+            rejected.error.find("arm_l") == std::string::npos) {
+            std::cerr << "MAR-171 resolver error must name the animation and track: "
+                      << rejected.error << '\n';
+            return false;
+        }
+    }
+
+    // --- A project with no automatic key is never touched -----------------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        const std::string snapshot = marrow::editor::serialize_project(project);
+        const auto resolved = marrow::editor::resolve_automatic_curves(&project, {});
+        if (!resolved || resolved.changed || resolved.auto_key_count != 0U ||
+            resolved.resolved_key_count != 0U ||
+            marrow::editor::serialize_project(project) != snapshot) {
+            std::cerr << "MAR-171 whole-project resolve must skip a project with no auto key.\n";
+            return false;
+        }
+    }
+
+    // --- Load never resolves: a stale mode/curve pair is legal data --------
+    {
+        const auto stale_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar171_stale_" + path_token + ".marrow");
+        marrow::editor::ProjectData project = rebase(stale_path);
+        auto* track = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        track->keyframes[0].curve_mode = TimelineCurveMode::Auto;
+        track->keyframes[0].curve_driver = TimelineScalarComponent::Angle;
+        // Deliberately not the curve the resolver would produce.
+        track->keyframes[0].interpolation =
+            marrow::runtime::Interpolation::cubic_bezier(0.25, 0.1, 0.75, 0.9);
+        const std::string stale_text = marrow::editor::serialize_project(project);
+        const auto saved = marrow::editor::save_project(project, stale_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(stale_path);
+        std::filesystem::remove(stale_path, ignored);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        if (marrow::editor::serialize_project(*reloaded.project) != stale_text) {
+            std::cerr << "MAR-171 load must not repair a stale mode/curve pair.\n";
+            return false;
+        }
+        marrow::editor::ProjectData reconciled = *reloaded.project;
+        const auto forced = marrow::editor::set_keyframe_curve_mode(
+            &reconciled, {spine_selector(0.0)}, TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        const auto* reconciled_track = spine_rotate(reconciled);
+        if (!forced || !forced.changed || forced.resolved_key_count == 0U ||
+            !curve_is(reconciled_track->keyframes[0].interpolation, kSegment0)) {
+            std::cerr << "MAR-171 explicit reconciliation must rewrite a stale curve.\n";
+            return false;
+        }
+    }
+
+    // --- The duration trigger is wired and is honestly a no-op today -------
+    {
+        marrow::editor::ProjectData project = *project_result.project;
+        const auto seeded = marrow::editor::set_keyframe_curve_mode(
+            &project, {spine_selector(0.0), spine_selector(0.5)},
+            TimelineCurveMode::Auto, TimelineScalarComponent::Angle);
+        if (!seeded) {
+            std::cerr << "MAR-171 could not seed the duration case: " << seeded.error << '\n';
+            return false;
+        }
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto duration = marrow::editor::set_animation_duration(
+            &project, *project_result.skeleton_data, "idle", 2.5);
+        if (!duration || !duration.changed) {
+            std::cerr << "MAR-171 could not author a duration: " << duration.error << '\n';
+            return false;
+        }
+        const auto resolved = marrow::editor::resolve_automatic_curves(&project, "idle");
+        if (!resolved || resolved.changed || resolved.resolved_key_count != 0U) {
+            std::cerr << "MAR-171 a duration change must resolve nothing today.\n";
+            return false;
+        }
+        (void)before;
+    }
+
+    // ------------------------------------------------------------------
+    // Export. MAR-168 and MAR-169 both shipped an export criterion whose test
+    // mutated a ProjectData copy that never reached the exporter, so this block
+    // exports the MUTATED project, asserts the resolved control points arrived
+    // in the runtime file, asserts the two project-local fields did NOT, and
+    // compares against a baseline measured in the same run.
+    // ------------------------------------------------------------------
+    {
+        const std::filesystem::path auto_json_path = "/tmp/marrow_mar171_auto.mskl";
+        const std::filesystem::path auto_binary_path = "/tmp/marrow_mar171_auto.mbin";
+        const std::filesystem::path baseline_json_path =
+            "/tmp/marrow_mar171_export_baseline.mskl";
+        const std::filesystem::path baseline_binary_path =
+            "/tmp/marrow_mar171_export_baseline.mbin";
+
+        marrow::editor::ProjectExportOptions baseline_options;
+        baseline_options.skeleton_output_path = baseline_json_path;
+        baseline_options.binary_output_path = baseline_binary_path;
+        const auto baseline_export = marrow::editor::export_runtime_assets(
+            *project_result.project,
+            *project_result.base_skeleton_document,
+            baseline_options);
+        if (!baseline_export) {
+            std::cerr << baseline_export.error->format() << '\n';
+            return false;
+        }
+
+        marrow::editor::ProjectData exported_project = *project_result.project;
+        TimelineKeySelector arm_key;
+        arm_key.kind = TimelineKeyKind::Transform;
+        arm_key.animation_name = "idle";
+        arm_key.bone_name = "arm_l";
+        arm_key.transform_channel = TransformTimelineChannel::Rotate;
+        arm_key.time = 0.25;
+        const auto authored = marrow::editor::set_keyframe_curve_mode(
+            &exported_project,
+            {spine_selector(0.0), spine_selector(0.5), arm_key},
+            TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        if (!authored || !authored.changed || authored.resolved_key_count != 3U) {
+            std::cerr << "MAR-171 export block could not author its automatic keys: "
+                      << authored.error << '\n';
+            return false;
+        }
+
+        marrow::editor::ProjectExportOptions auto_options;
+        auto_options.skeleton_output_path = auto_json_path;
+        auto_options.binary_output_path = auto_binary_path;
+        const auto auto_export = marrow::editor::export_runtime_assets(
+            exported_project, *project_result.base_skeleton_document, auto_options);
+        if (!auto_export) {
+            std::cerr << auto_export.error->format() << '\n';
+            return false;
+        }
+
+        const auto exported = marrow::runtime::load_skeleton_data(auto_json_path);
+        if (!exported) {
+            std::cerr << exported.error->format();
+            return false;
+        }
+        const auto* exported_idle = exported.skeleton_data->find_animation("idle");
+        const auto spine_index = exported.skeleton_data->find_bone_index("spine");
+        const auto arm_index = exported.skeleton_data->find_bone_index("arm_l");
+        const auto* exported_spine =
+            exported_idle != nullptr && spine_index.has_value()
+            ? exported_idle->find_rotate_timeline(*spine_index)
+            : nullptr;
+        const auto* exported_arm = exported_idle != nullptr && arm_index.has_value()
+            ? exported_idle->find_rotate_timeline(*arm_index)
+            : nullptr;
+        if (exported_spine == nullptr || exported_spine->keyframes.empty() ||
+            exported_arm == nullptr || exported_arm->keyframes.empty()) {
+            std::cerr << "MAR-171 export did not carry the two rotate timelines.\n";
+            return false;
+        }
+        const auto& spine_easing = exported_spine->keyframes.front().interpolation;
+        if (spine_easing.kind() != InterpolationKind::CubicBezier ||
+            spine_easing.cubic_bezier().cx1 !=
+                static_cast<marrow::runtime::AnimationScalar>(kThird) ||
+            spine_easing.cubic_bezier().cy1 !=
+                static_cast<marrow::runtime::AnimationScalar>(kThird) ||
+            spine_easing.cubic_bezier().cx2 !=
+                static_cast<marrow::runtime::AnimationScalar>(kTwoThirds) ||
+            spine_easing.cubic_bezier().cy2 != 1.0f) {
+            std::cerr << "MAR-171 resolved spine curve did not reach the exported .mskl.\n";
+            return false;
+        }
+        // The fixture stores `"curve": "linear"` on this key today, so a
+        // 4-number array here is a visible, byte-level conversion.
+        if (exported_arm->keyframes.front().interpolation.kind() !=
+            InterpolationKind::CubicBezier) {
+            std::cerr << "MAR-171 did not convert arm_l's `\"linear\"` string to an array.\n";
+            return false;
+        }
+
+        std::ifstream exported_text(auto_json_path, std::ios::binary);
+        const std::string export_body(
+            (std::istreambuf_iterator<char>(exported_text)),
+            std::istreambuf_iterator<char>());
+        if (export_body.empty()) {
+            std::cerr << "MAR-171 could not read the exported .mskl as text.\n";
+            return false;
+        }
+        if (export_body.find("curve_mode") != std::string::npos ||
+            export_body.find("curve_driver") != std::string::npos) {
+            std::cerr << "MAR-171 leaked a project-local field into the runtime export.\n";
+            return false;
+        }
+
+        if (!auto_export.binary_path.has_value() ||
+            !validate_binary_export(auto_export.path, *auto_export.binary_path)) {
+            std::cerr << "MAR-171 auto export did not match its v2 binary payload.\n";
+            return false;
+        }
+
+        std::error_code size_error;
+        const auto auto_json_size = std::filesystem::file_size(auto_json_path, size_error);
+        const auto auto_binary_size =
+            std::filesystem::file_size(auto_binary_path, size_error);
+        const auto baseline_json_size =
+            std::filesystem::file_size(baseline_json_path, size_error);
+        if (size_error || auto_json_size <= baseline_json_size) {
+            // An equal size means the exported artifact is the untouched
+            // baseline, which is exactly the defect this block exists to catch.
+            std::cerr << "MAR-171 auto export must be strictly larger than the baseline: "
+                      << auto_json_size << " vs " << baseline_json_size << '\n';
+            return false;
+        }
+        std::cout << "MAR-171 auto export: JSON " << auto_json_size << " bytes, MBIN "
+                  << auto_binary_size << " bytes (baseline JSON " << baseline_json_size
+                  << " bytes).\n";
+    }
+
+    std::cout << "MAR-171 automatic curve storage validated as additive, "
+                 "default-absent, and strictly re-validated.\n";
+    return true;
+}
+
 bool validate_mar168_graph_scalar_authoring(
     const marrow::editor::ProjectLoadResult& project_result) {
     using marrow::editor::TimelineKeyKind;
@@ -4905,6 +5902,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar170_curve_presets(result)) {
+            return 1;
+        }
+        if (!validate_mar171_automatic_curves(result)) {
             return 1;
         }
     }

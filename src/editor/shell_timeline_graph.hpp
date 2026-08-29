@@ -78,7 +78,30 @@ struct TimelineGraphRenderStats {
     // kCurvePresets.size().
     std::size_t active_preset_index{0U};
     std::size_t default_preset_index{0U};
+    // MAR-171 curve-mode row. Appended after MAR-170's, never reordered, so
+    // every earlier positional expectation is unaffected.
+    bool curve_mode_row_drawn{false};
+    bool curve_mode_row_enabled{false};
+    float first_curve_mode_min_x{0.0f};
+    float first_curve_mode_min_y{0.0f};
+    float first_curve_mode_max_x{0.0f};
+    float first_curve_mode_max_y{0.0f};
+    // The `Auto` button's own rectangle, so an actual-frame smoke can aim a
+    // real mouse at the button whose click is observable in `active_key_auto`.
+    float auto_curve_mode_min_x{0.0f};
+    float auto_curve_mode_min_y{0.0f};
+    float auto_curve_mode_max_x{0.0f};
+    float auto_curve_mode_max_y{0.0f};
+    // True when the active key's outgoing segment is automatic, which is
+    // exactly when its handles are drawn in the auto colour.
+    bool active_key_auto{false};
+    // The active key's effective driver as its TimelineScalarComponent index;
+    // kCurveDriverCount when there is no automatic outgoing segment.
+    std::size_t active_driver_index{0U};
 };
+
+/** @brief The number of `TimelineScalarComponent` values, for `active_driver_index`. */
+inline constexpr std::size_t kCurveDriverCount = 7U;
 
 /**
  * @brief Draws the six fixed preset buttons and the `Default:` combo.
@@ -91,6 +114,18 @@ struct TimelineGraphRenderStats {
  * `set_shell_default_curve()`. `stats` may be null.
  */
 void draw_timeline_curve_preset_row(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    TimelineGraphRenderStats* stats);
+
+/**
+ * @brief Draws the `Curve mode:` buttons and the `Driver:` combo.
+ *
+ * Graph tab only: a driver is a component choice and the Dopesheet has no
+ * component notion. The row performs no arithmetic and no mutation of its own —
+ * a button click calls `apply_timeline_curve_mode()`. `stats` may be null.
+ */
+void draw_timeline_curve_mode_row(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks,
     TimelineGraphRenderStats* stats);

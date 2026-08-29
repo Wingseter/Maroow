@@ -505,6 +505,7 @@ add_library(marrow_editor STATIC
     src/editor/project.cpp
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
+    src/editor/curve_auto.cpp
     src/editor/session.cpp
     src/editor/agent_dispatch.cpp
     src/editor/agent_handlers_inspection.cpp
