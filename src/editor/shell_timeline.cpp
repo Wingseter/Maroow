@@ -2616,6 +2616,45 @@ void draw_timeline_window(
             std::string(state->timeline_loop ? "Enabled" : "Disabled") + " timeline looping";
     }
 
+    // MAR-174: transient preview speed. It sits on the transport row rather
+    // than in "Preview options" on purpose: that section's shared change
+    // handler pauses playback, and watching a speed change take effect while
+    // playing is the whole point of this control. Nothing here touches
+    // timeline_playing.
+    ImGui::SameLine();
+    ImGui::BeginDisabled(animation == nullptr);
+    double preview_speed = state->preview_speed;
+    ImGui::SetNextItemWidth(90.0f);
+    if (ImGui::DragScalar(
+            "Speed",
+            ImGuiDataType_Double,
+            &preview_speed,
+            0.01f,
+            &kPreviewSpeedMinimum,
+            &kPreviewSpeedMaximum,
+            "%.2fx",
+            ImGuiSliderFlags_AlwaysClamp)) {
+        set_preview_playback_speed(state, preview_speed, "Timeline", true);
+    }
+    for (std::size_t preset_index = 0;
+         preset_index < std::size(kPreviewSpeedPresets);
+         ++preset_index) {
+        const double preset = kPreviewSpeedPresets[preset_index];
+        char preset_label[16];
+        std::snprintf(
+            preset_label,
+            sizeof(preset_label),
+            preset < 1.0 ? "%.2gx" : "%.0fx",
+            preset);
+        ImGui::SameLine();
+        ImGui::PushID(static_cast<int>(preset_index));
+        if (ImGui::SmallButton(preset_label)) {
+            set_preview_playback_speed(state, preset, "Timeline", true);
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndDisabled();
+
     double slider_time = state->timeline_time_seconds;
     const double minimum_time = 0.0;
     const double maximum_time = duration_seconds > 0.0 ? duration_seconds : 1.0;

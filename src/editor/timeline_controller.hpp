@@ -105,6 +105,26 @@ bool scrub_timeline_time(
     bool update_status_message);
 void advance_timeline_playback(ShellState* state, double delta_seconds);
 void advance_timeline_playback(ShellState* state, float delta_seconds);
+/**
+ * @brief Sets the transient preview playback speed (MAR-174).
+ *
+ * Writes `ShellState::preview_speed` and nothing else besides an optional
+ * status message. It opens no transaction, makes no `EditorSession` call, and
+ * therefore moves no revision counter, no dirty state, and no history entry.
+ *
+ * @param state Shell state receiving the speed.
+ * @param speed Requested multiplier; finite values clamp into
+ *              `[kPreviewSpeedMinimum, kPreviewSpeedMaximum]`.
+ * @param source Label appended to the status message.
+ * @param update_status_message Whether to publish a status message.
+ * @return `false` when `speed` is not finite, leaving the field bit-unchanged;
+ *         otherwise `true`.
+ */
+bool set_preview_playback_speed(
+    ShellState* state,
+    double speed,
+    std::string_view source,
+    bool update_status_message);
 bool focus_timeline_track(
     ShellState* state,
     const TimelineTrackRow& track,

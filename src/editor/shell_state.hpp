@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -756,6 +758,15 @@ using AgentReviewKind = marrow::editor::AgentReviewKind;
 using AgentReviewRequest = marrow::editor::AgentReviewRequest;
 using AgentActivityEntry = marrow::editor::AgentActivityEntry;
 
+// MAR-174: transient preview transport speed. Strictly positive; direction is
+// preview_reverse's job (a negative delta is a silent no-op inside
+// PreviewImpl::advance() and drops every event in AnimationState). These sit
+// ahead of ShellState because kDefaultPreviewSpeed is a member initializer.
+constexpr double kPreviewSpeedMinimum = 0.05;
+constexpr double kPreviewSpeedMaximum = 8.0;
+constexpr double kDefaultPreviewSpeed = 1.0;
+constexpr double kPreviewSpeedPresets[] = {0.25, 0.5, 1.0, 2.0};
+
 struct ShellState {
     ShellState()
         : load_result(marrow::editor::EditorSessionShellBinding::load_result(session)) {}
@@ -812,6 +823,11 @@ struct ShellState {
     bool preview_use_custom_mix_duration{false};
     double preview_custom_mix_duration{0.0};
     bool preview_reverse{false};
+    // MAR-174: transient preview transport speed. Shell-private and strictly
+    // positive; direction is preview_reverse's job. Never serialized, never in
+    // PreviewState, never in EditorHistorySnapshot, never in EditorPreferences.
+    // reload_project() resets it to kDefaultPreviewSpeed.
+    double preview_speed{kDefaultPreviewSpeed};
     marrow::runtime::RootMotionDelta preview_root_motion_delta{};
     marrow::runtime::RootMotionDelta preview_root_motion_total{};
     std::vector<marrow::runtime::AnimationEvent> preview_events;
@@ -864,6 +880,16 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
         state.timeline_editor.graph_value_gesture.has_value() ||
         state.timeline_editor.graph_handle_gesture.has_value() ||
         state.weight_paint_stroke.active;
+}
+
+/** MAR-174: clamped read of the transient preview speed. The single choke
+    point, so a corrupted or non-finite field can never reach
+    EditorSession::advance(). */
+inline double preview_playback_speed(const ShellState& state) noexcept {
+    if (!std::isfinite(state.preview_speed)) {
+        return kDefaultPreviewSpeed;
+    }
+    return std::clamp(state.preview_speed, kPreviewSpeedMinimum, kPreviewSpeedMaximum);
 }
 
 void sync_shell_from_editor_session(ShellState* state);

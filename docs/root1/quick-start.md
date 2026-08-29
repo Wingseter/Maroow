@@ -33,7 +33,7 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
 Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170/
-MAR-172/MAR-173 checkpoints or the next MAR-174 product milestone.
+MAR-172/MAR-173/MAR-174 checkpoints or the next MAR-175 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:

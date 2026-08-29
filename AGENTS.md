@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-173, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-174 is the next product milestone and depends on MAR-173. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-174, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-175 is the next product milestone and depends on MAR-174. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -162,7 +162,7 @@
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
-- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting, transient preview playback speed, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
@@ -226,6 +226,70 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-174 Transient Preview Playback Speed Validation Results
+
+Validated 2026-08-30. MAR-174 is one bounded, strictly positive multiplier on the
+Timeline transport, and its whole engineering content is the proof that nothing
+else can see it. `advance_timeline_playback()` is the sole progression path and
+`EditorSession::advance()` forwards one delta into the displayed time, the
+sampled pose, the crossfade, and event dispatch, so **one multiply at one site**
+scales all four consistently by construction rather than by four agreeing
+implementations.
+
+Three decisions carry the story. **Speed is a magnitude, not a direction.**
+`PreviewImpl::advance()` early-returns on `delta_seconds <= 0.0` and the event
+dispatcher returns on `current_time <= previous_time`, so a negative speed would
+be a silent no-op that also dropped every event on that frame; direction stays
+with `preview_reverse`, which the runtime already models as a sampling transform
+over a monotonically increasing track time. **Zero clamps to 0.05x rather than
+meaning pause**, because the accepting range is `[0.05, 8.0]` and pause already
+exists as `timeline_playing`. **Finite out-of-range clamps, non-finite rejects
+with the field bit-unchanged** — clamping is the house idiom for the shell's
+other transient preview scalars (`preview_queue_delay`,
+`preview_custom_mix_duration`), while `NaN` has no clamp target and silently
+substituting one would hide a caller bug.
+
+The field lives on `ShellState`, **not** on `marrow::editor::PreviewState`, even
+though that struct already holds `reverse`, `loop`, and `playing` and looks like
+the natural home. `assign_history_snapshot()` writes every `PreviewState` field
+back on undo, and `sync_shell_from_editor_session()` does the same after
+`session.undo()`, while `history_snapshots_equal()` compares only the serialized
+project and the preview skin/slot selections — so a speed parked there would
+silently jump on Ctrl+Z with nothing reporting a change. The smoke asserts the
+speed survives two undos and a redo, and that case fails when the write is
+simulated at the undo site.
+
+| Area | Evidence | Result |
+| --- | --- | --- |
+| Domain and presets | Continuous `[0.05, 8.0]` with `1.0` as both the default and a preset: `0.0` and `-3.0` clamp to `0.05`, `100.0` clamps to `8.0`, the bounds and `3.75` assign exactly, and each of `{0.25, 0.5, 1.0, 2.0}` is asserted in range **and** assigned exactly, so the presets are shortcuts onto the domain rather than the domain itself. `NaN`, `+inf`, and `-inf` each return `false` with the field compared by `std::memcmp` over the two `double`s, not `==`, so a `NaN` write cannot pass. `preview_playback_speed()` is an independent second clamp at the point of use: a directly poked `NaN`, `1000.0`, and `-1000.0` read back as `1.0`, `8.0`, and `0.05` | PASS |
+| One multiply, one site | A 0.25 s frame reaches 0.25, 0.5, 0.0625, 0.125, 0.0 (`fmod(2.0, 1.0)`), and 0.0125 s at 1x, 2x, 0.25x, 0.5x, 8x, and 0.05x on `idle`'s inferred 1.0 s duration. The equivalence law is stated as an assertion: three frames at `(s, 0.25)` land where three frames at `(1.0, 0.25*s)` land, for `s ∈ {0.25, 2.0}`. Dropping the multiply fails with `A 0.25s frame at 2x must reach 0.5s, got 0.25s.` | PASS |
+| Reverse composes | At `preview_reverse` with speed 2x, a 0.15 s frame reaches track time 0.3 s — **identical to forward**, proving speed does not alter direction — and the sampled `spine` local pose at that track time matches the forward pose at `duration - t == 0.7` s within `1e-6` while differing from the forward pose at 0.3 s, which the fixture is first asserted to distinguish | PASS |
+| Loop, clamp, scrub, pause | `std::fmod` is a single exact modulo, so a two-period step at 8x from 0.9 s lands back on 0.9 s with the `spine` pose bit-comparable to the 1x walk within `1e-6` and playback still running — no drift. MAR-172's managed boundary key is never sampled during looped playback at any speed because `fmod` yields `[0, duration)`. Non-looping, the same 8x step stops at exactly the duration with `timeline_playing == false`: speed reaches the end sooner and cannot overshoot it. A scrub at 8x lands on its exact requested time, because scrubbing is an absolute position and not a rate. A paused transport advances by nothing at 8x, and resuming advances by `delta * speed` from where it paused | PASS |
+| The non-effect gate | After replaying every accepted and every rejected request with no `advance` between capture and compare, `serialize_project()`, `undo_count()`, `redo_count()`, `project_revision()`, `runtime_revision()`, **`preview_revision()`**, and `agent_operation_descriptor_count()` are all identical, `session.dirty()` and `project_dirty` are still `false`, and the session's own `PreviewState` (playing, loop, reverse, time, animation) has not moved. `preview_revision` is the sharp one — a stray `session.set_playing(true)` in the setter fails this gate. The session-state capture covers the residual case where a stray call's argument happens to match, since the session setters only bump a revision when a value actually changes. The exported `.mskl` **and** `.mbin` are byte-compared before and after the batch and are identical, with both asserted non-empty first so the comparison cannot pass vacuously | PASS |
+| Mid-gesture inertness | The setter deliberately does not consult `authoring_gesture_active()`, and the claim is proved rather than asserted: inside a live `EditTransaction` a speed change assigns, records no history, and leaves the transaction valid, while `advance_timeline_playback()` moves no time because `EditorSession::advance()` refuses outright while a transaction is open. Rolling back restores the byte-identical project | PASS |
+| Undo never rewrites it | With two real history entries present, a speed of 3.5 survives two undos and a redo unchanged. Simulating a `PreviewState`-resident field by writing the default at the undo site fails this with `Undo must leave the transient preview speed exactly where the user put it, got 1.` | PASS |
+| Reset through one default | Both `reload_project()` branches are exercised, so "opening, reloading, or replacing" is covered by construction rather than by an argument about which word maps to which call: `session.reload()` on the same path, then `session.open()` on a copy saved into the isolation directory. Each lands on `kDefaultPreviewSpeed`, which is also the `ShellState` member initializer, so a fresh shell and a reloaded shell start identically. Removing the reset line fails with `Reloading the current project must reset the preview speed, got 4.` | PASS |
+| Registry unchanged at 60; no agent operation added | `std::size(kOperationSpecs)` is **60** before and after MAR-174, `timeline.scale_key_times` still at index 35. Speed is a display control with no project effect, so exposing it to an agent would give the agent a lever that provably does nothing to the document. `git diff` is empty on `src/editor/agent_dispatch.cpp`, `src/editor/agent_dispatch_smoke.cpp`, `src/editor/agent_handlers_*.cpp`, and `tools/mcp/**`; the seven `!= 60U` guards in `shell_smoke_graph.cpp` are untouched and still seven; MAR-174's only count reference is the guard inside its own new scenario | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, and C ABI v1 unchanged with a zero-byte diff on `src/runtime/**`, `include/marrow/runtime/**`, `src/c_api/**`, and `include/marrow/c_api/**`; `editor-settings.json` v1 unchanged with a zero-byte diff on `src/editor/preferences.cpp` and `include/marrow/editor/preferences.hpp`, and MAR-174 persists nothing — AC 4 resets on every project open, so a persisted value could never be observed; the `.marrow` schema and the preview/history contract unchanged with a zero-byte diff on `include/marrow/editor/project.hpp`, `src/editor/project.cpp`, `include/marrow/editor/session.hpp`, and `src/editor/session.cpp`; no `include/marrow/**` header and no CMake file changed. `grep -rn 'preview_speed' src/ include/` reaches only `shell_state.hpp`, `timeline_controller.{hpp,cpp}`, `shell_core.cpp`, `shell_timeline.cpp`, and `shell_smoke_timeline.cpp` | PASS |
+
+Command output recorded during validation:
+
+- `cmake -S . -B build && cmake --build build` -> configured and built with zero warnings; `cmake --build build --target marrow_verify_third_party` and `--target marrow_constraint_warning_check` -> both passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new `validate_preview_playback_speed_shell_smoke` scenario; `--project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> passed unchanged, proving the new transport row does not disturb Parameter Modeling mode where the transport is disabled; `--verify-launch-focus` -> passed
+- `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21`; `-L editor` -> 11/11; `-L runtime` -> 4/4. MAR-174 registers no new CTest entry — its scenario runs inside the existing `marrow.editor_shell_smoke`
+- `./build/marrow_unit_tests` -> passed; `./build/marrow_timeline_model_tests` -> `Timeline model: 17 cases passed`; `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 20 cases passed`; `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`; `./build/marrow_preference_tests` -> `PreferenceStore: 11 cases passed` (unchanged; MAR-174 touches no preference code); `./build/marrow_viewport_interaction_tests` -> passed; `./build/marrow_windowing_tests` -> `Windowing: 4 cases passed`; `./build/marrow_pen_input_tests` -> `Pen input: 34 cases passed`; `./build/marrow_agent_socket_tests` -> `Agent socket tests: 4 cases passed`
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` over 325 `[ OK ]` cases, unchanged
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` with `tools/mcp/venv/bin/python tools/mcp/test_client.py` -> `mcp test_client: PASSED`, whose own `assert len(registry_names) == 60` and `assert len(mcp_names) == 60` are untouched, so 60/60 parity is unchanged; `python -m py_compile` over `server.py`, `test_client.py`, `tools/editing.py`, `tools/inspection.py` -> clean
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, still reporting MAR-173's `JSON 14341 bytes, MBIN 3984 bytes`; `--export-runtime`/`--export-binary` -> passed; `./build/marrow_inspect --compare` -> matches; `./build/marrow_fixture_smoke`, `./build/marrow_parameter_project_smoke`, and `./build/marrow_c_smoke` -> all passed
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after every gate above, including the `--agent-port` run of the production `shell_main.cpp` startup load, which resolves the real path with no override. No `/tmp/marrow-shell-config-*` directory was left behind. The new scenario installs its own `ScopedPreferenceIsolation` even though MAR-174 reads and writes no preference at all
+- `git diff --name-only` -> exactly eight source files plus this closure prose: `shell_state.hpp`, `timeline_controller.{hpp,cpp}`, `shell_core.cpp`, `shell_timeline.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_scenarios.hpp`, `shell_smoke.cpp`
+
+Not run: the interactive macOS confirmation that the Speed drag and the four
+preset buttons render on the Timeline transport row, that changing speed during
+playback changes the rate without stopping playback, and that the readout shows
+`2.00x`. The headless smoke drives `set_preview_playback_speed()` directly and
+cannot see layout. MAR-192 through MAR-210 remain the qualification authority.
 
 ## MAR-173 Atomic Key Time Scaling Validation Results
 

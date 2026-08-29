@@ -34,6 +34,8 @@ bool validate_timeline_loop_sync_shell_smoke(
     const std::filesystem::path& project_path);
 bool validate_timeline_scale_shell_smoke(
     const std::filesystem::path& project_path);
+bool validate_preview_playback_speed_shell_smoke(
+    const std::filesystem::path& project_path);
 bool validate_timeline_p0_authoring_smoke(
     const std::filesystem::path& project_path);
 bool validate_derived_cache_smoke(ShellState* state);

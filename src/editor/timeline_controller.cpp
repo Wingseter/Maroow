@@ -770,13 +770,51 @@ void advance_timeline_playback(ShellState* state, double delta_seconds) {
         state->session.set_playing(false);
         return;
     }
+    // MAR-174: the single site where preview time advances, so the single site
+    // where the transient speed applies. EditorSession::advance() forwards this
+    // one delta into the displayed time, the sampled pose, the crossfade, and
+    // event dispatch, so they all scale together by construction.
+    // preview_playback_speed() is clamped and finite and delta_seconds is
+    // already > 0, so the product is > 0 unless an absurd delta overflows it to
+    // infinity, which the guard below catches.
+    const double scaled_delta = delta_seconds * preview_playback_speed(*state);
+    if (!std::isfinite(scaled_delta) || scaled_delta <= 0.0) {
+        return;
+    }
     state->session.set_playing(true);
-    (void)state->session.advance(delta_seconds);
+    (void)state->session.advance(scaled_delta);
     sync_shell_from_editor_session(state);
 }
 
 void advance_timeline_playback(ShellState* state, float delta_seconds) {
     advance_timeline_playback(state, static_cast<double>(delta_seconds));
+}
+
+bool set_preview_playback_speed(
+    ShellState* state,
+    double speed,
+    std::string_view source,
+    bool update_status_message) {
+    // A non-finite request has no sensible clamp target, and substituting one
+    // would hide a caller bug, so it is refused with the field bit-unchanged.
+    // Finite out-of-range values clamp, which is what the shell already does
+    // for its other transient preview scalars.
+    if (!std::isfinite(speed)) {
+        return false;
+    }
+    state->preview_speed =
+        std::clamp(speed, kPreviewSpeedMinimum, kPreviewSpeedMaximum);
+
+    if (update_status_message) {
+        std::ostringstream stream;
+        stream << "Preview speed " << std::fixed << std::setprecision(2)
+               << state->preview_speed << 'x';
+        if (!source.empty()) {
+            stream << " via " << source;
+        }
+        state->status_message = stream.str();
+    }
+    return true;
 }
 
 bool focus_timeline_track(

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -25,6 +26,7 @@
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
+#include "shell_preferences.hpp"
 #include "shell_smoke_scenarios.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
@@ -2781,6 +2783,657 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             std::cerr << "Undo smoke could not resolve the body slot for preview attachment validation.\n";
             return false;
         }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// MAR-174 transient preview playback speed.
+//
+// The feature is one multiply at one site, so the scenario's weight sits on
+// the negative: a speed change must leave the serialized project, the history,
+// every session revision, and the exported runtime assets byte-identical.
+// ---------------------------------------------------------------------
+bool validate_preview_playback_speed_shell_smoke(
+    const std::filesystem::path& project_path) {
+    // Every scenario that touches the preference store isolates it, so a smoke
+    // run can never create, read, or write the real preference directory.
+    using TransformChannel = marrow::editor::TransformTimelineChannel;
+
+    const ScopedPreferenceIsolation isolation("preview-speed");
+    if (!isolation.installed()) {
+        std::cerr << "Preview speed shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Preview speed smoke", false, true)) {
+        std::cerr << "Preview speed shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 60U) {
+        std::cerr << "Preview speed shell smoke requires the exact 60-operation registry.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    const auto near_time = [](double left, double right) {
+        return std::abs(left - right) <= 1e-9;
+    };
+    const auto set_speed = [&](double speed) {
+        return set_preview_playback_speed(&state, speed, "Preview speed smoke", false);
+    };
+    const auto seek = [&](double time_seconds) {
+        return scrub_timeline_time(&state, time_seconds, "Preview speed smoke", false);
+    };
+    const auto idle_duration = [&]() -> double {
+        const auto* animation = state.session.runtime_data() != nullptr
+            ? state.session.runtime_data()->find_animation("idle")
+            : nullptr;
+        return animation != nullptr ? animation->duration() : -1.0;
+    };
+    const auto spine_index = state.load_result.skeleton_data->find_bone_index("spine");
+    if (!spine_index.has_value()) {
+        std::cerr << "Preview speed smoke needs the fixture's spine bone.\n";
+        return false;
+    }
+    const auto spine_pose = [&]() {
+        return state.preview_skeleton->bone_poses()[*spine_index].local_pose;
+    };
+    const auto poses_match = [](const marrow::runtime::BoneTransform& left,
+                                const marrow::runtime::BoneTransform& right) {
+        return std::abs(left.rotation - right.rotation) <= 1e-6f &&
+            std::abs(left.x - right.x) <= 1e-6f &&
+            std::abs(left.y - right.y) <= 1e-6f;
+    };
+
+    // Every numeric expectation below is derived from this duration.
+    if (idle_duration() != 1.0) {
+        std::cerr << "Preview speed smoke needs idle's inferred 1.0s duration, found "
+                  << idle_duration() << ".\n";
+        return false;
+    }
+
+    // --- The value domain --------------------------------------------------
+    {
+        const ShellState fresh;
+        if (fresh.preview_speed != kDefaultPreviewSpeed ||
+            state.preview_speed != kDefaultPreviewSpeed) {
+            std::cerr << "A fresh and a reloaded shell must both start at the one "
+                         "documented default preview speed.\n";
+            return false;
+        }
+    }
+
+    struct ClampCase {
+        double input;
+        double expected;
+    };
+    // Finite out-of-range values clamp, which is the house idiom for transient
+    // preview scalars. Zero and negatives are simply below the floor: zero is
+    // not a pause and a negative is never a reverse.
+    const ClampCase clamp_cases[] = {
+        {0.0, kPreviewSpeedMinimum},
+        {-3.0, kPreviewSpeedMinimum},
+        {100.0, kPreviewSpeedMaximum},
+        {kPreviewSpeedMinimum, kPreviewSpeedMinimum},
+        {kPreviewSpeedMaximum, kPreviewSpeedMaximum},
+        {3.75, 3.75},
+    };
+    for (const ClampCase& item : clamp_cases) {
+        if (!set_speed(item.input) || state.preview_speed != item.expected) {
+            std::cerr << "Preview speed " << item.input << " must resolve to "
+                      << item.expected << ", got " << state.preview_speed << ".\n";
+            return false;
+        }
+    }
+    // The presets are shortcuts onto the continuous domain, not the domain.
+    for (const double preset : kPreviewSpeedPresets) {
+        if (preset < kPreviewSpeedMinimum || preset > kPreviewSpeedMaximum ||
+            !set_speed(preset) || state.preview_speed != preset) {
+            std::cerr << "Preset " << preset
+                      << " must lie inside the accepted range and assign exactly.\n";
+            return false;
+        }
+    }
+
+    // A non-finite request is rejected with the field bit-unchanged. memcmp,
+    // not ==, so a NaN write can never pass this.
+    const double accepted_speed = state.preview_speed;
+    for (const double rejected : {std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::infinity(),
+                                  -std::numeric_limits<double>::infinity()}) {
+        if (set_preview_playback_speed(&state, rejected, "Preview speed smoke", true) ||
+            std::memcmp(&state.preview_speed, &accepted_speed, sizeof(double)) != 0) {
+            std::cerr << "A non-finite preview speed must be rejected and leave the "
+                         "field bit-unchanged.\n";
+            return false;
+        }
+    }
+
+    // The accessor is an independent second clamp, so even a directly poked
+    // field can never reach EditorSession::advance().
+    state.preview_speed = std::numeric_limits<double>::quiet_NaN();
+    const bool accessor_rejects_nan =
+        preview_playback_speed(state) == kDefaultPreviewSpeed;
+    state.preview_speed = 1000.0;
+    const bool accessor_clamps_high =
+        preview_playback_speed(state) == kPreviewSpeedMaximum;
+    state.preview_speed = -1000.0;
+    const bool accessor_clamps_low =
+        preview_playback_speed(state) == kPreviewSpeedMinimum;
+    if (!accessor_rejects_nan || !accessor_clamps_high || !accessor_clamps_low) {
+        std::cerr << "preview_playback_speed() must clamp a corrupted field at the "
+                     "point of use.\n";
+        return false;
+    }
+    if (!set_speed(kDefaultPreviewSpeed)) {
+        std::cerr << "Preview speed smoke could not restore its default speed.\n";
+        return false;
+    }
+
+    // --- Forward progression ----------------------------------------------
+    state.preview_reverse = false;
+    state.timeline_loop = true;
+    state.timeline_playing = true;
+    if (!refresh_preview_pose(&state)) {
+        std::cerr << "Preview speed smoke could not arm looped forward playback.\n";
+        return false;
+    }
+
+    struct AdvanceCase {
+        double speed;
+        double expected_time;
+    };
+    const AdvanceCase advance_cases[] = {
+        {1.0, 0.25},
+        {2.0, 0.5},
+        {0.25, 0.0625},
+        {0.5, 0.125},
+        {8.0, 0.0},  // fmod(2.0, 1.0): two whole periods in one step
+        {0.05, 0.0125},
+    };
+    for (const AdvanceCase& item : advance_cases) {
+        state.timeline_playing = true;
+        if (!seek(0.0) || !set_speed(item.speed)) {
+            std::cerr << "Preview speed smoke could not arm speed " << item.speed << ".\n";
+            return false;
+        }
+        advance_timeline_playback(&state, 0.25);
+        if (!near_time(state.timeline_time_seconds, item.expected_time)) {
+            std::cerr << "A 0.25s frame at " << item.speed << "x must reach "
+                      << item.expected_time << "s, got "
+                      << state.timeline_time_seconds << "s.\n";
+            return false;
+        }
+    }
+
+    // The equivalence law: speed multiplies the delta and nothing else, so N
+    // frames at (s, d) must land exactly where N frames at (1, s*d) land.
+    for (const double speed : {0.25, 2.0}) {
+        state.timeline_playing = true;
+        if (!seek(0.0) || !set_speed(speed)) {
+            std::cerr << "Preview speed smoke could not arm its equivalence walk.\n";
+            return false;
+        }
+        for (int step = 0; step < 3; ++step) {
+            advance_timeline_playback(&state, 0.25);
+        }
+        const double scaled_time = state.timeline_time_seconds;
+
+        state.timeline_playing = true;
+        if (!seek(0.0) || !set_speed(kDefaultPreviewSpeed)) {
+            std::cerr << "Preview speed smoke could not arm its reference walk.\n";
+            return false;
+        }
+        for (int step = 0; step < 3; ++step) {
+            advance_timeline_playback(&state, 0.25 * speed);
+        }
+        if (!near_time(scaled_time, state.timeline_time_seconds)) {
+            std::cerr << "Three frames at " << speed << "x reached " << scaled_time
+                      << "s but three scaled frames at 1x reached "
+                      << state.timeline_time_seconds << "s.\n";
+            return false;
+        }
+    }
+
+    // --- Reverse: speed is a magnitude, direction stays preview_reverse -----
+    state.preview_reverse = false;
+    state.timeline_playing = false;
+    if (!refresh_preview_pose(&state) || !seek(0.3)) {
+        std::cerr << "Preview speed smoke could not sample its forward reference.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform forward_at_030 = spine_pose();
+    if (!seek(0.7)) {
+        std::cerr << "Preview speed smoke could not sample its mirrored reference.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform forward_at_070 = spine_pose();
+    if (poses_match(forward_at_030, forward_at_070)) {
+        std::cerr << "The fixture must distinguish 0.3s from 0.7s for the reverse proof.\n";
+        return false;
+    }
+
+    state.preview_reverse = true;
+    state.timeline_loop = true;
+    state.timeline_playing = true;
+    if (!refresh_preview_pose(&state) || !seek(0.0) || !set_speed(2.0)) {
+        std::cerr << "Preview speed smoke could not arm reversed playback at 2x.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.15);
+    if (!near_time(state.timeline_time_seconds, 0.3)) {
+        std::cerr << "Reverse must not change the track-time progression: expected "
+                     "0.3s at 2x, got " << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform reverse_at_030 = spine_pose();
+    if (poses_match(reverse_at_030, forward_at_030) ||
+        !poses_match(reverse_at_030, forward_at_070)) {
+        std::cerr << "At 2x reversed, track time 0.3s must sample the forward pose at "
+                     "0.7s and not the forward pose at 0.3s.\n";
+        return false;
+    }
+    state.preview_reverse = false;
+    if (!refresh_preview_pose(&state)) {
+        std::cerr << "Preview speed smoke could not clear reverse.\n";
+        return false;
+    }
+
+    // --- Loop: one exact fmod, so a multi-period step cannot drift ----------
+    state.timeline_loop = true;
+    state.timeline_playing = false;
+    if (!refresh_preview_pose(&state) || !set_speed(kDefaultPreviewSpeed) || !seek(0.9)) {
+        std::cerr << "Preview speed smoke could not sample its loop reference.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform reference_at_090 = spine_pose();
+    state.timeline_playing = true;
+    if (!seek(0.9) || !set_speed(8.0)) {
+        std::cerr << "Preview speed smoke could not arm its multi-period step.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.25);  // +2.0s across two whole periods
+    if (!near_time(state.timeline_time_seconds, 0.9) || !state.timeline_playing ||
+        !poses_match(spine_pose(), reference_at_090)) {
+        std::cerr << "A two-period step at 8x must land back on 0.9s and on the same "
+                     "pose, got " << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+
+    // --- Non-loop: speed reaches the end sooner, never past it --------------
+    state.timeline_loop = false;
+    state.timeline_playing = true;
+    if (!refresh_preview_pose(&state) || !seek(0.9) || !set_speed(8.0)) {
+        std::cerr << "Preview speed smoke could not arm its non-looping clamp.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.25);
+    if (state.timeline_time_seconds != idle_duration() || state.timeline_playing) {
+        std::cerr << "A non-looping 8x step must stop at exactly the duration, got "
+                  << state.timeline_time_seconds << "s playing="
+                  << state.timeline_playing << ".\n";
+        return false;
+    }
+
+    // --- Scrubbing is an absolute position, so speed does not touch it ------
+    state.timeline_loop = true;
+    state.timeline_playing = false;
+    if (!refresh_preview_pose(&state) || !set_speed(8.0) || !seek(0.3) ||
+        state.timeline_time_seconds != 0.3) {
+        std::cerr << "A scrub at 8x must land on its exact requested time, got "
+                  << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+
+    // --- Pause is timeline_playing, at every speed --------------------------
+    advance_timeline_playback(&state, 0.25);
+    if (state.timeline_time_seconds != 0.3) {
+        std::cerr << "A paused transport must not advance at any speed.\n";
+        return false;
+    }
+    state.timeline_playing = true;
+    if (!seek(0.3)) {
+        std::cerr << "Preview speed smoke could not resume playback.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.05);
+    if (!near_time(state.timeline_time_seconds, 0.7)) {
+        std::cerr << "Resuming must advance by delta * speed from the paused time: "
+                     "expected 0.7s, got " << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+
+    // --- The non-effect gate ------------------------------------------------
+    state.timeline_playing = false;
+    state.timeline_loop = true;
+    state.preview_reverse = false;
+    // The speed goes back to its default FIRST and the ordinary preview path
+    // settles the session LAST, so the baseline below can never be poisoned by
+    // the very setter under test.
+    if (!set_speed(kDefaultPreviewSpeed) || !refresh_preview_pose(&state) ||
+        !seek(0.0)) {
+        std::cerr << "Preview speed smoke could not settle before its non-effect gate.\n";
+        return false;
+    }
+    if (state.session.preview_state().playing) {
+        std::cerr << "Preview speed smoke needs a settled, paused session before its gate.\n";
+        return false;
+    }
+    update_project_dirty_state(&state);
+    if (state.project_dirty || state.session.dirty()) {
+        std::cerr << "Preview speed smoke needs a clean project before its gate.\n";
+        return false;
+    }
+
+    const auto file_bytes = [](const std::filesystem::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string(
+            std::istreambuf_iterator<char>(stream),
+            std::istreambuf_iterator<char>());
+    };
+    const auto export_pair = [&](std::string_view stem,
+                                 std::filesystem::path* skeleton_out,
+                                 std::filesystem::path* binary_out) {
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = isolation.path() / (std::string(stem) + ".mskl");
+        options.binary_output_path = isolation.path() / (std::string(stem) + ".mbin");
+        const auto exported = marrow::editor::export_runtime_assets(
+            *state.session.project(),
+            *state.session.base_skeleton_document(),
+            options);
+        if (!exported) {
+            std::cerr << exported.error->format() << '\n';
+            return false;
+        }
+        *skeleton_out = options.skeleton_output_path;
+        *binary_out = *options.binary_output_path;
+        return true;
+    };
+
+    std::filesystem::path skeleton_before;
+    std::filesystem::path binary_before;
+    if (!export_pair("mar174-before", &skeleton_before, &binary_before)) {
+        std::cerr << "Preview speed smoke could not export its baseline runtime assets.\n";
+        return false;
+    }
+    const std::string skeleton_bytes_before = file_bytes(skeleton_before);
+    const std::string binary_bytes_before = file_bytes(binary_before);
+    if (skeleton_bytes_before.empty() || binary_bytes_before.empty()) {
+        std::cerr << "Preview speed smoke exported empty runtime assets, so its "
+                     "byte-identity gate would be vacuous.\n";
+        return false;
+    }
+
+    const std::string project_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t undo_before = state.session.undo_count();
+    const std::size_t redo_before = state.session.redo_count();
+    const std::uint64_t project_revision_before = state.session.project_revision();
+    const std::uint64_t runtime_revision_before = state.session.runtime_revision();
+    const std::uint64_t preview_revision_before = state.session.preview_revision();
+    const std::size_t operations_before =
+        marrow::editor::agent_operation_descriptor_count();
+    // The revision counters only move when a session setter actually changes a
+    // value, so the preview state itself is captured too: that catches a stray
+    // session call whose argument happened to match on the day.
+    const marrow::editor::PreviewState preview_before = state.session.preview_state();
+
+    // Replay every accepted and every rejected request, with no advance
+    // anywhere between the capture and the compare.
+    for (const ClampCase& item : clamp_cases) {
+        (void)set_speed(item.input);
+    }
+    for (const double preset : kPreviewSpeedPresets) {
+        (void)set_speed(preset);
+    }
+    (void)set_speed(std::numeric_limits<double>::quiet_NaN());
+    (void)set_speed(std::numeric_limits<double>::infinity());
+    (void)set_speed(-std::numeric_limits<double>::infinity());
+    // With the status message on, which is the only other field the setter may
+    // write. A visible message here keeps the gate below from being vacuous.
+    state.status_message.clear();
+    if (!set_preview_playback_speed(&state, 2.0, "Timeline", true) ||
+        state.status_message.find("2.00x") == std::string::npos ||
+        state.status_message.find("Timeline") == std::string::npos) {
+        std::cerr << "The setter must report the accepted speed and its source, got '"
+                  << state.status_message << "'.\n";
+        return false;
+    }
+
+    // preview_revision is the sharp one: the setter must make zero session
+    // calls, so even the cheapest preview counter must not move.
+    if (marrow::editor::serialize_project(*state.session.project()) != project_before ||
+        state.session.undo_count() != undo_before ||
+        state.session.redo_count() != redo_before ||
+        state.session.project_revision() != project_revision_before ||
+        state.session.runtime_revision() != runtime_revision_before ||
+        state.session.preview_revision() != preview_revision_before ||
+        marrow::editor::agent_operation_descriptor_count() != operations_before) {
+        std::cerr << "A preview speed change must leave the serialized project, the "
+                     "history, every session revision, and the operation registry "
+                     "untouched.\n";
+        return false;
+    }
+    update_project_dirty_state(&state);
+    if (state.project_dirty || state.session.dirty()) {
+        std::cerr << "A preview speed change must never dirty the project.\n";
+        return false;
+    }
+    const marrow::editor::PreviewState& preview_after = state.session.preview_state();
+    if (preview_after.playing != preview_before.playing ||
+        preview_after.loop != preview_before.loop ||
+        preview_after.reverse != preview_before.reverse ||
+        preview_after.time_seconds != preview_before.time_seconds ||
+        preview_after.animation_name != preview_before.animation_name) {
+        std::cerr << "A preview speed change must make zero EditorSession calls, so "
+                     "the session's own preview state cannot move.\n";
+        return false;
+    }
+
+    std::filesystem::path skeleton_after;
+    std::filesystem::path binary_after;
+    if (!export_pair("mar174-after", &skeleton_after, &binary_after)) {
+        std::cerr << "Preview speed smoke could not export its comparison assets.\n";
+        return false;
+    }
+    if (file_bytes(skeleton_after) != skeleton_bytes_before ||
+        file_bytes(binary_after) != binary_bytes_before) {
+        std::cerr << "A preview speed change altered the exported .mskl/.mbin bytes.\n";
+        return false;
+    }
+
+    // --- A speed change is inert inside a live transaction ------------------
+    {
+        const std::size_t transaction_undo_before = state.session.undo_count();
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Preview speed inertness probe",
+            "timeline:preview-speed",
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) {
+            std::cerr << "Preview speed smoke could not open its inertness transaction.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const double transaction_time_before = state.timeline_time_seconds;
+        state.timeline_playing = true;
+        if (!set_speed(4.0) || state.preview_speed != 4.0 ||
+            state.session.undo_count() != transaction_undo_before || !transaction) {
+            std::cerr << "A mid-transaction speed change must assign without recording "
+                         "history or disturbing the live transaction.\n";
+            return false;
+        }
+        advance_timeline_playback(&state, 0.25);
+        if (state.timeline_time_seconds != transaction_time_before) {
+            std::cerr << "EditorSession::advance() must refuse while a transaction is "
+                         "live, at any speed.\n";
+            return false;
+        }
+        transaction.cancel();
+        sync_shell_from_editor_session(&state);
+        if (marrow::editor::serialize_project(*state.session.project()) != project_before ||
+            state.session.undo_count() != transaction_undo_before) {
+            std::cerr << "Rolling back the inertness transaction must restore the "
+                         "byte-identical project.\n";
+            return false;
+        }
+    }
+
+    // --- MAR-172 interaction: 8x never reaches the managed boundary key -----
+    {
+        const auto stored_spine = [&]() -> const marrow::editor::TransformTimelineEdit* {
+            return state.session.project()->find_transform_timeline_edit(
+                "idle", "spine", TransformChannel::Rotate);
+        };
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 1.5) ||
+            !finish_animation_duration_gesture(&state, true) ||
+            std::abs(idle_duration() - 1.5) > 1e-6) {
+            std::cerr << "Preview speed smoke could not author idle's explicit duration.\n";
+            return false;
+        }
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "Enable loop synchronization",
+                "timeline:loop-sync",
+                false,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview});
+            marrow::editor::TimelineLaneSelector lane;
+            lane.kind = marrow::editor::TimelineLaneKind::Transform;
+            lane.animation_name = "idle";
+            lane.bone_name = "spine";
+            lane.transform_channel = TransformChannel::Rotate;
+            const auto enabled = transaction
+                ? marrow::editor::set_timeline_loop_sync(
+                      transaction.project(),
+                      *state.session.runtime_data(),
+                      {lane},
+                      true)
+                : marrow::editor::TimelineLoopSyncResult{};
+            if (!transaction || !enabled || !enabled.changed ||
+                enabled.created_key_count != 1U || !transaction.commit()) {
+                std::cerr << "Preview speed smoke could not enable spine/rotate loop sync.\n";
+                return false;
+            }
+        }
+        sync_shell_from_editor_session(&state);
+
+        const auto* lane = stored_spine();
+        if (lane == nullptr || lane->keyframes.size() < 2U ||
+            lane->keyframes.back().time != 1.5 ||
+            lane->keyframes.back().angle != lane->keyframes.front().angle) {
+            std::cerr << "Preview speed smoke could not establish MAR-172's managed "
+                         "boundary key at 1.5s.\n";
+            return false;
+        }
+        const std::size_t boundary_key_count = lane->keyframes.size();
+        const double boundary_angle = lane->keyframes.back().angle;
+        const std::string boundary_project_before =
+            marrow::editor::serialize_project(*state.session.project());
+
+        state.timeline_loop = true;
+        state.timeline_playing = true;
+        state.preview_reverse = false;
+        if (!refresh_preview_pose(&state) || !seek(0.0) || !set_speed(8.0)) {
+            std::cerr << "Preview speed smoke could not arm its boundary walk.\n";
+            return false;
+        }
+        for (int step = 0; step < 8; ++step) {
+            advance_timeline_playback(&state, 0.25);  // 16s over 1.5s periods
+        }
+        const auto* lane_after = stored_spine();
+        if (lane_after == nullptr || lane_after->keyframes.size() != boundary_key_count ||
+            lane_after->keyframes.back().time != 1.5 ||
+            lane_after->keyframes.back().angle != boundary_angle ||
+            lane_after->keyframes.back().angle != lane_after->keyframes.front().angle ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                boundary_project_before) {
+            std::cerr << "Ten periods of 8x playback must not touch the project or "
+                         "MAR-172's managed boundary key.\n";
+            return false;
+        }
+    }
+
+    // --- Undo must never rewrite the speed ----------------------------------
+    // The tempting home for this field is marrow::editor::PreviewState, which
+    // already holds reverse, loop, and playing. It cannot live there:
+    // assign_history_snapshot() writes every PreviewState field back on undo,
+    // and sync_shell_from_editor_session() does the same after session.undo(),
+    // while history_snapshots_equal() ignores them all. A speed parked there
+    // would silently jump on Ctrl+Z with nothing reporting a change. This case
+    // fails the moment the field moves off ShellState.
+    {
+        if (state.session.undo_count() < 2U) {
+            std::cerr << "Preview speed smoke needs real history for its undo case.\n";
+            return false;
+        }
+        if (!set_speed(3.5) || state.preview_speed != 3.5) {
+            std::cerr << "Preview speed smoke could not arm its undo case.\n";
+            return false;
+        }
+        if (!undo_project_change(&state) || state.preview_speed != 3.5) {
+            std::cerr << "Undo must leave the transient preview speed exactly where "
+                         "the user put it, got " << state.preview_speed << ".\n";
+            return false;
+        }
+        if (!undo_project_change(&state) || state.preview_speed != 3.5) {
+            std::cerr << "A second undo must still leave the preview speed alone, got "
+                      << state.preview_speed << ".\n";
+            return false;
+        }
+        if (!redo_project_change(&state) || state.preview_speed != 3.5) {
+            std::cerr << "Redo must leave the transient preview speed alone, got "
+                      << state.preview_speed << ".\n";
+            return false;
+        }
+    }
+
+    // --- reload_project() resets through the one session default ------------
+    if (!set_speed(4.0) || state.preview_speed != 4.0) {
+        std::cerr << "Preview speed smoke could not arm its reload reset.\n";
+        return false;
+    }
+    if (!reload_project(&state) || state.preview_speed != kDefaultPreviewSpeed) {
+        std::cerr << "Reloading the current project must reset the preview speed, got "
+                  << state.preview_speed << ".\n";
+        return false;
+    }
+
+    marrow::editor::ProjectData reopened_project = *state.session.project();
+    reopened_project.source_path = isolation.path() / "mar174-reopen.marrow";
+    materialize_temp_project_runtime_assets(state, &reopened_project);
+    const auto saved = marrow::editor::save_project(
+        reopened_project, reopened_project.source_path);
+    if (!saved) {
+        std::cerr << saved.error->format() << '\n';
+        return false;
+    }
+    if (!set_speed(4.0) || state.preview_speed != 4.0) {
+        std::cerr << "Preview speed smoke could not arm its open reset.\n";
+        return false;
+    }
+    state.project_path = reopened_project.source_path;
+    if (!reload_project(&state) || state.preview_speed != kDefaultPreviewSpeed) {
+        std::cerr << "Opening a different project must reset the preview speed, got "
+                  << state.preview_speed << ".\n";
+        return false;
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Preview speed editing changed the Agent operation surface.\n";
+        return false;
     }
     return true;
 }

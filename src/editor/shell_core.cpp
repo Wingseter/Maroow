@@ -576,6 +576,9 @@ bool reload_project(ShellState* state) {
     state->timeline_time_seconds = 0.0;
     state->timeline_loop = previous_timeline_loop;
     state->timeline_playing = false;
+    // MAR-174: the one documented session default, reached by open, reload, and
+    // replace alike because both load branches converge here.
+    state->preview_speed = kDefaultPreviewSpeed;
     state->pending_edit_action.reset();
     
     state->project_dirty = false;
