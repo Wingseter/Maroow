@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -184,5 +185,37 @@ TimelineRetimeResult retime_keyframes(
     double requested_delta,
     bool snap_to_frames,
     double frames_per_second);
+
+/** @brief One editable scalar channel of a persisted timeline key. */
+enum class TimelineScalarComponent : std::uint8_t {
+    Angle,
+    X,
+    Y,
+    Red,
+    Green,
+    Blue,
+    Alpha,
+};
+
+struct TimelineScalarOffsetResult : AuthoringResult {
+    double applied_delta{0.0};
+    std::size_t key_count{0U};
+};
+
+/**
+ * @brief Atomically offsets one scalar component of persisted timeline keys.
+ *
+ * Every selector must resolve to a Transform or Slot Color key whose family
+ * supports `component`. Slot Color deltas are clamped group-wide into [0, 1];
+ * Angle, X, and Y are unclamped. Rotate angles are setup-relative in the
+ * project and absolute in the graph, but a delta is identical in both spaces,
+ * so no setup-pose conversion occurs. Times and interpolations are never
+ * written. A rejected edit leaves the project unchanged.
+ */
+TimelineScalarOffsetResult offset_keyframe_scalars(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    TimelineScalarComponent component,
+    double requested_delta);
 
 } // namespace marrow::editor

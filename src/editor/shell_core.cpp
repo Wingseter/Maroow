@@ -476,8 +476,10 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
         cancelled = true;
     }
     cancel_transaction_gesture(state->timeline_editor.retime_gesture);
+    cancel_transaction_gesture(state->timeline_editor.graph_value_gesture);
     cancel_transaction_gesture(state->parameter_slider_gesture);
     cancel_transaction_gesture(state->parameter_geometry_gesture);
+    state->timeline_editor.graph_drag.reset();
     state->viewport_ffd_box_selection.reset();
     state->viewport_box_selection.reset();
     state->pointer_mediator.reset();

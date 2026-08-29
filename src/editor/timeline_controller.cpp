@@ -16,6 +16,7 @@
 #include "shell_derived_cache.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
+#include "shell_timeline_graph.hpp"
 #include "viewport_ffd_controller.hpp"
 #include "marrow/editor/authoring.hpp"
 
@@ -1748,5 +1749,256 @@ bool apply_timeline_retime_delta(
     return true;
 }
 
+namespace {
+
+std::optional<marrow::editor::TimelineScalarComponent> to_scalar_component(
+    timeline_graph_model::Component component) {
+    switch (component) {
+    case timeline_graph_model::Component::Angle:
+        return marrow::editor::TimelineScalarComponent::Angle;
+    case timeline_graph_model::Component::X:
+        return marrow::editor::TimelineScalarComponent::X;
+    case timeline_graph_model::Component::Y:
+        return marrow::editor::TimelineScalarComponent::Y;
+    case timeline_graph_model::Component::Red:
+        return marrow::editor::TimelineScalarComponent::Red;
+    case timeline_graph_model::Component::Green:
+        return marrow::editor::TimelineScalarComponent::Green;
+    case timeline_graph_model::Component::Blue:
+        return marrow::editor::TimelineScalarComponent::Blue;
+    case timeline_graph_model::Component::Alpha:
+        return marrow::editor::TimelineScalarComponent::Alpha;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+bool timeline_graph_component_is_editable(
+    const TimelineTrackRow& track,
+    timeline_graph_model::Component component) {
+    using Component = timeline_graph_model::Component;
+    switch (track.kind) {
+    case timeline_model::TimelineTrackKind::Rotate:
+        return component == Component::Angle;
+    case timeline_model::TimelineTrackKind::Translate:
+    case timeline_model::TimelineTrackKind::Scale:
+    case timeline_model::TimelineTrackKind::Shear:
+        return component == Component::X || component == Component::Y;
+    case timeline_model::TimelineTrackKind::SlotColor:
+        return component == Component::Red || component == Component::Green ||
+            component == Component::Blue || component == Component::Alpha;
+    case timeline_model::TimelineTrackKind::Unknown:
+    case timeline_model::TimelineTrackKind::Inherit:
+    case timeline_model::TimelineTrackKind::SlotAttachment:
+    case timeline_model::TimelineTrackKind::Deform:
+    case timeline_model::TimelineTrackKind::DrawOrder:
+    case timeline_model::TimelineTrackKind::Event:
+        return false;
+    }
+    return false;
+}
+
+bool begin_timeline_graph_value_gesture(
+    ShellState* state,
+    std::uint32_t item_id,
+    const TimelineTrackRow& track,
+    timeline_graph_model::Component component,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || authoring_gesture_active(*state) ||
+        !timeline_track_is_editable(track) ||
+        !timeline_graph_component_is_editable(track, component) ||
+        state->timeline_editor.selected_keys.empty() ||
+        find_timeline_track(tracks, track.id) == nullptr) {
+        return false;
+    }
+    // The graph shows one track at a time, so only the focused row's keys join
+    // the gesture. Selected keys on other rows are ignored and left untouched.
+    std::vector<TimelineKeyRef> keys;
+    for (const TimelineKeyRef& key : state->timeline_editor.selected_keys) {
+        if (key.track_id == track.id) keys.push_back(key);
+    }
+    if (keys.empty()) return false;
+
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        keys.size() == 1U ? "Edit graph key value" : "Edit graph key values",
+        "timeline:graph-value",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    TimelineGraphValueGesture gesture;
+    gesture.item_id = item_id;
+    gesture.track_id = track.id;
+    gesture.component = component;
+    gesture.keys = std::move(keys);
+    gesture.transaction = std::move(transaction);
+
+    const auto& projection = cached_timeline_graph_projection(state, track);
+    if (projection.status != timeline_graph_model::ProjectionStatus::Ready ||
+        !projection.track.has_value()) {
+        gesture.transaction.cancel();
+        return false;
+    }
+    const auto component_slot = std::find_if(
+        projection.track->components.begin(),
+        projection.track->components.end(),
+        [&](const timeline_graph_model::ComponentDescriptor& descriptor) {
+            return descriptor.component == component;
+        });
+    if (component_slot == projection.track->components.end()) {
+        gesture.transaction.cancel();
+        return false;
+    }
+    const auto component_index = static_cast<std::size_t>(
+        std::distance(projection.track->components.begin(), component_slot));
+    for (const TimelineKeyRef& key : gesture.keys) {
+        const auto key_index = timeline_key_index(track, key);
+        const auto projected = std::find_if(
+            projection.track->keys.begin(),
+            projection.track->keys.end(),
+            [&](const timeline_graph_model::Key& candidate) {
+                return candidate.identity == key;
+            });
+        if (!key_index.has_value() || projected == projection.track->keys.end() ||
+            component_index >= projected->value_count) {
+            gesture.transaction.cancel();
+            return false;
+        }
+        gesture.original_values.push_back(projected->values[component_index]);
+    }
+    state->timeline_editor.graph_value_gesture.emplace(std::move(gesture));
+    return true;
+}
+
+void finish_timeline_graph_value_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->timeline_editor.graph_value_gesture.has_value()) {
+        return;
+    }
+    TimelineGraphValueGesture gesture =
+        std::move(*state->timeline_editor.graph_value_gesture);
+    state->timeline_editor.graph_value_gesture.reset();
+    const auto completion =
+        marrow::editor::timeline_model::completion_decision(
+            commit, gesture.changed);
+    if (completion.action ==
+        marrow::editor::timeline_model::CompletionAction::Cancel) {
+        gesture.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        if (completion.report_cancelled) {
+            state->status_message = "Cancelled graph value edit";
+        }
+        return;
+    }
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Graph value edit failed";
+    } else {
+        state->status_message = gesture.keys.size() == 1U
+            ? "Edited graph key value"
+            : "Edited graph key values";
+    }
+}
+
+bool apply_timeline_graph_value_delta(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double requested_delta) {
+    if (state == nullptr || !state->timeline_editor.graph_value_gesture.has_value()) {
+        return false;
+    }
+    TimelineGraphValueGesture& gesture = *state->timeline_editor.graph_value_gesture;
+    if (std::abs(requested_delta - gesture.applied_delta) <= 1e-12) return true;
+    const auto incremental_delta =
+        marrow::editor::timeline_model::incremental_retime_delta(
+            requested_delta, gesture.applied_delta);
+    if (!incremental_delta.has_value()) {
+        finish_timeline_graph_value_gesture(state, false);
+        state->error_message = "Graph value delta must be finite.";
+        state->status_message = "Graph value edit failed";
+        return false;
+    }
+    const auto scalar_component = to_scalar_component(gesture.component);
+    const TimelineTrackRow* track = find_timeline_track(tracks, gesture.track_id);
+    if (track == nullptr || !scalar_component.has_value() ||
+        !timeline_track_is_editable(*track) ||
+        !timeline_graph_component_is_editable(*track, gesture.component)) {
+        finish_timeline_graph_value_gesture(state, false);
+        state->status_message = "The graph editing context changed during editing";
+        return false;
+    }
+
+    // The first edit copies every imported runtime key into the project, so a
+    // value offset never replaces an unmaterialized track with one key.
+    if (!gesture.materialized) {
+        if (!visit_editable_timeline_keys(state, *track, [](auto&) {})) {
+            finish_timeline_graph_value_gesture(state, false);
+            state->status_message = "Could not materialize the selected graph keys";
+            return false;
+        }
+        gesture.materialized = true;
+    }
+
+    std::vector<marrow::editor::TimelineKeySelector> selectors;
+    selectors.reserve(gesture.keys.size());
+    for (const TimelineKeyRef& key : gesture.keys) {
+        const TimelineTrackRow* resolved_track =
+            find_timeline_track(tracks, gesture.track_id);
+        const auto key_index = resolved_track != nullptr
+            ? timeline_key_index(*resolved_track, key)
+            : std::nullopt;
+        if (!key_index.has_value()) {
+            finish_timeline_graph_value_gesture(state, false);
+            state->status_message = "The selected graph keys changed during editing";
+            return false;
+        }
+        const auto selector =
+            timeline_key_selector(*state, *resolved_track, *key_index);
+        if (!selector.has_value()) {
+            finish_timeline_graph_value_gesture(state, false);
+            state->status_message = "Could not resolve the selected graph keys";
+            return false;
+        }
+        selectors.push_back(*selector);
+    }
+
+    const marrow::editor::TimelineScalarOffsetResult offset =
+        marrow::editor::offset_keyframe_scalars(
+            gesture.transaction.project(),
+            selectors,
+            *scalar_component,
+            *incremental_delta);
+    if (!offset) {
+        const std::string error = offset.error;
+        finish_timeline_graph_value_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Graph value edit failed";
+        return false;
+    }
+    if (!offset.changed) return true;
+
+    const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
+    if (!refresh) {
+        const std::string error = refresh.error->format();
+        finish_timeline_graph_value_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Graph value edit preview failed";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    // A value edit never moves a key in time, so every TimelineKeyRef stays
+    // bit-identical and selection/active_key need no rebuild.
+    gesture.applied_delta += offset.applied_delta;
+    gesture.changed = true;
+    return true;
+}
 
 } // namespace marrow::editor::shell

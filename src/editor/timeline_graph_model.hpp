@@ -37,6 +37,13 @@ enum class ProjectionStatus : std::uint8_t {
     InvalidData,
 };
 
+/** @brief Axis a graph point drag locks onto once it leaves the dead zone. */
+enum class DragAxis : std::uint8_t {
+    Undecided,
+    Time,
+    Value,
+};
+
 struct ComponentDescriptor {
     Component component{Component::Angle};
     std::string_view label;
@@ -113,6 +120,38 @@ struct PointHit {
     Component component{Component::Angle};
     std::size_t component_index{0U};
 };
+
+/** @brief Shared pixel/unit mapping used by both rendering and dragging. */
+double time_at_x(PlotRect rect, const View& view, double x);
+double value_at_y(PlotRect rect, const View& view, double y);
+double x_at_time(PlotRect rect, const View& view, double time_seconds);
+double y_at_value(PlotRect rect, const View& view, double value);
+
+/**
+ * @brief Locks one drag axis by dominant-axis comparison.
+ *
+ * Returns `Undecided` for any non-finite input, a non-finite or negative dead
+ * zone, and while the pointer stays inside the dead zone. Otherwise `|dx| >
+ * |dy|` locks `Time` and every other case locks `Value`, so an exact tie
+ * resolves to the value axis.
+ */
+DragAxis decide_drag_axis(
+    double press_x,
+    double press_y,
+    double pointer_x,
+    double pointer_y,
+    double dead_zone_pixels = 4.0);
+
+/** @brief Signed seconds a horizontal drag requests, or nullopt when unusable. */
+std::optional<double> drag_time_delta(
+    const View& view,
+    double press_x,
+    double pointer_x);
+/** @brief Signed units a vertical drag requests, inverting screen Y. */
+std::optional<double> drag_value_delta(
+    const View& view,
+    double press_y,
+    double pointer_y);
 
 bool track_is_supported(const timeline_model::TrackRow& track) noexcept;
 Projection project_track(

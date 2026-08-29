@@ -583,6 +583,41 @@ struct TimelineGraphViewState {
     bool needs_fit{true};
 };
 
+/**
+ * @brief Armed graph point press that has not yet chosen a drag axis.
+ *
+ * A candidate holds no transaction, so `authoring_gesture_active` stays false
+ * while only a press is live. Every field is captured once and never re-read,
+ * which freezes the view transform for the whole gesture.
+ */
+struct TimelineGraphPointDrag {
+    std::uint32_t item_id{0U};
+    timeline_graph_model::DragAxis axis{timeline_graph_model::DragAxis::Undecided};
+    std::string track_id;
+    TimelineKeyRef pressed_key;
+    timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
+    std::size_t component_index{0U};
+    double press_pointer_x{0.0};
+    double press_pointer_y{0.0};
+    double press_time_seconds{0.0};
+    double press_value{0.0};
+    timeline_graph_model::View frozen_view{};
+    timeline_graph_model::PlotRect frozen_plot{};
+};
+
+/** @brief Live value-axis graph gesture owning one open transaction. */
+struct TimelineGraphValueGesture {
+    std::uint32_t item_id{0U};
+    std::string track_id;
+    timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
+    std::vector<TimelineKeyRef> keys;
+    std::vector<double> original_values;
+    double applied_delta{0.0};
+    bool materialized{false};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
 struct ParameterSliderGesture {
     std::string parameter_id;
     bool changed{false};
@@ -610,6 +645,8 @@ struct TimelineEditorState {
     TimelineClipboard clipboard;
     std::optional<TimelineBoxSelection> box_selection;
     std::optional<TimelineRetimeGesture> retime_gesture;
+    std::optional<TimelineGraphPointDrag> graph_drag;
+    std::optional<TimelineGraphValueGesture> graph_value_gesture;
 };
 
 using AgentReviewKind = marrow::editor::AgentReviewKind;
@@ -712,6 +749,7 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
         state.parameter_slider_gesture.has_value() ||
         state.parameter_geometry_gesture.has_value() ||
         state.timeline_editor.retime_gesture.has_value() ||
+        state.timeline_editor.graph_value_gesture.has_value() ||
         state.weight_paint_stroke.active;
 }
 

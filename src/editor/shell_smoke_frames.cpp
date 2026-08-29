@@ -694,6 +694,263 @@ bool render_headless_smoke_frames(
               << " playhead=" << translate_stats.playhead_drawn
               << ".\n";
 
+    // --- MAR-168: actual-frame graph point drags through real ImGui mouse
+    // events aimed at real submitted point coordinates. ---
+    {
+        // Editing rebuilds the shared track cache, so this block keeps only
+        // value copies of the focused row's identity, never a row pointer.
+        const std::string drag_track_id = translate_track->id;
+        const std::size_t drag_bone_index = translate_track->bone_index.value_or(0U);
+        const TimelineKeyRef drag_key = timeline_model::key_ref(*translate_track, 0U);
+        shell_state.selected_timeline_track_id = drag_track_id;
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        shell_state.timeline_editor.snap_to_frames = true;
+        shell_state.timeline_editor.frames_per_second = 60.0;
+        const auto reset_drag_selection = [&]() {
+            shell_state.timeline_editor.selected_keys = {drag_key};
+            shell_state.timeline_editor.active_key = drag_key;
+            shell_state.timeline_editor.graph_view.active_component =
+                timeline_graph_model::Component::X;
+        };
+        // One settling frame first: switching the focused row resets the
+        // graph's active component and requests a fresh fit.
+        render_graph_frame(nullptr);
+        reset_drag_selection();
+        shell_state.timeline_editor.graph_view.needs_fit = true;
+        TimelineGraphRenderStats drag_stats;
+        render_graph_frame(&drag_stats);
+        // Scroll the plot back into the Timeline window so a real mouse can
+        // reach the submitted point.
+        if (ImGuiWindow* scroll_window = ImGui::FindWindowByName(kTimelineWindowTitle)) {
+            ImGui::SetScrollY(scroll_window, scroll_window->ScrollMax.y);
+        }
+        reset_drag_selection();
+        render_graph_frame(&drag_stats);
+        reset_drag_selection();
+        render_graph_frame(&drag_stats);
+        ImGuiWindow* drag_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+        if (drag_window == nullptr || !drag_stats.active_point_valid ||
+            !drag_stats.first_point_valid ||
+            drag_stats.status != timeline_graph_model::ProjectionStatus::Ready) {
+            std::cerr << "Actual-frame graph drag smoke could not submit an active point: valid="
+                      << drag_stats.active_point_valid
+                      << " points=" << drag_stats.point_count
+                      << " component="
+                      << (shell_state.timeline_editor.graph_view.active_component.has_value()
+                              ? static_cast<int>(
+                                    *shell_state.timeline_editor.graph_view.active_component)
+                              : -1)
+                      << " selected=" << shell_state.timeline_editor.selected_keys.size()
+                      << " status=" << static_cast<int>(drag_stats.status) << ".\n";
+            return false;
+        }
+        const ImVec2 press_position{drag_stats.active_point_x, drag_stats.active_point_y};
+        if (press_position.x < drag_window->InnerClipRect.Min.x + 1.0f ||
+            press_position.x > drag_window->InnerClipRect.Max.x - 1.0f ||
+            press_position.y < drag_window->InnerClipRect.Min.y + 1.0f ||
+            press_position.y > drag_window->InnerClipRect.Max.y - 1.0f) {
+            std::cerr << "Actual-frame graph drag smoke could not reach a visible active point: point=("
+                      << press_position.x << "," << press_position.y << ") clip=("
+                      << drag_window->InnerClipRect.Min.x << ","
+                      << drag_window->InnerClipRect.Min.y << ")-("
+                      << drag_window->InnerClipRect.Max.x << ","
+                      << drag_window->InnerClipRect.Max.y << ").\n";
+            return false;
+        }
+
+        const std::string drag_project_before =
+            marrow::editor::serialize_project(*shell_state.session.project());
+        const std::size_t drag_undo_before = shell_state.session.undo_count();
+        // EditTransaction::cancel deliberately bumps the runtime/preview
+        // revision so every consumer re-reads the restored data, so the
+        // persistent revision to compare is the project one.
+        const std::uint64_t drag_project_revision_before =
+            shell_state.session.project_revision();
+
+        const auto press_graph = [&](TimelineGraphRenderStats* stats) {
+            io.AddMousePosEvent(press_position.x, press_position.y);
+            render_graph_frame(nullptr);
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+            render_graph_frame(stats);
+        };
+        const auto move_graph = [&](float dx, float dy, TimelineGraphRenderStats* stats) {
+            io.AddMousePosEvent(press_position.x + dx, press_position.y + dy);
+            render_graph_frame(stats);
+        };
+        const auto release_graph = [&](TimelineGraphRenderStats* stats) {
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+            render_graph_frame(stats);
+        };
+
+        // 1. Dominant vertical motion locks the value axis.
+        TimelineGraphRenderStats value_stats;
+        press_graph(&value_stats);
+        if (!value_stats.drag_candidate_active ||
+            value_stats.drag_axis != timeline_graph_model::DragAxis::Undecided ||
+            value_stats.value_gesture_active) {
+            std::cerr << "An actual-frame graph press did not arm a candidate: candidate="
+                      << value_stats.drag_candidate_active
+                      << " axis=" << static_cast<int>(value_stats.drag_axis) << ".\n";
+            return false;
+        }
+        move_graph(0.0f, -40.0f, &value_stats);
+        if (value_stats.drag_axis != timeline_graph_model::DragAxis::Value ||
+            !value_stats.value_gesture_active || value_stats.retime_gesture_active) {
+            std::cerr << "An actual-frame vertical graph drag did not lock the value axis: axis="
+                      << static_cast<int>(value_stats.drag_axis)
+                      << " value=" << value_stats.value_gesture_active
+                      << " retime=" << value_stats.retime_gesture_active << ".\n";
+            return false;
+        }
+        // 2. A frozen view: zoom, pan, and a requested Fit are inert mid-drag.
+        const auto view_before_suppression = shell_state.timeline_editor.graph_view.view;
+        io.AddMouseWheelEvent(0.0f, -1.0f);
+        move_graph(0.0f, -40.0f, &value_stats);
+        shell_state.timeline_editor.graph_view.needs_fit = true;
+        move_graph(0.0f, -40.0f, &value_stats);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Middle, true);
+        move_graph(18.0f, -46.0f, &value_stats);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Middle, false);
+        move_graph(0.0f, -40.0f, &value_stats);
+        const auto view_after_suppression = shell_state.timeline_editor.graph_view.view;
+        if (view_after_suppression.pixels_per_second !=
+                view_before_suppression.pixels_per_second ||
+            view_after_suppression.pixels_per_value !=
+                view_before_suppression.pixels_per_value ||
+            view_after_suppression.view_start_seconds !=
+                view_before_suppression.view_start_seconds ||
+            view_after_suppression.value_center !=
+                view_before_suppression.value_center ||
+            !shell_state.timeline_editor.graph_view.needs_fit) {
+            std::cerr << "A live graph drag did not freeze its view transform.\n";
+            return false;
+        }
+        // 3. Release commits one entry with an unchanged time and sibling.
+        const auto* pre_release_animation =
+            shell_state.session.runtime_data()->find_animation("idle");
+        const auto* pre_release_translate =
+            pre_release_animation != nullptr
+            ? pre_release_animation->find_translate_timeline(drag_bone_index)
+            : nullptr;
+        if (pre_release_translate == nullptr || pre_release_translate->keyframes.empty()) {
+            std::cerr << "Actual-frame graph drag smoke lost its translate timeline.\n";
+            return false;
+        }
+        const double previewed_x =
+            static_cast<double>(pre_release_translate->keyframes.front().x);
+        const double previewed_y =
+            static_cast<double>(pre_release_translate->keyframes.front().y);
+        const double previewed_time =
+            static_cast<double>(pre_release_translate->keyframes.front().time);
+        release_graph(&value_stats);
+        if (value_stats.drag_candidate_active || value_stats.value_gesture_active ||
+            shell_state.session.undo_count() != drag_undo_before + 1U) {
+            std::cerr << "Releasing an actual-frame graph value drag did not commit one entry.\n";
+            return false;
+        }
+        {
+            const auto* committed = shell_state.session.runtime_data()->find_animation("idle");
+            const auto* committed_translate =
+                committed != nullptr
+                ? committed->find_translate_timeline(drag_bone_index)
+                : nullptr;
+            if (committed_translate == nullptr || committed_translate->keyframes.empty() ||
+                std::abs(
+                    static_cast<double>(committed_translate->keyframes.front().x) -
+                    previewed_x) > 1e-5 ||
+                std::abs(
+                    static_cast<double>(committed_translate->keyframes.front().y) -
+                    previewed_y) > 1e-5 ||
+                std::abs(
+                    static_cast<double>(committed_translate->keyframes.front().time) -
+                    previewed_time) > 1e-6) {
+                std::cerr << "An actual-frame graph value drag changed a key time or sibling.\n";
+                return false;
+            }
+        }
+        if (!shell_state.session.undo()) {
+            std::cerr << "Actual-frame graph value drag could not be undone.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+        shell_state.timeline_editor.graph_view.needs_fit = false;
+
+        // 4. Dominant horizontal motion locks the time axis. The rollback
+        // baseline is recaptured here: committing and undoing the value drag
+        // legitimately advanced the monotonic project revision.
+        const std::string time_project_before =
+            marrow::editor::serialize_project(*shell_state.session.project());
+        const std::size_t time_undo_before = shell_state.session.undo_count();
+        const std::uint64_t time_project_revision_before =
+            shell_state.session.project_revision();
+        reset_drag_selection();
+        TimelineGraphRenderStats time_stats;
+        press_graph(&time_stats);
+        move_graph(40.0f, 0.0f, &time_stats);
+        if (time_stats.drag_axis != timeline_graph_model::DragAxis::Time ||
+            !time_stats.retime_gesture_active || time_stats.value_gesture_active) {
+            std::cerr << "An actual-frame horizontal graph drag did not lock the time axis: axis="
+                      << static_cast<int>(time_stats.drag_axis)
+                      << " retime=" << time_stats.retime_gesture_active
+                      << " value=" << time_stats.value_gesture_active << ".\n";
+            return false;
+        }
+        // 5. Switching to the Dopesheet mid-drag cancels with a full rollback.
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Dopesheet;
+        render_graph_frame(nullptr);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(nullptr);
+        if (shell_state.timeline_editor.graph_drag.has_value() ||
+            authoring_gesture_active(shell_state) ||
+            marrow::editor::serialize_project(*shell_state.session.project()) !=
+                time_project_before ||
+            shell_state.session.undo_count() != time_undo_before ||
+            shell_state.session.project_revision() != time_project_revision_before) {
+            std::cerr << "A mid-drag Dopesheet tab switch did not cancel with rollback: drag="
+                      << shell_state.timeline_editor.graph_drag.has_value()
+                      << " gesture=" << authoring_gesture_active(shell_state)
+                      << " undo=" << shell_state.session.undo_count()
+                      << " revision=" << shell_state.session.project_revision()
+                      << "/" << time_project_revision_before << ".\n";
+            return false;
+        }
+        // 6. The shared dopesheet retime lane still starts and commits.
+        reset_drag_selection();
+        const auto& dopesheet_tracks = cached_timeline_tracks(&shell_state);
+        if (!begin_timeline_retime_gesture(&shell_state, 777U, 0.0f, dopesheet_tracks) ||
+            !apply_timeline_retime_delta(
+                &shell_state, cached_timeline_tracks(&shell_state), 0.1, true)) {
+            std::cerr << "The dopesheet retime lane did not work after a cancelled graph drag.\n";
+            return false;
+        }
+        finish_timeline_retime_gesture(&shell_state, true);
+        if (authoring_gesture_active(shell_state) ||
+            shell_state.session.undo_count() != time_undo_before + 1U) {
+            std::cerr << "The dopesheet retime lane did not commit after a cancelled graph drag.\n";
+            return false;
+        }
+        if (!shell_state.session.undo()) return false;
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+        reconcile_timeline_key_selection(
+            &shell_state, cached_timeline_tracks(&shell_state));
+        if (marrow::editor::serialize_project(*shell_state.session.project()) !=
+            drag_project_before) {
+            std::cerr << "Actual-frame graph drag smoke did not restore its project bytes.\n";
+            return false;
+        }
+        std::cout << "Timeline Graph actual-frame drags: value axis="
+                  << static_cast<int>(timeline_graph_model::DragAxis::Value)
+                  << " time axis=" << static_cast<int>(timeline_graph_model::DragAxis::Time)
+                  << " active point=(" << press_position.x << "," << press_position.y
+                  << ").\n";
+        shell_state.selected_timeline_track_id = drag_track_id;
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        render_graph_frame(nullptr);
+    }
+
     // MAR-159: the anchor resets only when filter/tree-collapse removes it
     // from the visible order. A Hierarchy window whose dock tab is hidden
     // renders no rows at all; that degenerate frame must not clear it.

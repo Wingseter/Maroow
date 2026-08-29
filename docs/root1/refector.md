@@ -100,9 +100,9 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | MAR-155 | Editor duration authoring | MAR-154 | Done (validated 2026-07-17) |
 | MAR-156 | Versioned user preference store | MAR-155 | Done (validated 2026-07-18) |
 | MAR-157–167 | Typed selection through synchronized scalar graph checkpoints | Each story depends on the immediately preceding story | Done (validated 2026-07-18 through 2026-08-20) |
-| MAR-168–191 | Remaining Editing P1 product chain | Each story depends on the immediately preceding story | Open backlog beginning at MAR-168 |
+| MAR-169–191 | Remaining Editing P1 product chain | Each story depends on the immediately preceding story | Open backlog beginning at MAR-169 |
 
-Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, MAR-154–156 are complete, and MAR-157–167 remain completed functional checkpoints. The next dependency sequence is the remaining linear MAR-168–191 P1 product chain. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
+Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, MAR-154–156 are complete, and MAR-157–168 remain completed functional checkpoints. The next dependency sequence is the remaining linear MAR-169–191 P1 product chain. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
 
 ## Compatibility boundary
 
@@ -329,8 +329,8 @@ passed this completion gate on both hosts:
   staged-folder and new-directory extracted runs both exited 0.
 
 Task #28, MAR-163, and MAR-164 remain complete at that checkpoint. MAR-165,
-MAR-166, and MAR-167 were completed separately on 2026-08-20; MAR-168 is the
-next product milestone.
+MAR-166, and MAR-167 were completed separately on 2026-08-20 and MAR-168 on
+2026-08-30; MAR-169 is the next product milestone.
 Windows 11 high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain
 deferred MAR-192 through MAR-210 qualification evidence and received no
 Task #28 or platform-qualification credit. Those stories remain `open`, and

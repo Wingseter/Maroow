@@ -123,6 +123,9 @@ void update_timeline_retime_gesture(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks) {
     if (state == nullptr || !state->timeline_editor.retime_gesture.has_value()) return;
+    // The Graph tab drives its own retime from the graph view transform. Both
+    // updaters running would apply two deltas per frame at two scales.
+    if (state->timeline_editor.view_mode == TimelineViewMode::Graph) return;
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         finish_timeline_retime_gesture(state, false);
         return;
@@ -2364,6 +2367,11 @@ void draw_timeline_window(
         state->preview_root_motion_total.x,
         state->preview_root_motion_total.y);
 
+    // Leaving the Graph tab, in either direction, ends any live graph drag
+    // before the dopesheet lane can see a half-owned retime gesture.
+    if (state->timeline_editor.requested_view_mode == TimelineViewMode::Dopesheet) {
+        cancel_timeline_graph_point_drag(state);
+    }
     if (ImGui::BeginTabBar("timeline_views")) {
         if (ImGui::BeginTabItem(
                 "Dopesheet",
@@ -2371,6 +2379,7 @@ void draw_timeline_window(
                 state->timeline_editor.requested_view_mode == TimelineViewMode::Dopesheet
                     ? ImGuiTabItemFlags_SetSelected
                     : ImGuiTabItemFlags_None)) {
+            cancel_timeline_graph_point_drag(state);
             state->timeline_editor.view_mode = TimelineViewMode::Dopesheet;
             draw_dopesheet_body(state, tracks, duration_seconds);
             ImGui::EndTabItem();

@@ -490,4 +490,1009 @@ bool validate_timeline_graph_shell_smoke(
     return true;
 }
 
+namespace {
+
+struct GraphEditSnapshot {
+    std::string project;
+    std::size_t undo_count{0U};
+    std::size_t redo_count{0U};
+    std::uint64_t project_revision{0U};
+    bool dirty{false};
+    bool shell_dirty{false};
+    std::vector<double> dopesheet_key_times;
+    std::vector<double> graph_times;
+    std::vector<double> graph_values;
+};
+
+/**
+ * @brief Captures everything an atomic rollback must restore byte-for-byte.
+ *
+ * Both views are rebuilt from the restored runtime data, so comparing them
+ * proves the graph and the dopesheet return to the same pre-gesture truth.
+ */
+std::optional<GraphEditSnapshot> capture_graph_edit_snapshot(
+    ShellState* state,
+    std::string_view track_id) {
+    if (state == nullptr || state->session.project() == nullptr) return std::nullopt;
+    const TimelineTrackRow* row =
+        find_timeline_track(cached_timeline_tracks(state), track_id);
+    if (row == nullptr) return std::nullopt;
+    GraphEditSnapshot snapshot;
+    snapshot.project = marrow::editor::serialize_project(*state->session.project());
+    snapshot.undo_count = state->session.undo_count();
+    snapshot.redo_count = state->session.redo_count();
+    snapshot.project_revision = state->session.project_revision();
+    snapshot.dirty = state->session.dirty();
+    snapshot.shell_dirty = state->project_dirty;
+    snapshot.dopesheet_key_times = row->key_times;
+    const auto& projection = cached_timeline_graph_projection(state, *row);
+    if (projection.status != GraphProjectionStatus::Ready ||
+        !projection.track.has_value()) {
+        return std::nullopt;
+    }
+    for (const auto& key : projection.track->keys) {
+        snapshot.graph_times.push_back(key.time_seconds);
+        for (std::size_t component = 0U; component < key.value_count; ++component) {
+            snapshot.graph_values.push_back(key.values[component]);
+        }
+    }
+    return snapshot;
+}
+
+bool graph_edit_snapshots_match(
+    const GraphEditSnapshot& left,
+    const GraphEditSnapshot& right) {
+    return left.project == right.project && left.undo_count == right.undo_count &&
+        left.redo_count == right.redo_count &&
+        left.project_revision == right.project_revision &&
+        left.dirty == right.dirty && left.shell_dirty == right.shell_dirty &&
+        left.dopesheet_key_times == right.dopesheet_key_times &&
+        left.graph_times == right.graph_times &&
+        left.graph_values == right.graph_values;
+}
+
+struct ProjectedKey {
+    double time_seconds{0.0};
+    std::array<double, 4> values{};
+    std::size_t value_count{0U};
+    marrow::runtime::InterpolationKind easing{
+        marrow::runtime::InterpolationKind::Linear};
+};
+
+std::optional<ProjectedKey> projected_key(
+    ShellState* state,
+    std::string_view track_id,
+    const TimelineKeyRef& key) {
+    if (state == nullptr) return std::nullopt;
+    const TimelineTrackRow* row =
+        find_timeline_track(cached_timeline_tracks(state), track_id);
+    if (row == nullptr) return std::nullopt;
+    const auto& projection = cached_timeline_graph_projection(state, *row);
+    if (projection.status != GraphProjectionStatus::Ready ||
+        !projection.track.has_value()) {
+        return std::nullopt;
+    }
+    for (const auto& candidate : projection.track->keys) {
+        if (!(candidate.identity == key)) continue;
+        ProjectedKey result;
+        result.time_seconds = candidate.time_seconds;
+        result.values = candidate.values;
+        result.value_count = candidate.value_count;
+        result.easing = candidate.outgoing_easing.kind();
+        return result;
+    }
+    return std::nullopt;
+}
+
+bool near_value(double left, double right, double tolerance = 1e-6) {
+    return std::abs(left - right) <= tolerance;
+}
+
+} // namespace
+
+bool validate_timeline_graph_edit_shell_smoke(
+    const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Graph edit smoke", false, true)) {
+        std::cerr << "Graph edit shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 56U) {
+        std::cerr << "Graph edit shell smoke requires the unchanged 56-operation registry.\n";
+        return false;
+    }
+
+    const auto row_of = [&](std::string_view id) {
+        return find_timeline_track(cached_timeline_tracks(&state), id);
+    };
+    const auto key_of = [&](std::string_view id, std::size_t index)
+        -> std::optional<TimelineKeyRef> {
+        const TimelineTrackRow* row = row_of(id);
+        if (row == nullptr || index >= row->key_times.size()) return std::nullopt;
+        return timeline_key_ref(*row, index);
+    };
+
+    // --- One Translate X value drag: one transaction, one undo entry, stable
+    // selection, and untouched Y / time / easing. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        if (!first_key.has_value()) {
+            std::cerr << "Graph edit smoke requires a spine Translate key.\n";
+            return false;
+        }
+        const auto before_key = projected_key(&state, "bone:1:Translate", *first_key);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before_key.has_value() || !before.has_value()) {
+            std::cerr << "Graph edit smoke could not capture its Translate baseline.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *translate, GraphComponent::X,
+                cached_timeline_tracks(&state)) ||
+            !authoring_gesture_active(state)) {
+            std::cerr << "The graph value gesture did not open one live transaction.\n";
+            return false;
+        }
+        if (!apply_timeline_graph_value_delta(&state, cached_timeline_tracks(&state), 3.0) ||
+            !apply_timeline_graph_value_delta(&state, cached_timeline_tracks(&state), 5.0)) {
+            std::cerr << "The graph value gesture did not preview its delta.\n";
+            return false;
+        }
+        if (state.session.undo_count() != before->undo_count) {
+            std::cerr << "A live graph value preview created a history entry.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        if (authoring_gesture_active(state) ||
+            state.session.undo_count() != before->undo_count + 1U ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*first_key))) {
+            std::cerr << "One graph value drag did not produce one stable-selection undo entry.\n";
+            return false;
+        }
+        const auto after_key = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!after_key.has_value() ||
+            !near_value(after_key->values[0], before_key->values[0] + 5.0) ||
+            !near_value(after_key->values[1], before_key->values[1]) ||
+            after_key->time_seconds != before_key->time_seconds ||
+            after_key->easing != before_key->easing) {
+            std::cerr << "A graph X drag did not move only the active component.\n";
+            return false;
+        }
+
+        // Undo and redo of a committed value edit keep selection intact,
+        // because the edit never moved a key in time.
+        if (!state.session.undo()) {
+            std::cerr << "Graph value edit could not be undone.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const auto undone_key = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!undone_key.has_value() ||
+            !near_value(undone_key->values[0], before_key->values[0]) ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*first_key))) {
+            std::cerr << "Undoing a graph value edit lost its value or selection.\n";
+            return false;
+        }
+        if (!state.session.redo()) {
+            std::cerr << "Graph value edit could not be redone.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const auto redone_key = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!redone_key.has_value() ||
+            !near_value(redone_key->values[0], before_key->values[0] + 5.0) ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*first_key))) {
+            std::cerr << "Redoing a graph value edit lost its value or selection.\n";
+            return false;
+        }
+        if (!state.session.undo()) {
+            std::cerr << "Graph value smoke could not restore its baseline.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // --- A cancelled gesture restores project, history, revision, dopesheet
+    // key times, and every graph component value. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!first_key.has_value() || !before.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *translate, GraphComponent::Y,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), -9.5)) {
+            std::cerr << "Graph value cancel smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, false);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (authoring_gesture_active(state) || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after) ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key}) {
+            std::cerr << "A cancelled graph value gesture did not roll back atomically.\n";
+            return false;
+        }
+    }
+
+    // --- A non-finite delta cancels the gesture with the same rollback. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!first_key.has_value() || !before.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *translate, GraphComponent::X,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 2.0)) {
+            std::cerr << "Graph value non-finite smoke could not stage its gesture.\n";
+            return false;
+        }
+        if (apply_timeline_graph_value_delta(
+                &state,
+                cached_timeline_tracks(&state),
+                std::numeric_limits<double>::quiet_NaN()) ||
+            authoring_gesture_active(state)) {
+            std::cerr << "A non-finite graph value delta did not cancel its gesture.\n";
+            return false;
+        }
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "A non-finite graph value delta left the project changed.\n";
+            return false;
+        }
+    }
+
+    // --- A zero-net drag commits nothing. The focused row is already authored
+    // in the fixture project, so materialization is a no-op and the shared
+    // history-equality rule can prove the drag left no entry. ---
+    {
+        const auto rotate_key = key_of("bone:1:Rotate", 0U);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!rotate_key.has_value() || !before.has_value()) return false;
+        state.timeline_editor.selected_keys = {*rotate_key};
+        state.timeline_editor.active_key = *rotate_key;
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        if (rotate == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *rotate, GraphComponent::Angle,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 4.0) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 0.0)) {
+            std::cerr << "Graph zero-net smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (authoring_gesture_active(state) || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "A zero-net graph value drag committed a history entry.\n";
+            return false;
+        }
+    }
+
+    // --- Multi-key drag preserves the difference between the selected keys. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        const auto second_key = key_of("bone:1:Translate", 1U);
+        if (!first_key.has_value() || !second_key.has_value()) return false;
+        const auto before_first = projected_key(&state, "bone:1:Translate", *first_key);
+        const auto before_second = projected_key(&state, "bone:1:Translate", *second_key);
+        const std::size_t undo_before = state.session.undo_count();
+        if (!before_first.has_value() || !before_second.has_value()) return false;
+        state.timeline_editor.selected_keys = {*first_key, *second_key};
+        state.timeline_editor.active_key = *first_key;
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *translate, GraphComponent::X,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 3.0)) {
+            std::cerr << "Graph multi-key smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        const auto after_first = projected_key(&state, "bone:1:Translate", *first_key);
+        const auto after_second = projected_key(&state, "bone:1:Translate", *second_key);
+        if (!after_first.has_value() || !after_second.has_value() ||
+            state.session.undo_count() != undo_before + 1U ||
+            !near_value(after_first->values[0], before_first->values[0] + 3.0) ||
+            !near_value(after_second->values[0], before_second->values[0] + 3.0) ||
+            !near_value(
+                after_second->values[0] - after_first->values[0],
+                before_second->values[0] - before_first->values[0]) ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key, *second_key}) {
+            std::cerr << "A multi-key graph value drag did not preserve key spacing.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // --- Rotate Angle moves the absolute projected angle by the delta. ---
+    {
+        const auto rotate_key = key_of("bone:1:Rotate", 0U);
+        if (!rotate_key.has_value()) return false;
+        const auto before_key = projected_key(&state, "bone:1:Rotate", *rotate_key);
+        if (!before_key.has_value()) return false;
+        state.timeline_editor.selected_keys = {*rotate_key};
+        state.timeline_editor.active_key = *rotate_key;
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        if (rotate == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *rotate, GraphComponent::Angle,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 12.5)) {
+            std::cerr << "Graph rotate smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        const auto after_key = projected_key(&state, "bone:1:Rotate", *rotate_key);
+        if (!after_key.has_value() ||
+            !near_value(after_key->values[0], before_key->values[0] + 12.5) ||
+            after_key->time_seconds != before_key->time_seconds ||
+            after_key->easing != before_key->easing) {
+            std::cerr << "A graph Angle drag did not move the absolute projected angle.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // --- Scale X reaches exactly zero and stays authorable. ---
+    {
+        const auto scale_key = key_of("bone:1:Scale", 0U);
+        if (!scale_key.has_value()) return false;
+        const auto before_key = projected_key(&state, "bone:1:Scale", *scale_key);
+        if (!before_key.has_value() || !near_value(before_key->values[0], 1.0)) {
+            std::cerr << "Graph scale smoke requires a unit scale key.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys = {*scale_key};
+        state.timeline_editor.active_key = *scale_key;
+        const TimelineTrackRow* scale = row_of("bone:1:Scale");
+        if (scale == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *scale, GraphComponent::X,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), -1.0)) {
+            std::cerr << "Graph scale smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        const auto after_key = projected_key(&state, "bone:1:Scale", *scale_key);
+        if (!after_key.has_value() || after_key->values[0] != 0.0 ||
+            !near_value(after_key->values[1], before_key->values[1])) {
+            std::cerr << "A graph Scale X drag did not reach exact zero.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // --- Shear Y edits only its own component. ---
+    {
+        const auto shear_key = key_of("bone:1:Shear", 1U);
+        if (!shear_key.has_value()) return false;
+        const auto before_key = projected_key(&state, "bone:1:Shear", *shear_key);
+        if (!before_key.has_value()) return false;
+        state.timeline_editor.selected_keys = {*shear_key};
+        state.timeline_editor.active_key = *shear_key;
+        const TimelineTrackRow* shear = row_of("bone:1:Shear");
+        if (shear == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *shear, GraphComponent::Y,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 7.25)) {
+            std::cerr << "Graph shear smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        const auto after_key = projected_key(&state, "bone:1:Shear", *shear_key);
+        if (!after_key.has_value() ||
+            !near_value(after_key->values[1], before_key->values[1] + 7.25) ||
+            !near_value(after_key->values[0], before_key->values[0]) ||
+            after_key->time_seconds != before_key->time_seconds) {
+            std::cerr << "A graph Shear Y drag did not preserve X.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // --- Slot Color Alpha clamps group-wide: both keys stop together. ---
+    {
+        const auto alpha_first = key_of("slot:0:Color", 0U);
+        const auto alpha_second = key_of("slot:0:Color", 1U);
+        if (!alpha_first.has_value() || !alpha_second.has_value()) return false;
+        const auto before_first = projected_key(&state, "slot:0:Color", *alpha_first);
+        const auto before_second = projected_key(&state, "slot:0:Color", *alpha_second);
+        if (!before_first.has_value() || !before_second.has_value() ||
+            !near_value(before_first->values[3], 1.0) ||
+            !near_value(before_second->values[3], 0.5)) {
+            std::cerr << "Graph colour smoke requires alpha keys at 1.0 and 0.5.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys = {*alpha_first, *alpha_second};
+        state.timeline_editor.active_key = *alpha_second;
+        const TimelineTrackRow* color = row_of("slot:0:Color");
+        if (color == nullptr ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *color, GraphComponent::Alpha,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), -0.9)) {
+            std::cerr << "Graph colour smoke could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, true);
+        const auto after_first = projected_key(&state, "slot:0:Color", *alpha_first);
+        const auto after_second = projected_key(&state, "slot:0:Color", *alpha_second);
+        if (!after_first.has_value() || !after_second.has_value() ||
+            !near_value(after_first->values[3], 0.5) ||
+            !near_value(after_second->values[3], 0.0) ||
+            !near_value(
+                after_first->values[3] - after_second->values[3],
+                before_first->values[3] - before_second->values[3]) ||
+            !near_value(after_first->values[0], before_first->values[0]) ||
+            !near_value(after_first->values[1], before_first->values[1]) ||
+            !near_value(after_first->values[2], before_first->values[2])) {
+            std::cerr << "A graph Alpha drag did not stop both keys at the group clamp.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // --- Fail-closed contracts. ---
+    {
+        const auto attachment_key = key_of("slot:0:Attachment", 0U);
+        const auto translate_key = key_of("bone:1:Translate", 0U);
+        if (!attachment_key.has_value() || !translate_key.has_value()) return false;
+        const TimelineTrackRow* attachment = row_of("slot:0:Attachment");
+        if (attachment != nullptr) {
+            state.timeline_editor.selected_keys = {*attachment_key};
+            state.timeline_editor.active_key = *attachment_key;
+            if (begin_timeline_graph_value_gesture(
+                    &state, 4242U, *attachment, GraphComponent::X,
+                    cached_timeline_tracks(&state)) ||
+                authoring_gesture_active(state)) {
+                std::cerr << "An unsupported graph row opened a value gesture.\n";
+                return false;
+            }
+        }
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        if (translate == nullptr ||
+            begin_timeline_graph_value_gesture(
+                &state, 4242U, *translate, GraphComponent::Alpha,
+                cached_timeline_tracks(&state)) ||
+            authoring_gesture_active(state)) {
+            std::cerr << "An unsupported (row, component) pairing opened a value gesture.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (begin_timeline_graph_value_gesture(
+                &state, 4242U, *row_of("bone:1:Translate"), GraphComponent::X,
+                cached_timeline_tracks(&state)) ||
+            authoring_gesture_active(state)) {
+            std::cerr << "An empty selection opened a graph value gesture.\n";
+            return false;
+        }
+        // A live gesture blocks another, and cancel_authoring_gestures releases it.
+        state.timeline_editor.selected_keys = {*translate_key};
+        state.timeline_editor.active_key = *translate_key;
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value() ||
+            !begin_timeline_graph_value_gesture(
+                &state, 4242U, *row_of("bone:1:Translate"), GraphComponent::X,
+                cached_timeline_tracks(&state)) ||
+            begin_timeline_graph_value_gesture(
+                &state, 4243U, *row_of("bone:1:Translate"), GraphComponent::Y,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_value_delta(
+                &state, cached_timeline_tracks(&state), 6.0)) {
+            std::cerr << "Graph value exclusivity smoke could not stage its gesture.\n";
+            return false;
+        }
+        cancel_authoring_gestures(&state, "graph value smoke");
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (authoring_gesture_active(state) ||
+            state.timeline_editor.graph_value_gesture.has_value() ||
+            !after.has_value() || !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "cancel_authoring_gestures did not release the graph value gesture.\n";
+            return false;
+        }
+    }
+
+
+    // --- Graph point drag driver: dead zone, axis lock, and shared retime. ---
+    // A fixed view keeps the pixel-to-unit mapping exact: x = 200 * time and
+    // y = 160 - 10 * value on this 640x320 plot.
+    constexpr timeline_graph_model::PlotRect drag_plot{0.0, 0.0, 640.0, 320.0};
+    const timeline_graph_model::View drag_view{0.0, 200.0, 0.0, 10.0};
+    const auto press_x_of = [&](double time_seconds) {
+        return timeline_graph_model::x_at_time(drag_plot, drag_view, time_seconds);
+    };
+    const auto press_y_of = [&](double value) {
+        return timeline_graph_model::y_at_value(drag_plot, drag_view, value);
+    };
+    const auto arm_drag = [&](std::string_view track_id,
+                              std::size_t key_index,
+                              GraphComponent component,
+                              std::size_t component_index) -> bool {
+        const auto key = key_of(track_id, key_index);
+        const TimelineTrackRow* row = row_of(track_id);
+        if (!key.has_value() || row == nullptr) return false;
+        const auto projected = projected_key(&state, track_id, *key);
+        if (!projected.has_value() || component_index >= projected->value_count) {
+            return false;
+        }
+        state.timeline_editor.selected_keys = {*key};
+        state.timeline_editor.active_key = *key;
+        const timeline_graph_model::PointHit hit{*key, component, component_index};
+        return begin_timeline_graph_point_drag(
+            &state,
+            *row_of(track_id),
+            hit,
+            4242U,
+            drag_plot,
+            drag_view,
+            press_x_of(projected->time_seconds),
+            press_y_of(projected->values[component_index]));
+    };
+
+    // A press alone arms a candidate and opens no transaction or history entry.
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before.has_value() || !arm_drag("bone:1:Translate", 0U, GraphComponent::X, 0U) ||
+            !state.timeline_editor.graph_drag.has_value() ||
+            authoring_gesture_active(state) ||
+            state.session.undo_count() != before->undo_count) {
+            std::cerr << "A graph press must arm a candidate without a transaction.\n";
+            return false;
+        }
+        const auto key = key_of("bone:1:Translate", 0U);
+        const auto projected = projected_key(&state, "bone:1:Translate", *key);
+        const double press_x = press_x_of(projected->time_seconds);
+        const double press_y = press_y_of(projected->values[0]);
+        // Inside the dead zone nothing is decided and nothing is written.
+        if (!update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                press_x + 3.0, press_y + 2.0, true, false, false) ||
+            state.timeline_editor.graph_drag->axis !=
+                timeline_graph_model::DragAxis::Undecided ||
+            authoring_gesture_active(state)) {
+            std::cerr << "Motion inside the graph dead zone opened a gesture.\n";
+            return false;
+        }
+        // Dominant vertical motion locks the value axis.
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 2.0, press_y - 40.0, true, false, false);
+        if (!state.timeline_editor.graph_value_gesture.has_value() ||
+            state.timeline_editor.retime_gesture.has_value() ||
+            !state.timeline_editor.graph_drag.has_value() ||
+            state.timeline_editor.graph_drag->axis !=
+                timeline_graph_model::DragAxis::Value) {
+            std::cerr << "A dominant vertical graph drag did not lock the value axis.\n";
+            return false;
+        }
+        // A locked Value axis never edits time, however far the pointer travels
+        // horizontally afterwards. This is the acceptance-criterion-1 proof.
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 400.0, press_y - 40.0, true, false, false);
+        if (state.timeline_editor.retime_gesture.has_value() ||
+            state.timeline_editor.graph_drag->axis !=
+                timeline_graph_model::DragAxis::Value) {
+            std::cerr << "Later horizontal motion re-decided a locked value axis.\n";
+            return false;
+        }
+        // Releasing commits exactly one entry and clears both slots.
+        if (update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                press_x + 400.0, press_y - 40.0, false, false, false) ||
+            state.timeline_editor.graph_drag.has_value() ||
+            authoring_gesture_active(state) ||
+            state.session.undo_count() != before->undo_count + 1U) {
+            std::cerr << "Releasing a graph value drag did not commit one entry.\n";
+            return false;
+        }
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after.has_value() ||
+            after->dopesheet_key_times != before->dopesheet_key_times ||
+            after->graph_times != before->graph_times) {
+            std::cerr << "A locked value drag changed a key time.\n";
+            return false;
+        }
+        const auto moved = projected_key(&state, "bone:1:Translate", *key);
+        if (!moved.has_value() ||
+            !near_value(moved->values[0], projected->values[0] + 4.0) ||
+            !near_value(moved->values[1], projected->values[1])) {
+            std::cerr << "A locked value drag did not apply its pixel delta.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // A dominant horizontal drag opens the shared retime gesture and lands on a
+    // frame boundary while Snap is on.
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        const auto key = key_of("bone:1:Translate", 0U);
+        if (!before.has_value() || !key.has_value()) return false;
+        const auto projected = projected_key(&state, "bone:1:Translate", *key);
+        if (!projected.has_value()) return false;
+        const double press_x = press_x_of(projected->time_seconds);
+        const double press_y = press_y_of(projected->values[0]);
+        state.timeline_editor.snap_to_frames = true;
+        state.timeline_editor.frames_per_second = 60.0;
+        if (!arm_drag("bone:1:Translate", 0U, GraphComponent::X, 0U)) return false;
+        // 82 px / 200 px per second = 0.41 s, which is not on the 60 fps grid.
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 82.0, press_y + 1.0, true, false, false);
+        if (!state.timeline_editor.retime_gesture.has_value() ||
+            state.timeline_editor.graph_value_gesture.has_value() ||
+            state.timeline_editor.graph_drag->axis !=
+                timeline_graph_model::DragAxis::Time) {
+            std::cerr << "A dominant horizontal graph drag did not lock the time axis.\n";
+            return false;
+        }
+        // A locked Time axis never edits a value, however far the pointer
+        // travels vertically afterwards.
+        const auto values_before_vertical =
+            capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 82.0, press_y - 300.0, true, false, false);
+        if (state.timeline_editor.graph_value_gesture.has_value() ||
+            state.timeline_editor.graph_drag->axis !=
+                timeline_graph_model::DragAxis::Time ||
+            !values_before_vertical.has_value()) {
+            std::cerr << "Later vertical motion re-decided a locked time axis.\n";
+            return false;
+        }
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 82.0, press_y - 300.0, false, false, false);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after.has_value() || authoring_gesture_active(state) ||
+            state.timeline_editor.graph_drag.has_value() ||
+            after->graph_values != values_before_vertical->graph_values ||
+            state.session.undo_count() != before->undo_count + 1U) {
+            std::cerr << "A locked time drag changed a component value or history.\n";
+            return false;
+        }
+        const double snapped_frames = after->dopesheet_key_times.front() * 60.0;
+        if (std::abs(snapped_frames - std::round(snapped_frames)) > 1e-4 ||
+            !near_value(after->dopesheet_key_times.front(), 25.0 / 60.0, 1e-4)) {
+            std::cerr << "A snapped graph time drag did not land on a frame boundary: "
+                      << after->dopesheet_key_times.front() << ".\n";
+            return false;
+        }
+        // Undo of a committed time edit reconciles the moved selection away by
+        // the shared dopesheet rule; MAR-168 deliberately does not change it.
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        reconcile_timeline_key_selection(&state, cached_timeline_tracks(&state));
+        if (!state.timeline_editor.selected_keys.empty() ||
+            state.timeline_editor.active_key.has_value()) {
+            std::cerr << "Undoing a graph time drag did not reconcile its moved selection.\n";
+            return false;
+        }
+        state.session.clear_history();
+    }
+
+    // Alt bypasses frame snapping for the current drag.
+    {
+        const auto key = key_of("bone:1:Translate", 0U);
+        if (!key.has_value()) return false;
+        const auto projected = projected_key(&state, "bone:1:Translate", *key);
+        if (!projected.has_value()) return false;
+        const double press_x = press_x_of(projected->time_seconds);
+        const double press_y = press_y_of(projected->values[0]);
+        state.timeline_editor.snap_to_frames = true;
+        if (!arm_drag("bone:1:Translate", 0U, GraphComponent::X, 0U)) return false;
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 82.0, press_y, true, false, true);
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 82.0, press_y, false, false, true);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after.has_value()) return false;
+        const double raw_frames = after->dopesheet_key_times.front() * 60.0;
+        if (!near_value(after->dopesheet_key_times.front(), 0.41, 1e-4) ||
+            std::abs(raw_frames - std::round(raw_frames)) < 1e-3) {
+            std::cerr << "The Alt bypass path landed on the frame grid: "
+                      << after->dopesheet_key_times.front() << ".\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+    }
+
+    // A time drag toward an unselected neighbour clamps and keeps the drag live.
+    {
+        const auto key = key_of("bone:1:Translate", 0U);
+        if (!key.has_value()) return false;
+        const auto projected = projected_key(&state, "bone:1:Translate", *key);
+        if (!projected.has_value()) return false;
+        const double press_x = press_x_of(projected->time_seconds);
+        const double press_y = press_y_of(projected->values[0]);
+        state.timeline_editor.snap_to_frames = false;
+        if (!arm_drag("bone:1:Translate", 0U, GraphComponent::X, 0U)) return false;
+        if (!update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                press_x + 180.0, press_y, true, false, false) ||
+            !state.timeline_editor.retime_gesture.has_value() ||
+            !state.timeline_editor.graph_drag.has_value()) {
+            std::cerr << "A clamped graph time drag ended its gesture.\n";
+            return false;
+        }
+        const auto clamped = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!clamped.has_value() ||
+            !near_value(
+                clamped->dopesheet_key_times.front(),
+                clamped->dopesheet_key_times[1U] - timeline_model::kNonEventKeySpacing,
+                1e-5)) {
+            std::cerr << "A graph time drag did not clamp at the 1 ms neighbour spacing.\n";
+            return false;
+        }
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 180.0, press_y, false, false, false);
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+        state.timeline_editor.snap_to_frames = true;
+    }
+
+    // Explicit-duration auto-grow happens inside the same transaction and the
+    // same undo entry as the drag that caused it.
+    {
+        const auto* animation = state.session.runtime_data()->find_animation("idle");
+        if (animation == nullptr) return false;
+        const double inferred_duration = animation->duration();
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "Graph auto-grow smoke duration",
+                {},
+                false,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview});
+            const auto authored = marrow::editor::set_animation_duration(
+                transaction.project(), *state.session.runtime_data(), "idle",
+                inferred_duration);
+            if (!authored || !transaction.commit()) {
+                std::cerr << "Graph auto-grow smoke could not author an explicit duration.\n";
+                return false;
+            }
+        }
+        sync_shell_from_editor_session(&state);
+        const std::size_t undo_before = state.session.undo_count();
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (translate == nullptr || translate->key_times.size() < 3U) return false;
+        const std::size_t last_index = translate->key_times.size() - 1U;
+        const auto key = key_of("bone:1:Translate", last_index);
+        if (!key.has_value()) return false;
+        const auto projected = projected_key(&state, "bone:1:Translate", *key);
+        if (!projected.has_value()) return false;
+        const double press_x = press_x_of(projected->time_seconds);
+        const double press_y = press_y_of(projected->values[0]);
+        state.timeline_editor.snap_to_frames = false;
+        if (!arm_drag("bone:1:Translate", last_index, GraphComponent::X, 0U)) return false;
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 40.0, press_y, true, false, false);
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 40.0, press_y, false, false, false);
+        const auto* grown = state.session.runtime_data()->find_animation("idle");
+        if (grown == nullptr || state.session.undo_count() != undo_before + 1U ||
+            !near_value(grown->duration(), inferred_duration + 0.2, 1e-4)) {
+            std::cerr << "A graph time drag past an explicit duration did not auto-grow it in one entry.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        const auto* restored = state.session.runtime_data()->find_animation("idle");
+        if (restored == nullptr || !near_value(restored->duration(), inferred_duration, 1e-4)) {
+            std::cerr << "Undoing a graph time drag did not undo its duration growth.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+        state.timeline_editor.snap_to_frames = true;
+    }
+
+    // Cancel paths on both axes roll back to byte-identical state.
+    {
+        const auto key = key_of("bone:1:Translate", 0U);
+        if (!key.has_value()) return false;
+        const auto projected = projected_key(&state, "bone:1:Translate", *key);
+        if (!projected.has_value()) return false;
+        const double press_x = press_x_of(projected->time_seconds);
+        const double press_y = press_y_of(projected->values[0]);
+
+        const auto before_value = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before_value.has_value() ||
+            !arm_drag("bone:1:Translate", 0U, GraphComponent::X, 0U)) {
+            return false;
+        }
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x, press_y - 60.0, true, false, false);
+        if (update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                press_x, press_y - 60.0, true, true, false) ||
+            state.timeline_editor.graph_drag.has_value() ||
+            authoring_gesture_active(state)) {
+            std::cerr << "An Escape on a graph value drag did not end the gesture.\n";
+            return false;
+        }
+        const auto after_value = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after_value.has_value() ||
+            !graph_edit_snapshots_match(*before_value, *after_value)) {
+            std::cerr << "A cancelled graph value drag did not roll back atomically.\n";
+            return false;
+        }
+
+        const auto before_time = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before_time.has_value() ||
+            !arm_drag("bone:1:Translate", 0U, GraphComponent::X, 0U)) {
+            return false;
+        }
+        (void)update_timeline_graph_point_drag(
+            &state, cached_timeline_tracks(&state),
+            press_x + 60.0, press_y, true, false, false);
+        cancel_timeline_graph_point_drag(&state);
+        const auto after_time = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (state.timeline_editor.graph_drag.has_value() ||
+            authoring_gesture_active(state) || !after_time.has_value() ||
+            !graph_edit_snapshots_match(*before_time, *after_time)) {
+            std::cerr << "A cancelled graph time drag did not roll back atomically.\n";
+            return false;
+        }
+    }
+
+    // Fail-closed press contracts.
+    {
+        const auto attachment_key = key_of("slot:0:Attachment", 0U);
+        const TimelineTrackRow* attachment = row_of("slot:0:Attachment");
+        if (attachment_key.has_value() && attachment != nullptr) {
+            state.timeline_editor.selected_keys = {*attachment_key};
+            state.timeline_editor.active_key = *attachment_key;
+            const timeline_graph_model::PointHit hit{
+                *attachment_key, GraphComponent::X, 0U};
+            if (begin_timeline_graph_point_drag(
+                    &state, *attachment, hit, 4242U, drag_plot, drag_view, 10.0, 10.0) ||
+                state.timeline_editor.graph_drag.has_value()) {
+                std::cerr << "An unsupported graph row armed a drag candidate.\n";
+                return false;
+            }
+        }
+        const auto key = key_of("bone:1:Translate", 0U);
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (!key.has_value() || translate == nullptr) return false;
+        // A key that activation left unselected must not arm a drag.
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        const timeline_graph_model::PointHit hit{*key, GraphComponent::X, 0U};
+        if (begin_timeline_graph_point_drag(
+                &state, *translate, hit, 4242U, drag_plot, drag_view, 0.0, 160.0) ||
+            state.timeline_editor.graph_drag.has_value()) {
+            std::cerr << "An unselected graph key armed a drag candidate.\n";
+            return false;
+        }
+        // Another live authoring gesture blocks the press entirely.
+        state.timeline_editor.selected_keys = {*key};
+        state.timeline_editor.active_key = *key;
+        if (!begin_timeline_graph_value_gesture(
+                &state, 9999U, *row_of("bone:1:Translate"), GraphComponent::X,
+                cached_timeline_tracks(&state))) {
+            std::cerr << "Graph press exclusivity smoke could not stage its gesture.\n";
+            return false;
+        }
+        if (begin_timeline_graph_point_drag(
+                &state, *row_of("bone:1:Translate"), hit, 4242U, drag_plot,
+                drag_view, 0.0, 160.0) ||
+            state.timeline_editor.graph_drag.has_value()) {
+            std::cerr << "A press during a live authoring gesture armed a candidate.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, false);
+        // Non-finite pointer input never arms a candidate.
+        if (begin_timeline_graph_point_drag(
+                &state, *row_of("bone:1:Translate"), hit, 4242U, drag_plot,
+                drag_view, std::numeric_limits<double>::quiet_NaN(), 160.0) ||
+            state.timeline_editor.graph_drag.has_value()) {
+            std::cerr << "A non-finite graph press armed a drag candidate.\n";
+            return false;
+        }
+    }
+
+    // TimelineEditorState{} source adoption clears both drag slots atomically.
+    {
+        const auto key = key_of("bone:1:Translate", 0U);
+        const TimelineTrackRow* translate = row_of("bone:1:Translate");
+        if (!key.has_value() || translate == nullptr) return false;
+        state.timeline_editor.selected_keys = {*key};
+        state.timeline_editor.active_key = *key;
+        const timeline_graph_model::PointHit hit{*key, GraphComponent::X, 0U};
+        if (!begin_timeline_graph_point_drag(
+                &state, *translate, hit, 4242U, drag_plot, drag_view, 0.0, 160.0) ||
+            !state.timeline_editor.graph_drag.has_value()) {
+            std::cerr << "Graph source-adoption smoke could not arm its candidate.\n";
+            return false;
+        }
+        if (!reload_project(&state)) {
+            std::cerr << "Graph source-adoption smoke could not reload its project.\n";
+            return false;
+        }
+        if (state.timeline_editor.graph_drag.has_value() ||
+            state.timeline_editor.graph_value_gesture.has_value() ||
+            authoring_gesture_active(state)) {
+            std::cerr << "TimelineEditorState source adoption did not clear the graph drag slots.\n";
+            return false;
+        }
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Graph value editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace marrow::editor::shell

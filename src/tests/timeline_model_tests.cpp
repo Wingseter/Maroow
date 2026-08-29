@@ -344,6 +344,38 @@ void test_atomic_selector_collision_rejection(TestSuite& suite) {
         "rejected multi-key retime must leave the project byte-for-byte unchanged");
 }
 
+
+// The graph value gesture must reuse these shared helpers rather than
+// re-deriving completion or incremental-delta rules of its own.
+void test_graph_value_gesture_completion_reuse(TestSuite& suite) {
+    const auto unchanged = model::completion_decision(true, false);
+    suite.expect(
+        unchanged.action == model::CompletionAction::Cancel &&
+            unchanged.history_entries == 0U,
+        "an unchanged graph value gesture must cancel without a history entry");
+    const auto changed = model::completion_decision(true, true);
+    suite.expect(
+        changed.action == model::CompletionAction::Commit &&
+            changed.history_entries == 1U,
+        "a changed graph value gesture must commit exactly one history entry");
+    const auto cancelled = model::completion_decision(false, true);
+    suite.expect(
+        cancelled.action == model::CompletionAction::Cancel &&
+            cancelled.history_entries == 0U && cancelled.report_cancelled,
+        "an explicitly cancelled changed gesture must report its cancellation");
+
+    const auto incremental = model::incremental_retime_delta(5.0, 3.0);
+    suite.expect(
+        incremental.has_value() && near(*incremental, 2.0),
+        "the incremental delta must subtract the already applied delta");
+    suite.expect(
+        !model::incremental_retime_delta(
+             std::numeric_limits<double>::quiet_NaN(), 0.0).has_value() &&
+            !model::incremental_retime_delta(
+                 1.0, std::numeric_limits<double>::infinity()).has_value(),
+        "a non-finite requested or applied delta must reject the increment");
+}
+
 } // namespace
 
 int main() {
@@ -369,6 +401,9 @@ int main() {
     });
     suite.run("atomic selector collision rejection", [&] {
         test_atomic_selector_collision_rejection(suite);
+    });
+    suite.run("graph value gesture completion reuse", [&] {
+        test_graph_value_gesture_completion_reuse(suite);
     });
     return suite.finish();
 }

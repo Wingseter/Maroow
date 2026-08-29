@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-167, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-168 is the next product milestone and depends on MAR-167. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-168, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-169 is the next product milestone and depends on MAR-168. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -39,7 +39,9 @@
 - Typed transient entity selection model: `./build/marrow_selection_tests`
 - Viewport interaction data-kernel tests: `./build/marrow_viewport_interaction_tests`
 - Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
-- Timeline scalar-graph projection/geometry/view tests: `./build/marrow_timeline_graph_model_tests`
+- Timeline scalar-graph projection/geometry/view/drag-math tests: `./build/marrow_timeline_graph_model_tests`
+- Editor project authoring smoke including `offset_keyframe_scalars`: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -224,6 +226,57 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-168 Graph Key Time and Value Editing Validation Results
+
+Validated 2026-08-30. The Timeline Graph tab is now authoritative for editing.
+A left press on a graph point arms a drag candidate that holds no transaction;
+the first motion past an inclusive 4.0 logical-pixel dead zone locks one axis by
+dominant-axis comparison and keeps it for the rest of the gesture. A Value-locked
+drag offsets exactly one scalar component of every selected key on the focused
+track through the new additive `offset_keyframe_scalars()` primitive; a
+Time-locked drag reuses the dopesheet's `begin/apply/finish_timeline_retime_gesture()`
+trio verbatim. The Graph toolbar exposes the same shared
+`TimelineEditorState::snap_to_frames` field the Dopesheet tab owns, and Alt
+bypasses snapping for the current drag. No code path reads or writes
+`Interpolation`; Bezier editing remains MAR-169.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Axis lock and component preservation | Locked-axis drags: vertical changes only the active component; horizontal changes only key times. `decide_drag_axis` unit tests cover the dead zone, both dominant directions, the exact tie, and every non-finite input; headless drags assert that later off-axis motion never re-decides the axis; actual-frame drags report `drag_axis` and the matching live gesture | PASS |
+| Shared authoring reuse | Frame snap, neighbour collision with 1 ms spacing, stable identity, and explicit-duration auto-grow come from `retime_keyframes()`/`refresh_runtime()`; values come from `offset_keyframe_scalars()`. `update_timeline_retime_gesture()` returns early in Graph mode so exactly one surface owns a live retime | PASS |
+| Atomic rollback | Escape, `cancel_authoring_gestures()`, a mid-drag tab switch, a non-finite delta, and every hard primitive rejection restore project bytes, history, project revision, dirty state, rebuilt dopesheet key times, and every rebuilt graph component value | PASS |
+| One drag, one transaction | Press-only opens none; a zero-net drag on an already-authored row commits none; a committed drag adds exactly one undo entry with `selected_keys` and `active_key` bit-identical across commit, undo, and redo of a value edit | PASS |
+| Persistence and compatibility | Save/reload, JSON/MBIN export, `.mskl` v1, `.mbin` v2, C ABI v1, and the 56-operation Agent/MCP surface unchanged; the only public-header change is additive | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j8` -> configure and all default targets built
+- `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 19 cases passed`, including the new `drag axis lock and unit mapping` case
+- `./build/marrow_timeline_model_tests` -> `Timeline model: 9 cases passed`, including the new `graph value gesture completion reuse` case
+- `./build/marrow_viewport_interaction_tests` -> passed; `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed; `MAR-168 graph scalar authoring validated across 11 lane-family cases` covering Rotate Angle, Translate X/Y, Scale X/Y, Shear X/Y, Slot Color R/G/B/A, the setup-pose-free Rotate delta, signed and exact-zero scale, the group colour clamp, the degenerate `upper < lower` no-op, thirteen atomic rejections, and a save/reload round trip
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new headless `validate_timeline_graph_edit_shell_smoke` drag scenario and the actual-frame drags, which reported `Timeline Graph actual-frame drags: value axis=2 time axis=1 active point=(438.364,814.064)`
+- `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> parameter-mode shell smoke passed
+- `ctest --test-dir build -N` -> `Total Tests: 21`; `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21` in 0.82 s. MAR-168 registers no new CTest.
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j8 && ctest --test-dir build-display --output-on-failure` -> automated Debug display-enabled suite 24/24, including 3 display-labelled tests, passed in 8.77 s
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j8 && ctest --test-dir build-platform-release --output-on-failure` -> automated Release display-enabled suite 24/24, including 3 display-labelled tests, passed in 3.32 s
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar168.mskl --export-binary /tmp/marrow_mar168.mbin` -> export passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`
+- `./build/marrow_inspect --compare /tmp/marrow_mar168.mbin /tmp/marrow_mar168.mskl` -> match; `rotate_keys=10->10`, `translate_keys=6->6`, JSON `14336` bytes, MBIN v2 `3984` bytes with `version=2 optimized=yes animations=3 rotate_channels=4 translate_channels=2 keys=16 sorted=yes`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar168.mskl /tmp/player_idle.matl` -> exported runtime passed with 16 bones, 7 slots, 5 skins, 3 animations, 2 events, 3 draw commands, and 1 clip
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` against the unchanged exact 56-operation registry, which the shell smoke asserts before and after every graph edit; `./build/marrow_agent_socket_tests` -> `Agent socket tests: 4 cases passed`; `./build/marrow_c_smoke` -> C ABI loaded 3 commands, 6 indices, and 2 callback events
+- MCP schema `py_compile`, `cmake --build build --target marrow_verify_third_party`, fixture/`.mskl`/PRD JSON parsing, `git diff --check`, and `git lfs status` -> passed; no LFS object was staged or queued to push
+- `git diff --stat -- include/marrow/c_api src/c_api` and `git diff --stat -- src/editor/agent_dispatch.cpp src/editor/agent_handlers_editing.cpp tools/mcp` -> empty; the `include/marrow/editor/authoring.hpp` diff contains added lines only
+
+`./build/marrow_project_smoke --create <path>` exits 1 with
+`Viewport validation expected the fixture debug overlay toggles to be enabled.`
+That failure reproduces identically on the pre-MAR-168 tree and is unrelated to
+this story.
+
+The display suites are automated evidence only. This checkpoint adds no manual
+visible-UI, Windows 11, physical-input, or platform qualification credit.
+MAR-192 through MAR-210 remain open, and support qualification remains governed
+by `docs/root1/platform-validation.md`.
 
 ## MAR-167 Synchronized Scalar Graph Validation Results
 

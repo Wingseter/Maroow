@@ -2406,6 +2406,513 @@ bool validate_editing_p1_animation_duration(
     return true;
 }
 
+// MAR-168: the shared scalar-offset primitive that the Graph value drag writes
+// through. Every case runs on an isolated ProjectData so a rejection can be
+// proven byte-atomic against `serialize_project`.
+bool validate_mar168_graph_scalar_authoring(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::TimelineKeyKind;
+    using marrow::editor::TimelineKeySelector;
+    using marrow::editor::TimelineScalarComponent;
+    using marrow::editor::TransformTimelineChannel;
+
+    constexpr double kExact = 1e-12;
+    constexpr double kFloatTolerance = 1e-6;
+    const auto near_exact = [](double left, double right) {
+        return std::abs(left - right) <= kExact;
+    };
+    const auto near_float = [](double left, double right) {
+        return std::abs(left - right) <= kFloatTolerance;
+    };
+
+    const auto make_transform_track = [](std::string bone,
+                                         TransformTimelineChannel channel,
+                                         std::vector<marrow::editor::TransformKeyframeEdit> keys) {
+        marrow::editor::TransformTimelineEdit edit;
+        edit.animation_name = "mar168";
+        edit.bone_name = std::move(bone);
+        edit.channel = channel;
+        edit.keyframes = std::move(keys);
+        return edit;
+    };
+
+    const auto build_project = [&]() {
+        marrow::editor::ProjectData project;
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Rotate,
+            {{0.0, 10.0, 0.0, 0.0,
+              marrow::runtime::Interpolation::cubic_bezier(0.25, 0.1, 0.75, 0.9)},
+             {0.5, 20.0, 0.0, 0.0, marrow::runtime::Interpolation::stepped()}}));
+        // A bone whose runtime setup pose is rotated: the project stores the
+        // setup-relative angle, and a delta must not be converted either way.
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "transform_source",
+            TransformTimelineChannel::Rotate,
+            {{0.0, 100.0, 0.0, 0.0, marrow::runtime::Interpolation::linear()}}));
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Translate,
+            {{0.0, 0.0, 3.0, 7.0,
+              marrow::runtime::Interpolation::cubic_bezier(0.3, 0.2, 0.7, 0.8)},
+             {0.5, 0.0, 9.0, -2.0, marrow::runtime::Interpolation::linear()}}));
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Scale,
+            {{0.0, 0.0, -1.25, 2.0, marrow::runtime::Interpolation::linear()},
+             {0.5, 0.0, 0.5, 1.0, marrow::runtime::Interpolation::stepped()}}));
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Shear,
+            {{0.0, 0.0, 4.0, -6.0, marrow::runtime::Interpolation::linear()},
+             {0.5, 0.0, 8.0, 12.0, marrow::runtime::Interpolation::linear()}}));
+
+        marrow::editor::SlotColorTimelineEdit color;
+        color.animation_name = "mar168";
+        color.slot_name = "body";
+        color.keyframes.push_back(
+            {0.0, marrow::runtime::SlotColor{0.25, 0.5, 0.75, 0.4},
+             marrow::runtime::Interpolation::cubic_bezier(0.1, 0.2, 0.3, 0.4)});
+        color.keyframes.push_back(
+            {0.5, marrow::runtime::SlotColor{0.5, 0.25, 0.125, 0.9},
+             marrow::runtime::Interpolation::stepped()});
+        project.slot_color_timeline_edits.push_back(std::move(color));
+
+        marrow::editor::MeshDeformTimelineEdit deform;
+        deform.animation_name = "mar168";
+        deform.slot_name = "body";
+        deform.attachment_name = "body_mesh";
+        deform.keyframes.push_back({0.0, {0.0, 0.0, 1.0, 2.0}, {}});
+        project.mesh_deform_timeline_edits.push_back(std::move(deform));
+
+        marrow::editor::DrawOrderTimelineEdit draw_order;
+        draw_order.animation_name = "mar168";
+        draw_order.keyframes.push_back({0.0, {"body", "arm_l"}});
+        project.draw_order_timeline_edits.push_back(std::move(draw_order));
+
+        marrow::editor::EventTimelineEdit events;
+        events.animation_name = "mar168";
+        events.keyframes.push_back(
+            {0.0, "footstep", std::nullopt, std::nullopt, std::nullopt,
+             std::nullopt, std::nullopt, std::nullopt});
+        project.event_timeline_edits.push_back(std::move(events));
+
+        marrow::editor::SlotAttachmentTimelineEdit attachment;
+        attachment.animation_name = "mar168";
+        attachment.slot_name = "body";
+        attachment.keyframes.push_back({0.0, std::string("body")});
+        project.slot_attachment_timeline_edits.push_back(std::move(attachment));
+        return project;
+    };
+
+    const auto transform_selector = [](std::string bone,
+                                       TransformTimelineChannel channel,
+                                       double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::Transform;
+        selector.animation_name = "mar168";
+        selector.bone_name = std::move(bone);
+        selector.transform_channel = channel;
+        selector.time = time;
+        return selector;
+    };
+    const auto color_selector = [](double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::SlotColor;
+        selector.animation_name = "mar168";
+        selector.slot_name = "body";
+        selector.time = time;
+        return selector;
+    };
+
+    // One case per supported lane family: the named component moves by exactly
+    // the delta and every sibling field, the time, and the easing survive.
+    struct TransformCase {
+        const char* label;
+        TransformTimelineChannel channel;
+        TimelineScalarComponent component;
+        double delta;
+    };
+    const TransformCase transform_cases[] = {
+        {"Rotate Angle", TransformTimelineChannel::Rotate,
+         TimelineScalarComponent::Angle, -12.5},
+        {"Translate X", TransformTimelineChannel::Translate,
+         TimelineScalarComponent::X, 3.5},
+        {"Translate Y", TransformTimelineChannel::Translate,
+         TimelineScalarComponent::Y, -1.25},
+        {"Scale X", TransformTimelineChannel::Scale,
+         TimelineScalarComponent::X, 0.75},
+        {"Scale Y", TransformTimelineChannel::Scale,
+         TimelineScalarComponent::Y, -0.5},
+        {"Shear X", TransformTimelineChannel::Shear,
+         TimelineScalarComponent::X, 2.0},
+        {"Shear Y", TransformTimelineChannel::Shear,
+         TimelineScalarComponent::Y, 7.5},
+    };
+    for (const TransformCase& scenario : transform_cases) {
+        marrow::editor::ProjectData project = build_project();
+        const marrow::editor::TransformTimelineEdit* source =
+            project.find_transform_timeline_edit("mar168", "spine", scenario.channel);
+        if (source == nullptr || source->keyframes.empty()) {
+            std::cerr << "MAR-168 case " << scenario.label
+                      << " is missing its source timeline.\n";
+            return false;
+        }
+        const marrow::editor::TransformKeyframeEdit original = source->keyframes.front();
+        const std::size_t original_key_count = source->keyframes.size();
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto moved = marrow::editor::offset_keyframe_scalars(
+            &project,
+            {transform_selector("spine", scenario.channel, 0.0)},
+            scenario.component,
+            scenario.delta);
+        if (!moved || !moved.changed || moved.key_count != 1U ||
+            !near_exact(moved.applied_delta, scenario.delta)) {
+            std::cerr << "MAR-168 could not offset a " << scenario.label << " key: "
+                      << moved.error << '\n';
+            return false;
+        }
+        const marrow::editor::TransformTimelineEdit* edited =
+            project.find_transform_timeline_edit("mar168", "spine", scenario.channel);
+        if (edited == nullptr || edited->keyframes.size() != original_key_count) {
+            std::cerr << "MAR-168 " << scenario.label
+                      << " offset reshaped its timeline.\n";
+            return false;
+        }
+        const marrow::editor::TransformKeyframeEdit& key = edited->keyframes.front();
+        const double expected_angle = original.angle +
+            (scenario.component == TimelineScalarComponent::Angle ? scenario.delta : 0.0);
+        const double expected_x = original.x +
+            (scenario.component == TimelineScalarComponent::X ? scenario.delta : 0.0);
+        const double expected_y = original.y +
+            (scenario.component == TimelineScalarComponent::Y ? scenario.delta : 0.0);
+        if (!near_exact(key.angle, expected_angle) || !near_exact(key.x, expected_x) ||
+            !near_exact(key.y, expected_y) || !near_exact(key.time, original.time) ||
+            key.interpolation.kind() != original.interpolation.kind()) {
+            std::cerr << "MAR-168 " << scenario.label
+                      << " scalar offset did not preserve the parent key.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(project) == before) {
+            std::cerr << "MAR-168 " << scenario.label
+                      << " offset reported a change it did not persist.\n";
+            return false;
+        }
+    }
+
+    struct ColorCase {
+        const char* label;
+        TimelineScalarComponent component;
+        int channel_index;
+    };
+    const ColorCase color_cases[] = {
+        {"Slot Color R", TimelineScalarComponent::Red, 0},
+        {"Slot Color G", TimelineScalarComponent::Green, 1},
+        {"Slot Color B", TimelineScalarComponent::Blue, 2},
+        {"Slot Color A", TimelineScalarComponent::Alpha, 3},
+    };
+    const auto color_channel = [](const marrow::runtime::SlotColor& color, int index) {
+        switch (index) {
+        case 0: return static_cast<double>(color.r);
+        case 1: return static_cast<double>(color.g);
+        case 2: return static_cast<double>(color.b);
+        default: return static_cast<double>(color.a);
+        }
+    };
+    for (const ColorCase& scenario : color_cases) {
+        marrow::editor::ProjectData project = build_project();
+        const marrow::editor::SlotColorTimelineEdit* source =
+            project.find_slot_color_timeline_edit("mar168", "body");
+        if (source == nullptr || source->keyframes.empty()) {
+            std::cerr << "MAR-168 case " << scenario.label
+                      << " is missing its colour timeline.\n";
+            return false;
+        }
+        const marrow::editor::SlotColorKeyframeEdit original = source->keyframes.front();
+        const auto moved = marrow::editor::offset_keyframe_scalars(
+            &project, {color_selector(0.0)}, scenario.component, 0.05);
+        if (!moved || !moved.changed || moved.key_count != 1U ||
+            !near_exact(moved.applied_delta, 0.05)) {
+            std::cerr << "MAR-168 could not offset a " << scenario.label << " key: "
+                      << moved.error << '\n';
+            return false;
+        }
+        const marrow::editor::SlotColorTimelineEdit* edited =
+            project.find_slot_color_timeline_edit("mar168", "body");
+        if (edited == nullptr) {
+            std::cerr << "MAR-168 " << scenario.label << " lost its colour timeline.\n";
+            return false;
+        }
+        const marrow::editor::SlotColorKeyframeEdit& key = edited->keyframes.front();
+        bool preserved = near_float(key.time, original.time) &&
+            key.interpolation.kind() == original.interpolation.kind();
+        for (int index = 0; index < 4; ++index) {
+            const double expected = color_channel(original.color, index) +
+                (index == scenario.channel_index ? 0.05 : 0.0);
+            preserved = preserved && near_float(color_channel(key.color, index), expected);
+        }
+        if (!preserved) {
+            std::cerr << "MAR-168 " << scenario.label
+                      << " offset did not preserve its sibling channels.\n";
+            return false;
+        }
+    }
+
+    // Rotate carries no setup-pose conversion: a delta is identical in the
+    // absolute space the graph plots and the setup-relative space the project
+    // stores, so the stored angle moves by exactly the requested amount.
+    {
+        marrow::editor::ProjectData project = build_project();
+        const auto setup_bone =
+            project_result.skeleton_data->find_bone_index("transform_source");
+        if (!setup_bone.has_value()) {
+            std::cerr << "MAR-168 requires a fixture bone with a setup rotation.\n";
+            return false;
+        }
+        const double setup_rotation =
+            project_result.skeleton_data->bones()[*setup_bone].setup_pose.rotation;
+        const auto moved = marrow::editor::offset_keyframe_scalars(
+            &project,
+            {transform_selector(
+                "transform_source", TransformTimelineChannel::Rotate, 0.0)},
+            TimelineScalarComponent::Angle,
+            10.0);
+        const auto* edited = project.find_transform_timeline_edit(
+            "mar168", "transform_source", TransformTimelineChannel::Rotate);
+        if (!moved || !moved.changed || edited == nullptr ||
+            edited->keyframes.size() != 1U ||
+            !near_exact(edited->keyframes.front().angle, 110.0) ||
+            std::abs(setup_rotation) <= kExact) {
+            std::cerr << "MAR-168 Rotate offset applied a setup-pose conversion.\n";
+            return false;
+        }
+    }
+
+    // Signed scale: a negative value stays negative and exact zero stays
+    // authorable, which the MAR-162 signed local scale gizmo depends on.
+    {
+        marrow::editor::ProjectData project = build_project();
+        const auto negative = marrow::editor::offset_keyframe_scalars(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Scale, 0.0)},
+            TimelineScalarComponent::X,
+            -0.25);
+        const auto zeroed = marrow::editor::offset_keyframe_scalars(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Scale, 0.5)},
+            TimelineScalarComponent::X,
+            -0.5);
+        const auto* edited = project.find_transform_timeline_edit(
+            "mar168", "spine", TransformTimelineChannel::Scale);
+        if (!negative || !zeroed || edited == nullptr ||
+            edited->keyframes.size() != 2U ||
+            !near_exact(edited->keyframes[0].x, -1.5) ||
+            edited->keyframes[0].x >= 0.0 || edited->keyframes[1].x != 0.0) {
+            std::cerr << "MAR-168 signed scale offset lost its sign or exact zero.\n";
+            return false;
+        }
+    }
+
+    // Slot Colour clamps group-wide so a multi-key drag stops as one unit.
+    {
+        marrow::editor::ProjectData project = build_project();
+        const auto clamped = marrow::editor::offset_keyframe_scalars(
+            &project,
+            {color_selector(0.0), color_selector(0.5)},
+            TimelineScalarComponent::Alpha,
+            0.5);
+        const auto* edited = project.find_slot_color_timeline_edit("mar168", "body");
+        if (!clamped || !clamped.changed || clamped.key_count != 2U ||
+            !near_float(clamped.applied_delta, 0.1) || edited == nullptr ||
+            edited->keyframes.size() != 2U ||
+            !near_float(edited->keyframes[0].color.a, 0.5) ||
+            !near_float(edited->keyframes[1].color.a, 1.0) ||
+            !near_float(
+                static_cast<double>(edited->keyframes[1].color.a) -
+                    static_cast<double>(edited->keyframes[0].color.a),
+                0.5)) {
+            std::cerr << "MAR-168 group colour clamp did not stop both keys together.\n";
+            return false;
+        }
+    }
+
+    // Imported data already outside [0, 1] yields a no-op frame, not an error.
+    {
+        marrow::editor::ProjectData project = build_project();
+        marrow::editor::SlotColorTimelineEdit* degenerate =
+            project.find_slot_color_timeline_edit("mar168", "body");
+        if (degenerate == nullptr || degenerate->keyframes.size() != 2U) {
+            std::cerr << "MAR-168 degenerate clamp case is missing its colour keys.\n";
+            return false;
+        }
+        degenerate->keyframes[0].color.a = 1.4f;
+        degenerate->keyframes[1].color.a = 0.2f;
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto degenerate_result = marrow::editor::offset_keyframe_scalars(
+            &project,
+            {color_selector(0.0), color_selector(0.5)},
+            TimelineScalarComponent::Alpha,
+            0.3);
+        if (degenerate_result.changed || !degenerate_result.error.empty() ||
+            !near_exact(degenerate_result.applied_delta, 0.0) ||
+            degenerate_result.key_count != 2U ||
+            marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-168 degenerate colour clamp did not stay a silent no-op.\n";
+            return false;
+        }
+    }
+
+    // Rejection atomicity: every failing shape leaves the project byte-identical.
+    {
+        marrow::editor::ProjectData project = build_project();
+        const std::string before = marrow::editor::serialize_project(project);
+        TimelineKeySelector deform_selector;
+        deform_selector.kind = TimelineKeyKind::Deform;
+        deform_selector.animation_name = "mar168";
+        deform_selector.slot_name = "body";
+        deform_selector.attachment_name = "body_mesh";
+        deform_selector.time = 0.0;
+        TimelineKeySelector draw_order_selector;
+        draw_order_selector.kind = TimelineKeyKind::DrawOrder;
+        draw_order_selector.animation_name = "mar168";
+        draw_order_selector.time = 0.0;
+        TimelineKeySelector event_selector;
+        event_selector.kind = TimelineKeyKind::Event;
+        event_selector.animation_name = "mar168";
+        event_selector.time = 0.0;
+        TimelineKeySelector attachment_selector;
+        attachment_selector.kind = TimelineKeyKind::SlotAttachment;
+        attachment_selector.animation_name = "mar168";
+        attachment_selector.slot_name = "body";
+        attachment_selector.time = 0.0;
+
+        struct Rejection {
+            const char* label;
+            std::vector<TimelineKeySelector> selectors;
+            TimelineScalarComponent component;
+            double delta;
+        };
+        auto unresolvable =
+            transform_selector("spine", TransformTimelineChannel::Translate, 99.0);
+        const auto duplicate =
+            transform_selector("spine", TransformTimelineChannel::Translate, 0.0);
+        const Rejection rejections[] = {
+            {"Angle on a Translate channel",
+             {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+             TimelineScalarComponent::Angle, 1.0},
+            {"X on a Rotate channel",
+             {transform_selector("spine", TransformTimelineChannel::Rotate, 0.0)},
+             TimelineScalarComponent::X, 1.0},
+            {"X on a Slot Color track", {color_selector(0.0)},
+             TimelineScalarComponent::X, 0.1},
+            {"Alpha on a Transform track",
+             {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+             TimelineScalarComponent::Alpha, 0.1},
+            {"a Deform selector", {deform_selector}, TimelineScalarComponent::X, 1.0},
+            {"a Draw Order selector", {draw_order_selector},
+             TimelineScalarComponent::X, 1.0},
+            {"an Event selector", {event_selector}, TimelineScalarComponent::X, 1.0},
+            {"a Slot Attachment selector", {attachment_selector},
+             TimelineScalarComponent::Alpha, 0.1},
+            {"an unresolvable selector", {unresolvable},
+             TimelineScalarComponent::X, 1.0},
+            {"a duplicated selector", {duplicate, duplicate},
+             TimelineScalarComponent::X, 1.0},
+            {"a non-finite delta", {duplicate}, TimelineScalarComponent::X,
+             std::numeric_limits<double>::quiet_NaN()},
+            {"an out-of-float32-range result", {duplicate},
+             TimelineScalarComponent::X, 1e39},
+            {"an empty selector list", {}, TimelineScalarComponent::X, 1.0},
+        };
+        for (const Rejection& rejection : rejections) {
+            const auto result = marrow::editor::offset_keyframe_scalars(
+                &project, rejection.selectors, rejection.component, rejection.delta);
+            if (result || result.changed || result.error.empty() ||
+                marrow::editor::serialize_project(project) != before) {
+                std::cerr << "MAR-168 did not atomically reject " << rejection.label
+                          << ".\n";
+                return false;
+            }
+        }
+        const auto null_project = marrow::editor::offset_keyframe_scalars(
+            nullptr, {duplicate}, TimelineScalarComponent::X, 1.0);
+        if (null_project || null_project.error.empty()) {
+            std::cerr << "MAR-168 did not reject a null project.\n";
+            return false;
+        }
+    }
+
+    // Save/reload round trip of an offset project.
+    {
+        const std::filesystem::path round_trip_path =
+            "/tmp/marrow_mar168_scalar_offset.marrow";
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = round_trip_path;
+
+        TimelineKeySelector fixture_selector;
+        fixture_selector.kind = TimelineKeyKind::Transform;
+        fixture_selector.animation_name = "idle";
+        fixture_selector.bone_name = "arm_l";
+        fixture_selector.transform_channel = TransformTimelineChannel::Rotate;
+        fixture_selector.time = 0.25;
+        const auto* fixture_track = project.find_transform_timeline_edit(
+            "idle", "arm_l", TransformTimelineChannel::Rotate);
+        if (fixture_track == nullptr || fixture_track->keyframes.empty()) {
+            std::cerr << "MAR-168 round trip requires the fixture arm_l rotate keys.\n";
+            return false;
+        }
+        const double original_angle = fixture_track->keyframes.front().angle;
+        const auto offset = marrow::editor::offset_keyframe_scalars(
+            &project, {fixture_selector}, TimelineScalarComponent::Angle, -17.5);
+        if (!offset || !offset.changed) {
+            std::cerr << "MAR-168 round trip could not offset the fixture key: "
+                      << offset.error << '\n';
+            return false;
+        }
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* reloaded_track = reloaded.project->find_transform_timeline_edit(
+            "idle", "arm_l", TransformTimelineChannel::Rotate);
+        if (reloaded_track == nullptr || reloaded_track->keyframes.empty() ||
+            !near_float(reloaded_track->keyframes.front().angle, original_angle - 17.5)) {
+            std::cerr << "MAR-168 offset value did not survive save and reload.\n";
+            return false;
+        }
+        const auto* reloaded_animation = reloaded.skeleton_data->find_animation("idle");
+        const auto arm_index = reloaded.skeleton_data->find_bone_index("arm_l");
+        const auto* reloaded_rotate =
+            reloaded_animation != nullptr && arm_index.has_value()
+            ? reloaded_animation->find_rotate_timeline(*arm_index)
+            : nullptr;
+        if (reloaded_rotate == nullptr || reloaded_rotate->keyframes.empty() ||
+            !near_float(
+                static_cast<double>(reloaded_rotate->keyframes.front().angle),
+                original_angle - 17.5)) {
+            std::cerr << "MAR-168 offset value did not reach the rebuilt runtime.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-168 graph scalar authoring validated across "
+              << (std::size(transform_cases) + std::size(color_cases))
+              << " lane-family cases.\n";
+    return true;
+}
+
 bool validate_editing_p0_end_to_end(
     const marrow::editor::ProjectLoadResult& project_result) {
     const std::filesystem::path project_path =
@@ -3037,6 +3544,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!validate_editing_p0_end_to_end(result)) {
+        return 1;
+    }
+    if (!validate_mar168_graph_scalar_authoring(result)) {
         return 1;
     }
     if (parse_result.options.export_runtime_path.has_value() ||

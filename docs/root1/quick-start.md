@@ -32,8 +32,8 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167 checkpoints or the next
-MAR-168 product milestone.
+Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168 checkpoints or the
+next MAR-169 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -61,12 +61,29 @@ display plots effective runtime values and the actual outgoing Linear, Stepped,
 or Cubic easing. One outgoing easing belongs to the complete Transform or RGBA
 parent key, not to an individual component.
 
-MAR-167 is read-only. Point dragging displays the MAR-168 editing boundary and
-does not change key time or value. FFD and discrete Inherit, Attachment, Draw
-Order, and Event lanes show an unsupported empty state instead of stale graph
-data. Graph tab, visibility, Fit, pan, zoom, hover, and active-component state
-are shell-private and are not saved to `.marrow`, runtime export, history,
-dirty state, runtime revision, or Agent/MCP.
+Graph points are draggable. Press a point to select it, then move the pointer:
+the first 4 logical pixels of motion lock one axis for the whole drag. A
+dominant vertical move edits only the pressed scalar component on every
+selected key of the focused track; a dominant horizontal move retimes the whole
+parent key, and every selected key, carrying all of its components with it. A
+press and release without motion is still a plain selection click.
+
+The **Snap** checkbox on the Graph toolbar is the same shared frame-snap
+setting the Dopesheet tab owns, so toggling it in either tab is visible in the
+other. Hold Alt to bypass frame snapping for the current drag. Escape, leaving
+the Graph tab, or losing window focus cancels the drag and restores the project
+exactly. One drag is always one undo entry, and a drag that ends where it
+started creates none. Slot Color R/G/B/A clamps group-wide to `[0, 1]`; Angle,
+Translate, Scale, and Shear are unclamped, so a signed or exactly zero scale
+stays authorable. Dragging a key past an authored explicit duration grows that
+duration inside the same undo entry.
+
+Bezier handle and easing editing is still MAR-169. FFD and discrete Inherit,
+Attachment, Draw Order, and Event lanes show an unsupported empty state instead
+of stale graph data. Graph tab, visibility, Fit, pan, zoom, hover,
+active-component, and drag state are shell-private and are not saved to
+`.marrow`, runtime export, history, dirty state, runtime revision, or
+Agent/MCP.
 
 ## Auto-key an attachment-local FFD vertex group
 

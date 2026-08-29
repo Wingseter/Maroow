@@ -315,6 +315,74 @@ bool set_color_values(
 
 } // namespace
 
+double time_at_x(PlotRect rect, const View& view, double x) {
+    return view.view_start_seconds + (x - rect.min_x) / view.pixels_per_second;
+}
+
+double value_at_y(PlotRect rect, const View& view, double y) {
+    return view.value_center +
+        (((rect.min_y + rect.max_y) * 0.5) - y) / view.pixels_per_value;
+}
+
+double x_at_time(PlotRect rect, const View& view, double time_seconds) {
+    return rect.min_x +
+        (time_seconds - view.view_start_seconds) * view.pixels_per_second;
+}
+
+double y_at_value(PlotRect rect, const View& view, double value) {
+    return ((rect.min_y + rect.max_y) * 0.5) -
+        (value - view.value_center) * view.pixels_per_value;
+}
+
+DragAxis decide_drag_axis(
+    double press_x,
+    double press_y,
+    double pointer_x,
+    double pointer_y,
+    double dead_zone_pixels) {
+    if (!std::isfinite(press_x) || !std::isfinite(press_y) ||
+        !std::isfinite(pointer_x) || !std::isfinite(pointer_y) ||
+        !std::isfinite(dead_zone_pixels) || dead_zone_pixels < 0.0) {
+        return DragAxis::Undecided;
+    }
+    const double dx = pointer_x - press_x;
+    const double dy = pointer_y - press_y;
+    if (!std::isfinite(dx) || !std::isfinite(dy)) return DragAxis::Undecided;
+    if (std::max(std::abs(dx), std::abs(dy)) < dead_zone_pixels) {
+        return DragAxis::Undecided;
+    }
+    // An exact tie resolves to Value: the dopesheet already edits time, so the
+    // graph keeps the axis only it can author.
+    return std::abs(dx) > std::abs(dy) ? DragAxis::Time : DragAxis::Value;
+}
+
+std::optional<double> drag_time_delta(
+    const View& view,
+    double press_x,
+    double pointer_x) {
+    if (!std::isfinite(press_x) || !std::isfinite(pointer_x) ||
+        !std::isfinite(view.pixels_per_second) || view.pixels_per_second <= 0.0) {
+        return std::nullopt;
+    }
+    const double delta = (pointer_x - press_x) / view.pixels_per_second;
+    if (!std::isfinite(delta)) return std::nullopt;
+    return delta;
+}
+
+std::optional<double> drag_value_delta(
+    const View& view,
+    double press_y,
+    double pointer_y) {
+    if (!std::isfinite(press_y) || !std::isfinite(pointer_y) ||
+        !std::isfinite(view.pixels_per_value) || view.pixels_per_value <= 0.0) {
+        return std::nullopt;
+    }
+    // ImGui y grows downward while values grow upward.
+    const double delta = (press_y - pointer_y) / view.pixels_per_value;
+    if (!std::isfinite(delta)) return std::nullopt;
+    return delta;
+}
+
 bool track_is_supported(const timeline_model::TrackRow& track) noexcept {
     switch (track.kind) {
     case timeline_model::TimelineTrackKind::Rotate:

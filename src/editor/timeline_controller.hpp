@@ -153,4 +153,33 @@ bool apply_timeline_retime_delta(
     bool snap_to_frames);
 void finish_timeline_retime_gesture(ShellState* state, bool commit);
 
+/**
+ * @brief Opens one live transaction that offsets a single graph component.
+ *
+ * The gesture edits `component` on every selected key that belongs to `track`,
+ * leaving key times, every other component, and the shared outgoing easing
+ * untouched. Fails closed on a non-editable row, an unsupported (row,
+ * component) pairing, an empty selection, or another live authoring gesture.
+ */
+bool begin_timeline_graph_value_gesture(
+    ShellState* state,
+    std::uint32_t item_id,
+    const TimelineTrackRow& track,
+    timeline_graph_model::Component component,
+    const std::vector<TimelineTrackRow>& tracks);
+/**
+ * @brief Applies one absolute value delta, cancelling atomically on failure.
+ * @return false when the gesture ended; the gesture is already gone.
+ */
+bool apply_timeline_graph_value_delta(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double requested_delta);
+void finish_timeline_graph_value_gesture(ShellState* state, bool commit);
+
+/** @brief Reports whether `component` is authorable on `track`. */
+bool timeline_graph_component_is_editable(
+    const TimelineTrackRow& track,
+    timeline_graph_model::Component component);
+
 } // namespace marrow::editor::shell

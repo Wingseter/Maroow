@@ -263,6 +263,122 @@ std::optional<ResolvedTimelineKey> resolve_timeline_key(
     return std::nullopt;
 }
 
+bool component_is_color_channel(TimelineScalarComponent component) {
+    switch (component) {
+    case TimelineScalarComponent::Red:
+    case TimelineScalarComponent::Green:
+    case TimelineScalarComponent::Blue:
+    case TimelineScalarComponent::Alpha:
+        return true;
+    case TimelineScalarComponent::Angle:
+    case TimelineScalarComponent::X:
+    case TimelineScalarComponent::Y:
+        return false;
+    }
+    return false;
+}
+
+bool finite_animation_scalar(double value) {
+    return std::isfinite(value) &&
+        std::abs(value) <=
+            static_cast<double>(std::numeric_limits<runtime::AnimationScalar>::max());
+}
+
+/**
+ * @brief Reports whether `component` is authorable on the resolved key family.
+ *
+ * Rotate owns Angle; Translate, Scale, and Shear own X and Y; Slot Color owns
+ * the four channels. Deform, Draw Order, Event, and Slot Attachment keys own
+ * none. Times and interpolations are never named here.
+ */
+bool read_scalar_component(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved,
+    TimelineScalarComponent component,
+    double* value_out) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform: {
+        const auto& timeline = project.transform_timeline_edits[resolved.timeline_index];
+        const auto& keyframe = timeline.keyframes[resolved.key_index];
+        const bool rotate = timeline.channel == TransformTimelineChannel::Rotate;
+        if (rotate) {
+            if (component != TimelineScalarComponent::Angle) return false;
+            *value_out = keyframe.angle;
+            return true;
+        }
+        if (component == TimelineScalarComponent::X) {
+            *value_out = keyframe.x;
+            return true;
+        }
+        if (component == TimelineScalarComponent::Y) {
+            *value_out = keyframe.y;
+            return true;
+        }
+        return false;
+    }
+    case TimelineKeyKind::SlotColor: {
+        const auto& keyframe =
+            project.slot_color_timeline_edits[resolved.timeline_index]
+                .keyframes[resolved.key_index];
+        switch (component) {
+        case TimelineScalarComponent::Red:
+            *value_out = static_cast<double>(keyframe.color.r);
+            return true;
+        case TimelineScalarComponent::Green:
+            *value_out = static_cast<double>(keyframe.color.g);
+            return true;
+        case TimelineScalarComponent::Blue:
+            *value_out = static_cast<double>(keyframe.color.b);
+            return true;
+        case TimelineScalarComponent::Alpha:
+            *value_out = static_cast<double>(keyframe.color.a);
+            return true;
+        case TimelineScalarComponent::Angle:
+        case TimelineScalarComponent::X:
+        case TimelineScalarComponent::Y:
+            return false;
+        }
+        return false;
+    }
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return false;
+    }
+    return false;
+}
+
+/** @brief Writes exactly one scalar field; never `time` and never easing. */
+void write_scalar_component(
+    ProjectData* project,
+    const ResolvedTimelineKey& resolved,
+    TimelineScalarComponent component,
+    double value) {
+    if (resolved.kind == TimelineKeyKind::Transform) {
+        auto& keyframe = project->transform_timeline_edits[resolved.timeline_index]
+                             .keyframes[resolved.key_index];
+        switch (component) {
+        case TimelineScalarComponent::Angle: keyframe.angle = value; return;
+        case TimelineScalarComponent::X: keyframe.x = value; return;
+        case TimelineScalarComponent::Y: keyframe.y = value; return;
+        default: return;
+        }
+    }
+    if (resolved.kind == TimelineKeyKind::SlotColor) {
+        auto& keyframe = project->slot_color_timeline_edits[resolved.timeline_index]
+                             .keyframes[resolved.key_index];
+        const auto scalar = static_cast<runtime::AnimationScalar>(value);
+        switch (component) {
+        case TimelineScalarComponent::Red: keyframe.color.r = scalar; return;
+        case TimelineScalarComponent::Green: keyframe.color.g = scalar; return;
+        case TimelineScalarComponent::Blue: keyframe.color.b = scalar; return;
+        case TimelineScalarComponent::Alpha: keyframe.color.a = scalar; return;
+        default: return;
+        }
+    }
+}
+
 template <typename Keyframe>
 void include_retime_bounds(
     const std::vector<Keyframe>& keyframes,
@@ -1644,6 +1760,91 @@ TimelineRetimeResult retime_keyframes(
         apply_resolved_retime(&candidate, key, applied_delta);
     }
     sort_retimed_timelines(&candidate, resolved);
+    *project = std::move(candidate);
+    return {{true, {}}, applied_delta, resolved.size()};
+}
+
+TimelineScalarOffsetResult offset_keyframe_scalars(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    TimelineScalarComponent component,
+    double requested_delta) {
+    if (project == nullptr) {
+        return {{false, "Timeline authoring requires an open project."}, 0.0, 0U};
+    }
+    if (selectors.empty()) {
+        return {{false, "At least one timeline key is required."}, 0.0, 0U};
+    }
+    if (!std::isfinite(requested_delta)) {
+        return {{false, "Timeline scalar delta must be finite."}, 0.0, 0U};
+    }
+
+    ProjectData candidate = *project;
+    std::vector<ResolvedTimelineKey> resolved;
+    resolved.reserve(selectors.size());
+    std::vector<double> original_values;
+    original_values.reserve(selectors.size());
+    std::set<std::tuple<int, std::size_t, std::size_t>> identities;
+    for (const TimelineKeySelector& selector : selectors) {
+        if (selector.animation_name.empty() || !std::isfinite(selector.time) ||
+            selector.time < 0.0) {
+            return {{false, "Timeline selectors require an animation and non-negative finite time."},
+                    0.0,
+                    0U};
+        }
+        std::string error;
+        const auto key = resolve_timeline_key(candidate, selector, &error);
+        if (!key.has_value()) {
+            return {{false, std::move(error)}, 0.0, 0U};
+        }
+        const auto identity = std::make_tuple(
+            static_cast<int>(key->kind), key->timeline_index, key->key_index);
+        if (!identities.insert(identity).second) {
+            return {{false, "A timeline key was selected more than once."}, 0.0, 0U};
+        }
+        double current = 0.0;
+        if (!read_scalar_component(candidate, *key, component, &current)) {
+            return {{false, "The selected timeline key does not expose that scalar component."},
+                    0.0,
+                    0U};
+        }
+        if (!finite_animation_scalar(current)) {
+            return {{false, "The selected timeline key holds a non-finite scalar value."},
+                    0.0,
+                    0U};
+        }
+        resolved.push_back(*key);
+        original_values.push_back(current);
+    }
+
+    double applied_delta = requested_delta;
+    if (component_is_color_channel(component)) {
+        // The clamp is group-wide so a multi-key drag stops as one unit
+        // instead of collapsing against the boundary. Imported data already
+        // outside [0, 1] yields a zero delta, a no-op frame rather than an
+        // error, so it neither jumps nor blocks the rest of the gesture.
+        const auto bounds = std::minmax_element(
+            original_values.begin(), original_values.end());
+        const double lower = -*bounds.first;
+        const double upper = 1.0 - *bounds.second;
+        applied_delta = upper < lower ? 0.0 : std::clamp(requested_delta, lower, upper);
+    }
+    if (std::abs(applied_delta) <= 1e-12) {
+        return {{false, {}}, 0.0, resolved.size()};
+    }
+
+    for (std::size_t index = 0U; index < resolved.size(); ++index) {
+        double value = original_values[index] + applied_delta;
+        if (component_is_color_channel(component)) {
+            value = std::clamp(value, 0.0, 1.0);
+        }
+        if (!finite_animation_scalar(value)) {
+            return {{false, "A timeline scalar edit left the finite float32 range."},
+                    0.0,
+                    0U};
+        }
+        write_scalar_component(&candidate, resolved[index], component, value);
+    }
     *project = std::move(candidate);
     return {{true, {}}, applied_delta, resolved.size()};
 }

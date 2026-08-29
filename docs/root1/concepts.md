@@ -139,8 +139,14 @@ transient shell state. They are duration-independent and are not serialized or
 included in history, dirty state, runtime export, C ABI, or Agent/MCP. Runtime
 revision rebuilds the effective projection without retaining runtime pointers;
 same-context undo/redo preserves a finite view, while successful project/source
-adoption resets the graph state. MAR-167 performs no graph authoring; point
-time/value dragging begins at MAR-168.
+adoption resets the graph state. Graph authoring introduces no parallel
+key-writing path: a value drag writes through `offset_keyframe_scalars()` and a
+time drag through the dopesheet's `retime_keyframes()`, both inside one
+`EditorSession::EditTransaction`. Components the drag does not name, the key
+time, and the parent key's single shared outgoing easing are carried through
+unchanged, and explicit-duration auto-grow runs inside the same transaction and
+the same undo entry. The drag candidate itself holds no transaction, so a press
+never blocks another editing surface. Easing authoring begins at MAR-169.
 
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active

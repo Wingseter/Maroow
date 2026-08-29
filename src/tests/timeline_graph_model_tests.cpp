@@ -804,6 +804,137 @@ void test_nonfinite_cubic_control_fails_closed(TestSuite& suite) {
         "a non-finite cubic control must return InvalidData without a track");
 }
 
+
+void test_graph_drag_axis_and_unit_mapping(TestSuite& suite) {
+    constexpr graph::PlotRect rect{100.0, 40.0, 700.0, 340.0};
+    const graph::View view{0.5, 200.0, 10.0, 25.0};
+
+    suite.expect(
+        near(graph::time_at_x(rect, view, graph::x_at_time(rect, view, 1.25)), 1.25, 1e-9) &&
+            near(graph::value_at_y(rect, view, graph::y_at_value(rect, view, -3.5)), -3.5, 1e-9),
+        "pixel and unit mapping must round-trip");
+
+    const graph::View negative_start{-2.25, 37.5, -18.0, 0.125};
+    suite.expect(
+        near(
+            graph::time_at_x(
+                rect, negative_start, graph::x_at_time(rect, negative_start, -1.75)),
+            -1.75,
+            1e-9) &&
+            near(
+                graph::value_at_y(
+                    rect, negative_start, graph::y_at_value(rect, negative_start, 96.5)),
+                96.5,
+                1e-9),
+        "a negative view start and a sub-unit value scale must still round-trip");
+
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 302.0, 201.0, 4.0) ==
+            graph::DragAxis::Undecided,
+        "a move inside the dead zone must not choose an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 320.0, 203.0, 4.0) == graph::DragAxis::Time,
+        "a dominant horizontal move must lock the time axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 303.0, 220.0, 4.0) == graph::DragAxis::Value,
+        "a dominant vertical move must lock the value axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 310.0, 210.0, 4.0) == graph::DragAxis::Value,
+        "an exact axis tie must resolve to the value axis");
+    suite.expect(
+        graph::decide_drag_axis(
+            std::numeric_limits<double>::quiet_NaN(), 200.0, 310.0, 210.0, 4.0) ==
+            graph::DragAxis::Undecided,
+        "non-finite pointer input must not choose an axis");
+    suite.expect(
+        graph::decide_drag_axis(
+            300.0, 200.0, 310.0, 210.0,
+            std::numeric_limits<double>::infinity()) == graph::DragAxis::Undecided,
+        "a non-finite dead zone must not choose an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 310.0, 210.0, -1.0) ==
+            graph::DragAxis::Undecided,
+        "a negative dead zone must not choose an axis");
+
+    const auto time_delta = graph::drag_time_delta(view, 300.0, 400.0);
+    suite.expect(
+        time_delta.has_value() && near(*time_delta, 0.5),
+        "time delta must divide the pixel delta by pixels per second");
+    const auto value_delta = graph::drag_value_delta(view, 300.0, 200.0);
+    suite.expect(
+        value_delta.has_value() && near(*value_delta, 4.0),
+        "value delta must invert screen Y and divide by pixels per value");
+    const auto negative_value_delta = graph::drag_value_delta(view, 200.0, 300.0);
+    suite.expect(
+        negative_value_delta.has_value() && near(*negative_value_delta, -4.0),
+        "downward screen motion must produce a negative value delta");
+
+    graph::View degenerate = view;
+    degenerate.pixels_per_value = 0.0;
+    suite.expect(
+        !graph::drag_value_delta(degenerate, 300.0, 200.0).has_value(),
+        "a non-positive value scale must reject the drag delta");
+    graph::View degenerate_time = view;
+    degenerate_time.pixels_per_second = std::numeric_limits<double>::quiet_NaN();
+    suite.expect(
+        !graph::drag_time_delta(degenerate_time, 300.0, 400.0).has_value(),
+        "a non-finite time scale must reject the drag delta");
+    suite.expect(
+        !graph::drag_time_delta(
+             view, std::numeric_limits<double>::infinity(), 400.0).has_value(),
+        "a non-finite press coordinate must reject the drag delta");
+    suite.expect(
+        !graph::drag_value_delta(
+             view, 300.0, std::numeric_limits<double>::quiet_NaN()).has_value(),
+        "a non-finite pointer coordinate must reject the drag delta");
+
+    graph::View overflow_view = view;
+    overflow_view.pixels_per_value = std::numeric_limits<double>::denorm_min();
+    suite.expect(
+        !graph::drag_value_delta(
+             overflow_view, std::numeric_limits<double>::max(), -std::numeric_limits<double>::max())
+             .has_value(),
+        "an overflowing quotient must reject the drag delta");
+
+    // The render path and the drag path must agree on every submitted point.
+    const graph::View render_view{-0.1, 200.0, 10.0, 25.0};
+    const auto track = make_scalar_track(
+        marrow::runtime::Interpolation::linear(), 8.0, 12.0);
+    const auto geometry = graph::build_geometry(
+        track, {true, false, false, false}, render_view, rect, 0.5);
+    suite.expect(
+        geometry.has_value() && geometry->points.size() == 2U,
+        "the mapping comparison requires two submitted graph points");
+    if (geometry.has_value()) {
+        bool matched = !geometry->points.empty();
+        for (const auto& point : geometry->points) {
+            const auto key = std::find_if(
+                track.keys.begin(),
+                track.keys.end(),
+                [&](const graph::Key& candidate) {
+                    return candidate.identity == point.key;
+                });
+            if (key == track.keys.end()) {
+                matched = false;
+                break;
+            }
+            matched = matched &&
+                near(
+                    graph::x_at_time(rect, render_view, key->time_seconds),
+                    point.position.x,
+                    1e-9) &&
+                near(
+                    graph::y_at_value(
+                        rect, render_view, key->values[point.component_index]),
+                    point.position.y,
+                    1e-9);
+        }
+        suite.expect(
+            matched,
+            "x_at_time and y_at_value must reproduce the submitted point coordinates");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -861,6 +992,9 @@ int main() {
     });
     suite.run("nonfinite cubic control fails closed", [&] {
         test_nonfinite_cubic_control_fails_closed(suite);
+    });
+    suite.run("drag axis lock and unit mapping", [&] {
+        test_graph_drag_axis_and_unit_mapping(suite);
     });
     return suite.finish();
 }
