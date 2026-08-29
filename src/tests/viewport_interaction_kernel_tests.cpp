@@ -22,6 +22,76 @@ bool check(bool condition, std::string_view message) {
     return condition;
 }
 
+bool snap_cases() {
+    const auto snapped = [](double value,
+                            double step,
+                            bool configured_enabled,
+                            bool temporarily_enabled,
+                            bool bypass) {
+        return kernel::snap_scalar({
+            value,
+            step,
+            {configured_enabled, temporarily_enabled, bypass}});
+    };
+
+    const auto disabled = snapped(12.4, 10.0, false, false, false);
+    const auto configured = snapped(17.6, 10.0, true, false, false);
+    const auto temporary = snapped(12.4, 10.0, false, true, false);
+    const auto bypassed = snapped(17.6, 10.0, true, true, true);
+    if (!check(
+            disabled.has_value() && near(*disabled, 12.4),
+            "disabled snap changed the scalar") ||
+        !check(
+            configured.has_value() && near(*configured, 20.0),
+            "configured snap did not quantize to the nearest grid line") ||
+        !check(
+            temporary.has_value() && near(*temporary, 10.0),
+            "temporary modifier did not enable snapping") ||
+        !check(
+            bypassed.has_value() && near(*bypassed, 17.6),
+            "Alt bypass did not win over configured and temporary enablement")) {
+        return false;
+    }
+
+    const auto positive_half = snapped(5.0, 10.0, true, false, false);
+    const auto negative_half = snapped(-5.0, 10.0, true, false, false);
+    const auto multi_turn = snapped(377.0, 15.0, true, false, false);
+    const auto exact_zero = snapped(-0.049, 0.1, true, false, false);
+    if (!check(
+            positive_half.has_value() && near(*positive_half, 10.0),
+            "positive half-step did not round away from zero") ||
+        !check(
+            negative_half.has_value() && near(*negative_half, -10.0),
+            "negative half-step did not round away from zero") ||
+        !check(
+            multi_turn.has_value() && near(*multi_turn, 375.0),
+            "multi-turn absolute angle was normalized before snapping") ||
+        !check(
+            exact_zero.has_value() && *exact_zero == 0.0 &&
+                !std::signbit(*exact_zero),
+            "snap did not canonicalize exact zero")) {
+        return false;
+    }
+
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return check(
+               !snapped(1.0, 0.0, true, false, false),
+               "snap accepted a zero step") &&
+        check(
+               !snapped(1.0, -1.0, false, false, false),
+               "disabled snap accepted a negative step") &&
+        check(
+               !snapped(infinity, 1.0, true, false, false),
+               "snap accepted a non-finite value") &&
+        check(
+               !snapped(1.0, nan, true, false, false),
+               "snap accepted a non-finite step") &&
+        check(
+               !snapped(1e308, 1e-308, true, false, false),
+               "snap accepted an overflowing quotient");
+}
+
 bool rotation_cases() {
     struct BasisCase {
         kernel::Matrix2 matrix;
@@ -175,9 +245,66 @@ bool scale_cases() {
     }
     mapping.start_scale_x = 0.0;
     mapping.start_scale_y = 0.0;
+    if (!check(
+            !kernel::map_scale(mapping, {74.0, 0.0}),
+            "uniform mapping accepted a zero-zero starting scale")) {
+        return false;
+    }
+
+    const kernel::SnapActivation enabled{true, false, false};
+    const auto snapped_x = kernel::snap_scale_candidate(
+        {-0.04, -3.0}, kernel::ScaleHandle::X, 0.1, enabled);
+    const auto snapped_signed_x = kernel::snap_scale_candidate(
+        {-0.16, -3.0}, kernel::ScaleHandle::X, 0.1, enabled);
+    const auto snapped_uniform = kernel::snap_scale_candidate(
+        {-0.26, 0.13}, kernel::ScaleHandle::Uniform, 0.1, enabled);
+    const auto snapped_uniform_y = kernel::snap_scale_candidate(
+        {0.0, -0.26}, kernel::ScaleHandle::Uniform, 0.1, enabled);
+    const auto snapped_uniform_zero = kernel::snap_scale_candidate(
+        {0.0, 0.0}, kernel::ScaleHandle::Uniform, 0.1, enabled);
     return check(
-        !kernel::map_scale(mapping, {74.0, 0.0}),
-        "uniform mapping accepted a zero-zero starting scale");
+               snapped_x.has_value() && snapped_x->scale_x == 0.0 &&
+                   !std::signbit(snapped_x->scale_x) &&
+                   near(snapped_x->scale_y, -3.0),
+               "axis scale snap did not permit canonical exact zero") &&
+        check(
+               snapped_signed_x.has_value() && near(snapped_signed_x->scale_x, -0.2) &&
+                   near(snapped_signed_x->scale_y, -3.0),
+               "axis scale snap did not preserve signed absolute scale") &&
+        check(
+               snapped_uniform.has_value() && near(snapped_uniform->scale_x, -0.3) &&
+                   near(snapped_uniform->scale_y, 0.15),
+               "uniform scale snap did not preserve the X-driven signed ratio") &&
+        check(
+               snapped_uniform_y.has_value() && snapped_uniform_y->scale_x == 0.0 &&
+                   near(snapped_uniform_y->scale_y, -0.3),
+               "uniform scale snap did not fall back to a nonzero Y driver") &&
+        check(
+               snapped_uniform_zero.has_value() &&
+                   snapped_uniform_zero->scale_x == 0.0 &&
+                   snapped_uniform_zero->scale_y == 0.0,
+               "uniform scale snap rejected the exact-zero result");
+}
+
+bool grid_cases() {
+    const auto near_grid = kernel::visible_grid_step(10.0, 2.0, 18.0);
+    const auto medium_grid = kernel::visible_grid_step(10.0, 1.0, 18.0);
+    const auto far_grid = kernel::visible_grid_step(10.0, 0.26, 18.0);
+    return check(
+               near_grid.has_value() && near(*near_grid, 10.0),
+               "visible grid skipped the base world step unnecessarily") &&
+        check(
+               medium_grid.has_value() && near(*medium_grid, 20.0),
+               "visible grid did not choose an integer multiple") &&
+        check(
+               far_grid.has_value() && near(*far_grid, 70.0),
+               "zoomed-out grid was not an integer multiple of the snap grid") &&
+        check(
+               !kernel::visible_grid_step(0.0, 1.0, 18.0),
+               "visible grid accepted a zero world step") &&
+        check(
+               !kernel::visible_grid_step(10.0, 0.0, 18.0),
+               "visible grid accepted zero pixels per unit");
 }
 
 bool ffd_cases() {
@@ -445,7 +572,8 @@ bool arbitration_and_completion_cases() {
 } // namespace
 
 int main() {
-    if (!rotation_cases() || !rotation_drag_cases() || !scale_cases() ||
+    if (!snap_cases() || !rotation_cases() || !rotation_drag_cases() || !scale_cases() ||
+        !grid_cases() ||
         !ffd_cases() || !arbitration_and_completion_cases()) {
         return 1;
     }

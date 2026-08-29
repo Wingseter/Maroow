@@ -72,6 +72,11 @@ struct ViewportWorldPoint {
     double y{0.0};
 };
 
+struct ViewportSnapModifiers {
+    bool temporarily_enable{false};
+    bool bypass{false};
+};
+
 struct ViewportLayout {
     ImVec2 canvas_origin{};
     ImVec2 canvas_size{};
@@ -364,6 +369,10 @@ struct PendingEditAction {
     std::string label;
     std::string group;
     bool allow_merge{false};
+    marrow::editor::EditImpact impacts{
+        marrow::editor::EditImpact::Project |
+        marrow::editor::EditImpact::Runtime |
+        marrow::editor::EditImpact::Preview};
     EditorHistorySnapshot before_snapshot;
 };
 
@@ -391,6 +400,7 @@ struct ViewportTranslateGesturePayload {
     ViewportTranslateAxis axis{ViewportTranslateAxis::Free};
     ViewportWorldPoint pointer_start{};
     ViewportWorldPoint bone_world_start{};
+    ViewportWorldPoint current_world_target{};
 };
 
 struct ViewportRotationBasis {
@@ -408,6 +418,7 @@ struct ViewportRotateGesturePayload {
     std::optional<double> previous_wrapped_angle;
     double accumulated_rotation{0.0};
     bool angular_reference_suspended{false};
+    bool has_pointer_movement{false};
     ImVec2 pointer_screen{};
     double current_absolute_rotation{0.0};
 };
@@ -439,6 +450,7 @@ struct ViewportScaleGesturePayload {
     double start_absolute_scale_x{1.0};
     double start_absolute_scale_y{1.0};
     double start_projection_pixels{0.0};
+    bool has_pointer_movement{false};
     ImVec2 pointer_screen{};
     double current_absolute_scale_x{1.0};
     double current_absolute_scale_y{1.0};
@@ -746,7 +758,11 @@ bool record_action_from_snapshots(
     EditActionKind kind,
     std::string label,
     std::string group,
-    bool allow_merge);
+    bool allow_merge,
+    marrow::editor::EditImpact impacts =
+        marrow::editor::EditImpact::Project |
+        marrow::editor::EditImpact::Runtime |
+        marrow::editor::EditImpact::Preview);
 void cancel_authoring_gestures(ShellState* state, std::string_view reason);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);

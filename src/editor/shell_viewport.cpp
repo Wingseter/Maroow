@@ -19,6 +19,7 @@
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
+#include "shell_viewport_ui.hpp"
 #include "shell_weight_paint.hpp"
 #include "viewport_renderer.hpp"
 #include "viewport_interaction_kernel.hpp"
@@ -1705,24 +1706,31 @@ void build_viewport_background_geometry(
 
     auto& line_vertices = geometry->line_vertices;
     auto& triangle_vertices = geometry->triangle_vertices;
-    const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state.viewport.zoom));
-    for (float x = first_grid_line(layout.world_origin_screen.x, layout.canvas_origin.x, grid_spacing);
-         x < layout.canvas_end.x;
-         x += grid_spacing) {
-        append_colored_line(
-            &line_vertices,
-            ImVec2(x - layout.canvas_origin.x, 0.0f),
-            ImVec2(x - layout.canvas_origin.x, layout.canvas_size.y),
-            IM_COL32(31, 35, 41, 255));
-    }
-    for (float y = first_grid_line(layout.world_origin_screen.y, layout.canvas_origin.y, grid_spacing);
-         y < layout.canvas_end.y;
-         y += grid_spacing) {
-        append_colored_line(
-            &line_vertices,
-            ImVec2(0.0f, y - layout.canvas_origin.y),
-            ImVec2(layout.canvas_size.x, y - layout.canvas_origin.y),
-            IM_COL32(31, 35, 41, 255));
+    if (const auto grid_spacing = viewport_grid_spacing_pixels(state, layout)) {
+        for (float x = first_grid_line(
+                 layout.world_origin_screen.x,
+                 layout.canvas_origin.x,
+                 *grid_spacing);
+             x < layout.canvas_end.x;
+             x += *grid_spacing) {
+            append_colored_line(
+                &line_vertices,
+                ImVec2(x - layout.canvas_origin.x, 0.0f),
+                ImVec2(x - layout.canvas_origin.x, layout.canvas_size.y),
+                IM_COL32(31, 35, 41, 255));
+        }
+        for (float y = first_grid_line(
+                 layout.world_origin_screen.y,
+                 layout.canvas_origin.y,
+                 *grid_spacing);
+             y < layout.canvas_end.y;
+             y += *grid_spacing) {
+            append_colored_line(
+                &line_vertices,
+                ImVec2(0.0f, y - layout.canvas_origin.y),
+                ImVec2(layout.canvas_size.x, y - layout.canvas_origin.y),
+                IM_COL32(31, 35, 41, 255));
+        }
     }
 
     append_colored_line(

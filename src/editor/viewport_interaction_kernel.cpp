@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <tuple>
 
 namespace marrow::editor::viewport_interaction_kernel {
 namespace {
@@ -50,6 +51,31 @@ std::optional<Matrix2> inverse_matrix(Matrix2 matrix) {
 }
 
 } // namespace
+
+std::optional<double> snap_scalar(SnapScalarRequest request) {
+    if (!std::isfinite(request.value) || !std::isfinite(request.step) ||
+        request.step <= 0.0) {
+        return std::nullopt;
+    }
+    const bool enabled = !request.activation.bypass &&
+        (request.activation.configured_enabled ||
+         request.activation.temporarily_enabled);
+    if (!enabled) {
+        return request.value;
+    }
+    const double quotient = request.value / request.step;
+    if (!std::isfinite(quotient)) {
+        return std::nullopt;
+    }
+    double result = std::round(quotient) * request.step;
+    if (!std::isfinite(result)) {
+        return std::nullopt;
+    }
+    if (result == 0.0) {
+        result = 0.0;
+    }
+    return result;
+}
 
 std::optional<RotationBasis> make_rotation_basis(
     Point pivot,
@@ -256,6 +282,74 @@ std::optional<ScaleCandidate> map_scale(
         candidate.scale_y = 0.0;
     }
     return candidate;
+}
+
+std::optional<ScaleCandidate> snap_scale_candidate(
+    ScaleCandidate candidate,
+    ScaleHandle handle,
+    double step,
+    SnapActivation activation) {
+    if (!std::isfinite(candidate.scale_x) ||
+        !std::isfinite(candidate.scale_y)) {
+        return std::nullopt;
+    }
+    if (handle == ScaleHandle::X || handle == ScaleHandle::Y) {
+        double* component = handle == ScaleHandle::X
+            ? &candidate.scale_x
+            : &candidate.scale_y;
+        const auto snapped = snap_scalar({*component, step, activation});
+        if (!snapped.has_value()) {
+            return std::nullopt;
+        }
+        *component = *snapped;
+    } else {
+        const bool use_x = candidate.scale_x != 0.0;
+        const double driver = use_x ? candidate.scale_x : candidate.scale_y;
+        const auto snapped = snap_scalar({driver, step, activation});
+        if (!snapped.has_value()) {
+            return std::nullopt;
+        }
+        if (driver == 0.0 || *snapped == 0.0) {
+            candidate.scale_x = 0.0;
+            candidate.scale_y = 0.0;
+        } else {
+            const double ratio = *snapped / driver;
+            candidate.scale_x *= ratio;
+            candidate.scale_y *= ratio;
+        }
+    }
+    if (!std::isfinite(candidate.scale_x) ||
+        !std::isfinite(candidate.scale_y)) {
+        return std::nullopt;
+    }
+    if (candidate.scale_x == 0.0) {
+        candidate.scale_x = 0.0;
+    }
+    if (candidate.scale_y == 0.0) {
+        candidate.scale_y = 0.0;
+    }
+    return candidate;
+}
+
+std::optional<double> visible_grid_step(
+    double world_step,
+    double pixels_per_world_unit,
+    double minimum_spacing_pixels) {
+    if (!std::isfinite(world_step) || world_step <= 0.0 ||
+        !std::isfinite(pixels_per_world_unit) || pixels_per_world_unit <= 0.0 ||
+        !std::isfinite(minimum_spacing_pixels) || minimum_spacing_pixels <= 0.0) {
+        return std::nullopt;
+    }
+    const double base_spacing_pixels = world_step * pixels_per_world_unit;
+    if (!std::isfinite(base_spacing_pixels) || base_spacing_pixels <= 0.0) {
+        return std::nullopt;
+    }
+    const double multiple = std::max(
+        1.0, std::ceil(minimum_spacing_pixels / base_spacing_pixels));
+    const double result = world_step * multiple;
+    return std::isfinite(result) && result > 0.0
+        ? std::optional<double>(result)
+        : std::nullopt;
 }
 
 std::optional<std::size_t> nearest_ffd_vertex(

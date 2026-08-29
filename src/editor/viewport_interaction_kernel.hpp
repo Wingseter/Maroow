@@ -25,6 +25,20 @@ struct Matrix2 {
     double d{1.0};
 };
 
+struct SnapActivation {
+    bool configured_enabled{false};
+    bool temporarily_enabled{false};
+    bool bypass{false};
+};
+
+struct SnapScalarRequest {
+    double value{0.0};
+    double step{1.0};
+    SnapActivation activation{};
+};
+
+std::optional<double> snap_scalar(SnapScalarRequest request);
+
 struct RotationBasis {
     Point pivot{};
     Matrix2 inverse{};
@@ -99,6 +113,16 @@ struct ScaleCandidate {
 std::optional<ScaleCandidate> map_scale(
     const ScaleMapping& mapping,
     Point pointer_screen);
+std::optional<ScaleCandidate> snap_scale_candidate(
+    ScaleCandidate candidate,
+    ScaleHandle handle,
+    double step,
+    SnapActivation activation);
+
+std::optional<double> visible_grid_step(
+    double world_step,
+    double pixels_per_world_unit,
+    double minimum_spacing_pixels);
 
 struct FfdInfluence {
     Matrix2 bone_world{};

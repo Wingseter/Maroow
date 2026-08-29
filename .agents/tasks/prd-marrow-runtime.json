@@ -3400,7 +3400,8 @@
       "dependsOn": [
         "MAR-164"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-20"
     },
     {
       "id": "MAR-166",

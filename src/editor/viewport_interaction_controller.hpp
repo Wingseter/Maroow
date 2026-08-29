@@ -104,7 +104,8 @@ bool begin_translate_gesture(
 bool update_translate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer);
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers = {});
 bool begin_rotate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
@@ -112,7 +113,8 @@ bool begin_rotate_gesture(
 bool update_rotate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer);
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers = {});
 bool begin_scale_gesture(
     ShellState* state,
     const ViewportLayout& layout,
@@ -121,7 +123,8 @@ bool begin_scale_gesture(
 bool update_scale_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer);
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers = {});
 void finish_transform_gesture(ShellState* state, bool commit);
 bool begin_box_selection(
     ShellState* state,

@@ -290,6 +290,21 @@ struct RuntimeAssetReferences {
     std::vector<std::filesystem::path> atlas_paths;
 };
 
+/** @brief Optional editor-only viewport snapping stored at top-level `.marrow.snap`. */
+struct ProjectSnapSettings {
+    static constexpr double kDefaultWorldGridStep = 10.0;
+    static constexpr double kDefaultLocalAngleStepDegrees = 15.0;
+    static constexpr double kDefaultAbsoluteScaleStep = 0.1;
+
+    bool world_grid_enabled{false};
+    bool local_angle_enabled{false};
+    bool absolute_scale_enabled{false};
+    double world_grid_step{kDefaultWorldGridStep};
+    double local_angle_step_degrees{kDefaultLocalAngleStepDegrees};
+    double absolute_scale_step{kDefaultAbsoluteScaleStep};
+    runtime::json::Value preserved_source{runtime::json::Value::Object{}, {}};
+};
+
 struct ViewportState {
     double pan_x{0.0};
     double pan_y{0.0};
@@ -461,6 +476,7 @@ struct ProjectData {
     std::string marrow_version{"1.0"};
     RuntimeAssetReferences runtime_assets;
     ProjectMetadata editor_metadata;
+    std::optional<ProjectSnapSettings> snap_settings;
     std::vector<AnimationEdit> animation_edits;
     std::vector<TransformTimelineEdit> transform_timeline_edits;
     std::vector<MeshDeformTimelineEdit> mesh_deform_timeline_edits;

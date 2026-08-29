@@ -1340,6 +1340,7 @@ bool validate_shell_foundation_smoke(
     if (!validate_animation_catalog_smoke(options.project_path) ||
         !validate_animation_duration_shell_smoke(options.project_path) ||
         !validate_viewport_camera_smoke(options.project_path) ||
+        !validate_viewport_snap_smoke(options.project_path) ||
         !validate_viewport_prepared_scene_renderer_smoke(options.project_path)) {
         return false;
     }
