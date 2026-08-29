@@ -253,7 +253,18 @@ void print_summary(const marrow::editor::ProjectLoadResult& result, const std::f
     std::cout << "Loaded atlases: " << join_strings(atlas_names) << '\n';
 }
 
-bool validate_viewport_settings(const marrow::editor::ProjectLoadResult& result) {
+/**
+ * @brief Validates viewport metadata against the loaded project's own contract.
+ *
+ * Zoom and the onion-skin block are struct defaults, so every project must
+ * satisfy them. The debug overlay is not: `player_idle.marrow` deliberately
+ * enables all six toggles, while `create_minimal_project` authors none and
+ * therefore loads the `DebugOverlaySettings` defaults. Asserting the fixture's
+ * shape against a freshly created project is what made `--create` fail.
+ */
+bool validate_viewport_settings(
+    const marrow::editor::ProjectLoadResult& result,
+    bool created_minimal_project) {
     if (result.project == nullptr) {
         std::cerr << "Viewport validation requires a loaded project.\n";
         return false;
@@ -275,7 +286,18 @@ bool validate_viewport_settings(const marrow::editor::ProjectLoadResult& result)
         std::cerr << "Viewport validation expected the default 3+3 frame-based onion-skin settings.\n";
         return false;
     }
-    if (!debug_overlay.bones ||
+    if (created_minimal_project) {
+        if (!debug_overlay.bones ||
+            debug_overlay.ik_constraints ||
+            debug_overlay.path_constraints ||
+            debug_overlay.physics_constraints ||
+            debug_overlay.mesh_wireframes ||
+            debug_overlay.bounding_boxes) {
+            std::cerr << "Viewport validation expected a created project to load the default bones-only debug overlay.\n";
+            return false;
+        }
+    } else if (
+        !debug_overlay.bones ||
         !debug_overlay.ik_constraints ||
         !debug_overlay.path_constraints ||
         !debug_overlay.physics_constraints ||
@@ -320,8 +342,17 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
         return false;
     }
 
+    // The MAR-165 field-removal check needs a project that actually authors a
+    // snap section. `player_idle.marrow` does; a freshly created minimal
+    // project does not, and its documented contract is exactly that absence.
+    marrow::editor::ProjectData mar165_source = *result.project;
+    if (!mar165_source.snap_settings.has_value()) {
+        marrow::editor::ProjectSnapSettings seeded;
+        seeded.magnetic_vertex_enabled = true;
+        mar165_source.snap_settings = seeded;
+    }
     const auto current_document = marrow::runtime::json::parse_document(
-        marrow::editor::serialize_project(*result.project),
+        marrow::editor::serialize_project(mar165_source),
         result.project->source_path);
     if (!current_document) {
         std::cerr << current_document.error->format();
@@ -3608,6 +3639,48 @@ bool validate_editing_p0_end_to_end(
 
 } // namespace
 
+/**
+ * @brief Validates what a freshly created minimal project must guarantee.
+ *
+ * The editing suites below this one assert authored `player_idle.marrow`
+ * overlays — transform timelines, catalog animations, explicit durations,
+ * graph-editable colour keys. A created project has none by construction, so
+ * running them against it asserted the fixture's shape, not creation's. This
+ * validates creation's own contract instead: the saved project reloads, keeps
+ * its resolved runtime references, and serializes byte-identically.
+ */
+bool validate_created_minimal_project(
+    const marrow::editor::ProjectLoadResult& result,
+    const std::filesystem::path& project_path) {
+    if (result.project == nullptr || result.skeleton_data == nullptr) {
+        std::cerr << "Created project validation requires a loaded project.\n";
+        return false;
+    }
+    if (!result.project->transform_timeline_edits.empty() ||
+        !result.project->slot_color_timeline_edits.empty() ||
+        !result.project->animation_edits.empty() ||
+        result.project->snap_settings.has_value() ||
+        result.project->parameter_model.has_value()) {
+        std::cerr << "A created minimal project must author no edits or optional sections.\n";
+        return false;
+    }
+    if (result.project->editor_metadata.preview_skins.empty() ||
+        result.project->editor_metadata.active_animation.empty() ||
+        !std::filesystem::exists(result.project->resolved_skeleton_path())) {
+        std::cerr << "A created minimal project did not resolve its runtime references.\n";
+        return false;
+    }
+    const std::string serialized = marrow::editor::serialize_project(*result.project);
+    const auto reloaded = marrow::editor::load_project(project_path);
+    if (!reloaded ||
+        marrow::editor::serialize_project(*reloaded.project) != serialized) {
+        std::cerr << "A created minimal project did not reload byte-identically.\n";
+        return false;
+    }
+    std::cout << "Created minimal project defaults, references, and round trip validated.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -3628,29 +3701,39 @@ int main(int argc, char** argv) {
     }
 
     print_summary(result, parse_result.options.project_path);
-    if (!validate_viewport_settings(result)) {
+    if (!validate_viewport_settings(result, parse_result.options.create_project)) {
         return 1;
     }
     if (!validate_snap_settings(result)) {
         return 1;
     }
-    if (!validate_undo_redo_cycle(result)) {
-        return 1;
-    }
-    if (!validate_selection_reconciliation_transience(result)) {
-        return 1;
-    }
-    if (!validate_animation_catalog_edits(result)) {
-        return 1;
-    }
-    if (!validate_editing_p1_animation_duration(result)) {
-        return 1;
-    }
-    if (!validate_editing_p0_end_to_end(result)) {
-        return 1;
-    }
-    if (!validate_mar168_graph_scalar_authoring(result)) {
-        return 1;
+    // The editing suites below assert authored `player_idle.marrow` overlays.
+    // A freshly created project has none, so it gets its own creation contract
+    // instead of the fixture's shape.
+    if (parse_result.options.create_project) {
+        if (!validate_created_minimal_project(
+                result, parse_result.options.project_path)) {
+            return 1;
+        }
+    } else {
+        if (!validate_undo_redo_cycle(result)) {
+            return 1;
+        }
+        if (!validate_selection_reconciliation_transience(result)) {
+            return 1;
+        }
+        if (!validate_animation_catalog_edits(result)) {
+            return 1;
+        }
+        if (!validate_editing_p1_animation_duration(result)) {
+            return 1;
+        }
+        if (!validate_editing_p0_end_to_end(result)) {
+            return 1;
+        }
+        if (!validate_mar168_graph_scalar_authoring(result)) {
+            return 1;
+        }
     }
     if (parse_result.options.export_runtime_path.has_value() ||
         parse_result.options.export_binary_path.has_value()) {
