@@ -585,7 +585,6 @@ bool begin_timeline_graph_handle_drag(
     drag.frozen_view = view;
     drag.frozen_plot = plot;
     drag.pressed_key = handles.key;
-    drag.component_index = handles.component_index;
     drag.handle = handle;
     drag.frame = handles.frame;
     drag.seed_control_points = handles.control_points;
@@ -657,7 +656,6 @@ bool update_timeline_graph_handle_drag(
                 drag.item_id,
                 *row,
                 drag.pressed_key,
-                drag.handle,
                 drag.frame,
                 drag.seed_control_points,
                 drag.segment_kind,

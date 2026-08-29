@@ -3009,6 +3009,61 @@ bool validate_mar169_graph_interpolation_authoring(
             std::cerr << "MAR-169 overshoot curve did not survive save and reload.\n";
             return false;
         }
+
+        // AC6: the authored curve must reach the exported runtime JSON and the
+        // v2 binary, not only the reloaded project. Saving and reloading only
+        // proves the write gate and the loader's read gate are the same
+        // predicate; export is a separate writer with its own encoder.
+        const std::filesystem::path curve_json_path =
+            "/tmp/marrow_mar169_curve.mskl";
+        const std::filesystem::path curve_binary_path =
+            "/tmp/marrow_mar169_curve.mbin";
+        marrow::editor::ProjectExportOptions curve_export_options;
+        curve_export_options.skeleton_output_path = curve_json_path;
+        curve_export_options.binary_output_path = curve_binary_path;
+        const auto curve_export = marrow::editor::export_runtime_assets(
+            project, *project_result.base_skeleton_document, curve_export_options);
+        if (!curve_export) {
+            std::cerr << curve_export.error->format() << '\n';
+            return false;
+        }
+        const auto exported = marrow::runtime::load_skeleton_data(curve_json_path);
+        if (!exported) {
+            std::cerr << exported.error->format();
+            return false;
+        }
+        const auto exported_arm = exported.skeleton_data->find_bone_index("arm_l");
+        const auto* exported_idle = exported.skeleton_data->find_animation("idle");
+        const auto* exported_rotate =
+            exported_idle != nullptr && exported_arm.has_value()
+            ? exported_idle->find_rotate_timeline(*exported_arm)
+            : nullptr;
+        const marrow::runtime::RotateKeyframe* exported_key = nullptr;
+        if (exported_rotate != nullptr) {
+            for (const auto& keyframe : exported_rotate->keyframes) {
+                if (std::abs(static_cast<double>(keyframe.time) - 0.25) <= 1e-6) {
+                    exported_key = &keyframe;
+                    break;
+                }
+            }
+        }
+        if (exported_key == nullptr ||
+            !control_points_match(exported_key->interpolation, kOvershoot)) {
+            std::cerr << "MAR-169 overshoot curve did not reach the exported runtime JSON.\n";
+            return false;
+        }
+        if (!curve_export.binary_path.has_value() ||
+            !validate_binary_export(curve_export.path, *curve_export.binary_path)) {
+            std::cerr << "MAR-169 curve export did not match its v2 binary payload.\n";
+            return false;
+        }
+        std::error_code curve_size_error;
+        const auto curve_json_size =
+            std::filesystem::file_size(curve_json_path, curve_size_error);
+        std::cout << "MAR-169 curve export: JSON " << curve_json_size
+                  << " bytes, MBIN "
+                  << std::filesystem::file_size(curve_binary_path, curve_size_error)
+                  << " bytes.\n";
         (void)near_float;
     }
     std::cout << "MAR-169 shared bezier interpolation authoring validated "

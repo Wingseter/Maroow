@@ -541,11 +541,16 @@ std::optional<GraphEditSnapshot> capture_graph_edit_snapshot(
         }
         snapshot.graph_segment_kinds.push_back(
             static_cast<int>(key.outgoing_easing.kind()));
-        const auto& points = key.outgoing_easing.cubic_bezier();
-        snapshot.graph_control_points.push_back(static_cast<double>(points.cx1));
-        snapshot.graph_control_points.push_back(static_cast<double>(points.cy1));
-        snapshot.graph_control_points.push_back(static_cast<double>(points.cx2));
-        snapshot.graph_control_points.push_back(static_cast<double>(points.cy2));
+        // Only a cubic easing carries control points; reading them for a
+        // Linear or Stepped key would look past the documented kind guard.
+        if (key.outgoing_easing.kind() ==
+            marrow::runtime::InterpolationKind::CubicBezier) {
+            const auto& points = key.outgoing_easing.cubic_bezier();
+            snapshot.graph_control_points.push_back(static_cast<double>(points.cx1));
+            snapshot.graph_control_points.push_back(static_cast<double>(points.cy1));
+            snapshot.graph_control_points.push_back(static_cast<double>(points.cx2));
+            snapshot.graph_control_points.push_back(static_cast<double>(points.cy2));
+        }
     }
     return snapshot;
 }
@@ -593,12 +598,14 @@ std::optional<ProjectedKey> projected_key(
         result.values = candidate.values;
         result.value_count = candidate.value_count;
         result.easing = candidate.outgoing_easing.kind();
-        const auto& points = candidate.outgoing_easing.cubic_bezier();
-        result.control_points = {
-            static_cast<double>(points.cx1),
-            static_cast<double>(points.cy1),
-            static_cast<double>(points.cx2),
-            static_cast<double>(points.cy2)};
+        if (result.easing == marrow::runtime::InterpolationKind::CubicBezier) {
+            const auto& points = candidate.outgoing_easing.cubic_bezier();
+            result.control_points = {
+                static_cast<double>(points.cx1),
+                static_cast<double>(points.cy1),
+                static_cast<double>(points.cx2),
+                static_cast<double>(points.cy2)};
+        }
         return result;
     }
     return std::nullopt;
@@ -812,11 +819,15 @@ bool validate_timeline_graph_edit_shell_smoke(
             std::cerr << "Graph zero-net smoke could not stage its gesture.\n";
             return false;
         }
+        state.status_message = "graph value sentinel";
         finish_timeline_graph_value_gesture(&state, true);
         const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
         if (authoring_gesture_active(state) || !after.has_value() ||
-            !graph_edit_snapshots_match(*before, *after)) {
-            std::cerr << "A zero-net graph value drag committed a history entry.\n";
+            !graph_edit_snapshots_match(*before, *after) ||
+            state.status_message != "graph value sentinel") {
+            std::cerr << "A zero-net graph value drag committed a history entry or "
+                         "reported an edit it did not make: status=\""
+                      << state.status_message << "\".\n";
             return false;
         }
     }
@@ -1604,7 +1615,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         }
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4343U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             !authoring_gesture_active(state) ||
@@ -1722,7 +1733,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         constexpr std::array<double, 4> kSecondCurve{0.4, 0.6, 0.9, 0.2};
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4344U, *translate, *stepped_key,
-                timeline_graph_model::HandleIndex::Second, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::Stepped,
                 cached_timeline_tracks(&state)) ||
             !apply_timeline_graph_handle_control_points(
@@ -1793,7 +1804,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         }
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4345U, *rotate, *rotate_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::CubicBezier,
                 cached_timeline_tracks(&state)) ||
             !apply_timeline_graph_handle_control_points(
@@ -1801,12 +1812,109 @@ bool validate_timeline_graph_easing_shell_smoke(
             std::cerr << "An unchanged cubic handle gesture did not stay live.\n";
             return false;
         }
+        state.status_message = "graph easing sentinel";
         finish_timeline_graph_handle_gesture(&state, true);
         const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
-        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after)) {
-            std::cerr << "An unchanged handle gesture created a history entry.\n";
+        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after) ||
+            state.status_message != "graph easing sentinel") {
+            std::cerr << "An unchanged handle gesture created a history entry or "
+                         "reported an edit it did not make: status=\""
+                      << state.status_message << "\".\n";
             return false;
         }
+    }
+
+    // --- A multi-frame drag that leaves the original control points and comes
+    // back to them commits nothing either. The single-frame case above hits the
+    // primitive's no-change early return; this one exercises the path where a
+    // real mutation happened first and was then undone by the pointer. ---
+    {
+        const auto rotate_key = key_of("bone:1:Rotate", 0U);
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        if (!rotate_key.has_value() || rotate == nullptr) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Rotate");
+        state.timeline_editor.selected_keys = {*rotate_key};
+        state.timeline_editor.active_key = *rotate_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Angle;
+        const auto handles = handles_for("bone:1:Rotate", *rotate_key, 0U);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!handles.has_value() || !before.has_value() ||
+            handles->kind != timeline_graph_model::SegmentKind::Cubic) {
+            return false;
+        }
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4358U, *rotate, *rotate_key,
+                handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), {0.9, 0.85, 0.1, 0.15}) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), handles->control_points)) {
+            std::cerr << "A drag-away-and-back handle gesture did not stay live.\n";
+            return false;
+        }
+        state.status_message = "graph easing sentinel";
+        finish_timeline_graph_handle_gesture(&state, true);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (authoring_gesture_active(state) || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after) ||
+            state.status_message != "graph easing sentinel") {
+            std::cerr << "A drag-away-and-back handle gesture created a history entry "
+                         "or reported an edit it did not make: status=\""
+                      << state.status_message << "\" undo="
+                      << state.session.undo_count() << "/" << before->undo_count
+                      << " revision=" << state.session.project_revision() << "/"
+                      << before->project_revision << ".\n";
+            return false;
+        }
+    }
+
+    // --- A drag that leaves the dead zone on a Stepped segment and returns to
+    // the seed still commits, because the authored kind genuinely changed. ---
+    {
+        const auto stepped_key = key_of("bone:1:Rotate", 1U);
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        if (!stepped_key.has_value() || rotate == nullptr) return false;
+        state.timeline_editor.selected_keys = {*stepped_key};
+        state.timeline_editor.active_key = *stepped_key;
+        const auto handles = handles_for("bone:1:Rotate", *stepped_key, 0U);
+        if (!handles.has_value() ||
+            handles->kind != timeline_graph_model::SegmentKind::Stepped ||
+            handles->control_points !=
+                timeline_graph_model::kLinearEquivalentControlPoints) {
+            std::cerr << "The seed-return case requires a stepped spine Rotate segment.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4359U, *rotate, *stepped_key,
+                handles->frame,
+                handles->control_points, InterpolationKind::Stepped,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), {0.8, 0.2, 0.9, 0.1}) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), handles->control_points)) {
+            std::cerr << "A seed-return handle gesture did not stay live.\n";
+            return false;
+        }
+        state.status_message = "graph easing sentinel";
+        finish_timeline_graph_handle_gesture(&state, true);
+        const auto after = projected_key(&state, "bone:1:Rotate", *stepped_key);
+        if (state.status_message != "Edited key easing" ||
+            state.session.undo_count() != undo_before + 1U || !after.has_value() ||
+            after->easing != InterpolationKind::CubicBezier ||
+            !near_points(
+                after->control_points,
+                timeline_graph_model::kLinearEquivalentControlPoints)) {
+            std::cerr << "Returning to the seed on a stepped segment did not commit "
+                         "the Cubic conversion.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
     }
 
     // --- The flat Blue segment of slot:0:Color: a drag succeeds through the
@@ -1835,7 +1943,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         constexpr std::array<double, 4> kFlatCurve{0.3, 0.8, 0.7, 0.25};
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4346U, *color, *color_key,
-                timeline_graph_model::HandleIndex::First, blue->frame,
+                blue->frame,
                 blue->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             !apply_timeline_graph_handle_control_points(
@@ -1872,7 +1980,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         }
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4347U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::CubicBezier,
                 cached_timeline_tracks(&state)) ||
             !apply_timeline_graph_handle_control_points(
@@ -1897,7 +2005,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4348U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::CubicBezier,
                 cached_timeline_tracks(&state))) {
             std::cerr << "The rejection case could not stage its gesture.\n";
@@ -1922,7 +2030,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4349U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::Second, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::CubicBezier,
                 cached_timeline_tracks(&state)) ||
             apply_timeline_graph_handle_control_points(
@@ -1963,7 +2071,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         // A row the graph cannot author.
         if (begin_timeline_graph_handle_gesture(
                 &state, 4350U, *attachment, *attachment_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             state.timeline_editor.graph_handle_gesture.has_value()) {
@@ -1975,7 +2083,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (begin_timeline_graph_handle_gesture(
                 &state, 4351U, *translate, *last_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             state.timeline_editor.graph_handle_gesture.has_value()) {
@@ -1988,7 +2096,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (begin_timeline_graph_handle_gesture(
                 &state, 4352U, *translate, stranger,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             state.timeline_editor.graph_handle_gesture.has_value()) {
@@ -2002,7 +2110,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (begin_timeline_graph_handle_gesture(
                 &state, 4353U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, broken,
+                broken,
                 handles->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             state.timeline_editor.graph_handle_gesture.has_value()) {
@@ -2022,7 +2130,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (begin_timeline_graph_handle_gesture(
                 &state, 4355U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::Linear,
                 cached_timeline_tracks(&state)) ||
             state.timeline_editor.graph_handle_gesture.has_value()) {
@@ -2052,7 +2160,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (!handles.has_value() || !before.has_value()) return false;
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4356U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::CubicBezier,
                 cached_timeline_tracks(&state)) ||
             !apply_timeline_graph_handle_control_points(
@@ -2073,7 +2181,7 @@ bool validate_timeline_graph_easing_shell_smoke(
         if (translate == nullptr) return false;
         if (!begin_timeline_graph_handle_gesture(
                 &state, 4357U, *translate, *first_key,
-                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->frame,
                 handles->control_points, InterpolationKind::CubicBezier,
                 cached_timeline_tracks(&state))) {
             std::cerr << "The source-adoption case could not stage its gesture.\n";

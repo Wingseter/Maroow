@@ -614,7 +614,6 @@ struct TimelineGraphPointDrag {
     // because its mapping is absolute rather than a delta from the press.
     timeline_graph_model::PlotRect frozen_plot{};
     TimelineKeyRef pressed_key{};
-    std::size_t component_index{0U};
     timeline_graph_model::HandleIndex handle{
         timeline_graph_model::HandleIndex::First};
     timeline_graph_model::SegmentFrame frame{};
@@ -634,13 +633,11 @@ struct TimelineGraphHandleGesture {
     std::uint32_t item_id{0U};
     std::string track_id;
     TimelineKeyRef key;
-    timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
-    std::size_t component_index{0U};
-    timeline_graph_model::HandleIndex handle{
-        timeline_graph_model::HandleIndex::First};
     timeline_graph_model::SegmentFrame frame{};
     marrow::runtime::InterpolationKind original_kind{
         marrow::runtime::InterpolationKind::Linear};
+    // The authored easing at the press. `changed` is measured against this, so
+    // a drag that travels and comes back completes as a cancel.
     std::array<double, 4> original_control_points{};
     std::array<double, 4> applied_control_points{};
     bool clamped_x{false};

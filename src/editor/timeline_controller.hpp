@@ -182,9 +182,10 @@ void finish_timeline_graph_value_gesture(ShellState* state, bool commit);
  * @brief Opens one live transaction that authors the active key's easing.
  *
  * The easing belongs to the whole parent key and is shared by every component
- * of that key, so the gesture carries no component through to the primitive;
- * `component`/`component_index` exist only so the driver can notice the
- * displayed component changing under a live drag. Fails closed on a null
+ * of that key, so the gesture carries no component at all: there is no argument
+ * through which a component could influence which bytes are written. The
+ * displayed component cannot change under a live drag because the visibility
+ * controls are disabled for as long as one is live. Fails closed on a null
  * state, another live authoring gesture, a non-editable or unprojectable row,
  * a key that is not on `track`, the track's last key, and a non-finite frame.
  */
@@ -193,7 +194,6 @@ bool begin_timeline_graph_handle_gesture(
     std::uint32_t item_id,
     const TimelineTrackRow& track,
     const TimelineKeyRef& key,
-    timeline_graph_model::HandleIndex handle,
     const timeline_graph_model::SegmentFrame& frame,
     const std::array<double, 4>& seed_control_points,
     marrow::runtime::InterpolationKind original_kind,

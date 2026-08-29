@@ -1996,7 +1996,11 @@ bool apply_timeline_graph_value_delta(
     // A value edit never moves a key in time, so every TimelineKeyRef stays
     // bit-identical and selection/active_key need no rebuild.
     gesture.applied_delta += offset.applied_delta;
-    gesture.changed = true;
+    // `changed` is the net state, not "some frame mutated something": a drag
+    // that travels and comes back must complete as a cancel so it neither
+    // claims an edit it did not make nor relies on the session's
+    // unchanged-snapshot backstop to suppress a history entry.
+    gesture.changed = std::abs(gesture.applied_delta) > 1e-12;
     return true;
 }
 
@@ -2035,7 +2039,6 @@ bool begin_timeline_graph_handle_gesture(
     std::uint32_t item_id,
     const TimelineTrackRow& track,
     const TimelineKeyRef& key,
-    timeline_graph_model::HandleIndex handle,
     const timeline_graph_model::SegmentFrame& frame,
     const std::array<double, 4>& seed_control_points,
     marrow::runtime::InterpolationKind original_kind,
@@ -2066,23 +2069,9 @@ bool begin_timeline_graph_handle_gesture(
         });
     if (projected == projection.track->keys.end()) return false;
 
-    // The displayed component only labels the gesture; the primitive writes the
-    // one shared easing of the parent key and takes no component argument.
-    std::size_t component_index = 0U;
-    if (state->timeline_editor.graph_view.active_component.has_value()) {
-        const auto slot = std::find_if(
-            projection.track->components.begin(),
-            projection.track->components.end(),
-            [&](const timeline_graph_model::ComponentDescriptor& descriptor) {
-                return descriptor.component ==
-                    *state->timeline_editor.graph_view.active_component;
-            });
-        if (slot != projection.track->components.end()) {
-            component_index = static_cast<std::size_t>(
-                std::distance(projection.track->components.begin(), slot));
-        }
-    }
-    if (component_index >= projection.track->components.size()) return false;
+    // No component is captured at all: the primitive writes the one shared
+    // easing of the parent key and has no component argument to write through.
+    if (projection.track->components.empty()) return false;
 
     auto transaction = state->session.begin_edit({
         marrow::editor::EditKind::EditProperty,
@@ -2101,9 +2090,6 @@ bool begin_timeline_graph_handle_gesture(
     gesture.item_id = item_id;
     gesture.track_id = track.id;
     gesture.key = key;
-    gesture.component = projection.track->components[component_index].component;
-    gesture.component_index = component_index;
-    gesture.handle = handle;
     gesture.frame = frame;
     gesture.original_kind = original_kind;
     gesture.original_control_points = seed_control_points;
@@ -2229,7 +2215,15 @@ bool apply_timeline_graph_handle_control_points(
     // An easing edit never moves a key in time, so every TimelineKeyRef stays
     // bit-identical and selection/active_key need no rebuild.
     gesture.applied_control_points = requested_control_points;
-    gesture.changed = true;
+    // `changed` is the net state against the ORIGINAL authored easing, not
+    // "some frame mutated something". A drag that travels and returns to the
+    // stored Cubic points completes as a cancel; a drag that returns to the
+    // seed of a Linear or Stepped segment still counts as changed, because the
+    // authored kind genuinely became Cubic.
+    gesture.changed =
+        gesture.original_kind != marrow::runtime::InterpolationKind::CubicBezier ||
+        !same_control_points(
+            requested_control_points, gesture.original_control_points);
     return true;
 }
 
