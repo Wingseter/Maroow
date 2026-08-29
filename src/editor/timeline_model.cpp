@@ -87,7 +87,8 @@ std::vector<TrackRow> build_tracks(
     const auto add_bone_track = [&](std::string_view suffix,
                                     std::size_t bone_index,
                                     const auto& keyframes,
-                                    std::optional<marrow::editor::TransformTimelineChannel> transform_channel) {
+                                    std::optional<marrow::editor::TransformTimelineChannel> transform_channel,
+                                    TimelineTrackKind kind) {
         if (bone_index >= skeleton.bones().size() || keyframes.empty()) {
             return;
         }
@@ -100,11 +101,13 @@ std::vector<TrackRow> build_tracks(
             bone_index,
             std::nullopt,
             transform_channel,
-            std::nullopt});
+            std::nullopt,
+            kind});
     };
     const auto add_slot_track = [&](std::string_view suffix,
                                     std::size_t slot_index,
-                                    const auto& keyframes) {
+                                    const auto& keyframes,
+                                    TimelineTrackKind kind) {
         if (slot_index >= skeleton.slots().size() || keyframes.empty()) {
             return;
         }
@@ -117,7 +120,8 @@ std::vector<TrackRow> build_tracks(
             std::nullopt,
             slot_index,
             std::nullopt,
-            std::nullopt});
+            std::nullopt,
+            kind});
     };
 
     for (const auto& timeline : animation.bone_rotate_timelines) {
@@ -125,37 +129,54 @@ std::vector<TrackRow> build_tracks(
             "Rotate",
             timeline.bone_index,
             timeline.keyframes,
-            marrow::editor::TransformTimelineChannel::Rotate);
+            marrow::editor::TransformTimelineChannel::Rotate,
+            TimelineTrackKind::Rotate);
     }
     for (const auto& timeline : animation.bone_translate_timelines) {
         add_bone_track(
             "Translate",
             timeline.bone_index,
             timeline.keyframes,
-            marrow::editor::TransformTimelineChannel::Translate);
+            marrow::editor::TransformTimelineChannel::Translate,
+            TimelineTrackKind::Translate);
     }
     for (const auto& timeline : animation.bone_scale_timelines) {
         add_bone_track(
             "Scale",
             timeline.bone_index,
             timeline.keyframes,
-            marrow::editor::TransformTimelineChannel::Scale);
+            marrow::editor::TransformTimelineChannel::Scale,
+            TimelineTrackKind::Scale);
     }
     for (const auto& timeline : animation.bone_shear_timelines) {
         add_bone_track(
             "Shear",
             timeline.bone_index,
             timeline.keyframes,
-            marrow::editor::TransformTimelineChannel::Shear);
+            marrow::editor::TransformTimelineChannel::Shear,
+            TimelineTrackKind::Shear);
     }
     for (const auto& timeline : animation.bone_inherit_timelines) {
-        add_bone_track("Inherit", timeline.bone_index, timeline.keyframes, std::nullopt);
+        add_bone_track(
+            "Inherit",
+            timeline.bone_index,
+            timeline.keyframes,
+            std::nullopt,
+            TimelineTrackKind::Inherit);
     }
     for (const auto& timeline : animation.slot_attachment_timelines) {
-        add_slot_track("Attachment", timeline.slot_index, timeline.keyframes);
+        add_slot_track(
+            "Attachment",
+            timeline.slot_index,
+            timeline.keyframes,
+            TimelineTrackKind::SlotAttachment);
     }
     for (const auto& timeline : animation.slot_color_timelines) {
-        add_slot_track("Color", timeline.slot_index, timeline.keyframes);
+        add_slot_track(
+            "Color",
+            timeline.slot_index,
+            timeline.keyframes,
+            TimelineTrackKind::SlotColor);
     }
     for (const auto& timeline : animation.mesh_deform_timelines) {
         if (timeline.slot_index >= skeleton.slots().size() || timeline.keyframes.empty()) {
@@ -171,7 +192,8 @@ std::vector<TrackRow> build_tracks(
             std::nullopt,
             timeline.slot_index,
             std::nullopt,
-            timeline.attachment_name});
+            timeline.attachment_name,
+            TimelineTrackKind::Deform});
     }
 
     if (animation.draw_order_timeline_data.has_value() &&
@@ -184,7 +206,8 @@ std::vector<TrackRow> build_tracks(
             std::nullopt,
             std::nullopt,
             std::nullopt,
-            std::nullopt});
+            std::nullopt,
+            TimelineTrackKind::DrawOrder});
     }
 
     if (animation.event_timeline_data.has_value() &&
@@ -197,7 +220,8 @@ std::vector<TrackRow> build_tracks(
             std::nullopt,
             std::nullopt,
             std::nullopt,
-            std::nullopt});
+            std::nullopt,
+            TimelineTrackKind::Event});
     }
 
     return tracks;
@@ -272,6 +296,37 @@ std::optional<std::size_t> key_index(
     return resolved;
 }
 
+void apply_key_activation(
+    std::vector<KeyRef>* selection,
+    std::optional<KeyRef>* active_key,
+    const KeyRef& clicked_key,
+    bool additive) {
+    if (selection == nullptr || active_key == nullptr) {
+        return;
+    }
+    const auto found = std::find(selection->begin(), selection->end(), clicked_key);
+    if (!additive) {
+        if (found == selection->end()) {
+            *selection = {clicked_key};
+        }
+        *active_key = clicked_key;
+        return;
+    }
+    if (found == selection->end()) {
+        selection->push_back(clicked_key);
+        *active_key = clicked_key;
+        return;
+    }
+    const bool removed_active = *active_key == std::optional<KeyRef>(clicked_key);
+    selection->erase(found);
+    if (removed_active || !active_key->has_value() ||
+        std::find(selection->begin(), selection->end(), **active_key) == selection->end()) {
+        *active_key = selection->empty()
+            ? std::nullopt
+            : std::optional<KeyRef>(selection->back());
+    }
+}
+
 void reconcile_selection(
     std::vector<KeyRef>* selection,
     const std::vector<TrackRow>& tracks) {
@@ -295,6 +350,22 @@ void reconcile_selection(
         }
     }
     *selection = std::move(unique);
+}
+
+void reconcile_selection(
+    std::vector<KeyRef>* selection,
+    std::optional<KeyRef>* active_key,
+    const std::vector<TrackRow>& tracks) {
+    if (selection == nullptr || active_key == nullptr) {
+        return;
+    }
+    reconcile_selection(selection, tracks);
+    if (!active_key->has_value() ||
+        std::find(selection->begin(), selection->end(), **active_key) == selection->end()) {
+        *active_key = selection->empty()
+            ? std::nullopt
+            : std::optional<KeyRef>(selection->back());
+    }
 }
 
 std::vector<std::size_t> selected_indices(

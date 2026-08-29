@@ -11,6 +11,7 @@
 
 #include "timeline_controller.hpp"
 #include "timeline_model.hpp"
+#include "shell_timeline_graph.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/runtime/animation.hpp"
 
@@ -40,6 +41,8 @@ void draw_slot_attachment_timeline_editor(
 void draw_transform_timeline_editor(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks);
-void draw_timeline_window(ShellState* state);
+void draw_timeline_window(
+    ShellState* state,
+    TimelineGraphRenderStats* graph_stats_out = nullptr);
 
 } // namespace marrow::editor::shell

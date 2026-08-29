@@ -88,18 +88,93 @@ void test_same_time_identity_and_reconciliation(TestSuite& suite) {
         "identity must survive unrelated insertion before the key time");
 
     std::vector<model::KeyRef> selection{first, first, second};
-    model::reconcile_selection(&selection, {shifted});
+    std::optional<model::KeyRef> active = second;
+    model::reconcile_selection(&selection, &active, {shifted});
     suite.expect(
-        selection == std::vector<model::KeyRef>{first, second},
-        "reconciliation must preserve order while removing duplicates");
+        selection == std::vector<model::KeyRef>{first, second} &&
+            active == std::optional<model::KeyRef>(second),
+        "reconciliation must preserve order and a valid active identity while removing duplicates");
 
     const model::TrackRow reduced = track({0.5, 1.0});
     suite.expect(
         !model::key_index(reduced, first).has_value() &&
             !model::key_index(reduced, second).has_value(),
         "a changed same-time population must invalidate every ambiguous identity");
-    model::reconcile_selection(&selection, {reduced});
-    suite.expect(selection.empty(), "invalid same-time identities must be dropped");
+    model::reconcile_selection(&selection, &active, {reduced});
+    suite.expect(
+        selection.empty() && !active.has_value(),
+        "invalid same-time identities must clear the active key");
+}
+
+void test_fixture_track_kinds_preserve_identifiers(TestSuite& suite) {
+    const auto loaded = marrow::editor::load_project("assets/fixtures/player_idle.marrow");
+    suite.expect(static_cast<bool>(loaded), "fixture project must load");
+    if (!loaded) return;
+    const auto* animation = loaded.skeleton_data->find_animation("idle");
+    suite.expect(animation != nullptr, "idle animation must resolve");
+    if (animation == nullptr) return;
+
+    const std::vector<std::pair<std::string, model::TimelineTrackKind>> expected{
+        {"bone:0:Translate", model::TimelineTrackKind::Translate},
+        {"bone:1:Rotate", model::TimelineTrackKind::Rotate},
+        {"bone:1:Translate", model::TimelineTrackKind::Translate},
+        {"bone:1:Scale", model::TimelineTrackKind::Scale},
+        {"bone:1:Shear", model::TimelineTrackKind::Shear},
+        {"bone:2:Rotate", model::TimelineTrackKind::Rotate},
+        {"slot:0:Attachment", model::TimelineTrackKind::SlotAttachment},
+        {"slot:0:Color", model::TimelineTrackKind::SlotColor},
+        {"slot:0:deform:body_mesh", model::TimelineTrackKind::Deform},
+        {"global:draw-order", model::TimelineTrackKind::DrawOrder},
+        {"global:events", model::TimelineTrackKind::Event},
+    };
+    const auto rows = model::build_tracks(*loaded.skeleton_data, *animation);
+    suite.expect(rows.size() == expected.size(), "fixture track count must stay unchanged");
+    for (const auto& [id, kind] : expected) {
+        const model::TrackRow* row = model::find_track(rows, id);
+        suite.expect(
+            row != nullptr && row->id == id && row->kind == kind,
+            "typed track kind must preserve the established fixture identifier");
+    }
+}
+
+void test_parent_key_activation_and_active_fallback(TestSuite& suite) {
+    const model::TrackRow row = track({0.1, 0.2, 0.3});
+    const model::KeyRef first = model::key_ref(row, 0U);
+    const model::KeyRef second = model::key_ref(row, 1U);
+    const model::KeyRef third = model::key_ref(row, 2U);
+
+    std::vector<model::KeyRef> selection{first, second};
+    std::optional<model::KeyRef> active = first;
+
+    model::apply_key_activation(&selection, &active, second, false);
+    suite.expect(
+        selection == std::vector<model::KeyRef>{first, second} &&
+            active == std::optional<model::KeyRef>(second),
+        "plain activation of a selected key must preserve the group and move active");
+
+    model::apply_key_activation(&selection, &active, third, false);
+    suite.expect(
+        selection == std::vector<model::KeyRef>{third} &&
+            active == std::optional<model::KeyRef>(third),
+        "plain activation of an unselected key must replace selection");
+
+    model::apply_key_activation(&selection, &active, first, true);
+    suite.expect(
+        selection == std::vector<model::KeyRef>{third, first} &&
+            active == std::optional<model::KeyRef>(first),
+        "additive insertion must append and activate the clicked key");
+
+    model::apply_key_activation(&selection, &active, first, true);
+    suite.expect(
+        selection == std::vector<model::KeyRef>{third} &&
+            active == std::optional<model::KeyRef>(third),
+        "removing the active key must choose the last stable remaining key");
+
+    const model::TrackRow reduced = track({0.1});
+    model::reconcile_selection(&selection, &active, {reduced});
+    suite.expect(
+        selection.empty() && !active.has_value(),
+        "reconciliation must clear an active key whose identity no longer resolves");
 }
 
 void test_clipboard_collision_and_order(TestSuite& suite) {
@@ -275,6 +350,12 @@ int main() {
     TestSuite suite;
     suite.run("same-time identity and reconciliation", [&] {
         test_same_time_identity_and_reconciliation(suite);
+    });
+    suite.run("fixture track kinds preserve identifiers", [&] {
+        test_fixture_track_kinds_preserve_identifiers(suite);
+    });
+    suite.run("parent key activation and active fallback", [&] {
+        test_parent_key_activation_and_active_fallback(suite);
     });
     suite.run("clipboard collision and stable ordering", [&] {
         test_clipboard_collision_and_order(suite);

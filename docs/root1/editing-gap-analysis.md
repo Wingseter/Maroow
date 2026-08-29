@@ -1,11 +1,13 @@
 # Maroow 편집 기능 갭 분석 (vs Spine 4.2/4.3, Live2D Cubism 5.x)
 
-최종 갱신: 2026-08-16. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
+최종 갱신: 2026-08-20. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
 Preference Store, MAR-157 Typed SelectionSet, MAR-158 Selection Migration, MAR-159 Hierarchy
 Multi-Selection, MAR-160 Viewport Multi-Selection, MAR-161 Parent-Space Rotation Gizmo 및
 MAR-162 Signed Local Scale Gizmo, Task #28 핵심 경계 리팩터, MAR-163 Single-Vertex
-FFD Auto-Key 및 MAR-164 Attachment-local Multi-Vertex FFD 완료 checkpoint,
+FFD Auto-Key, MAR-164 Attachment-local Multi-Vertex FFD, MAR-165 Share Project
+Viewport Transform Snapping, MAR-166 Grid/Magnetic FFD Vertex Snapping 및 MAR-167
+Synchronized Scalar Graph 완료 checkpoint,
 MAR-192~210 platform program 보류 결정과
 `.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
@@ -22,9 +24,9 @@ ArtPath, expression/lip-sync, Parameter Modeling mode와 56개 에이전트 오�
 
 현재 Spine/Live2D 대비 가장 큰 **미해결** 격차는 세 가지다:
 
-1. **뷰포트 직접 조작의 P1 범위** — 이동, parent-space 회전, signed local scale 및 attachment-local multi-vertex FFD는 구현됐지만 grid/angle/vertex snap은 아직 없다.
+1. **고급 타임라인 저작 UX 미구현** — P0 도프시트와 MAR-167 읽기 전용 scalar graph view는 완성됐지만 graph point/Bezier handle 편집, 리타임 스케일, 커브 프리셋/자동 핸들/루프 동기화는 P1이다.
 2. **리그/메시 저작 불가** — 본·슬롯·스킨·어태치먼트·메시 지오메트리를 에디터에서 생성/삭제/편집할 수 없다(임포트 전용). 이는 오버레이 아키텍처의 의도된 결과지만, "에디터"로서는 결정적 제약.
-3. **고급 타임라인 UX 미구현** — P0 도프시트는 완성됐지만 그래프 에디터, 그래픽 베지어 핸들, 리타임 스케일, 커브 프리셋/자동 핸들/루프 동기화는 P1이다.
+3. **파일·복구 UX 미완성** — atomic open/save-as, external-conflict workflow, structured Problems, staged/atomic PSD re-import가 남아 있다.
 
 이전의 네 번째 핵심 gap이던 **Live2D식 파라미터 모델링 레이어는 해소됐다**. MAR-121은 MAR-122에 통합됐고,
 MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoint가 2026-07-16에 검증됐다.
@@ -39,8 +41,9 @@ platform-correct replace/toggle/range/additive-range gesture와 transient anchor
 multi-turn auto-key를 완료했다. MAR-162는 frozen scale-free local axis와 signed/exact-zero scale
 auto-key를 2026-07-25에 완료했고 behavior-preserving Task #28 핵심 경계 리팩터와
 single-vertex FFD auto-key MAR-163과 attachment-local multi-vertex FFD MAR-164는 2026-08-16에
-완료했다. 다음 제품 milestone은 shared transform snapping을 담당하는 MAR-165이며 dependency는
-완료된 MAR-164다.
+완료했다. MAR-165 shared transform snapping, MAR-166 FFD grid/magnetic vertex snapping과
+MAR-167 synchronized scalar graph view는 2026-08-20에 완료했다. 다음 제품 milestone은 graph
+point editing을 담당하는 MAR-168이며 dependency는 완료된 MAR-167이다.
 MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
 
 ---
@@ -69,8 +72,8 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 | User preferences | v1 `editor-settings.json`, six typed curve tokens, raw Recent Projects paths, macOS/Linux/Windows resolver, Windows UTF-16 AppData와 durable atomic replace, unknown-field 보존, malformed/future-version 보호 | `preferences.cpp`, `preferences.hpp`, `preference_store_tests.cpp` |
 | Platform/GPU shell | SDL3 window/input/IME/pen, macOS Metal 및 Windows/Linux GLCORE 4.1 Sokol surface, pass-free scene renderer, official sokol_imgui; 현재 qualification은 macOS arm64와 Windows 11 x64만 대상으로 MAR-210까지 open | `sdl_window_host.cpp`, `sokol_graphics_device.cpp`, `viewport_renderer.cpp` |
 | Entity selection | 이름 기반 typed Bone/Slot/Attachment/Constraint 집합, 단일 active invariant, stable-order primitives, hierarchy replace/toggle/range/additive-range와 viewport typed point/bone-only box gesture, transient anchor, selected/active 구분 | `selection.cpp`, `shell_selection.cpp`, `selection_set_tests.cpp` |
-| 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale, exact active mesh의 single-vertex full-vector FFD auto-key | `viewport_interaction_kernel.cpp`, `viewport_interaction_controller.cpp`, `viewport_ffd_controller.cpp`, `shell_viewport_ui.cpp` |
-| 도프시트 | 60 FPS 눈금자, 독립 zoom/pan, 안정적 키 identity, toggle/box 선택, 다중 리타임, typed clipboard | `timeline_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp` |
+| 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale, attachment-local multi-vertex FFD auto-key, project world-grid/local-angle/absolute-scale snap, inclusive 8px visible-vertex magnetic FFD snap과 live Alt/Cmd·Ctrl | `viewport_interaction_kernel.cpp`, `viewport_interaction_controller.cpp`, `viewport_ffd_controller.cpp`, `shell_viewport_ui.cpp` |
+| 도프시트/그래프 | 60 FPS 눈금자, 도프시트 독립 zoom/pan, 안정적 parent-key identity, toggle/box 선택, 다중 리타임, typed clipboard; 한 focused parent track의 effective scalar projection, component toggle/Fit/wheel·Shift-wheel/middle pan, shared selection/active/playhead, actual Linear/Stepped/Cubic 표시 | `timeline_model.cpp`, `timeline_graph_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp`, `shell_timeline_graph.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
 | 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두 | `shell_constraints.cpp` |
 | 언두/트랜잭션 | 스냅샷 100개 캡, 머지 키 그룹핑, 원자적 런타임 리빌드+실패 롤백 | `session.cpp` |
@@ -84,8 +87,8 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 
 - **Setup Pose/슬롯 setup 색상은 의도적으로 read-only** — Animation 모드 본 포즈는 항상 playhead auto-key이고, 슬롯 light/attachment는 timeline editor에서 저작한다. 저장되지 않는 preview-only 포즈/색상 입력은 없다.
 - **inherit timeline은 read-only** — project overlay는 MAR-184, 편집 parity는 MAR-185로 미뤘다.
-- **뷰포트는 이동·회전·signed scale·attachment-local multi-vertex FFD까지 직접 저작** — FFD point/toggle/box sub-selection과 common-world-delta group move는 구현됐고 공용/vertex snap은 MAR-165~166이다. 경로 제어점 직접 조작과 entity `SelectionSet`의 group transform은 P1 범위 밖이다.
-- **그래프 에디터 없음** — 숫자 Bezier 입력은 가능하지만 graph view/point/handle, preset/auto handle/loop 동기화는 MAR-167~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
+- **뷰포트는 이동·회전·signed scale·attachment-local multi-vertex FFD와 transform/FFD snap까지 직접 저작** — FFD point/toggle/box sub-selection, common-world-delta group move, world-grid/local-angle/absolute-scale snap, visible nonselected vertex magnetic snap과 live modifier/guide가 구현됐다. 경로 제어점 직접 조작과 entity `SelectionSet`의 group transform은 P1 범위 밖이다.
+- **그래프 view는 읽기 전용** — MAR-167은 effective Transform/Slot RGBA scalar series, actual easing, shared parent selection/active/playhead와 transient navigation을 제공한다. Point time/value 편집과 Bezier handle, preset/auto handle/loop 동기화는 MAR-168~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
 - **제약 파라미터 일부 위젯 없음** — IK softness/compress/stretch, Physics step/x/y/rotate/scaleX/shearX/limit/massInverse (라운드트립은 됨).
 - **제약 삭제/이름변경 불가** — lifecycle schema는 MAR-177, UI·agent surface는 MAR-178, 누락 위젯은 MAR-179 범위다.
 - **Hierarchy와 viewport entity gesture 완료** — MAR-159는 visible row range와 transient anchor를, MAR-160은 typed point hit와 visible active-Bone box selection을 완료했다. 모든 도구는 active item 하나만 편집하며 group transform은 범위 밖이다.
@@ -96,7 +99,7 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 
 우선순위 표기: 🔴 결정적(경쟁 도구의 CORE 워크플로), 🟡 중요(생산성 격차 큼), 🟢 편의(있으면 좋음).
 
-### 2.1 뷰포트 직접 조작 — P0 기반 완료, P1 확장 필요
+### 2.1 뷰포트 직접 조작 — 승인된 P1 확장 완료
 
 Spine 편집의 본질은 "뷰포트에서 본을 잡아 끄는 것"이고, Live2D는 "캔버스 위에서 디포머/파라미터를 직접 조작하는 것"이다. Maroow P0는 이 층의 최소 수직 슬라이스를 구현했다.
 
@@ -108,8 +111,8 @@ Spine 편집의 본질은 "뷰포트에서 본을 잡아 끄는 것"이고, Live
 | scale X/Y/uniform 기즈모 | 구현. 74px fixed handles, frozen scale-free local axes, signed ratio와 exact-zero fallback, active-only auto-key, one transaction/undo | MAR-162 완료 |
 | single-vertex FFD 직접 편집 | 구현. 최종 mesh pose의 6px handle, frozen weighted inverse, full-vector animation-FFD auto-key, linked parent target, one transaction/undo | MAR-163 완료 |
 | persistent/multi-vertex FFD 선택·이동 | 구현. exact displayed Attachment scope, point/toggle/inclusive box, common world delta와 frozen per-vertex inverse, atomic full-vector update, linked parent target, one transaction/undo | MAR-164 완료 |
-| translate/rotate/scale 공용 snap | 미구현 | MAR-165 |
-| FFD grid/magnetic vertex snap | 미구현 | MAR-166 |
+| translate/rotate/scale 공용 snap | 구현. optional project model, 10/15/0.1 defaults, Alt bypass, Cmd/Ctrl temporary enable, project-only settings history | MAR-165 완료 |
+| FFD grid/magnetic vertex snap | 구현. pressed-vertex anchor, shared world grid, inclusive 8px visible candidate, selected exclusion, magnetic-before-grid, stable identity tie, live modifiers, common group delta | MAR-166 완료 |
 | 경로 제어점 직접 조작·group transform | 미구현 | P1 범위 밖 |
 
 초기 선결 과제였던 `world_from_screen`과 포즈 bounds에서 분리된 카메라는 MAR-143에서 해결됐다.
@@ -216,7 +219,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 
 - 단기 제품은 **임포트 리그 기반 애니메이션/후처리 에디터**다.
 - Setup Pose와 슬롯 dark tint는 P0에서 읽기 전용이다. Animation 모드의 R/T/S/shear 변경은 항상 현재 playhead의 키로 영속화한다.
-- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale을 추가했다. FFD 직접 조작과 snap은 후속 P1이다.
+- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale, MAR-163~164 attachment-local FFD 직접 조작, MAR-165 transform snap과 MAR-166 FFD grid/magnetic vertex snap을 추가했고 MAR-167에서 synchronized scalar graph view를 완료했다. 다음 직접 제품 milestone은 MAR-168 graph point editing이다.
 - MAR-154에서 호환 가능한 runtime explicit/inferred/effective duration 경계를, MAR-155에서 editor
   authoring·undo·Agent/MCP를 완료했다. 키 생성·오른쪽 이동은 같은 transaction에서 duration을 자동 연장하되
   키 삭제·왼쪽 이동은 자동 축소하지 않으며 마지막 키보다 짧은 수동 축소를 원자적으로 거부한다. Duration이 없는 기존
@@ -272,7 +275,7 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 플랫폼 전환 코드의 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
 raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
 revision 최종 로컬 매트릭스(MAR-210)다. 이 story들은 상태와 내부 dependency를 유지한 채 별도
-재개 결정 전까지 open 병렬 보류 backlog이며 MAR-165 이후 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
+재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~167 및 다음 MAR-168~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
 `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate에서 제외됐다. 코드·단위 테스트가 구현돼도
 macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/resource/package 증거가
 모두 없으면 story를 done으로 표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는
@@ -280,7 +283,7 @@ macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/res
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD 및 MAR-164 attachment-local multi-vertex FFD checkpoint는 통과했다. 다음 제품 chain은 MAR-164에 의존하는 MAR-165부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD, MAR-164 attachment-local multi-vertex FFD, MAR-165 project viewport transform snapping, MAR-166 FFD vertex snapping 및 MAR-167 synchronized scalar graph checkpoint는 통과했다. 다음 제품 chain은 완료된 MAR-167에 의존하는 MAR-168부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
 
 #### 기반·선택
 
@@ -343,6 +346,29 @@ linked child-to-parent timeline, lifecycle 보존/clear와 no-op/return-to-start
 보존하면서 transient vertex selection을 저장하지 않았다. Default CTest 20/20과 Debug/Release
 display-enabled 23/23, C ABI v1, 56-operation Agent, socket/MCP, third-party hash와 export/runtime gate를
 통과했으며 Windows qualification credit은 추가하지 않았다.
+MAR-165 checkpoint는 UI-free scalar activation/quantization, negative half-step, multi-turn angle,
+signed/exact-zero 및 deterministic uniform scale ratio, visible-grid integer multiple을 kernel test로
+검증했다. Project smoke는 absent-section default-off/비물질화, strict positive finite step,
+unknown nested-field 보존, save/reload와 runtime-document 동등성을 확인했다. Shell smoke는
+project-only toggle, coalesced numeric drag, reflected parent 앞 world-target snap, translate/rotate/scale,
+gesture 중 Alt/Cmd·Ctrl 전환, 한 undo와 cancel 복원을 검증했다. Default build와 CTest 20/20을
+통과했으며 display/Release와 compatibility gate 결과는 `AGENTS.md`의 MAR-165 checkpoint를 따른다.
+MAR-166 checkpoint는 shared world grid와 default-off magnetic boolean, fixed inclusive 8px resolver,
+magnetic-before-grid 및 full stable identity tie-break를 UI-free kernel에서 검증했다. Shell smoke는
+pressed-vertex group anchor, selected exclusion, cross-slot/positive-alpha/live-canvas 후보, 같은 gesture의
+zoom 재투영과 offscreen-to-onscreen 진입, weighted/linked immediate-parent target, live Alt/Cmd·Ctrl,
+transient guide, one-undo/undo-redo, no-op/return-to-start/cancel을 검증했다. Project smoke는 MAR-165
+형태의 누락 필드 default false, strict bool, unknown 보존, filesystem save/reload와 runtime-export
+동등성을 확인했다. 전체 gate와 Windows qualification 비부여는 `AGENTS.md`의 MAR-166 checkpoint를 따른다.
+MAR-167 checkpoint는 effective runtime animation에서 Bone R/T/S/shear와 Slot light RGBA의
+한 focused parent track을 UI-free scalar projection으로 만들고 같은 `TimelineKeyRef`, selection,
+`active_key`, focused track과 playhead를 dopesheet와 공유한다. Component visibility, Fit, wheel time
+zoom, Shift-wheel value zoom, middle pan과 cache/view는 transient이며 duration, project bytes,
+dirty/history/revision과 56-operation Agent/MCP surface를 바꾸지 않는다. Linear/Stepped/Cubic은
+실제 outgoing easing과 서로 다른 marker로 표시하고 parent key 하나의 easing을 X/Y 또는 RGBA가
+공유한다. FFD와 discrete lane은 fail-closed empty state이며 value/time drag는 MAR-168 경계다.
+Canonical `player_idle` effective animation은 valid arm_l Rotate overlay를 포함해 7 parent track/14
+scalar series다. 전체 gate와 platform qualification 비부여는 `AGENTS.md`의 MAR-167 checkpoint를 따른다.
 
 #### 뷰포트 직접 조작
 
@@ -352,14 +378,14 @@ display-enabled 23/23, C ABI v1, 56-operation Agent, socket/MCP, third-party has
 | MAR-162 | Scale gizmo (완료, 2026-07-25) | 74px screen-space local X/Y/uniform handle이 frozen positive scale-free rotation/shear axis에서 signed ratio와 exact-zero 74px fallback을 계산한다. Uniform은 시작 X:Y ratio/sign을 보존하고 `(0,0)`에서는 숨긴다. Active Bone 하나만 effective scale track transaction으로 auto-key하며 unsupported inherit·singular·non-finite는 전체 rollback한다. |
 | MAR-163 | Single-vertex FFD (완료, 2026-08-16) | final mesh pose의 모든 vertex를 6px handle로 표시하고 effective deform 전체를 materialize한 뒤 한 pair만 auto-key한다. Weighted vertex는 가중 bone world 2×2 행렬 합의 frozen inverse를 사용하며 linked `deform=true`는 immediate parent target을 보존한다. |
 | MAR-164 | Multi-vertex FFD (완료, 2026-08-16) | exact displayed Attachment scope의 click/toggle/box selection과 common-world-delta group move를 한 full-vector key·transaction·undo로 적용한다. 모든 frozen inverse를 mutation 전에 검증하며 하나라도 invalid면 전체 candidate를 취소한다. |
-| MAR-165 | Shared transform snapping | 프로젝트별 snap metadata와 world grid 10 units, local angle 15°, absolute scale 0.1 snap을 translate/rotate/scale에 공통 적용한다. 기존 프로젝트 기본은 OFF, Alt는 우회, Ctrl/Cmd는 gesture 동안 임시 활성화한다. |
-| MAR-166 | FFD vertex snapping | grid와 보이는 모든 비선택 mesh vertex 대상 8px magnetic snap을 추가한다. Vertex snap이 grid보다 우선하고 screen distance 뒤 stable identity로 tie-break한다. |
+| MAR-165 | Share project viewport transform snapping (완료, 2026-08-20) | Optional `.marrow.snap`의 독립 enable과 10/15/0.1 step을 project-only history로 저장한다. Translate absolute world target, raw multi-turn local angle, signed/exact-zero absolute scale을 공용 scalar primitive로 quantize하고 uniform ratio/sign을 보존한다. Alt는 우회하고 Cmd/Ctrl은 disabled domain을 gesture 중 live 활성화하며 export와 project dirty/history에는 modifier가 남지 않는다. |
+| MAR-166 | Add grid and magnetic FFD vertex snapping (완료, 2026-08-20) | Pressed selected vertex를 group anchor로 삼아 shared world grid와 fixed inclusive 8px magnetic snap을 적용한다. Positive-alpha displayed mesh의 매-update on-canvas 후보에서 selected member를 제외하고 magnetic-before-grid, exact distance, `(slot, optional skin, attachment, vertex)` tie를 사용한다. Common world delta, linked parent target, live Alt/Cmd·Ctrl, transient guide와 one transaction/undo를 보존한다. |
 
 #### 그래프·타임라인 생산성
 
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
-| MAR-167 | Graph view | Transform R/T/S/shear와 Slot RGBA scalar series를 표시하고 dopesheet playhead/key selection을 공유한다. FFD와 discrete lane은 제외한다. |
+| MAR-167 | Graph view (완료, 2026-08-20) | 한 focused Transform R/T/S/shear 또는 Slot RGBA parent의 effective scalar series를 component toggle/Fit/wheel·Shift-wheel/middle pan으로 표시하고 dopesheet의 parent selection/active/playhead를 공유한다. Actual outgoing easing을 표시하며 FFD/discrete lane과 persistent state, point drag를 제외한다. |
 | MAR-168 | Graph point editing | active component 값과 key 전체 시간을 drag한다. 시간 충돌·frame snap·duration auto-grow는 공용 authoring primitive를 사용한다. |
 | MAR-169 | Graphical Bezier handles | outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 drag한다. X는 `[0,1]`, Y는 finite overshoot를 허용하며 한 drag는 한 undo다. |
 | MAR-170 | Curve presets/default | Linear, Stepped, Ease, Ease-In, Ease-Out, Ease-In-Out 고정값을 제공하고 마지막 기본 curve를 user preference에 저장한다. |

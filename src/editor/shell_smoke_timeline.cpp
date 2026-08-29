@@ -303,7 +303,21 @@ bool validate_timeline_p0_authoring_smoke(const std::filesystem::path& project_p
     }
     const TimelineTrackRow& source_translate = *translate_tracks[0];
     const TimelineTrackRow& target_translate = *translate_tracks[1];
+    state.timeline_editor.selected_keys = {
+        timeline_key_ref(source_translate, 0U),
+        timeline_key_ref(source_translate, 1U)};
+    state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+    if (!activate_timeline_key(
+            &state, source_translate, 1U, false, "Dopesheet smoke", false) ||
+        state.timeline_editor.selected_keys.size() != 2U ||
+        !(state.timeline_editor.active_key ==
+            std::optional<TimelineKeyRef>(timeline_key_ref(source_translate, 1U))) ||
+        std::abs(state.timeline_time_seconds - source_translate.key_times[1U]) > 1e-6) {
+        std::cerr << "Shared timeline activation did not preserve selection, active key, and playhead.\n";
+        return false;
+    }
     state.timeline_editor.selected_keys = {timeline_key_ref(source_translate, 0U)};
+    state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
     if (!copy_selected_timeline_keys(&state, tracks)) {
         std::cerr << "Timeline P0 compatible-lane copy failed.\n";
         return false;

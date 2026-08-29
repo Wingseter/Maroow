@@ -20,6 +20,8 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path);
 bool validate_viewport_prepared_scene_renderer_smoke(
     const std::filesystem::path& project_path);
 bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path);
+bool validate_timeline_graph_shell_smoke(
+    const std::filesystem::path& project_path);
 bool validate_timeline_p0_authoring_smoke(
     const std::filesystem::path& project_path);
 bool validate_derived_cache_smoke(ShellState* state);

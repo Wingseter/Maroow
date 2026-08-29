@@ -17,7 +17,7 @@ The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04
 - Preview/playback, asset watching, timeline, constraints, selection, inspector, weight-paint, viewport UI, project/runtime panels, and agent panels have feature-owned source/header pairs.
 - `marrow_editor` contains UI-free project/session/agent authoring code and links only `marrow_runtime` and Zlib; icon/UI/OpenGL code is compiled only into `marrow_editor_shell`.
 - The C API and socket dispatcher use `EditorSession` plus `AgentControlState`, and C ABI version 1 is unchanged.
-- CTest discovers seven source-root compatibility tests. The refactor baseline characterized 44 operations; editing P0 adds animation CRUD and atomic timeline retime, so the current agent smoke exercises all 49 registered operations.
+- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the current registry to the exact 56-operation total recorded below.
 
 ## Target ownership
 
@@ -80,7 +80,7 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | --- | --- | --- | --- |
 | MAR-120 | Fix parameter/deformer format boundary and roadmap slices | MAR-119 | Done (validated 2026-07-12) |
 | MAR-129 | Focused CTest guardrail | MAR-120 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
-| MAR-130 | Characterize external behavior and the baseline 44 agent operations | MAR-129 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00; current registry 49) |
+| MAR-130 | Characterize external behavior and the baseline 44 agent operations | MAR-129 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00; P0-era registry snapshot 49) |
 | MAR-131 | Unified session transactions and history | MAR-130 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
 | MAR-132 | Preview controller | MAR-131 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
 | MAR-133 | EditorSession lifecycle and ownership | MAR-132 | Done (`4c93ca1`, 2026-07-12T13:34:04+09:00) |
@@ -99,9 +99,10 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | MAR-154 | Runtime explicit clip duration | MAR-128 | Done (validated 2026-07-17) |
 | MAR-155 | Editor duration authoring | MAR-154 | Done (validated 2026-07-17) |
 | MAR-156 | Versioned user preference store | MAR-155 | Done (validated 2026-07-18) |
-| MAR-157–191 | Remaining Editing P1 backlog | Each story depends on the immediately preceding story | Open backlog beginning at MAR-157 |
+| MAR-157–167 | Typed selection through synchronized scalar graph checkpoints | Each story depends on the immediately preceding story | Done (validated 2026-07-18 through 2026-08-20) |
+| MAR-168–191 | Remaining Editing P1 product chain | Each story depends on the immediately preceding story | Open backlog beginning at MAR-168 |
 
-Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, and MAR-154–156 are also complete. The next dependency sequence is the linear MAR-157–191 P1 backlog. These are functional implementation and validation milestones. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
+Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, MAR-154–156 are complete, and MAR-157–167 remain completed functional checkpoints. The next dependency sequence is the remaining linear MAR-168–191 P1 product chain. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
 
 ## Compatibility boundary
 
@@ -327,7 +328,9 @@ passed this completion gate on both hosts:
   SHA-256 `f0c24473e21f7f5b9efda18df48c5e42339a6d0f4fe6a0a4bb57cefd38238d9c`;
   staged-folder and new-directory extracted runs both exited 0.
 
-Task #28, MAR-163, and MAR-164 are therefore complete; MAR-165 is the next product milestone.
+Task #28, MAR-163, and MAR-164 remain complete at that checkpoint. MAR-165,
+MAR-166, and MAR-167 were completed separately on 2026-08-20; MAR-168 is the
+next product milestone.
 Windows 11 high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain
 deferred MAR-192 through MAR-210 qualification evidence and received no
 Task #28 or platform-qualification credit. Those stories remain `open`, and

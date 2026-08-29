@@ -96,6 +96,13 @@ bool focus_timeline_track(
     double time_seconds,
     std::string_view source,
     bool update_status_message);
+bool activate_timeline_key(
+    ShellState* state,
+    const TimelineTrackRow& track,
+    std::size_t key_index,
+    bool additive,
+    std::string_view source,
+    bool update_status_message);
 
 std::optional<std::size_t> ensure_transform_timeline_edit_index(
     ShellState* state,

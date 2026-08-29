@@ -648,6 +648,7 @@ Top-level keys:
 - `marrow`
 - `runtime`
 - `editor`
+- `snap`
 - `animation_edits`
 - `timeline_edits`
 - `mesh_edits`
@@ -687,6 +688,50 @@ Common fields:
 `timeline` is optional and currently stores `fps`, a finite positive editor
 display/snap rate. It defaults to `60` for existing projects. Timeline zoom and
 pan are presentation state and do not alter animation duration.
+
+### `snap`
+
+Optional editor-only viewport-snapping settings. Projects that omit this
+section keep all four snap domains disabled while using the numeric defaults
+below if Cmd on macOS or Ctrl elsewhere temporarily enables snapping during a
+gesture. A MAR-165 project that has `snap` but omits the MAR-166 magnetic field
+also defaults magnetic snapping to off.
+
+```json
+"snap": {
+  "world_grid_enabled": false,
+  "magnetic_vertex_enabled": false,
+  "local_angle_enabled": false,
+  "absolute_scale_enabled": false,
+  "world_grid_step": 10,
+  "local_angle_step_degrees": 15,
+  "absolute_scale_step": 0.1
+}
+```
+
+- All four enable fields are booleans. The three step fields must be finite and strictly
+  greater than zero; invalid values are rejected on load and save.
+- Translation quantizes the applicable absolute world target axes about world
+  origin zero before parent inversion. Rotation quantizes the unnormalized
+  absolute local angle. Scale quantizes signed absolute components and permits
+  exact zero; uniform scale uses one deterministic nonzero driver and preserves
+  its X:Y ratio and signs.
+- Alt bypasses snapping even when the stored domain and Cmd/Ctrl temporary
+  enablement are both active. Modifiers are transient input and never enter the
+  project document, dirty state, or history.
+- The visible viewport grid uses `world_grid_step` at world origin zero and may
+  skip only integer multiples while zoomed out.
+- FFD uses the same `world_grid_enabled` and `world_grid_step`. Magnetic matching
+  is enabled by `magnetic_vertex_enabled` and uses a fixed, non-serialized,
+  inclusive 8 logical-pixel Euclidean radius. The pressed selected vertex is the
+  group anchor; selected active-scope members are excluded, magnetic wins over
+  grid, and exact-distance ties use `(slot name, optional resolved skin name,
+  displayed attachment name, vertex index)`. Candidate canvas membership is
+  reevaluated under the current layout during the active gesture.
+- Unknown additive members inside `snap` survive load/save. The entire section
+  is omitted when it was absent and no setting has been authored.
+- `snap` never enters `.mskl` or `.mbin` export and does not change runtime
+  format versions, C ABI v1, or the Agent/MCP surface.
 
 ### `animation_edits`
 

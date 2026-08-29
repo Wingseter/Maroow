@@ -81,7 +81,9 @@ void reconcile_timeline_key_selection(
         return;
     }
     marrow::editor::timeline_model::reconcile_selection(
-        &state->timeline_editor.selected_keys, tracks);
+        &state->timeline_editor.selected_keys,
+        &state->timeline_editor.active_key,
+        tracks);
 }
 
 const TimelineTrackRow* selected_timeline_track(
@@ -648,6 +650,7 @@ bool set_selected_animation(
 
     if (state->selected_animation_name != animation->name) {
         state->timeline_editor.selected_keys.clear();
+        state->timeline_editor.active_key.reset();
         state->timeline_editor.box_selection.reset();
     }
     state->selected_animation_name = animation->name;
@@ -797,6 +800,29 @@ bool focus_timeline_track(
         state->status_message = stream.str();
     }
 
+    return true;
+}
+
+bool activate_timeline_key(
+    ShellState* state,
+    const TimelineTrackRow& track,
+    std::size_t key_index,
+    bool additive,
+    std::string_view source,
+    bool update_status_message) {
+    if (state == nullptr || key_index >= track.key_times.size()) {
+        return false;
+    }
+    state->timeline_playing = false;
+    if (!focus_timeline_track(
+            state, track, track.key_times[key_index], source, update_status_message)) {
+        return false;
+    }
+    marrow::editor::timeline_model::apply_key_activation(
+        &state->timeline_editor.selected_keys,
+        &state->timeline_editor.active_key,
+        timeline_key_ref(track, key_index),
+        additive);
     return true;
 }
 
@@ -1111,10 +1137,13 @@ bool add_timeline_key_at_playhead(
             : std::vector<TimelineTrackRow>{};
         const TimelineTrackRow* rebuilt_track = find_timeline_track(rebuilt_tracks, track.id);
         if (rebuilt_track != nullptr && *inserted_index < rebuilt_track->key_times.size()) {
-            state->timeline_editor.selected_keys = {
-                timeline_key_ref(*rebuilt_track, *inserted_index)};
+            const TimelineKeyRef inserted_key =
+                timeline_key_ref(*rebuilt_track, *inserted_index);
+            state->timeline_editor.selected_keys = {inserted_key};
+            state->timeline_editor.active_key = inserted_key;
         } else {
             state->timeline_editor.selected_keys.clear();
+            state->timeline_editor.active_key.reset();
         }
     }
     return committed;
@@ -1218,7 +1247,10 @@ bool remove_selected_timeline_keys(
         std::move(transaction),
         removed_count == 1U ? "Removed timeline key" : "Removed timeline keys",
         removed_count > 0U);
-    if (committed) state->timeline_editor.selected_keys.clear();
+    if (committed) {
+        state->timeline_editor.selected_keys.clear();
+        state->timeline_editor.active_key.reset();
+    }
     return committed;
 }
 
@@ -1500,6 +1532,7 @@ bool paste_timeline_clipboard(
         pasted_count > 0U);
     if (committed) {
         state->timeline_editor.selected_keys.clear();
+        state->timeline_editor.active_key.reset();
         if (first_track_id.has_value()) state->selected_timeline_track_id = *first_track_id;
     }
     return committed;
@@ -1696,8 +1729,20 @@ bool apply_timeline_retime_delta(
         rebuilt_selection.push_back(
             timeline_key_ref(*rebuilt_track, resolved_indices[selection_index]));
     }
+    std::optional<TimelineKeyRef> rebuilt_active;
+    if (state->timeline_editor.active_key.has_value()) {
+        for (std::size_t selection_index = 0U;
+             selection_index < gesture.keys.size();
+             ++selection_index) {
+            if (gesture.keys[selection_index] == *state->timeline_editor.active_key) {
+                rebuilt_active = rebuilt_selection[selection_index];
+                break;
+            }
+        }
+    }
     gesture.keys = rebuilt_selection;
     state->timeline_editor.selected_keys = std::move(rebuilt_selection);
+    state->timeline_editor.active_key = std::move(rebuilt_active);
     gesture.applied_delta += retime.applied_delta;
     gesture.changed = true;
     return true;

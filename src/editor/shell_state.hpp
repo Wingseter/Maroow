@@ -15,6 +15,7 @@
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
+#include "timeline_graph_model.hpp"
 #include "timeline_model.hpp"
 #include "viewport_interaction_kernel.hpp"
 #include "viewport_renderer.hpp"
@@ -558,6 +559,30 @@ struct TimelineRetimeGesture {
     marrow::editor::EditorSession::EditTransaction transaction;
 };
 
+enum class TimelineViewMode : std::uint8_t {
+    Dopesheet,
+    Graph,
+};
+
+struct TimelineGraphProjectionCache {
+    std::uint64_t runtime_revision{0U};
+    const marrow::runtime::SkeletonData* skeleton_identity{nullptr};
+    std::string animation_name;
+    std::string track_id;
+    timeline_graph_model::Projection projection;
+    std::uint64_t generation{0U};
+    bool valid{false};
+};
+
+struct TimelineGraphViewState {
+    timeline_graph_model::View view{};
+    std::array<bool, 4> component_visible{true, true, true, true};
+    std::optional<timeline_graph_model::Component> active_component;
+    std::string fitted_track_id;
+    std::string fitted_animation_name;
+    bool needs_fit{true};
+};
+
 struct ParameterSliderGesture {
     std::string parameter_id;
     bool changed{false};
@@ -577,6 +602,11 @@ struct TimelineEditorState {
     double view_start_seconds{0.0};
     double pixels_per_second{160.0};
     std::vector<TimelineKeyRef> selected_keys;
+    std::optional<TimelineKeyRef> active_key;
+    TimelineViewMode view_mode{TimelineViewMode::Dopesheet};
+    std::optional<TimelineViewMode> requested_view_mode;
+    TimelineGraphViewState graph_view{};
+    TimelineGraphProjectionCache graph_cache{};
     TimelineClipboard clipboard;
     std::optional<TimelineBoxSelection> box_selection;
     std::optional<TimelineRetimeGesture> retime_gesture;

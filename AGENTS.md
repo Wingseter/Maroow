@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-164, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-165 is the next product milestone and depends on MAR-164. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-167, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-168 is the next product milestone and depends on MAR-167. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -39,6 +39,7 @@
 - Typed transient entity selection model: `./build/marrow_selection_tests`
 - Viewport interaction data-kernel tests: `./build/marrow_viewport_interaction_tests`
 - Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
+- Timeline scalar-graph projection/geometry/view tests: `./build/marrow_timeline_graph_model_tests`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -159,7 +160,7 @@
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
-- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
@@ -223,6 +224,107 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-167 Synchronized Scalar Graph Validation Results
+
+Validated 2026-08-20 and final-review corrections revalidated 2026-08-21. The
+Timeline window now has a read-only Graph tab for one
+focused continuous parent track. It projects effective runtime Bone
+Rotate/Translate/Scale/Shear or Slot light RGBA, shares parent-key selection,
+`active_key`, focus, and playhead with the dopesheet, and keeps all graph view
+state transient. `player_idle` resolves seven supported parent tracks and
+fourteen scalar series because the valid arm_l Rotate project overlay is part of
+the effective runtime animation.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Projection and exclusion | UI-free tests cover the 7 parent/14 scalar fixture projection, absolute unwrapped Rotate, shared parent identity/easing, and fail-closed Inherit, Attachment, FFD, Draw Order, and Event exclusion | PASS |
+| Interaction and ownership | One focused parent track exposes per-component toggles and Fit. Wheel time zoom, bounded Shift-wheel value zoom, and middle pan are duration-independent; point activation shares parent selection, `active_key`, focus, and playhead with the dopesheet. Explicit fallback legend/empty-plot interaction focuses its displayed parent while render, Fit, wheel, and pan do not | PASS |
+| Easing and presentation | Actual Linear, Stepped, and Cubic outgoing easing use distinct markers. The UI states that easing is parent-key-wide across X/Y or RGBA, and point time/value dragging is read-only until MAR-168 | PASS |
+| Persistence and compatibility | Tab/view/cache/visibility/active-component interactions leave serialization, dirty state, history, project/runtime revision, `.mskl` v1, `.mbin` v2, C ABI v1, and the 56-operation Agent/MCP surface unchanged | PASS |
+
+Fresh commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j4 && ./build/marrow_timeline_graph_model_tests && ./build/marrow_timeline_model_tests && ./build/marrow_project_smoke assets/fixtures/player_idle.marrow && ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2 && ctest --test-dir build --output-on-failure` -> configure/build passed; graph model 18/18; timeline model 8/8; project smoke passed; actual two-frame shell smoke passed; default CTest 21/21.
+- The actual-frame shell smoke reported `spine_rotate points=3 linear=0 stepped=1 cubic=1 playhead=1`, `arm_l_rotate points=2 linear=1 stepped=0 cubic=0 playhead=0`, and `spine_translate points=6 linear=2 stepped=2 cubic=0 playhead=1`. Its real wheel arbitration reported hovered plot ownership with graph span `927.273->1066.36` and unchanged Timeline scroll `326->326`; the graph margin left the graph span `1066.36->1066.36` and changed Timeline scroll `326->261`.
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j4 && ctest --test-dir build-display --output-on-failure` -> automated Debug display-enabled suite 24/24, including 3 display tests, passed in 12.58 s.
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j4 && ctest --test-dir build-platform-release --output-on-failure` -> automated Release display-enabled suite 24/24, including 3 display tests, passed in 6.22 s.
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar167.mskl --export-binary /tmp/marrow_mar167.mbin` -> project/runtime export passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`.
+- `./build/marrow_inspect --compare /tmp/marrow_mar167.mbin /tmp/marrow_mar167.mskl` -> match; `rotate_keys=10->10`, `translate_keys=6->6`, JSON `14336` bytes, MBIN v2 `3984` bytes.
+- `./build/marrow_fixture_smoke /tmp/marrow_mar167.mskl /tmp/player_idle.matl` -> exported runtime passed with 16 bones, 7 slots, 5 skins, 3 animations, 2 events, 3 draw commands, and 1 clip.
+- `./build/marrow_agent_dispatch_smoke` -> passed against the unchanged exact 56-operation registry; `./build/marrow_agent_socket_tests` -> 4/4 passed; `./build/marrow_c_smoke` -> C ABI loaded 3 commands, 6 indices, and 2 callback events.
+- MCP schema `py_compile`, `cmake --build build --target marrow_verify_third_party`, fixture/PRD JSON parsing, `git diff --check`, and `git lfs status` passed; no LFS object was staged or queued to push.
+
+The display suites are automated evidence only. This checkpoint adds no manual
+visible-UI, Windows 11, physical-input, or platform qualification credit.
+MAR-192 through MAR-210 remain open, and support qualification remains governed
+by `docs/root1/platform-validation.md`.
+
+## MAR-166 Grid and Magnetic FFD Vertex Snapping Validation Results
+
+Validated 2026-08-20. Attachment-local FFD group drags now share the project
+world grid and can opt into magnetic matching against currently visible mesh
+vertices. The pressed selected vertex remains the group anchor, and one snapped
+common world delta preserves the MAR-164 transaction and linked-target boundary.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Project and settings | Additive `magnetic_vertex_enabled` defaults false when `.snap` or only the field is absent, rejects non-boolean input, preserves unknown nested data, survives filesystem save/reload, and remains runtime-export neutral. Properties → Viewport Snapping → Magnetic Vertices is one project-only undo/no-op-aware edit; the inclusive 8px radius is fixed and not serialized | PASS |
+| Candidate and resolver | The UI-free resolver covers inclusive 8px Euclidean matching, magnetic-before-grid precedence, exact distance and `(slot, optional resolved skin, displayed attachment, vertex)` tie order. Shell coverage includes selected exclusion, duplicate attachment names across skins, cross-slot meshes, positive-alpha gating, per-update on-canvas filtering, same-gesture zoom reprojection, and offscreen-to-onscreen candidate admission | PASS |
+| Gesture and lifecycle | Snapping uses the pressed selected vertex as anchor and applies one common world delta through frozen single/weighted inverses. Live Alt bypass and Cmd/Ctrl temporary enable do not enter settings/history; grid fallback, linked child-to-immediate-parent targeting, one commit/undo/redo, click/no-movement, snap-return-to-start, cancel, refresh failure, and atomic rollback remain covered | PASS |
+| UI and compatibility | Magnetic and grid previews use transient cyan/gold guides from the raw pressed-anchor target. The display-enabled suites exercise the editor UI path without adding a manual visual-support claim. `.mskl` v1, `.mbin` v2, C ABI v1, `SelectionSet`, GPU ownership, and the 56-operation Agent/MCP surface remain unchanged | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j4` -> all default targets built
+- `./build/marrow_viewport_interaction_tests` -> inclusive boundary, precedence, stable slot/skin/attachment/vertex ties, live activation/bypass, grid fallback, and invalid-math tests passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> absent/MAR-165-shaped default-off compatibility, strict boolean validation, unknown retention, filesystem save/reload, and runtime-document export neutrality passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> candidate visibility/identity, selected exclusion, same-gesture layout reprojection, group/weighted/linked snapping, modifiers, guide origin, grid fallback, cancel/no-op, save/reload, and undo/redo smoke passed
+- `ctest --test-dir build --output-on-failure` -> 20/20 passed
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j4 && ctest --test-dir build-display --output-on-failure` -> Debug display-enabled suite 23/23 passed
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j4 && ctest --test-dir build-platform-release --output-on-failure` -> Release display-enabled suite 23/23 passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar166.mskl --export-binary /tmp/marrow_mar166.mbin` -> project/runtime export passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar166.mbin /tmp/marrow_mar166.mskl` -> match; `rotation_error=0.00274662deg`, `position_error=0.000811016px`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar166.mskl /tmp/player_idle.matl` -> exported runtime passed
+- `./build/marrow_agent_dispatch_smoke`, `./build/marrow_agent_socket_tests`, `./build/marrow_c_smoke`, and MCP schema `py_compile` -> unchanged surfaces and transports passed
+- `python3 -m json.tool assets/fixtures/player_idle.marrow > /dev/null`, `python3 -m json.tool .agents/tasks/prd-marrow-runtime.json > /dev/null`, `cmake --build build --target marrow_verify_third_party`, and `git diff --check` -> passed
+
+This checkpoint adds no Windows qualification credit. MAR-192 through MAR-210 remain
+open, and macOS/Windows support qualification remains governed by
+`docs/root1/platform-validation.md`.
+
+## MAR-165 Shared Project Viewport Transform Snapping Validation Results
+
+Validated 2026-08-20. Animation-mode translate, rotate, and scale gestures now
+share one UI-free snap kernel backed by optional project metadata. Existing
+projects remain default-off, while transient gesture modifiers never enter the
+project, runtime export, dirty state, or history.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Project model | Optional top-level `.marrow.snap` stores independent world-grid/local-angle/absolute-scale enables and positive finite steps with defaults `10`/`15`/`0.1`; absent projects stay off without materialization, unknown nested fields survive, invalid load/save fails, and a valid filesystem save/reload preserves typed and unknown data | PASS |
+| Gesture math | The common scalar primitive covers negative half-steps and live activation; translate snaps the absolute world target before reflected-parent inversion, rotate snaps the raw unnormalized multi-turn local angle, and scale preserves signed/exact-zero components plus the X-if-nonzero-else-Y uniform driver ratio/sign rule | PASS |
+| Input, settings, and grid | Alt always bypasses; macOS Cmd/non-macOS Ctrl temporarily enables a disabled domain and is sampled live. A toggle creates one project-only undo, a numeric drag creates one coalesced project-only undo, a blocked drag continuation cannot mutate without its pending item, and the origin-anchored display grid uses only integer multiples of the configured world step | PASS |
+| Transaction and compatibility | One successful gesture creates one undo and cancellation is exact. An off-grid scale click with no movement and orthogonal pointer movement on an axis-constrained translate create no key or history. The additive public `ProjectSnapSettings`/`ProjectData::snap_settings` model does not change runtime documents, `.mskl` v1, `.mbin` v2, C ABI v1, GPU resources, or the 56-operation Agent/MCP surface | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j4` -> all default targets built
+- `./build/marrow_viewport_interaction_tests` -> scalar activation/quantization, negative midpoint, signed/exact-zero/uniform scale, invalid math, and visible-grid integer-multiple tests passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> absent/default-off compatibility, strict validation, unknown-field retention, valid filesystem save/reload, and runtime-document export neutrality passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> project-only settings history and blocked-continuation rejection, reflected-parent/free/axis-constrained translation, raw rotation, signed/exact-zero scale, live modifiers, off-grid no-movement regressions, cancellation, and one-undo smoke passed
+- `ctest --test-dir build --output-on-failure` -> 20/20 passed
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j4 && ctest --test-dir build-display --output-on-failure` -> Debug display-enabled suite 23/23 passed
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j4 && ctest --test-dir build-platform-release --output-on-failure` -> Release display-enabled suite 23/23 passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar165.mskl --export-binary /tmp/marrow_mar165.mbin` -> project/runtime export passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar165.mbin /tmp/marrow_mar165.mskl` -> match; `rotation_error=0.00274662deg`, `position_error=0.000811016px`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar165.mskl /tmp/player_idle.matl` -> exported runtime passed
+- `./build/marrow_agent_dispatch_smoke`, `./build/marrow_agent_socket_tests`, `./build/marrow_c_smoke`, and MCP schema `py_compile` -> unchanged surfaces and transports passed
+- `python3 -m json.tool assets/fixtures/player_idle.marrow > /dev/null`, `cmake --build build --target marrow_verify_third_party`, and `git diff --check` -> passed
+
+This checkpoint adds no Windows qualification credit. MAR-192 through MAR-210 remain
+open, and macOS/Windows support qualification remains governed by
+`docs/root1/platform-validation.md`.
 
 ## MAR-164 Attachment-Local Multi-Vertex FFD Validation Results
 
