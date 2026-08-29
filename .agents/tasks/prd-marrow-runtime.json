@@ -3417,7 +3417,8 @@
       "dependsOn": [
         "MAR-165"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-20"
     },
     {
       "id": "MAR-167",
@@ -3433,7 +3434,8 @@
       "dependsOn": [
         "MAR-166"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-20"
     },
     {
       "id": "MAR-168",

@@ -1801,6 +1801,60 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
     sync_shell_from_editor_session(&state);
     state.session.clear_history();
 
+    const std::string magnetic_baseline =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto* runtime_before_magnetic = state.session.runtime_data();
+    const bool dirty_before_magnetic = state.session.dirty();
+    const std::uint64_t project_revision_before_magnetic =
+        state.session.project_revision();
+    const std::uint64_t runtime_revision_before_magnetic =
+        state.session.runtime_revision();
+    const std::uint64_t preview_revision_before_magnetic =
+        state.session.preview_revision();
+    if (!apply_snap_setting_edit(
+            &state,
+            "Enable magnetic vertex snapping",
+            "viewport:snap:magnetic-vertex-enabled",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->magnetic_vertex_enabled = true;
+            }) ||
+        !state.session.project()->snap_settings.has_value() ||
+        !state.session.project()->snap_settings->magnetic_vertex_enabled ||
+        state.session.undo_count() != 1U ||
+        state.session.runtime_data() != runtime_before_magnetic ||
+        state.session.project_revision() != project_revision_before_magnetic + 1U ||
+        state.session.runtime_revision() != runtime_revision_before_magnetic ||
+        state.session.preview_revision() != preview_revision_before_magnetic) {
+        std::cerr << "Magnetic vertex checkbox was not one project-only edit.\n";
+        return false;
+    }
+    const std::string magnetic_after =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t magnetic_undo = state.session.undo_count();
+    const std::uint64_t magnetic_project_revision =
+        state.session.project_revision();
+    if (apply_snap_setting_edit(
+            &state,
+            "Enable magnetic vertex snapping",
+            "viewport:snap:magnetic-vertex-enabled",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->magnetic_vertex_enabled = true;
+            }) ||
+        marrow::editor::serialize_project(*state.session.project()) != magnetic_after ||
+        state.session.undo_count() != magnetic_undo ||
+        state.session.project_revision() != magnetic_project_revision ||
+        state.session.runtime_revision() != runtime_revision_before_magnetic ||
+        state.session.preview_revision() != preview_revision_before_magnetic ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) !=
+            magnetic_baseline ||
+        state.session.dirty() != dirty_before_magnetic) {
+        std::cerr << "Magnetic vertex same-value edit or undo changed unrelated state.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
     constexpr ImGuiID kSnapStepItem = 0x4d415235U;
     const auto runtime_before_step_drag = state.session.runtime_data();
     if (!apply_coalesced_snap_setting_edit(

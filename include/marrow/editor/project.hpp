@@ -299,6 +299,7 @@ struct ProjectSnapSettings {
     bool world_grid_enabled{false};
     bool local_angle_enabled{false};
     bool absolute_scale_enabled{false};
+    bool magnetic_vertex_enabled{false};
     double world_grid_step{kDefaultWorldGridStep};
     double local_angle_step_degrees{kDefaultLocalAngleStepDegrees};
     double absolute_scale_step{kDefaultAbsoluteScaleStep};

@@ -375,6 +375,69 @@ bool world_position_matches(
         kWorldVerificationEpsilon * scale;
 }
 
+std::vector<ViewportFfdSnapCandidate> collect_snap_candidates(
+    const ShellState& state,
+    const ViewportFfdSelectionScope& active_scope,
+    const std::vector<std::size_t>& selected_vertices) {
+    std::vector<ViewportFfdSnapCandidate> candidates;
+    const auto* skeleton = state.session.runtime_data();
+    if (state.preview_skeleton == nullptr || skeleton == nullptr ||
+        state.preview_skeleton->slot_states().size() != skeleton->slots().size()) {
+        return candidates;
+    }
+    std::vector<bool> seen_slots(skeleton->slots().size(), false);
+    for (const std::size_t slot_index : state.preview_skeleton->draw_order()) {
+        if (slot_index >= skeleton->slots().size() || seen_slots[slot_index]) {
+            continue;
+        }
+        seen_slots[slot_index] = true;
+        const auto& slot_state = state.preview_skeleton->slot_states()[slot_index];
+        if (!std::isfinite(slot_state.color.a) || slot_state.color.a <= 0.0) {
+            continue;
+        }
+        const auto selection = current_attachment_selection(state, slot_index);
+        const auto* attachment = state.preview_skeleton->current_attachment(slot_index);
+        const auto pose = state.preview_skeleton->evaluate_current_mesh_attachment(
+            slot_index);
+        if (!selection.has_value() || attachment == nullptr ||
+            attachment->mesh_geometry == nullptr || !pose.has_value() ||
+            pose->attachment_name != selection->attachment_name) {
+            continue;
+        }
+        std::optional<std::string> skin_name;
+        if (selection->skin_index.has_value()) {
+            if (*selection->skin_index >= skeleton->skins().size()) {
+                continue;
+            }
+            skin_name = skeleton->skins()[*selection->skin_index].name;
+        }
+        for (std::size_t vertex_index = 0U;
+             vertex_index < pose->vertices.size();
+             ++vertex_index) {
+            const bool selected = slot_index == active_scope.slot_index &&
+                selection->skin_index == active_scope.display_skin_index &&
+                selection->attachment_name == active_scope.display_attachment_name &&
+                std::binary_search(
+                    selected_vertices.begin(), selected_vertices.end(), vertex_index);
+            if (selected) {
+                continue;
+            }
+            const auto& vertex = pose->vertices[vertex_index];
+            const ViewportWorldPoint world{vertex.x, vertex.y};
+            if (!finite_world_point(world)) {
+                continue;
+            }
+            candidates.push_back({
+                {skeleton->slots()[slot_index].name,
+                 skin_name,
+                 selection->attachment_name,
+                 vertex_index},
+                world});
+        }
+    }
+    return candidates;
+}
+
 bool activate_group_drag(
     ShellState* state,
     const ResolvedFfdTarget& target,
@@ -409,6 +472,9 @@ bool activate_group_drag(
             inverse->c,
             inverse->d});
     }
+    std::vector<ViewportFfdSnapCandidate> snap_candidates =
+        collect_snap_candidates(
+            *state, gesture->scope, gesture->vertex_indices);
 
     const std::size_t count = gesture->vertex_indices.size();
     auto transaction = state->session.begin_edit({
@@ -444,6 +510,7 @@ bool activate_group_drag(
 
     gesture->start_vertex_offsets = *offsets;
     gesture->vertex_mappings = std::move(mappings);
+    gesture->snap_candidates = std::move(snap_candidates);
     gesture->transaction = std::move(transaction);
     gesture->drag_started = true;
     return true;
@@ -618,7 +685,8 @@ bool begin_gesture(
 bool update_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer) {
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers) {
     if (state == nullptr || !state->viewport_ffd_gesture.has_value()) {
         return false;
     }
@@ -637,7 +705,7 @@ bool update_gesture(
         state->error_message = "FFD edit was cancelled after invalid pointer math.";
         return false;
     }
-    const kernel::Point world_delta{
+    const kernel::Point raw_world_delta{
         pointer_world.x - gesture.pointer_world_start.x,
         pointer_world.y - gesture.pointer_world_start.y};
     if (!gesture.drag_started) {
@@ -660,6 +728,70 @@ bool update_gesture(
         }
     }
 
+    const auto pressed_mapping = std::find_if(
+        gesture.vertex_mappings.begin(),
+        gesture.vertex_mappings.end(),
+        [&](const ViewportFfdVertexMapping& mapping) {
+            return mapping.vertex_index == gesture.pressed_vertex_index;
+        });
+    if (pressed_mapping == gesture.vertex_mappings.end()) {
+        finish_gesture(state, false);
+        state->error_message =
+            "FFD edit was cancelled because its drag-source mapping is unavailable.";
+        return false;
+    }
+    kernel::Point applied_world_delta = raw_world_delta;
+    gesture.snap_preview.reset();
+    if (raw_world_delta.x != 0.0 || raw_world_delta.y != 0.0) {
+        const kernel::Point raw_target_world{
+            pressed_mapping->vertex_world_start.x + raw_world_delta.x,
+            pressed_mapping->vertex_world_start.y + raw_world_delta.y};
+        const ImVec2 raw_target_screen = screen_from_world(
+            layout, raw_target_world.x, raw_target_world.y);
+        std::vector<kernel::FfdSnapVertexCandidate> snap_candidates;
+        snap_candidates.reserve(gesture.snap_candidates.size());
+        for (const ViewportFfdSnapCandidate& candidate : gesture.snap_candidates) {
+            const ImVec2 screen = screen_from_world(
+                layout, candidate.world_position.x, candidate.world_position.y);
+            if (!std::isfinite(screen.x) || !std::isfinite(screen.y) ||
+                screen.x < layout.canvas_origin.x || screen.x > layout.canvas_end.x ||
+                screen.y < layout.canvas_origin.y || screen.y > layout.canvas_end.y) {
+                continue;
+            }
+            snap_candidates.push_back({
+                candidate.identity,
+                {candidate.world_position.x, candidate.world_position.y},
+                {screen.x, screen.y}});
+        }
+        const marrow::editor::ProjectSnapSettings default_settings;
+        const auto& settings = gesture.transaction.project()->snap_settings.has_value()
+            ? *gesture.transaction.project()->snap_settings
+            : default_settings;
+        const auto resolved = kernel::resolve_ffd_snap(
+            raw_target_world,
+            {raw_target_screen.x, raw_target_screen.y},
+            settings.world_grid_step,
+            {settings.world_grid_enabled,
+             modifiers.temporarily_enable,
+             modifiers.bypass},
+            {settings.magnetic_vertex_enabled,
+             modifiers.temporarily_enable,
+             modifiers.bypass},
+            snap_candidates);
+        if (!resolved.has_value()) {
+            finish_gesture(state, false);
+            state->error_message =
+                "FFD edit was cancelled after invalid snap math.";
+            return false;
+        }
+        applied_world_delta = {
+            resolved->target_world.x - pressed_mapping->vertex_world_start.x,
+            resolved->target_world.y - pressed_mapping->vertex_world_start.y};
+        if (resolved->source != kernel::FfdSnapSource::None) {
+            gesture.snap_preview = *resolved;
+        }
+    }
+
     std::vector<kernel::FfdVertexDelta> local_deltas;
     local_deltas.reserve(gesture.vertex_mappings.size());
     for (const ViewportFfdVertexMapping& mapping : gesture.vertex_mappings) {
@@ -668,7 +800,7 @@ bool update_gesture(
              mapping.inverse_b,
              mapping.inverse_c,
              mapping.inverse_d},
-            world_delta);
+            applied_world_delta);
         if (!local_delta.has_value()) {
             finish_gesture(state, false);
             state->error_message =
@@ -726,8 +858,8 @@ bool update_gesture(
     }
     for (const ViewportFfdVertexMapping& mapping : gesture.vertex_mappings) {
         const ViewportWorldPoint expected{
-            mapping.vertex_world_start.x + world_delta.x,
-            mapping.vertex_world_start.y + world_delta.y};
+            mapping.vertex_world_start.x + applied_world_delta.x,
+            mapping.vertex_world_start.y + applied_world_delta.y};
         const ViewportWorldPoint actual =
             refreshed_target->vertex_world_positions[mapping.vertex_index];
         if (!world_position_matches(actual, expected)) {

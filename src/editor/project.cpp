@@ -342,6 +342,14 @@ std::optional<LoadError> parse_snap_settings(
             &settings.absolute_scale_enabled)) {
         return error;
     }
+    if (const auto error = read_optional_boolean(
+            document,
+            *snap,
+            "magnetic_vertex_enabled",
+            "$.snap",
+            &settings.magnetic_vertex_enabled)) {
+        return error;
+    }
     if (const auto error = read_optional_number(
             document,
             *snap,
@@ -4192,6 +4200,8 @@ Value build_project_value(const ProjectData& project) {
             make_boolean_value(project.snap_settings->local_angle_enabled);
         snap_object["absolute_scale_enabled"] =
             make_boolean_value(project.snap_settings->absolute_scale_enabled);
+        snap_object["magnetic_vertex_enabled"] =
+            make_boolean_value(project.snap_settings->magnetic_vertex_enabled);
         snap_object["world_grid_step"] =
             make_number_value(project.snap_settings->world_grid_step);
         snap_object["local_angle_step_degrees"] =

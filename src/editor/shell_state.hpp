@@ -496,11 +496,19 @@ struct ViewportFfdVertexMapping {
     double inverse_d{1.0};
 };
 
+struct ViewportFfdSnapCandidate {
+    marrow::editor::viewport_interaction_kernel::FfdSnapVertexIdentity identity;
+    ViewportWorldPoint world_position{};
+};
+
 struct ViewportFfdGesture {
     ViewportFfdSelectionScope scope{};
     std::size_t pressed_vertex_index{0U};
     std::vector<std::size_t> vertex_indices;
     std::vector<ViewportFfdVertexMapping> vertex_mappings;
+    std::vector<ViewportFfdSnapCandidate> snap_candidates;
+    std::optional<marrow::editor::viewport_interaction_kernel::FfdSnapResult>
+        snap_preview;
     std::string animation_name;
     double time_seconds{0.0};
     std::vector<double> start_vertex_offsets;

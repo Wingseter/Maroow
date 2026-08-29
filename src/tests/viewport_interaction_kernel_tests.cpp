@@ -307,6 +307,198 @@ bool grid_cases() {
                "visible grid accepted zero pixels per unit");
 }
 
+bool ffd_snap_cases() {
+    const kernel::FfdSnapVertexIdentity farther_identity{
+        "z_slot", std::optional<std::string>{"skin_b"}, "mesh_b", 4U};
+    const kernel::FfdSnapVertexIdentity stable_identity{
+        "a_slot", std::optional<std::string>{"skin_a"}, "mesh_a", 7U};
+    const std::vector<kernel::FfdSnapVertexCandidate> boundary_candidates{
+        {farther_identity, {23.0, 7.0}, {108.0, 100.0}}};
+    const auto boundary = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, false, false},
+        {true, false, false},
+        boundary_candidates,
+        8.0);
+    if (!check(
+            boundary.has_value() &&
+                boundary->source == kernel::FfdSnapSource::MagneticVertex &&
+                near(boundary->target_world.x, 23.0) &&
+                near(boundary->target_world.y, 7.0) &&
+                boundary->magnetic_identity.has_value() &&
+                boundary->magnetic_identity->slot_name == "z_slot" &&
+                boundary->magnetic_identity->vertex_index == 4U,
+            "FFD magnetic snap did not accept the inclusive 8px boundary or beat grid") ) {
+        return false;
+    }
+
+    const std::vector<kernel::FfdSnapVertexCandidate> outside_candidates{
+        {farther_identity, {23.0, 7.0}, {108.001, 100.0}}};
+    const auto outside = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, false, false},
+        {true, false, false},
+        outside_candidates,
+        8.0);
+    if (!check(
+            outside.has_value() &&
+                outside->source == kernel::FfdSnapSource::WorldGrid &&
+                near(outside->target_world.x, 20.0) &&
+                near(outside->target_world.y, 10.0) &&
+                !outside->magnetic_identity.has_value(),
+            "FFD vertex outside 8px did not fall back to the world grid")) {
+        return false;
+    }
+
+    const std::vector<kernel::FfdSnapVertexCandidate> reversed_tie{
+        {farther_identity, {30.0, 3.0}, {95.0, 100.0}},
+        {stable_identity, {-12.0, 9.0}, {105.0, 100.0}}};
+    const auto tied = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {true, false, false},
+        reversed_tie,
+        8.0);
+    if (!check(
+            tied.has_value() &&
+                tied->source == kernel::FfdSnapSource::MagneticVertex &&
+                near(tied->target_world.x, -12.0) &&
+                tied->magnetic_identity.has_value() &&
+                tied->magnetic_identity->slot_name == "a_slot" &&
+                tied->magnetic_identity->vertex_index == 7U,
+            "FFD magnetic tie did not use stable attachment-and-vertex identity")) {
+        return false;
+    }
+
+    const kernel::FfdSnapVertexIdentity later_attachment{
+        "body", std::optional<std::string>{"warrior"}, "z_mesh", 1U};
+    const kernel::FfdSnapVertexIdentity earlier_attachment{
+        "body", std::optional<std::string>{"warrior"}, "a_mesh", 99U};
+    const auto attachment_tie = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {true, false, false},
+        {{later_attachment, {30.0, 3.0}, {95.0, 100.0}},
+         {earlier_attachment, {-12.0, 9.0}, {105.0, 100.0}}},
+        8.0);
+    if (!check(
+            attachment_tie.has_value() &&
+                attachment_tie->magnetic_identity.has_value() &&
+                attachment_tie->magnetic_identity->attachment_name == "a_mesh" &&
+                attachment_tie->magnetic_identity->vertex_index == 99U,
+            "FFD magnetic tie did not compare displayed attachment identity")) {
+        return false;
+    }
+
+    const kernel::FfdSnapVertexIdentity later_vertex{
+        "body", std::optional<std::string>{"warrior"}, "body_mesh", 9U};
+    const kernel::FfdSnapVertexIdentity earlier_vertex{
+        "body", std::optional<std::string>{"warrior"}, "body_mesh", 2U};
+    const auto vertex_tie = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {true, false, false},
+        {{later_vertex, {30.0, 3.0}, {95.0, 100.0}},
+         {earlier_vertex, {-12.0, 9.0}, {105.0, 100.0}}},
+        8.0);
+    if (!check(
+            vertex_tie.has_value() &&
+                vertex_tie->magnetic_identity.has_value() &&
+                vertex_tie->magnetic_identity->attachment_name == "body_mesh" &&
+                vertex_tie->magnetic_identity->vertex_index == 2U,
+            "FFD magnetic tie did not compare vertex identity")) {
+        return false;
+    }
+
+    const auto disabled = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {false, false, false},
+        boundary_candidates,
+        8.0);
+    const auto temporarily_enabled = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, true, false},
+        {false, true, false},
+        boundary_candidates,
+        8.0);
+    const auto bypassed = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, true, true},
+        {true, true, true},
+        boundary_candidates,
+        8.0);
+    if (!check(
+            disabled.has_value() && disabled->source == kernel::FfdSnapSource::None &&
+                near(disabled->target_world.x, 17.6) &&
+                near(disabled->target_world.y, 12.4),
+            "disabled FFD snapping changed the raw world target") ||
+        !check(
+            temporarily_enabled.has_value() &&
+                temporarily_enabled->source == kernel::FfdSnapSource::MagneticVertex,
+            "Cmd/Ctrl did not temporarily enable disabled FFD snapping") ||
+        !check(
+            bypassed.has_value() && bypassed->source == kernel::FfdSnapSource::None &&
+                near(bypassed->target_world.x, 17.6) &&
+                near(bypassed->target_world.y, 12.4),
+            "Alt did not bypass configured and temporary FFD snapping")) {
+        return false;
+    }
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<kernel::FfdSnapVertexCandidate> invalid_candidate{
+        {stable_identity, {nan, 1.0}, {100.0, 100.0}}};
+    const auto skipped_invalid = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, false, false},
+        {true, false, false},
+        invalid_candidate,
+        8.0);
+    return check(
+               skipped_invalid.has_value() &&
+                   skipped_invalid->source == kernel::FfdSnapSource::WorldGrid &&
+                   near(skipped_invalid->target_world.x, 20.0),
+               "invalid magnetic candidate did not fail closed to grid") &&
+        check(
+               !kernel::resolve_ffd_snap(
+                    {nan, 12.4},
+                    {100.0, 100.0},
+                    10.0,
+                    {true, false, false},
+                    {true, false, false},
+                    boundary_candidates,
+                    8.0),
+               "FFD snap accepted a non-finite raw target") &&
+        check(
+               !kernel::resolve_ffd_snap(
+                    {17.6, 12.4},
+                    {100.0, 100.0},
+                    10.0,
+                    {true, false, false},
+                    {true, false, false},
+                    boundary_candidates,
+                    -1.0),
+               "FFD snap accepted a negative screen-space radius");
+}
+
 bool ffd_cases() {
     const std::vector<kernel::Point> handles{
         {10.0, 10.0},
@@ -573,7 +765,7 @@ bool arbitration_and_completion_cases() {
 
 int main() {
     if (!snap_cases() || !rotation_cases() || !rotation_drag_cases() || !scale_cases() ||
-        !grid_cases() ||
+        !grid_cases() || !ffd_snap_cases() ||
         !ffd_cases() || !arbitration_and_completion_cases()) {
         return 1;
     }

@@ -352,6 +352,83 @@ std::optional<double> visible_grid_step(
         : std::nullopt;
 }
 
+std::optional<FfdSnapResult> resolve_ffd_snap(
+    Point raw_target_world,
+    Point raw_target_screen,
+    double world_grid_step,
+    SnapActivation grid_activation,
+    SnapActivation vertex_activation,
+    const std::vector<FfdSnapVertexCandidate>& candidates,
+    double magnetic_radius_pixels) {
+    if (!finite(raw_target_world) || !finite(raw_target_screen) ||
+        !std::isfinite(world_grid_step) || world_grid_step <= 0.0 ||
+        !std::isfinite(magnetic_radius_pixels) || magnetic_radius_pixels < 0.0) {
+        return std::nullopt;
+    }
+    const double radius_squared =
+        magnetic_radius_pixels * magnetic_radius_pixels;
+    if (!std::isfinite(radius_squared)) {
+        return std::nullopt;
+    }
+
+    const bool vertex_enabled = !vertex_activation.bypass &&
+        (vertex_activation.configured_enabled ||
+         vertex_activation.temporarily_enabled);
+    if (vertex_enabled) {
+        const FfdSnapVertexCandidate* best = nullptr;
+        double best_distance_squared = radius_squared;
+        for (const FfdSnapVertexCandidate& candidate : candidates) {
+            if (!finite(candidate.world_position) ||
+                !finite(candidate.screen_position)) {
+                continue;
+            }
+            const double dx =
+                raw_target_screen.x - candidate.screen_position.x;
+            const double dy =
+                raw_target_screen.y - candidate.screen_position.y;
+            const double distance_squared = (dx * dx) + (dy * dy);
+            if (!std::isfinite(distance_squared) ||
+                distance_squared > radius_squared) {
+                continue;
+            }
+            const auto identity_key = [](const FfdSnapVertexIdentity& identity) {
+                return std::tie(
+                    identity.slot_name,
+                    identity.skin_name,
+                    identity.attachment_name,
+                    identity.vertex_index);
+            };
+            if (best == nullptr || distance_squared < best_distance_squared ||
+                (distance_squared == best_distance_squared &&
+                 identity_key(candidate.identity) < identity_key(best->identity))) {
+                best = &candidate;
+                best_distance_squared = distance_squared;
+            }
+        }
+        if (best != nullptr) {
+            return FfdSnapResult{
+                best->world_position,
+                FfdSnapSource::MagneticVertex,
+                best->identity};
+        }
+    }
+
+    const auto snapped_x = snap_scalar({
+        raw_target_world.x, world_grid_step, grid_activation});
+    const auto snapped_y = snap_scalar({
+        raw_target_world.y, world_grid_step, grid_activation});
+    if (!snapped_x.has_value() || !snapped_y.has_value()) {
+        return std::nullopt;
+    }
+    const bool grid_enabled = !grid_activation.bypass &&
+        (grid_activation.configured_enabled ||
+         grid_activation.temporarily_enabled);
+    return FfdSnapResult{
+        {*snapped_x, *snapped_y},
+        grid_enabled ? FfdSnapSource::WorldGrid : FfdSnapSource::None,
+        std::nullopt};
+}
+
 std::optional<std::size_t> nearest_ffd_vertex(
     const std::vector<Point>& vertex_screen_positions,
     Point pointer_screen,

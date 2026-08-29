@@ -327,6 +327,21 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
         std::cerr << current_document.error->format();
         return false;
     }
+    auto mar165_document = *current_document.document;
+    auto* mar165_snap = marrow::runtime::json::find_member(
+        mar165_document.root, "snap");
+    if (mar165_snap == nullptr || !mar165_snap->is_object()) {
+        std::cerr << "MAR-165 compatibility check requires snap metadata.\n";
+        return false;
+    }
+    mar165_snap->as_object().erase("magnetic_vertex_enabled");
+    const auto mar165_reloaded = marrow::editor::load_project(mar165_document);
+    if (!mar165_reloaded || !mar165_reloaded.project->snap_settings.has_value() ||
+        mar165_reloaded.project->snap_settings->magnetic_vertex_enabled) {
+        std::cerr << "MAR-165 snap metadata did not default magnetic vertices off.\n";
+        return false;
+    }
+
     const auto future_source = marrow::runtime::json::parse_document(
         R"({"future_snap_mode":{"sentinel":7}})", result.project->source_path);
     if (!future_source) {
@@ -337,6 +352,7 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
     settings.world_grid_enabled = true;
     settings.local_angle_enabled = false;
     settings.absolute_scale_enabled = true;
+    settings.magnetic_vertex_enabled = true;
     settings.world_grid_step = 12.5;
     settings.local_angle_step_degrees = 22.5;
     settings.absolute_scale_step = 0.25;
@@ -353,8 +369,14 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
     }
     const auto* snap_value = marrow::runtime::json::find_member(
         snapped_document.document->root, "snap");
+    const auto* magnetic_value = snap_value != nullptr
+        ? marrow::runtime::json::find_member(
+              *snap_value, "magnetic_vertex_enabled")
+        : nullptr;
     if (snap_value == nullptr || !snap_value->is_object() ||
-        marrow::runtime::json::find_member(*snap_value, "future_snap_mode") == nullptr) {
+        marrow::runtime::json::find_member(*snap_value, "future_snap_mode") == nullptr ||
+        magnetic_value == nullptr || !magnetic_value->is_boolean() ||
+        !magnetic_value->as_boolean()) {
         std::cerr << "Snap serialization did not retain its unknown additive field.\n";
         return false;
     }
@@ -366,7 +388,7 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
     }
     const auto& reloaded = *snapped_reloaded.project->snap_settings;
     if (!reloaded.world_grid_enabled || reloaded.local_angle_enabled ||
-        !reloaded.absolute_scale_enabled ||
+        !reloaded.absolute_scale_enabled || !reloaded.magnetic_vertex_enabled ||
         !require_near(reloaded.world_grid_step, 12.5, "snap world grid step") ||
         !require_near(
             reloaded.local_angle_step_degrees, 22.5, "snap local angle step") ||
@@ -392,7 +414,7 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
         : nullptr;
     if (!valid_save_result || !file_reloaded || file_snap == nullptr ||
         !file_snap->world_grid_enabled || file_snap->local_angle_enabled ||
-        !file_snap->absolute_scale_enabled ||
+        !file_snap->absolute_scale_enabled || !file_snap->magnetic_vertex_enabled ||
         !require_near(file_snap->world_grid_step, 12.5, "saved snap world grid step") ||
         !require_near(
             file_snap->local_angle_step_degrees,
@@ -428,6 +450,21 @@ bool validate_snap_settings(const marrow::editor::ProjectLoadResult& result) {
     *invalid_step = marrow::runtime::json::Value(0.0, invalid_step->location());
     if (marrow::editor::load_project(invalid_document)) {
         std::cerr << "Project loader accepted a zero snap step.\n";
+        return false;
+    }
+
+    auto invalid_magnetic_document = *snapped_document.document;
+    auto* invalid_magnetic_snap = marrow::runtime::json::find_member(
+        invalid_magnetic_document.root, "snap");
+    if (invalid_magnetic_snap == nullptr || !invalid_magnetic_snap->is_object()) {
+        std::cerr << "Snap validation could not prepare an invalid magnetic toggle.\n";
+        return false;
+    }
+    invalid_magnetic_snap->as_object()["magnetic_vertex_enabled"] =
+        marrow::runtime::json::Value(
+            std::string("enabled"), invalid_magnetic_snap->location());
+    if (marrow::editor::load_project(invalid_magnetic_document)) {
+        std::cerr << "Project loader accepted a non-boolean magnetic vertex toggle.\n";
         return false;
     }
 

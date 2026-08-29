@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -18,7 +19,9 @@
 #include "shell_project_panels.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
+#include "shell_viewport_ui.hpp"
 #include "viewport_ffd_controller.hpp"
+#include "viewport_interaction_controller.hpp"
 #include "viewport_interaction_kernel.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/runtime/module.hpp"
@@ -232,7 +235,7 @@ std::optional<TempDirectory> make_temp_directory() {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     TempDirectory result(
         std::filesystem::temp_directory_path(error) /
-        ("marrow-mar164-ffd-" + std::to_string(stamp)));
+        ("marrow-mar166-ffd-" + std::to_string(stamp)));
     if (error || !std::filesystem::create_directories(result.path, error) || error) {
         return std::nullopt;
     }
@@ -311,6 +314,207 @@ bool rollback_matches(
         state.selected_timeline_track_id == focus;
 }
 
+bool write_smoke_text(
+    const std::filesystem::path& path,
+    std::string_view text) {
+    std::ofstream stream(path, std::ios::trunc);
+    stream << text;
+    return stream.good();
+}
+
+bool validate_cross_slot_snap_candidates(
+    const ShellState& source_state) {
+    if (!source_state.load_result ||
+        source_state.load_result.project == nullptr) {
+        return false;
+    }
+    const auto source_atlases =
+        source_state.load_result.project->resolved_atlas_paths();
+    if (source_atlases.empty()) {
+        return false;
+    }
+    auto temporary = make_temp_directory();
+    if (!temporary.has_value()) {
+        return false;
+    }
+    const std::filesystem::path skeleton_path =
+        temporary->path / "cross_slot_candidates.mskl";
+    const std::filesystem::path project_path =
+        temporary->path / "cross_slot_candidates.marrow";
+    constexpr std::string_view skeleton_text = R"json({
+  "marrow": "1.0",
+  "version": 1,
+  "skeleton": {"name": "cross_slot_candidates", "width": 160, "height": 80},
+  "bones": [{"name": "root"}],
+  "slots": [
+    {"name": "active", "bone": "root", "attachment": "active_mesh"},
+    {"name": "candidate", "bone": "root", "attachment": "candidate_mesh"}
+  ],
+  "skins": {
+    "default": {
+      "active": {
+        "attachment": "active_mesh",
+        "type": "mesh",
+        "region": "body",
+        "vertices": [-40, -10, -20, -10, -20, 10, -40, 10],
+        "triangles": [0, 1, 2, 2, 3, 0],
+        "uvs": [0, 0, 1, 0, 1, 1, 0, 1],
+        "weights": [
+          [{"bone": "root", "x": -40, "y": -10, "weight": 1}],
+          [{"bone": "root", "x": -20, "y": -10, "weight": 1}],
+          [{"bone": "root", "x": -20, "y": 10, "weight": 1}],
+          [{"bone": "root", "x": -40, "y": 10, "weight": 1}]
+        ]
+      },
+      "candidate": {
+        "attachment": "candidate_mesh",
+        "type": "mesh",
+        "region": "body",
+        "vertices": [20, -10, 40, -10, 40, 10, 20, 10],
+        "triangles": [0, 1, 2, 2, 3, 0],
+        "uvs": [0, 0, 1, 0, 1, 1, 0, 1],
+        "weights": [
+          [{"bone": "root", "x": 20, "y": -10, "weight": 1}],
+          [{"bone": "root", "x": 40, "y": -10, "weight": 1}],
+          [{"bone": "root", "x": 40, "y": 10, "weight": 1}],
+          [{"bone": "root", "x": 20, "y": 10, "weight": 1}]
+        ]
+      }
+    }
+  },
+  "animations": {
+    "idle": {
+      "deform": {
+        "active": {
+          "active_mesh": [
+            {"time": 0, "vertices": [0, 0, 0, 0, 0, 0, 0, 0], "curve": "linear"}
+          ]
+        }
+      }
+    }
+  }
+})json";
+    if (!write_smoke_text(skeleton_path, skeleton_text)) {
+        return false;
+    }
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path = skeleton_path;
+    options.atlas_paths = {source_atlases.front()};
+    options.name = "MAR-166 cross-slot candidate smoke";
+    options.active_animation = "idle";
+    options.preview_skins = {"default"};
+    auto project = marrow::editor::create_minimal_project(options);
+    project.snap_settings = marrow::editor::ProjectSnapSettings{};
+    project.snap_settings->magnetic_vertex_enabled = true;
+    if (!marrow::editor::save_project(project, project_path)) {
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state)) {
+        std::cerr << state.error_message << '\n';
+        return false;
+    }
+    const auto active_slot = state.session.runtime_data()->find_slot_index("active");
+    const auto candidate_slot =
+        state.session.runtime_data()->find_slot_index("candidate");
+    const auto default_skin =
+        state.session.runtime_data()->find_skin_index("default");
+    if (!active_slot.has_value() || !candidate_slot.has_value() ||
+        !default_skin.has_value() ||
+        !prepare_attachment(
+            &state, *active_slot, *default_skin, "active_mesh", 0.0) ||
+        !viewport_ffd::select_vertex(&state, 0U, false)) {
+        return false;
+    }
+    const auto layout = smoke_layout(state);
+    const auto source = layout.has_value()
+        ? vertex_screen_position(state, *layout, 0U)
+        : std::nullopt;
+    if (!layout.has_value() || !source.has_value()) {
+        return false;
+    }
+    const auto activate = [&](const ViewportLayout& active_layout) {
+        return viewport_ffd::begin_gesture(
+                   &state, active_layout, 0U, *source) &&
+            viewport_ffd::update_gesture(
+                &state,
+                active_layout,
+                ImVec2(source->x + 5.0f, source->y));
+    };
+    const auto has_candidate_slot = [&]() {
+        return state.viewport_ffd_gesture.has_value() &&
+            std::any_of(
+                state.viewport_ffd_gesture->snap_candidates.begin(),
+                state.viewport_ffd_gesture->snap_candidates.end(),
+                [](const ViewportFfdSnapCandidate& candidate) {
+                    return candidate.identity.slot_name == "candidate" &&
+                        candidate.identity.skin_name ==
+                            std::optional<std::string>("default") &&
+                        candidate.identity.attachment_name == "candidate_mesh";
+                });
+    };
+    if (!activate(*layout) || !has_candidate_slot()) {
+        std::cerr << "FFD cross-slot visible mesh candidates were not collected.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+
+    state.preview_skeleton->slot_states()[*candidate_slot].color.a = 0.0;
+    if (!activate(*layout) || has_candidate_slot() ||
+        !state.viewport_ffd_gesture.has_value() ||
+        state.viewport_ffd_gesture->snap_candidates.empty()) {
+        std::cerr << "FFD cross-slot zero-alpha candidates were not excluded.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    if (!std::isfinite(
+            state.preview_skeleton->slot_states()[*candidate_slot].color.a) ||
+        state.preview_skeleton->slot_states()[*candidate_slot].color.a <= 0.0) {
+        std::cerr << "FFD cross-slot alpha probe did not restore preview state.\n";
+        return false;
+    }
+
+    const auto candidate_pose =
+        state.preview_skeleton->evaluate_current_mesh_attachment(*candidate_slot);
+    if (!candidate_pose.has_value() || candidate_pose->vertices.empty()) {
+        return false;
+    }
+    ViewportLayout clipped_layout = *layout;
+    const ImVec2 candidate_screen = screen_from_world(
+        clipped_layout,
+        candidate_pose->vertices.front().x,
+        candidate_pose->vertices.front().y);
+    if (candidate_screen.x <= source->x) {
+        return false;
+    }
+    clipped_layout.canvas_end.x = candidate_screen.x - 1.0f;
+    const ImVec2 reveal_pointer(candidate_screen.x + 6.0f, candidate_screen.y);
+    if (!viewport_ffd::begin_gesture(
+            &state, clipped_layout, 0U, *source) ||
+        !viewport_ffd::update_gesture(
+            &state, clipped_layout, reveal_pointer) ||
+        !state.viewport_ffd_gesture.has_value() ||
+        state.viewport_ffd_gesture->snap_preview.has_value() ||
+        !viewport_ffd::update_gesture(
+            &state, *layout, reveal_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        !state.viewport_ffd_gesture->snap_preview->magnetic_identity.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->slot_name !=
+            "candidate" ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity
+                ->attachment_name != "candidate_mesh" ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity
+                ->vertex_index != 0U) {
+        std::cerr << "FFD active gesture did not admit a newly visible candidate.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    return true;
+}
+
 } // namespace
 
 bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
@@ -318,6 +522,30 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     state.project_path = project_path;
     if (!reload_project(&state)) {
         std::cerr << state.error_message << '\n';
+        return false;
+    }
+    const auto arm_slot = state.session.runtime_data()->find_slot_index("arm_l");
+    const auto mage_arm_skin =
+        state.session.runtime_data()->find_skin_index("mage_arm");
+    if (!arm_slot.has_value() || !mage_arm_skin.has_value() ||
+        !apply_attachment_selection_to_preview_slot(
+            &state,
+            PreviewAttachmentSelection{
+                *arm_slot, *mage_arm_skin, "mage_arm_l"},
+            "FFD duplicate-skin identity smoke",
+            false,
+            false)) {
+        std::cerr << "FFD smoke could not stage the duplicate-name skin identity.\n";
+        return false;
+    }
+    const auto duplicate_skin_selection =
+        current_attachment_selection(state, *arm_slot);
+    if (!duplicate_skin_selection.has_value() ||
+        duplicate_skin_selection->skin_index != mage_arm_skin) {
+        std::cerr << "FFD current attachment identity ignored its recorded skin.\n";
+        return false;
+    }
+    if (!validate_cross_slot_snap_candidates(state)) {
         return false;
     }
     const auto body_slot = state.session.runtime_data()->find_slot_index("body");
@@ -661,6 +889,578 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         return false;
     }
 
+    const auto set_ffd_snap_enabled = [&](bool grid_enabled,
+                                          bool magnetic_enabled) {
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Configure FFD snapping",
+            "viewport-ffd-snap-settings",
+            false,
+            marrow::editor::EditImpact::Project});
+        if (!transaction) {
+            return false;
+        }
+        auto settings = transaction.project()->snap_settings.value_or(
+            marrow::editor::ProjectSnapSettings{});
+        settings.world_grid_enabled = grid_enabled;
+        settings.magnetic_vertex_enabled = magnetic_enabled;
+        transaction.project()->snap_settings = settings;
+        if (!transaction.commit()) {
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        state.session.clear_history();
+        return true;
+    };
+    if (!set_ffd_snap_enabled(true, true)) {
+        return false;
+    }
+    if (!prepare_attachment(
+            &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime) ||
+        !viewport_ffd::select_vertex(&state, 0U, false) ||
+        !viewport_ffd::select_vertex(&state, 1U, true)) {
+        return false;
+    }
+    const auto snap_layout = smoke_layout(state);
+    const auto snap_overlay_before = viewport_ffd::build_overlay(state);
+    const auto snap_source_screen = snap_layout.has_value()
+        ? vertex_screen_position(state, *snap_layout, 0U)
+        : std::nullopt;
+    const auto snap_target_screen = snap_layout.has_value()
+        ? vertex_screen_position(state, *snap_layout, 2U)
+        : std::nullopt;
+    if (!snap_layout.has_value() || !snap_overlay_before.has_value() ||
+        !snap_source_screen.has_value() || !snap_target_screen.has_value()) {
+        return false;
+    }
+    const std::string snap_cancel_project =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto* snap_cancel_runtime = state.session.runtime_data();
+    const std::string snap_cancel_preview = preview_signature(*state.preview_skeleton);
+    const bool snap_cancel_dirty = state.session.dirty();
+    const std::size_t snap_cancel_undo = state.session.undo_count();
+    const std::size_t snap_cancel_redo = state.session.redo_count();
+    const marrow::editor::SelectionSet snap_cancel_selection = state.selection;
+    const auto snap_cancel_ffd_selection = state.viewport_ffd_selection;
+    const auto snap_cancel_anchor = state.hierarchy_selection_anchor;
+    const auto snap_cancel_focus = state.selected_timeline_track_id;
+    const ImVec2 magnetic_grab_offset(2.0f, -1.0f);
+    const ImVec2 magnetic_gesture_start(
+        snap_source_screen->x + magnetic_grab_offset.x,
+        snap_source_screen->y + magnetic_grab_offset.y);
+    const ImVec2 magnetic_raw_pointer(
+        snap_target_screen->x + 6.0f + magnetic_grab_offset.x,
+        snap_target_screen->y + magnetic_grab_offset.y);
+    if (!viewport_ffd::begin_gesture(
+            &state, *snap_layout, 0U, magnetic_gesture_start) ||
+        !viewport_ffd::update_gesture(
+            &state,
+            *snap_layout,
+            magnetic_raw_pointer,
+            ViewportSnapModifiers{}) ||
+        !state.viewport_ffd_gesture.has_value() ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex ||
+        !state.viewport_ffd_gesture->snap_preview->magnetic_identity.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->vertex_index != 2U) {
+        std::cerr << "FFD magnetic group snap did not resolve its visible target.\n";
+        return false;
+    }
+    const auto magnetic_guide_start = ffd_snap_guide_start(
+        *state.viewport_ffd_gesture, *snap_layout);
+    if (!magnetic_guide_start.has_value() ||
+        std::abs(
+            magnetic_guide_start->x -
+            (magnetic_raw_pointer.x - magnetic_grab_offset.x)) > 1e-4f ||
+        std::abs(
+            magnetic_guide_start->y -
+            (magnetic_raw_pointer.y - magnetic_grab_offset.y)) > 1e-4f) {
+        std::cerr << "FFD snap guide did not originate at the raw pressed-vertex target.\n";
+        return false;
+    }
+    const auto snap_overlay_after = viewport_ffd::build_overlay(state);
+    const auto& source_before = snap_overlay_before->vertex_world_positions[0U];
+    const auto& second_before = snap_overlay_before->vertex_world_positions[1U];
+    const auto& target_before = snap_overlay_before->vertex_world_positions[2U];
+    const double snapped_dx = target_before.x - source_before.x;
+    const double snapped_dy = target_before.y - source_before.y;
+    if (!snap_overlay_after.has_value() ||
+        std::abs(
+            snap_overlay_after->vertex_world_positions[0U].x - target_before.x) > 1e-4 ||
+        std::abs(
+            snap_overlay_after->vertex_world_positions[0U].y - target_before.y) > 1e-4 ||
+        std::abs(
+            (snap_overlay_after->vertex_world_positions[1U].x - second_before.x) -
+            snapped_dx) > 1e-4 ||
+        std::abs(
+            (snap_overlay_after->vertex_world_positions[1U].y - second_before.y) -
+            snapped_dy) > 1e-4 ||
+        std::abs(
+            snap_overlay_after->vertex_world_positions[2U].x - target_before.x) > 1e-4 ||
+        std::abs(
+            snap_overlay_after->vertex_world_positions[2U].y - target_before.y) > 1e-4) {
+        std::cerr << "FFD magnetic group snap did not apply one common world delta.\n";
+        return false;
+    }
+    const ViewportWorldPoint magnetic_raw_world = world_from_screen(
+        *snap_layout,
+        ImVec2(
+            magnetic_raw_pointer.x - magnetic_grab_offset.x,
+            magnetic_raw_pointer.y - magnetic_grab_offset.y));
+    if (!viewport_ffd::update_gesture(
+            &state,
+            *snap_layout,
+            magnetic_raw_pointer,
+            ViewportSnapModifiers{false, true}) ||
+        !state.viewport_ffd_gesture.has_value() ||
+        state.viewport_ffd_gesture->snap_preview.has_value()) {
+        std::cerr << "FFD live Alt bypass did not clear the snap preview.\n";
+        return false;
+    }
+    const auto bypass_overlay = viewport_ffd::build_overlay(state);
+    if (!bypass_overlay.has_value() ||
+        std::abs(
+            bypass_overlay->vertex_world_positions[0U].x - magnetic_raw_world.x) >
+            1e-4 ||
+        std::abs(
+            bypass_overlay->vertex_world_positions[0U].y - magnetic_raw_world.y) >
+            1e-4 ||
+        !viewport_ffd::update_gesture(
+            &state,
+            *snap_layout,
+            magnetic_raw_pointer,
+            ViewportSnapModifiers{}) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex) {
+        std::cerr << "FFD live Alt release did not restore magnetic snapping.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    if (!rollback_matches(
+            state,
+            snap_cancel_project,
+            snap_cancel_runtime,
+            snap_cancel_preview,
+            snap_cancel_dirty,
+            snap_cancel_undo,
+            snap_cancel_redo,
+            snap_cancel_selection,
+            snap_cancel_anchor,
+            snap_cancel_focus,
+            snap_cancel_ffd_selection)) {
+        std::cerr << "FFD magnetic snap cancel did not restore exact state.\n";
+        return false;
+    }
+
+    if (!set_ffd_snap_enabled(false, false) ||
+        !prepare_attachment(
+            &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime) ||
+        !viewport_ffd::select_vertex(&state, 0U, false) ||
+        !viewport_ffd::select_vertex(&state, 1U, true)) {
+        return false;
+    }
+    const auto temporary_layout = smoke_layout(state);
+    const auto temporary_source = temporary_layout.has_value()
+        ? vertex_screen_position(state, *temporary_layout, 0U)
+        : std::nullopt;
+    const auto temporary_target = temporary_layout.has_value()
+        ? vertex_screen_position(state, *temporary_layout, 2U)
+        : std::nullopt;
+    if (!temporary_layout.has_value() || !temporary_source.has_value() ||
+        !temporary_target.has_value()) {
+        return false;
+    }
+    const ImVec2 temporary_pointer(
+        temporary_target->x + 6.0f, temporary_target->y);
+    const ViewportWorldPoint temporary_raw_world =
+        world_from_screen(*temporary_layout, temporary_pointer);
+    const std::string temporary_project =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto* temporary_runtime = state.session.runtime_data();
+    const std::string temporary_preview = preview_signature(*state.preview_skeleton);
+    const bool temporary_dirty = state.session.dirty();
+    const std::size_t temporary_undo = state.session.undo_count();
+    const std::size_t temporary_redo = state.session.redo_count();
+    const marrow::editor::SelectionSet temporary_selection = state.selection;
+    const auto temporary_ffd_selection = state.viewport_ffd_selection;
+    const auto temporary_anchor = state.hierarchy_selection_anchor;
+    const auto temporary_focus = state.selected_timeline_track_id;
+    if (!viewport_ffd::begin_gesture(
+            &state, *temporary_layout, 0U, *temporary_source) ||
+        !viewport_ffd::update_gesture(
+            &state,
+            *temporary_layout,
+            temporary_pointer,
+            ViewportSnapModifiers{true, false}) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex ||
+        !viewport_ffd::update_gesture(
+            &state,
+            *temporary_layout,
+            temporary_pointer,
+            ViewportSnapModifiers{}) ||
+        state.viewport_ffd_gesture->snap_preview.has_value()) {
+        std::cerr << "FFD live Cmd/Ctrl enable or release did not change snapping.\n";
+        return false;
+    }
+    const auto temporary_raw_overlay = viewport_ffd::build_overlay(state);
+    if (!temporary_raw_overlay.has_value() ||
+        std::abs(
+            temporary_raw_overlay->vertex_world_positions[0U].x -
+            temporary_raw_world.x) > 1e-4 ||
+        std::abs(
+            temporary_raw_overlay->vertex_world_positions[0U].y -
+            temporary_raw_world.y) > 1e-4) {
+        std::cerr << "FFD modifier release did not restore the raw target.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    if (!rollback_matches(
+            state,
+            temporary_project,
+            temporary_runtime,
+            temporary_preview,
+            temporary_dirty,
+            temporary_undo,
+            temporary_redo,
+            temporary_selection,
+            temporary_anchor,
+            temporary_focus,
+            temporary_ffd_selection) ||
+        !set_ffd_snap_enabled(true, true)) {
+        std::cerr << "FFD temporary snap modified settings, history, or rollback state.\n";
+        return false;
+    }
+
+    if (!set_ffd_snap_enabled(false, true) ||
+        !prepare_attachment(
+            &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime) ||
+        !viewport_ffd::select_vertex(&state, 0U, false)) {
+        return false;
+    }
+    const auto boundary_layout = smoke_layout(state);
+    const auto boundary_overlay = viewport_ffd::build_overlay(state);
+    const auto boundary_source = boundary_layout.has_value()
+        ? vertex_screen_position(state, *boundary_layout, 0U)
+        : std::nullopt;
+    const auto boundary_target = boundary_layout.has_value()
+        ? vertex_screen_position(state, *boundary_layout, 2U)
+        : std::nullopt;
+    if (!boundary_layout.has_value() || !boundary_overlay.has_value() ||
+        !boundary_source.has_value() || !boundary_target.has_value()) {
+        return false;
+    }
+    const std::string boundary_project =
+        marrow::editor::serialize_project(*state.session.project());
+    const bool boundary_dirty = state.session.dirty();
+    const ImVec2 exact_boundary_pointer(
+        boundary_target->x + 8.0f, boundary_target->y);
+    if (!viewport_ffd::begin_gesture(
+            &state, *boundary_layout, 0U, *boundary_source) ||
+        !viewport_ffd::update_gesture(
+            &state, *boundary_layout, exact_boundary_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex ||
+        !state.viewport_ffd_gesture->snap_preview->magnetic_identity.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->vertex_index != 2U) {
+        std::cerr << "FFD magnetic snap rejected the inclusive 8px shell boundary.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    const ImVec2 outside_boundary_pointer(
+        boundary_target->x + 8.25f, boundary_target->y);
+    if (!viewport_ffd::begin_gesture(
+            &state, *boundary_layout, 0U, *boundary_source) ||
+        !viewport_ffd::update_gesture(
+            &state, *boundary_layout, outside_boundary_pointer) ||
+        state.viewport_ffd_gesture->snap_preview.has_value()) {
+        std::cerr << "FFD magnetic snap accepted a shell target outside 8px.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    if (marrow::editor::serialize_project(*state.session.project()) !=
+            boundary_project ||
+        state.session.dirty() != boundary_dirty ||
+        state.session.undo_count() != 0U) {
+        std::cerr << "FFD boundary probes left project or history state behind.\n";
+        return false;
+    }
+
+    if (!viewport_ffd::select_vertex(&state, 0U, false) ||
+        !viewport_ffd::select_vertex(&state, 2U, true) ||
+        !viewport_ffd::begin_gesture(
+            &state, *boundary_layout, 0U, *boundary_source) ||
+        !viewport_ffd::update_gesture(
+            &state, *boundary_layout, *boundary_target) ||
+        !state.viewport_ffd_gesture.has_value() ||
+        state.viewport_ffd_gesture->snap_preview.has_value() ||
+        std::any_of(
+            state.viewport_ffd_gesture->snap_candidates.begin(),
+            state.viewport_ffd_gesture->snap_candidates.end(),
+            [](const ViewportFfdSnapCandidate& candidate) {
+                return candidate.identity.vertex_index == 0U ||
+                    candidate.identity.vertex_index == 2U;
+            })) {
+        std::cerr << "FFD selected members remained eligible magnetic candidates.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+
+    if (!viewport_ffd::select_vertex(&state, 0U, false)) {
+        return false;
+    }
+    const double visible_alpha =
+        state.preview_skeleton->slot_states()[*body_slot].color.a;
+    state.preview_skeleton->slot_states()[*body_slot].color.a = 0.0;
+    if (!viewport_ffd::begin_gesture(
+            &state, *boundary_layout, 0U, *boundary_source) ||
+        !viewport_ffd::update_gesture(
+            &state,
+            *boundary_layout,
+            ImVec2(boundary_source->x + 5.0f, boundary_source->y)) ||
+        !state.viewport_ffd_gesture.has_value() ||
+        !state.viewport_ffd_gesture->snap_candidates.empty()) {
+        std::cerr << "FFD zero-alpha mesh vertices remained magnetic candidates.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+    state.preview_skeleton->slot_states()[*body_slot].color.a = visible_alpha;
+
+    if (!viewport_ffd::select_vertex(&state, 0U, false)) {
+        return false;
+    }
+    ViewportLayout zoomed_out = *boundary_layout;
+    zoomed_out.pixels_per_unit = 1.0f;
+    zoomed_out.world_origin_screen = screen_from_world(zoomed_out, 0.0, 0.0);
+    ViewportLayout zoomed_in = zoomed_out;
+    zoomed_in.pixels_per_unit = 2.0f;
+    zoomed_in.world_origin_screen = screen_from_world(zoomed_in, 0.0, 0.0);
+    const auto& zoom_target_world = boundary_overlay->vertex_world_positions[2U];
+    const ViewportWorldPoint fixed_world_gap{
+        zoom_target_world.x + 6.0, zoom_target_world.y};
+    const ImVec2 zoomed_out_source = screen_from_world(
+        zoomed_out,
+        boundary_overlay->vertex_world_positions[0U].x,
+        boundary_overlay->vertex_world_positions[0U].y);
+    const ImVec2 zoomed_out_pointer = screen_from_world(
+        zoomed_out, fixed_world_gap.x, fixed_world_gap.y);
+    if (!viewport_ffd::begin_gesture(
+            &state, zoomed_out, 0U, zoomed_out_source) ||
+        !viewport_ffd::update_gesture(
+            &state, zoomed_out, zoomed_out_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex) {
+        std::cerr << "FFD zoomed-out 6px magnetic target did not snap.\n";
+        return false;
+    }
+    const ImVec2 zoomed_in_pointer = screen_from_world(
+        zoomed_in, fixed_world_gap.x, fixed_world_gap.y);
+    if (!viewport_ffd::update_gesture(
+            &state, zoomed_in, zoomed_in_pointer) ||
+        state.viewport_ffd_gesture->snap_preview.has_value() ||
+        !viewport_ffd::update_gesture(
+            &state, zoomed_out, zoomed_out_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value()) {
+        std::cerr << "FFD active gesture did not reproject its 8px radius across zoom.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+
+    const auto& tie_first_world = boundary_overlay->vertex_world_positions[2U];
+    const auto& tie_second_world = boundary_overlay->vertex_world_positions[3U];
+    const double tie_world_distance = std::hypot(
+        tie_first_world.x - tie_second_world.x,
+        tie_first_world.y - tie_second_world.y);
+    if (!std::isfinite(tie_world_distance) || tie_world_distance <= 0.0) {
+        return false;
+    }
+    ViewportLayout tie_layout = *boundary_layout;
+    tie_layout.pixels_per_unit = static_cast<float>(12.0 / tie_world_distance);
+    tie_layout.world_origin_screen = screen_from_world(tie_layout, 0.0, 0.0);
+    const ImVec2 tie_source = screen_from_world(
+        tie_layout,
+        boundary_overlay->vertex_world_positions[0U].x,
+        boundary_overlay->vertex_world_positions[0U].y);
+    const ViewportWorldPoint tie_world{
+        (tie_first_world.x + tie_second_world.x) * 0.5,
+        (tie_first_world.y + tie_second_world.y) * 0.5};
+    const ImVec2 tie_pointer = screen_from_world(
+        tie_layout, tie_world.x, tie_world.y);
+    if (!viewport_ffd::begin_gesture(&state, tie_layout, 0U, tie_source) ||
+        !viewport_ffd::update_gesture(
+            &state,
+            tie_layout,
+            ImVec2(tie_source.x, tie_source.y + 4.0f)) ||
+        !state.viewport_ffd_gesture.has_value()) {
+        return false;
+    }
+    std::reverse(
+        state.viewport_ffd_gesture->snap_candidates.begin(),
+        state.viewport_ffd_gesture->snap_candidates.end());
+    if (!viewport_ffd::update_gesture(
+            &state, tie_layout, tie_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        !state.viewport_ffd_gesture->snap_preview->magnetic_identity.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->attachment_name !=
+            "body_mesh" ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->vertex_index != 2U) {
+        std::cerr << "FFD shell tie changed under reversed candidate enumeration.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+
+    if (!set_ffd_snap_enabled(true, true) ||
+        !prepare_attachment(
+            &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime) ||
+        !viewport_ffd::select_vertex(&state, 0U, false)) {
+        return false;
+    }
+    const auto grid_layout = smoke_layout(state);
+    const auto grid_overlay = viewport_ffd::build_overlay(state);
+    if (!grid_layout.has_value() || !grid_overlay.has_value()) {
+        return false;
+    }
+    const auto& grid_source_world = grid_overlay->vertex_world_positions[0U];
+    const ViewportWorldPoint grid_raw_world{
+        grid_source_world.x + 37.3, grid_source_world.y + 29.1};
+    const ImVec2 grid_source = screen_from_world(
+        *grid_layout, grid_source_world.x, grid_source_world.y);
+    const ImVec2 grid_pointer = screen_from_world(
+        *grid_layout, grid_raw_world.x, grid_raw_world.y);
+    if (!viewport_ffd::begin_gesture(
+            &state, *grid_layout, 0U, grid_source) ||
+        !viewport_ffd::update_gesture(
+            &state, *grid_layout, grid_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::WorldGrid ||
+        std::abs(
+            state.viewport_ffd_gesture->snap_preview->target_world.x -
+            (std::round(grid_raw_world.x / 10.0) * 10.0)) > 1e-6 ||
+        std::abs(
+            state.viewport_ffd_gesture->snap_preview->target_world.y -
+            (std::round(grid_raw_world.y / 10.0) * 10.0)) > 1e-6) {
+        std::cerr << "FFD magnetic miss did not fall back to the world grid.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, false);
+
+    if (!prepare_attachment(
+            &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime) ||
+        !viewport_ffd::select_vertex(&state, 0U, false) ||
+        !viewport_ffd::select_vertex(&state, 1U, true)) {
+        return false;
+    }
+    const auto commit_layout = smoke_layout(state);
+    const auto commit_overlay_before = viewport_ffd::build_overlay(state);
+    const auto commit_source = commit_layout.has_value()
+        ? vertex_screen_position(state, *commit_layout, 0U)
+        : std::nullopt;
+    const auto commit_target = commit_layout.has_value()
+        ? vertex_screen_position(state, *commit_layout, 2U)
+        : std::nullopt;
+    if (!commit_layout.has_value() || !commit_overlay_before.has_value() ||
+        !commit_source.has_value() || !commit_target.has_value()) {
+        return false;
+    }
+    const ImVec2 commit_pointer(commit_target->x + 6.0f, commit_target->y);
+    const ViewportWorldPoint commit_raw_world =
+        world_from_screen(*commit_layout, commit_pointer);
+    const auto& commit_target_world =
+        commit_overlay_before->vertex_world_positions[2U];
+    const std::string commit_before =
+        marrow::editor::serialize_project(*state.session.project());
+    if (!viewport_ffd::begin_gesture(
+            &state, *commit_layout, 0U, *commit_source) ||
+        !viewport_ffd::update_gesture(
+            &state, *commit_layout, commit_pointer) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex ||
+        std::hypot(
+            commit_raw_world.x - commit_target_world.x,
+            commit_raw_world.y - commit_target_world.y) <= 1e-4) {
+        std::cerr << "FFD snapped commit did not differ from its raw pointer target.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, true);
+    const std::string commit_after =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto commit_overlay_after = viewport_ffd::build_overlay(state);
+    if (commit_after == commit_before || !commit_overlay_after.has_value() ||
+        std::abs(
+            commit_overlay_after->vertex_world_positions[0U].x -
+            commit_target_world.x) > 1e-4 ||
+        std::abs(
+            commit_overlay_after->vertex_world_positions[0U].y -
+            commit_target_world.y) > 1e-4 ||
+        state.session.undo_count() != 1U ||
+        !undo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != commit_before ||
+        !redo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != commit_after ||
+        !undo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != commit_before) {
+        std::cerr << "FFD snapped commit was not one exact undo/redo item.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    if (!prepare_attachment(
+            &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime) ||
+        !viewport_ffd::select_vertex(&state, 0U, false) ||
+        !viewport_ffd::select_vertex(&state, 1U, true)) {
+        return false;
+    }
+    const auto snap_back_layout = smoke_layout(state);
+    const auto snap_back_source = snap_back_layout.has_value()
+        ? vertex_screen_position(state, *snap_back_layout, 0U)
+        : std::nullopt;
+    const auto snap_back_target = snap_back_layout.has_value()
+        ? vertex_screen_position(state, *snap_back_layout, 2U)
+        : std::nullopt;
+    if (!snap_back_layout.has_value() || !snap_back_source.has_value() ||
+        !snap_back_target.has_value()) {
+        return false;
+    }
+    const std::string snap_back_project =
+        marrow::editor::serialize_project(*state.session.project());
+    const bool snap_back_dirty = state.session.dirty();
+    const auto* snap_back_runtime = state.session.runtime_data();
+    const std::string snap_back_preview = preview_signature(*state.preview_skeleton);
+    if (!viewport_ffd::begin_gesture(
+            &state, *snap_back_layout, 0U, *snap_back_source) ||
+        !viewport_ffd::update_gesture(
+            &state,
+            *snap_back_layout,
+            ImVec2(snap_back_target->x + 6.0f, snap_back_target->y)) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        !viewport_ffd::update_gesture(
+            &state, *snap_back_layout, *snap_back_source) ||
+        state.viewport_ffd_gesture->snap_preview.has_value()) {
+        std::cerr << "FFD enabled snap did not return exactly to its gesture start.\n";
+        return false;
+    }
+    viewport_ffd::finish_gesture(&state, true);
+    if (marrow::editor::serialize_project(*state.session.project()) !=
+            snap_back_project ||
+        state.session.dirty() != snap_back_dirty ||
+        state.session.undo_count() != 0U ||
+        state.session.runtime_data() != snap_back_runtime ||
+        preview_signature(*state.preview_skeleton) != snap_back_preview) {
+        std::cerr << "FFD enabled snap return-to-start left state or history.\n";
+        return false;
+    }
+
+    if (!set_ffd_snap_enabled(false, false)) {
+        return false;
+    }
+
     if (!prepare_attachment(
             &state, *body_slot, *mesh_skin, "body_mesh", kFfdSmokeTime)) {
         return false;
@@ -888,7 +1688,8 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     }
     apply_shell_mode(&state, ShellMode::Animation);
 
-    if (!prepare_attachment(
+    if (!set_ffd_snap_enabled(true, true) ||
+        !prepare_attachment(
             &state, *body_slot, *warrior_skin, "warrior_body", kFfdSmokeTime)) {
         std::cerr << "FFD smoke could not stage warrior_body.\n";
         return false;
@@ -905,8 +1706,14 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     const auto linked_vertex = linked_layout.has_value()
         ? vertex_screen_position(state, *linked_layout, 0U)
         : std::nullopt;
+    const auto linked_snap_target = linked_layout.has_value()
+        ? vertex_screen_position(state, *linked_layout, 2U)
+        : std::nullopt;
+    const std::string linked_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t linked_undo_before = state.session.undo_count();
     if (!linked_layout.has_value() || !linked_overlay.has_value() ||
-        !linked_vertex.has_value() ||
+        !linked_vertex.has_value() || !linked_snap_target.has_value() ||
         linked_overlay->display_attachment_name != "warrior_body" ||
         linked_overlay->deform_attachment_name != "body_mesh" ||
         state.preview_skeleton->current_mesh_vertex_offsets(*body_slot) == nullptr ||
@@ -920,7 +1727,18 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         !viewport_ffd::update_gesture(
             &state,
             *linked_layout,
-            ImVec2(linked_vertex->x + 12.0f, linked_vertex->y + 4.0f))) {
+            ImVec2(linked_snap_target->x + 6.0f, linked_snap_target->y)) ||
+        !state.viewport_ffd_gesture->snap_preview.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->source !=
+            marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex ||
+        !state.viewport_ffd_gesture->snap_preview->magnetic_identity.has_value() ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->slot_name !=
+            "body" ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->skin_name !=
+            std::optional<std::string>{"warrior"} ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->attachment_name !=
+            "warrior_body" ||
+        state.viewport_ffd_gesture->snap_preview->magnetic_identity->vertex_index != 2U) {
         std::cerr << "Linked-mesh FFD target/update failed: " << state.error_message << '\n';
         return false;
     }
@@ -952,6 +1770,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         !refreshed_warrior->linked_mesh.has_value() ||
         refreshed_warrior->linked_mesh->parent_attachment != "body_mesh" ||
         !refreshed_warrior->linked_mesh->deform ||
+        state.session.undo_count() != linked_undo_before + 1U ||
         !ffd_selection_is(state, {0U, 1U}) ||
         !selection_matches(state.selection, linked_selection) ||
         state.hierarchy_selection_anchor != linked_anchor ||
@@ -961,6 +1780,16 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     }
 
     const std::vector<double> committed_offsets = linked_key->vertex_offsets;
+    const std::string linked_after =
+        marrow::editor::serialize_project(*state.session.project());
+    if (!undo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != linked_before ||
+        !redo_project_change(&state) ||
+        marrow::editor::serialize_project(*state.session.project()) != linked_after ||
+        !ffd_selection_is(state, {0U, 1U})) {
+        std::cerr << "Linked magnetic FFD undo/redo changed child/parent identity.\n";
+        return false;
+    }
     auto temporary = make_temp_directory();
     if (!temporary.has_value()) {
         std::cerr << "FFD smoke could not create its temporary export directory.\n";
@@ -976,7 +1805,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         atlas_path = std::filesystem::absolute(atlas_path);
     }
     const std::filesystem::path saved_project =
-        temporary->path / "marrow_mar164.marrow";
+        temporary->path / "marrow_mar166.marrow";
     const auto saved = marrow::editor::save_project(save_copy, saved_project);
     const auto reloaded = saved
         ? marrow::editor::load_project(saved_project)
@@ -987,6 +1816,9 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         : nullptr;
     const auto* reloaded_key = key_near(reloaded_edit, kFfdSmokeTime);
     if (!saved || !reloaded || reloaded_key == nullptr ||
+        !reloaded.project->snap_settings.has_value() ||
+        !reloaded.project->snap_settings->world_grid_enabled ||
+        !reloaded.project->snap_settings->magnetic_vertex_enabled ||
         !vector_matches(reloaded_key->vertex_offsets, committed_offsets, 1e-9) ||
         !source_keys_preserved(source_keys, *reloaded_edit)) {
         std::cerr << "FFD full-vector project save/reload failed.\n";
@@ -1021,8 +1853,8 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     }
 
     marrow::editor::ProjectExportOptions export_options;
-    export_options.skeleton_output_path = temporary->path / "marrow_mar164.mskl";
-    export_options.binary_output_path = temporary->path / "marrow_mar164.mbin";
+    export_options.skeleton_output_path = temporary->path / "marrow_mar166.mskl";
+    export_options.binary_output_path = temporary->path / "marrow_mar166.mbin";
     const auto exported = marrow::editor::export_runtime_assets(
         *state.session.project(),
         *state.session.base_skeleton_document(),
@@ -1252,7 +2084,8 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         return false;
     }
 
-    std::cout << "MAR-164 attachment-local multi-vertex FFD smoke passed.\n";
+    std::cout
+        << "MAR-164 attachment-local FFD and MAR-166 grid/magnetic snapping smoke passed.\n";
     return true;
 }
 
