@@ -132,6 +132,42 @@ CompletionDecision completion_decision(
     bool commit_requested,
     bool changed);
 
+struct SelectionTimeSpan {
+    double minimum_time{0.0};
+    double maximum_time{0.0};
+    std::size_t key_count{0U};
+    bool valid{false};
+};
+
+/** @brief The selected keys' time range, resolved against the current tracks. */
+SelectionTimeSpan selection_time_span(
+    const std::vector<KeyRef>& selection,
+    const std::vector<TrackRow>& tracks);
+
+/** @brief The positive ratio that moves `edge_original_time` to `edge_target_time`. */
+std::optional<double> scale_from_edge_time(
+    double pivot_time,
+    double edge_original_time,
+    double edge_target_time);
+
+/**
+ * @brief The nearest ratio whose moved edge lands on a frame boundary.
+ *
+ * Snaps only the dragged edge, through the shared `snap_delta_to_frames()`;
+ * interior keys keep the ratio's exact placement, because quantizing them would
+ * stop the result from being a scale at all.
+ */
+std::optional<double> snap_scale_to_frames(
+    double pivot_time,
+    double edge_original_time,
+    double requested_scale,
+    double frames_per_second);
+
+/** @brief The ratio to apply now, given what a gesture has already applied. */
+std::optional<double> incremental_scale_ratio(
+    double requested_scale,
+    double applied_scale);
+
 template <typename Keyframe>
 std::optional<double> insertable_key_time(
     const std::vector<Keyframe>& keyframes,

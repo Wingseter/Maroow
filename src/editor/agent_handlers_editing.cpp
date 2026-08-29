@@ -1,10 +1,13 @@
 #include "agent_dispatch_internal.hpp"
 
+#include "timeline_model.hpp"
 #include "marrow/editor/authoring.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -791,6 +794,101 @@ AgentDispatchResult handle_editing_operation(
     return handle_timeline_editing_operation(context, cmd, operation);
 }
 
+bool timeline_key_selectors_arg(
+    const json::Value& keys_value,
+    std::string_view operation_label,
+    std::string_view family_noun,
+    std::vector<TimelineKeySelector>* selectors_out,
+    std::string* error_out) {
+    selectors_out->clear();
+    selectors_out->reserve(keys_value.as_array().size());
+    for (std::size_t index = 0U; index < keys_value.as_array().size(); ++index) {
+        const json::Value& key_value = keys_value.as_array()[index];
+        if (!key_value.is_object()) {
+            *error_out = std::string(operation_label) + " key " + std::to_string(index) +
+                    " must be an object.";
+            return false;
+        }
+        const auto kind = string_arg_any(key_value, {"kind", "type"});
+        const auto animation = string_arg(key_value, "animation");
+        const auto time = number_arg(key_value, "time");
+        if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
+            *error_out = std::string(operation_label) + " key " + std::to_string(index) +
+                    " requires kind, animation, and time.";
+            return false;
+        }
+
+        TimelineKeySelector selector;
+        selector.animation_name = std::string(*animation);
+        selector.time = *time;
+        if (*kind == "transform") {
+            const auto bone = string_arg(key_value, "bone");
+            const auto channel = string_arg(key_value, "channel");
+            if (!bone.has_value() || !channel.has_value()) {
+                *error_out = "Transform " + std::string(family_noun) + " keys require bone and channel.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::Transform;
+            selector.bone_name = std::string(*bone);
+            if (*channel == "rotate") {
+                selector.transform_channel = TransformTimelineChannel::Rotate;
+            } else if (*channel == "translate") {
+                selector.transform_channel = TransformTimelineChannel::Translate;
+            } else if (*channel == "scale") {
+                selector.transform_channel = TransformTimelineChannel::Scale;
+            } else if (*channel == "shear") {
+                selector.transform_channel = TransformTimelineChannel::Shear;
+            } else {
+                *error_out = "Transform " + std::string(family_noun) +
+                    " channel must be rotate, translate, scale, or shear.";
+                return false;
+            }
+        } else if (*kind == "deform") {
+            const auto slot = string_arg(key_value, "slot");
+            const auto attachment = string_arg(key_value, "attachment");
+            if (!slot.has_value() || !attachment.has_value()) {
+                *error_out = "Deform " + std::string(family_noun) + " keys require slot and attachment.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::Deform;
+            selector.slot_name = std::string(*slot);
+            selector.attachment_name = std::string(*attachment);
+        } else if (*kind == "draw_order") {
+            selector.kind = TimelineKeyKind::DrawOrder;
+        } else if (*kind == "event") {
+            selector.kind = TimelineKeyKind::Event;
+            if (const auto ordinal = integer_arg(key_value, "ordinal")) {
+                if (*ordinal < 0) {
+                    *error_out = "Event " + std::string(family_noun) + " ordinal must be non-negative.";
+                    return false;
+                }
+                selector.same_time_ordinal = static_cast<std::size_t>(*ordinal);
+            }
+        } else if (*kind == "slot_color") {
+            const auto slot = string_arg(key_value, "slot");
+            if (!slot.has_value()) {
+                *error_out = "Slot-color " + std::string(family_noun) + " keys require slot.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::SlotColor;
+            selector.slot_name = std::string(*slot);
+        } else if (*kind == "slot_attachment") {
+            const auto slot = string_arg(key_value, "slot");
+            if (!slot.has_value()) {
+                *error_out = "Slot-attachment " + std::string(family_noun) + " keys require slot.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::SlotAttachment;
+            selector.slot_name = std::string(*slot);
+        } else {
+            *error_out = "Unknown timeline " + std::string(family_noun) + " key kind: " + std::string(*kind);
+            return false;
+        }
+        selectors_out->push_back(std::move(selector));
+    }
+    return true;
+}
+
 AgentDispatchResult handle_timeline_editing_operation(
     AgentCommandContext& context,
     const json::Value& cmd,
@@ -822,94 +920,14 @@ AgentDispatchResult handle_timeline_editing_operation(
         }
 
         std::vector<TimelineKeySelector> selectors;
-        selectors.reserve(keys_value->as_array().size());
-        for (std::size_t index = 0U; index < keys_value->as_array().size(); ++index) {
-            const json::Value& key_value = keys_value->as_array()[index];
-            if (!key_value.is_object()) {
-                return make_error(
-                    "timeline.retime_keyframes key " + std::to_string(index) +
-                        " must be an object.",
-                    op,
-                    spec);
-            }
-            const auto kind = string_arg_any(key_value, {"kind", "type"});
-            const auto animation = string_arg(key_value, "animation");
-            const auto time = number_arg(key_value, "time");
-            if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
-                return make_error(
-                    "timeline.retime_keyframes key " + std::to_string(index) +
-                        " requires kind, animation, and time.",
-                    op,
-                    spec);
-            }
-
-            TimelineKeySelector selector;
-            selector.animation_name = std::string(*animation);
-            selector.time = *time;
-            if (*kind == "transform") {
-                const auto bone = string_arg(key_value, "bone");
-                const auto channel = string_arg(key_value, "channel");
-                if (!bone.has_value() || !channel.has_value()) {
-                    return make_error(
-                        "Transform retime keys require bone and channel.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::Transform;
-                selector.bone_name = std::string(*bone);
-                if (*channel == "rotate") {
-                    selector.transform_channel = TransformTimelineChannel::Rotate;
-                } else if (*channel == "translate") {
-                    selector.transform_channel = TransformTimelineChannel::Translate;
-                } else if (*channel == "scale") {
-                    selector.transform_channel = TransformTimelineChannel::Scale;
-                } else if (*channel == "shear") {
-                    selector.transform_channel = TransformTimelineChannel::Shear;
-                } else {
-                    return make_error(
-                        "Transform retime channel must be rotate, translate, scale, or shear.",
-                        op,
-                        spec);
-                }
-            } else if (*kind == "deform") {
-                const auto slot = string_arg(key_value, "slot");
-                const auto attachment = string_arg(key_value, "attachment");
-                if (!slot.has_value() || !attachment.has_value()) {
-                    return make_error(
-                        "Deform retime keys require slot and attachment.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::Deform;
-                selector.slot_name = std::string(*slot);
-                selector.attachment_name = std::string(*attachment);
-            } else if (*kind == "draw_order") {
-                selector.kind = TimelineKeyKind::DrawOrder;
-            } else if (*kind == "event") {
-                selector.kind = TimelineKeyKind::Event;
-                if (const auto ordinal = integer_arg(key_value, "ordinal")) {
-                    if (*ordinal < 0) {
-                        return make_error(
-                            "Event retime ordinal must be non-negative.", op, spec);
-                    }
-                    selector.same_time_ordinal = static_cast<std::size_t>(*ordinal);
-                }
-            } else if (*kind == "slot_color") {
-                const auto slot = string_arg(key_value, "slot");
-                if (!slot.has_value()) {
-                    return make_error("Slot-color retime keys require slot.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::SlotColor;
-                selector.slot_name = std::string(*slot);
-            } else if (*kind == "slot_attachment") {
-                const auto slot = string_arg(key_value, "slot");
-                if (!slot.has_value()) {
-                    return make_error(
-                        "Slot-attachment retime keys require slot.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::SlotAttachment;
-                selector.slot_name = std::string(*slot);
-            } else {
-                return make_error(
-                    "Unknown timeline retime key kind: " + std::string(*kind), op, spec);
-            }
-            selectors.push_back(std::move(selector));
+        std::string selector_error;
+        if (!timeline_key_selectors_arg(
+                *keys_value,
+                "timeline.retime_keyframes",
+                "retime",
+                &selectors,
+                &selector_error)) {
+            return make_error(std::move(selector_error), op, spec);
         }
 
         const bool snap = bool_arg(args, "snap", true);
@@ -1908,6 +1926,285 @@ AgentDispatchResult handle_timeline_editing_operation(
             op,
             spec,
             response_delta(result, false, previous, current));
+    }
+
+    if (op == "timeline.scale_key_times") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.scale_key_times requires an 'args' object.", op, spec);
+        }
+        const json::Value* keys_value = json::find_member(*args, "keys");
+        if (keys_value == nullptr || !keys_value->is_array() ||
+            keys_value->as_array().empty()) {
+            return make_error(
+                "timeline.scale_key_times requires a non-empty keys(array).", op, spec);
+        }
+        if (keys_value->as_array().size() > 4096U) {
+            return make_error(
+                "timeline.scale_key_times accepts at most 4096 keys.", op, spec);
+        }
+        std::vector<TimelineKeySelector> selectors;
+        std::string selector_error;
+        if (!timeline_key_selectors_arg(
+                *keys_value,
+                "timeline.scale_key_times",
+                "scale",
+                &selectors,
+                &selector_error)) {
+            return make_error(std::move(selector_error), op, spec);
+        }
+        // Missing is an error rather than a default: guessing a ratio or an
+        // anchor for the caller's whole selection is destructive.
+        const auto requested_scale = number_arg(*args, "scale");
+        if (!requested_scale.has_value()) {
+            return make_error(
+                "timeline.scale_key_times requires a numeric 'scale'.", op, spec);
+        }
+        const auto pivot_token = string_arg(*args, "pivot");
+        std::optional<marrow::editor::TimelineScalePivot> pivot;
+        if (pivot_token.has_value()) {
+            if (*pivot_token == "start") {
+                pivot = marrow::editor::TimelineScalePivot::RangeStart;
+            } else if (*pivot_token == "end") {
+                pivot = marrow::editor::TimelineScalePivot::RangeEnd;
+            }
+        }
+        if (!pivot.has_value()) {
+            return make_error(
+                "timeline.scale_key_times requires a 'pivot' of \"start\" or \"end\".",
+                op,
+                spec);
+        }
+        // A scripted ratio is exact, so snapping is opt-in here while
+        // timeline.retime_keyframes defaults its pointer-shaped delta to on.
+        const bool snap = bool_arg(args, "snap", false);
+        const double frames_per_second =
+            number_arg(*args, "frames_per_second")
+                .value_or(session.project()->editor_metadata.timeline.frames_per_second);
+        if (snap && (!std::isfinite(frames_per_second) || frames_per_second <= 0.0)) {
+            return make_error(
+                "timeline.scale_key_times frames per second must be positive.", op, spec);
+        }
+
+        const auto materialize = [&](ProjectData* project) {
+            for (const TimelineKeySelector& selector : selectors) {
+                switch (selector.kind) {
+                case TimelineKeyKind::Transform:
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name,
+                        selector.transform_channel);
+                    break;
+                case TimelineKeyKind::Deform:
+                    (void)ensure_mesh_deform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name,
+                        selector.attachment_name);
+                    break;
+                case TimelineKeyKind::DrawOrder:
+                    (void)ensure_draw_order_timeline_edit(
+                        *project, skeleton, selector.animation_name);
+                    break;
+                case TimelineKeyKind::Event:
+                    (void)ensure_event_timeline_edit(
+                        *project, skeleton, selector.animation_name);
+                    break;
+                case TimelineKeyKind::SlotColor:
+                    (void)ensure_slot_color_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name);
+                    break;
+                case TimelineKeyKind::SlotAttachment:
+                    (void)ensure_slot_attachment_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name);
+                    break;
+                }
+            }
+        };
+        // The times each selector currently names, in selector order, so the
+        // response can report `previous_time` without re-resolving afterwards.
+        const auto snapshot_times = [&](const ProjectData& project) {
+            std::vector<double> times;
+            times.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                times.push_back(selector.time);
+            }
+            (void)project;
+            return times;
+        };
+
+        // Snapping reshapes the ratio so the MOVED edge lands on a frame
+        // boundary; interior keys keep the ratio's exact placement, because
+        // quantizing them would stop the result from being a scale at all.
+        double applied_request = *requested_scale;
+        if (snap) {
+            double minimum_time = std::numeric_limits<double>::infinity();
+            double maximum_time = -std::numeric_limits<double>::infinity();
+            for (const TimelineKeySelector& selector : selectors) {
+                minimum_time = std::min(minimum_time, selector.time);
+                maximum_time = std::max(maximum_time, selector.time);
+            }
+            const bool start_pivot =
+                *pivot == marrow::editor::TimelineScalePivot::RangeStart;
+            const auto snapped = marrow::editor::timeline_model::snap_scale_to_frames(
+                start_pivot ? minimum_time : maximum_time,
+                start_pivot ? maximum_time : minimum_time,
+                *requested_scale,
+                frames_per_second);
+            if (!snapped.has_value()) {
+                return make_error(
+                    "No frame boundary produces a positive scale ratio.", op, spec);
+            }
+            applied_request = *snapped;
+        }
+
+        const auto apply = [&](ProjectData* project) {
+            materialize(project);
+            return marrow::editor::scale_keyframe_times(
+                project, selectors, *pivot, applied_request);
+        };
+        const auto response_delta =
+            [&](const marrow::editor::TimelineScaleResult& result,
+                bool dry_run,
+                const std::vector<double>& previous_times) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace("requested_scale", number_value(*requested_scale));
+                response.emplace("applied_scale", number_value(applied_request));
+                response.emplace(
+                    "pivot",
+                    string_value(std::string(
+                        *pivot == marrow::editor::TimelineScalePivot::RangeStart
+                            ? "start"
+                            : "end")));
+                response.emplace("pivot_time", number_value(result.pivot_time));
+                response.emplace("original_span", number_value(result.original_span));
+                response.emplace("scaled_span", number_value(result.scaled_span));
+                response.emplace("snap", bool_value(snap));
+                response.emplace("frames_per_second", number_value(frames_per_second));
+                response.emplace("key_count", number_value(result.key_count));
+                response.emplace(
+                    "moved_key_count", number_value(result.moved_key_count));
+                constexpr std::size_t kMaxReportedKeys = 256U;
+                const std::size_t reported =
+                    std::min(selectors.size(), kMaxReportedKeys);
+                response.emplace(
+                    "keys_truncated", bool_value(selectors.size() > reported));
+                json::Value::Array reported_keys;
+                reported_keys.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    const TimelineKeySelector& selector = selectors[index];
+                    const double previous = index < previous_times.size()
+                        ? previous_times[index]
+                        : selector.time;
+                    const double scaled = result.pivot_time +
+                        (previous - result.pivot_time) * applied_request;
+                    json::Value::Object entry;
+                    entry.emplace("kind", string_value(timeline_key_kind_name(selector.kind)));
+                    entry.emplace("animation", string_value(selector.animation_name));
+                    switch (selector.kind) {
+                    case TimelineKeyKind::Transform:
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(selector.transform_channel))));
+                        break;
+                    case TimelineKeyKind::Deform:
+                        entry.emplace("slot", string_value(selector.slot_name));
+                        entry.emplace(
+                            "attachment", string_value(selector.attachment_name));
+                        break;
+                    case TimelineKeyKind::SlotColor:
+                    case TimelineKeyKind::SlotAttachment:
+                        entry.emplace("slot", string_value(selector.slot_name));
+                        break;
+                    case TimelineKeyKind::Event:
+                        entry.emplace(
+                            "ordinal", number_value(selector.same_time_ordinal));
+                        break;
+                    case TimelineKeyKind::DrawOrder:
+                        break;
+                    }
+                    entry.emplace("previous_time", number_value(previous));
+                    entry.emplace("time", number_value(scaled));
+                    entry.emplace(
+                        "moved", bool_value(std::abs(scaled - previous) > 1e-12));
+                    reported_keys.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("keys", array_value(std::move(reported_keys)));
+                return object_value(std::move(response));
+            };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            const std::vector<double> previous_times = snapshot_times(candidate);
+            const marrow::editor::TimelineScaleResult result = apply(&candidate);
+            if (!result) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            return make_success(
+                "Timeline key scaling validated.",
+                op,
+                spec,
+                response_delta(result, true, previous_times));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            selectors.size() == 1U
+                ? "Scale timeline key via Agent"
+                : "Scale timeline keys via Agent",
+            "timeline:scale",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const std::vector<double> previous_times = snapshot_times(*transaction.project());
+        const marrow::editor::TimelineScaleResult result = apply(transaction.project());
+        if (!result) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to scale timeline keys: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Scaled timeline keys successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous_times));
     }
 
     if (op == "set_event_keyframe") {

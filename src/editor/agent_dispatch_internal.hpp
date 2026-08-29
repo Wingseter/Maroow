@@ -128,6 +128,23 @@ bool curve_mode_request_arg(
     std::optional<marrow::editor::TimelineScalarComponent>* driver_out,
     std::string* error_out);
 /**
+ * @brief Parses one timeline key selector array into project-domain selectors.
+ *
+ * `operation_label` names the operation in the two index-bearing messages and
+ * `family_noun` names the edit in the per-family ones, so each caller keeps its
+ * own error strings byte-identical. This is the single parser
+ * `timeline.retime_keyframes` and `timeline.scale_key_times` share; the caller
+ * still checks that `keys` is present, is an array, is non-empty, and is within
+ * the 4096 cap before calling.
+ */
+bool timeline_key_selectors_arg(
+    const json::Value& keys_value,
+    std::string_view operation_label,
+    std::string_view family_noun,
+    std::vector<marrow::editor::TimelineKeySelector>* selectors_out,
+    std::string* error_out);
+
+/**
  * @brief Parses one lane selector array into project-domain lane selectors.
  *
  * Lane selectors carry no time, because loop synchronization is a property of

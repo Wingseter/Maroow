@@ -17,7 +17,7 @@ The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04
 - Preview/playback, asset watching, timeline, constraints, selection, inspector, weight-paint, viewport UI, project/runtime panels, and agent panels have feature-owned source/header pairs.
 - `marrow_editor` contains UI-free project/session/agent authoring code and links only `marrow_runtime` and Zlib; icon/UI/OpenGL code is compiled only into `marrow_editor_shell`.
 - The C API and socket dispatcher use `EditorSession` plus `AgentControlState`, and C ABI version 1 is unchanged.
-- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the registry to 56, MAR-169's `timeline.set_interpolation` raised it to 57, MAR-171's `timeline.set_curve_mode` raised it to 58, and MAR-172's `timeline.set_loop_sync` raises the **current** registry to the exact 59-operation total recorded below.
+- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the registry to 56, MAR-169's `timeline.set_interpolation` raised it to 57, MAR-171's `timeline.set_curve_mode` raised it to 58, MAR-172's `timeline.set_loop_sync` raised it to 59, and MAR-173's `timeline.scale_key_times` raises the **current** registry to the exact 60-operation total recorded below.
 
 ## Target ownership
 
@@ -109,7 +109,7 @@ Numeric IDs are intentionally not execution order. The PRD array put MAR-141–1
 The refactor must preserve:
 
 - C ABI version 1, all C functions, status codes, and ownership rules;
-- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations, six MAR-128 parameter operations, MAR-155 `animation.set_duration`, MAR-169 `timeline.set_interpolation`, MAR-171 `timeline.set_curve_mode`, and MAR-172 `timeline.set_loop_sync` for an exact **current** total of 59;
+- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations, six MAR-128 parameter operations, MAR-155 `animation.set_duration`, MAR-169 `timeline.set_interpolation`, MAR-171 `timeline.set_curve_mode`, MAR-172 `timeline.set_loop_sync`, and MAR-173 `timeline.scale_key_times` for an exact **current** total of 60;
 - existing `.marrow` compatibility, `.mskl` v1, `.mbin` v2, and `.matl` v1; P1 project fields remain optional and additive;
 - optional parameter-model roots default to empty for old assets, unknown additive `.marrow` fields survive load/save, and direct preview parameter input is not serialized;
 - byte-identical unchanged `.marrow` serialization and equivalent `.mskl`/`.mbin` exports;

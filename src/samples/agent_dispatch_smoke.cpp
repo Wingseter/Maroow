@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 59> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 60> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -72,6 +72,7 @@ constexpr std::array<OperationExpectation, 59> kExpectedOperations{{
     {"timeline.set_interpolation", "edit", true, false, true},
     {"timeline.set_curve_mode", "edit", true, false, true},
     {"timeline.set_loop_sync", "edit", true, false, true},
+    {"timeline.scale_key_times", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
     {"set_event_keyframe", "edit", true, false, true},
@@ -2367,6 +2368,295 @@ int main(int argc, char** argv) {
         harness.invoke("undo the loop-sync enable", "{\"op\":\"undo\"}");
         harness.invoke("undo the loop-boundary duration", "{\"op\":\"undo\"}");
     }
+
+    // --- MAR-173: timeline.scale_key_times, the 60th operation. ---
+    {
+        const char* kSpine0 =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.0}";
+        const char* kSpineHalf =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.5}";
+        const char* kSpineOne =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":1.0}";
+        const auto whole_lane = [&](std::string tail) {
+            return std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                kSpine0 + "," + kSpineHalf + "," + kSpineOne + "]," + tail + "}}";
+        };
+        const auto key_entry = [&](const DispatchObservation& observation,
+                                   std::size_t index) -> const json::Value* {
+            const json::Value* entries = member(observation.scene_delta(), "keys");
+            if (entries == nullptr || !entries->is_array() ||
+                entries->as_array().size() <= index) {
+                return nullptr;
+            }
+            return &entries->as_array()[index];
+        };
+        const auto key_number_is = [](const json::Value* value, double expected) {
+            return value != nullptr && value->is_number() &&
+                std::abs(value->as_number() - expected) <= 1e-6;
+        };
+        const auto key_bool_is = [](const json::Value* value, bool expected) {
+            return value != nullptr && value->is_boolean() &&
+                value->as_boolean() == expected;
+        };
+
+        // The dry run doubles as the precondition assertion: it reports each
+        // key's `previous_time`, so the lane's shape is checked, not assumed.
+        const DispatchObservation scale_dry_run = harness.invoke(
+            "timeline.scale_key_times dry run",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"dry_run\":true"));
+        harness.expect(
+            bool_member(scale_dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(scale_dry_run.scene_delta(), "requested_scale") ==
+                    std::optional<double>(1.25) &&
+                number_member(scale_dry_run.scene_delta(), "applied_scale") ==
+                    std::optional<double>(1.25) &&
+                number_member(scale_dry_run.scene_delta(), "pivot_time") ==
+                    std::optional<double>(0.0) &&
+                number_member(scale_dry_run.scene_delta(), "original_span") ==
+                    std::optional<double>(1.0) &&
+                number_member(scale_dry_run.scene_delta(), "scaled_span") ==
+                    std::optional<double>(1.25) &&
+                number_member(scale_dry_run.scene_delta(), "key_count") ==
+                    std::optional<double>(3.0) &&
+                number_member(scale_dry_run.scene_delta(), "moved_key_count") ==
+                    std::optional<double>(2.0) &&
+                bool_member(scale_dry_run.scene_delta(), "keys_truncated") ==
+                    std::optional<bool>(false) &&
+                bool_member(scale_dry_run.scene_delta(), "snap") ==
+                    std::optional<bool>(false),
+            "timeline.scale_key_times dry run",
+            "the dry run did not report the ratio, the pivot, and both spans");
+        harness.expect(
+            key_number_is(member(key_entry(scale_dry_run, 0U), "previous_time"), 0.0) &&
+                key_number_is(member(key_entry(scale_dry_run, 0U), "time"), 0.0) &&
+                key_bool_is(member(key_entry(scale_dry_run, 0U), "moved"), false) &&
+                key_number_is(
+                    member(key_entry(scale_dry_run, 1U), "previous_time"), 0.5) &&
+                key_number_is(member(key_entry(scale_dry_run, 1U), "time"), 0.625) &&
+                key_bool_is(member(key_entry(scale_dry_run, 1U), "moved"), true) &&
+                key_number_is(
+                    member(key_entry(scale_dry_run, 2U), "previous_time"), 1.0) &&
+                key_number_is(member(key_entry(scale_dry_run, 2U), "time"), 1.25),
+            "timeline.scale_key_times dry-run key report",
+            "the per-key report did not carry previous_time, time, and moved");
+
+        // The same selection with the other pivot is a different edit.
+        const DispatchObservation end_pivot = harness.invoke(
+            "timeline.scale_key_times dry run with the end pivot",
+            whole_lane("\"scale\":0.5,\"pivot\":\"end\",\"dry_run\":true"));
+        harness.expect(
+            number_member(end_pivot.scene_delta(), "pivot_time") ==
+                    std::optional<double>(1.0) &&
+                key_number_is(member(key_entry(end_pivot, 0U), "time"), 0.5) &&
+                key_number_is(member(key_entry(end_pivot, 2U), "time"), 1.0),
+            "timeline.scale_key_times both pivots",
+            "the two pivots must produce different results for the same selection");
+
+        // `export.preview` reports the resolved export TARGET PATHS, not the
+        // exported content, so a time-only edit correctly leaves its payload
+        // identical. The design's §12.6 expected the payload to differ; that is
+        // wrong about this operation, and asserting the difference would have
+        // passed only on the response envelope's revision metadata. The
+        // content-level proof lives in marrow_project_smoke's MAR-173 export
+        // block, which exports the mutated project and asserts the loaded key
+        // time. What is asserted here is what this operation actually promises:
+        // a scaled project stays exportable to the same targets.
+        const auto preview_targets = [&](const DispatchObservation& observation) {
+            std::string joined;
+            const json::Value* targets = member(observation.scene_delta(), "targets");
+            if (targets == nullptr || !targets->is_array()) return joined;
+            for (const json::Value& entry : targets->as_array()) {
+                if (entry.is_string()) joined += entry.as_string() + "|";
+            }
+            return joined;
+        };
+        const DispatchObservation preview_before = harness.invoke(
+            "export.preview before the scale", "{\"op\":\"export.preview\"}");
+
+        const DispatchObservation scale_live = harness.invoke(
+            "timeline.scale_key_times live",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\""));
+        harness.expect(
+            bool_member(scale_live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false) &&
+                number_member(scale_live.scene_delta(), "moved_key_count") ==
+                    std::optional<double>(2.0) &&
+                number_member(scale_live.scene_delta(), "applied_scale") ==
+                    std::optional<double>(1.25),
+            "timeline.scale_key_times live",
+            "a live scale did not report its applied ratio and moved count");
+
+        const DispatchObservation preview_after = harness.invoke(
+            "export.preview after the scale", "{\"op\":\"export.preview\"}");
+        harness.expect(
+            preview_before.parsed && preview_after.parsed &&
+                !preview_targets(preview_before).empty() &&
+                preview_targets(preview_before) == preview_targets(preview_after),
+            "timeline.scale_key_times export preview",
+            "a scaled project must still preview the same export targets");
+
+        // A second identical live call moves nothing.
+        harness.invoke(
+            "timeline.scale_key_times no_change",
+            std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":0.0},"
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":0.625},"
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":1.25}],\"scale\":1.0,"
+                "\"pivot\":\"start\"}}",
+            false,
+            "no_change");
+
+        harness.invoke("undo the live scale", "{\"op\":\"undo\"}");
+        const DispatchObservation preview_undone = harness.invoke(
+            "export.preview after the undo", "{\"op\":\"export.preview\"}");
+        harness.expect(
+            preview_targets(preview_undone) == preview_targets(preview_before),
+            "timeline.scale_key_times export preview undo",
+            "undoing a scale must leave the export targets where they were");
+        const DispatchObservation restored = harness.invoke(
+            "timeline.scale_key_times read-back after undo",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"dry_run\":true"));
+        harness.expect(
+            key_number_is(member(key_entry(restored, 1U), "previous_time"), 0.5) &&
+                key_number_is(member(key_entry(restored, 2U), "previous_time"), 1.0),
+            "timeline.scale_key_times undo",
+            "one undo did not restore every key time");
+
+        // Snapping reshapes the ratio, and only on request.
+        const DispatchObservation snapped = harness.invoke(
+            "timeline.scale_key_times snapped dry run",
+            whole_lane("\"scale\":1.234,\"pivot\":\"start\",\"snap\":true,"
+                       "\"frames_per_second\":60,\"dry_run\":true"));
+        const std::optional<double> applied =
+            number_member(snapped.scene_delta(), "applied_scale");
+        harness.expect(
+            applied.has_value() && std::abs(*applied - 1.234) > 1e-9 &&
+                std::abs(*applied * 60.0 - std::round(*applied * 60.0)) < 1e-6 &&
+                bool_member(snapped.scene_delta(), "snap") == std::optional<bool>(true),
+            "timeline.scale_key_times snapping",
+            "snap:true must reshape the ratio so the moved edge lands on a frame");
+
+        // A loop-pinned key rejects, naming the remedy.
+        harness.invoke(
+            "animation.set_duration for the scale pin case",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":1.5}}");
+        harness.invoke(
+            "timeline.set_loop_sync for the scale pin case",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\"}],\"enabled\":true}}");
+        harness.invoke(
+            "timeline.scale_key_times rejects a loop-pinned key",
+            whole_lane("\"scale\":1.2,\"pivot\":\"end\""),
+            false,
+            "invalid_request");
+        // Both halves of the rejection: the call failed AND the authored key
+        // beside the pinned one survived.
+        harness.invoke(
+            "the spine key at 0.5 survived the rejected scale",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kSpineHalf + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.invoke("undo the scale pin enable", "{\"op\":\"undo\"}");
+        harness.invoke("undo the scale pin duration", "{\"op\":\"undo\"}");
+
+        // Rejections, each leaving the project untouched.
+        struct ScaleRejection {
+            const char* label;
+            std::string request;
+            const char* code;
+        };
+        const std::vector<ScaleRejection> scale_rejections{
+            {"a missing scale", whole_lane("\"pivot\":\"start\""), "invalid_request"},
+            {"a non-numeric scale",
+             whole_lane("\"scale\":\"1.5\",\"pivot\":\"start\""), "invalid_request"},
+            {"a zero scale", whole_lane("\"scale\":0,\"pivot\":\"start\""),
+             "invalid_request"},
+            {"a negative scale", whole_lane("\"scale\":-1,\"pivot\":\"start\""),
+             "invalid_request"},
+            {"a missing pivot", whole_lane("\"scale\":1.25"), "invalid_request"},
+            {"an unknown pivot", whole_lane("\"scale\":1.25,\"pivot\":\"middle\""),
+             "invalid_request"},
+            {"an empty keys array",
+             "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[],"
+             "\"scale\":1.25,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a duplicate key",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 + "," + kSpineHalf + "," + kSpineHalf +
+                 "],\"scale\":1.25,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a single-key selection",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpineHalf + "],\"scale\":1.25,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"keys from two animations",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 +
+                 ",{\"kind\":\"transform\",\"animation\":\"aim\",\"bone\":\"arm_l\","
+                 "\"channel\":\"rotate\",\"time\":0.0}],\"scale\":1.25,"
+                 "\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a non-event collision",
+             whole_lane("\"scale\":0.001,\"pivot\":\"start\""), "invalid_request"},
+            {"an intrusion into an unselected neighbour",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 + "," + kSpineHalf +
+                 "],\"scale\":1.999,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a partial event tie",
+             "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":["
+             "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.25,\"ordinal\":0},"
+             "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.8}],"
+             "\"scale\":1.5,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"snap with a non-positive frames_per_second",
+             whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"snap\":true,"
+                        "\"frames_per_second\":0"),
+             "invalid_request"},
+            {"an unresolvable key",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 +
+                 ",{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                 "\"channel\":\"rotate\",\"time\":0.42}],\"scale\":1.25,"
+                 "\"pivot\":\"start\"}}",
+             "not_found"},
+        };
+        for (const ScaleRejection& rejection : scale_rejections) {
+            harness.invoke(
+                std::string("timeline.scale_key_times rejects ") + rejection.label,
+                rejection.request,
+                false,
+                rejection.code);
+        }
+        const DispatchObservation after_scale_rejections = harness.invoke(
+            "timeline.scale_key_times unchanged after rejections",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"dry_run\":true"));
+        harness.expect(
+            key_number_is(
+                member(key_entry(after_scale_rejections, 1U), "previous_time"), 0.5) &&
+                key_number_is(
+                    member(key_entry(after_scale_rejections, 2U), "previous_time"), 1.0),
+            "timeline.scale_key_times rejection atomicity",
+            "a rejected scale request mutated the project");
+
+        // Event ties move together, and the whole tie is a legal selection.
+        harness.invoke(
+            "timeline.scale_key_times carries a complete event tie",
+            "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":["
+            "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.25,\"ordinal\":0},"
+            "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.25,\"ordinal\":1},"
+            "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.8}],"
+            "\"scale\":1.5,\"pivot\":\"start\",\"dry_run\":true}}");
+    }
+
 
     // Two merge-enabled transform edits must form one undo group. Temporary
     // JSON/binary comparison gives an implementation-independent key count.

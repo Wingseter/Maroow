@@ -275,6 +275,44 @@ bool apply_timeline_retime_delta(
 void finish_timeline_retime_gesture(ShellState* state, bool commit);
 
 /**
+ * @brief Opens one live transaction that scales the current key selection.
+ *
+ * The pivot names which edge of the selection's own time range stays fixed;
+ * the primitive recomputes it from the resolved times every frame, so the
+ * pivot key is bit-identical throughout. Fails closed on a null state, another
+ * live authoring gesture, an empty or single-time selection, a non-editable or
+ * unresolvable track, a partial event tie, and a loop-synchronization pinned
+ * key. The last two are reported through `state->status_message`.
+ */
+bool begin_timeline_scale_gesture(
+    ShellState* state,
+    std::uint32_t item_id,
+    marrow::editor::TimelineScalePivot pivot,
+    const std::vector<TimelineTrackRow>& tracks);
+
+/**
+ * @brief Applies one absolute ratio, holding the last accepted state on a
+ *        rejection and cancelling atomically on a structural failure.
+ *
+ * A `scale_keyframe_times()` rejection deliberately keeps the gesture alive:
+ * dragging inward past a collision and back out again is ordinary, and killing
+ * the drag there would lose the edit. Every other failure — materialization, a
+ * lost key identity, the automatic-curve resolve, the runtime refresh — cancels
+ * the whole transaction.
+ *
+ * @return false when the gesture ended; the gesture is already gone.
+ */
+bool apply_timeline_scale_ratio(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double requested_scale);
+
+void finish_timeline_scale_gesture(ShellState* state, bool commit);
+
+/** @brief The last rejected frame's reason, or empty while the scale is legal. */
+std::string_view timeline_scale_rejection(const ShellState& state);
+
+/**
  * @brief Opens one live transaction that offsets a single graph component.
  *
  * The gesture edits `component` on every selected key that belongs to `track`,

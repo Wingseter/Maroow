@@ -512,15 +512,63 @@ void include_timeline_retime_bounds(
 }
 
 /**
+ * @brief The minimum time separation two keys of one family must keep.
+ *
+ * Event timelines return 0.0 because same-time event keys are legal and are
+ * distinguished by `same_time_ordinal`; every other family returns the shared
+ * `kNonEventKeySpacing`. This is the single definition
+ * `include_resolved_retime_bounds()` and `scale_keyframe_times()` share, so a
+ * retime and a scale can never disagree about what a collision is.
+ */
+double family_key_spacing(TimelineKeyKind kind) {
+    switch (kind) {
+    case TimelineKeyKind::Event:
+        return 0.0;
+    case TimelineKeyKind::Transform:
+    case TimelineKeyKind::Deform:
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::SlotColor:
+    case TimelineKeyKind::SlotAttachment:
+        return kNonEventKeySpacing;
+    }
+    return kNonEventKeySpacing;
+}
+
+/**
+ * @brief Reports whether one resolved key sits on a loop-synchronized end.
+ *
+ * The first key defines the boundary value at t = 0 and the last key IS the
+ * managed boundary at the clip duration, so an opted-in lane treats both as
+ * immovable. This is the single definition `include_loop_boundary_retime_pins()`
+ * and `scale_keyframe_times()` share, so a retime and a scale can never
+ * disagree about which keys an opt-in freezes.
+ *
+ * This answers "may this key move?", which is deliberately a different question
+ * from `managed_boundary_index()`'s "does the boundary contract own this key,
+ * so may synchronization overwrite it?". The latter is stricter — it never
+ * names key 0, and it disowns a last key that is neither at the boundary nor
+ * still the bit-exact mirror of key 0 — because overwriting authored data is a
+ * worse failure than refusing to move it.
+ */
+template <typename Timeline>
+bool timeline_key_is_loop_pinned(
+    const std::vector<Timeline>& timelines,
+    const ResolvedTimelineKey& resolved) {
+    const Timeline& timeline = timelines[resolved.timeline_index];
+    return timeline.loop_sync &&
+        (resolved.key_index == 0U ||
+         resolved.key_index + 1U == timeline.keyframes.size());
+}
+
+/**
  * @brief Pins both ends of a loop-synchronized lane, for the three continuous
  *        families that carry the flag.
  *
- * The first key defines the boundary value at t = 0 and the last key IS the
- * managed boundary at the clip duration. Moving either would leave the lane
- * without the prerequisites its opt-in asserts, so both behave as immovable
- * neighbours. This composes with the existing shared-bounds model rather than
- * fighting it: one immovable key already freezes a whole selection, so a drag
- * that includes one collapses to the existing `changed == false` result.
+ * Moving either end would leave the lane without the prerequisites its opt-in
+ * asserts, so both behave as immovable neighbours. This composes with the
+ * existing shared-bounds model rather than fighting it: one immovable key
+ * already freezes a whole selection, so a drag that includes one collapses to
+ * the existing `changed == false` result.
  */
 template <typename Timeline>
 void include_loop_boundary_retime_pins(
@@ -528,14 +576,286 @@ void include_loop_boundary_retime_pins(
     const ResolvedTimelineKey& resolved,
     double* minimum_delta,
     double* maximum_delta) {
-    const Timeline& timeline = timelines[resolved.timeline_index];
-    if (!timeline.loop_sync) {
-        return;
-    }
-    if (resolved.key_index == 0U ||
-        resolved.key_index + 1U == timeline.keyframes.size()) {
+    if (timeline_key_is_loop_pinned(timelines, resolved)) {
         *minimum_delta = std::max(*minimum_delta, 0.0);
         *maximum_delta = std::min(*maximum_delta, 0.0);
+    }
+}
+
+/**
+ * @brief Reports whether one resolved key is pinned by loop synchronization.
+ *
+ * Only Transform, Slot Color, and Deform timelines carry the flag; the three
+ * discrete families are never pinned. Retime clamps its shared delta to zero
+ * for such a key, which is coherent because one immovable key pins the whole
+ * selection consistently; a scale rejects instead, because pinning one key
+ * while the rest scale produces a shape that is not `p + (t - p) * s` for any
+ * `s`.
+ */
+bool resolved_key_is_loop_pinned(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        return timeline_key_is_loop_pinned(project.transform_timeline_edits, resolved);
+    case TimelineKeyKind::Deform:
+        return timeline_key_is_loop_pinned(project.mesh_deform_timeline_edits, resolved);
+    case TimelineKeyKind::SlotColor:
+        return timeline_key_is_loop_pinned(project.slot_color_timeline_edits, resolved);
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return false;
+    }
+    return false;
+}
+
+/**
+ * @brief The family and lane a scale rejection names, for one resolved key.
+ *
+ * Rejections must be actionable, so every message says which lane of which
+ * animation refused; this builds that fragment from the resolved key rather
+ * than from the selector, so it names the lane the primitive actually walked.
+ */
+std::string scale_lane_label(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    const auto channel_token = [](TransformTimelineChannel channel) -> std::string {
+        switch (channel) {
+        case TransformTimelineChannel::Rotate:
+            return "rotate";
+        case TransformTimelineChannel::Translate:
+            return "translate";
+        case TransformTimelineChannel::Scale:
+            return "scale";
+        case TransformTimelineChannel::Shear:
+            return "shear";
+        }
+        return "rotate";
+    };
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform: {
+        const auto& edit = project.transform_timeline_edits[resolved.timeline_index];
+        return "transform key '" + edit.bone_name + "/" +
+            channel_token(edit.channel) + "'";
+    }
+    case TimelineKeyKind::Deform: {
+        const auto& edit = project.mesh_deform_timeline_edits[resolved.timeline_index];
+        return "deform key '" + edit.slot_name + "/" + edit.attachment_name + "'";
+    }
+    case TimelineKeyKind::DrawOrder:
+        return "draw-order key";
+    case TimelineKeyKind::Event:
+        return "event key";
+    case TimelineKeyKind::SlotColor: {
+        const auto& edit = project.slot_color_timeline_edits[resolved.timeline_index];
+        return "slot-color key '" + edit.slot_name + "'";
+    }
+    case TimelineKeyKind::SlotAttachment: {
+        const auto& edit =
+            project.slot_attachment_timeline_edits[resolved.timeline_index];
+        return "slot-attachment key '" + edit.slot_name + "'";
+    }
+    }
+    return "timeline key";
+}
+
+/**
+ * @brief The time a resolved key actually stores, in full `double` precision.
+ *
+ * `resolve_timeline_key()` carries the *selector's* time through to
+ * `ResolvedTimelineKey::original_time`, and a shell selector is built from the
+ * runtime track rows, whose times are already narrowed to `float32`. A retime
+ * adds one shared delta and does not care. A scale multiplies, and a live
+ * gesture re-derives its selectors from those rows on every frame, so reading
+ * the narrowed value would re-round each key through `float32` once per frame
+ * and accumulate an error far larger than the `double` composition bound the
+ * gesture's commit-time drift check enforces. Scaling therefore snapshots the
+ * stored double, which is the value the project is authoritative for.
+ */
+template <typename Timeline>
+double timeline_stored_key_time(
+    const std::vector<Timeline>& timelines,
+    const ResolvedTimelineKey& resolved) {
+    return timelines[resolved.timeline_index].keyframes[resolved.key_index].time;
+}
+
+double resolved_stored_key_time(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        return timeline_stored_key_time(project.transform_timeline_edits, resolved);
+    case TimelineKeyKind::Deform:
+        return timeline_stored_key_time(project.mesh_deform_timeline_edits, resolved);
+    case TimelineKeyKind::DrawOrder:
+        return timeline_stored_key_time(project.draw_order_timeline_edits, resolved);
+    case TimelineKeyKind::Event:
+        return timeline_stored_key_time(project.event_timeline_edits, resolved);
+    case TimelineKeyKind::SlotColor:
+        return timeline_stored_key_time(project.slot_color_timeline_edits, resolved);
+    case TimelineKeyKind::SlotAttachment:
+        return timeline_stored_key_time(
+            project.slot_attachment_timeline_edits, resolved);
+    }
+    return resolved.original_time;
+}
+
+/**
+ * @brief The refusal text for a selection that names part of an event tie.
+ *
+ * A tie one side of which is selected would be split by any `s != 1`, which
+ * contradicts the promise that tied event keys stay tied. The primitive names
+ * the time rather than widening the caller's selection. This is the single
+ * definition `scale_keyframe_times()` and `timeline_scale_selection_refusal()`
+ * share.
+ */
+std::string partial_event_tie_rejection(
+    double time,
+    std::string_view animation_name) {
+    return "Event keys sharing time " + std::to_string(time) + " s in animation '" +
+        std::string(animation_name) +
+        "' must be scaled together; select every event key at that time.";
+}
+
+/** @brief The refusal text for a selection containing a loop-pinned key. */
+std::string loop_pinned_rejection(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved,
+    std::string_view animation_name) {
+    return "Animation '" + std::string(animation_name) + "' timeline " +
+        scale_lane_label(project, resolved) +
+        " is loop synchronized; its first and last keys are pinned. Disable loop "
+        "synchronization on that timeline to scale them.";
+}
+
+/** @brief The time of a partially selected same-time group, if one exists. */
+template <typename Timeline>
+std::optional<double> partial_tie_time(
+    const Timeline& timeline,
+    const std::set<std::size_t>& selected_indices) {
+    for (std::size_t index = 0U; index + 1U < timeline.keyframes.size(); ++index) {
+        if (std::abs(
+                timeline.keyframes[index + 1U].time - timeline.keyframes[index].time) >
+            kKeyTimeEpsilon) {
+            continue;
+        }
+        if ((selected_indices.count(index) != 0U) !=
+            (selected_indices.count(index + 1U) != 0U)) {
+            return timeline.keyframes[index].time;
+        }
+    }
+    return std::nullopt;
+}
+
+/**
+ * @brief Validates one affected timeline's whole projected key set.
+ *
+ * The projected list spans the timeline's entire `keyframes` vector, not just
+ * the selected keys, so one adjacent-pair rule covers a selected key colliding
+ * with a selected neighbour and a selected key intruding on an unselected one,
+ * on either side, without any notion of "the nearest unselected neighbour".
+ *
+ * The required gap is `min(spacing, original_gap)` rather than a flat
+ * `spacing`: a stored timeline can already carry a sub-millisecond gap that an
+ * import or a hand-edited document produced, and a flat rule would make every
+ * scale on such a timeline impossible even when the scale does not make the gap
+ * worse. The `min` form says exactly what is meant — a gap that satisfied the
+ * spacing must still satisfy it, and a gap that was already tighter must not
+ * get tighter.
+ */
+template <typename Timeline>
+bool validate_projected_scale(
+    const Timeline& timeline,
+    const std::set<std::size_t>& selected_indices,
+    TimelineKeyKind kind,
+    std::string_view animation_name,
+    const std::string& lane_label,
+    double pivot_time,
+    double scale,
+    std::string* error_out) {
+    const double spacing = family_key_spacing(kind);
+    const std::size_t count = timeline.keyframes.size();
+    std::vector<double> projected;
+    projected.reserve(count);
+    for (std::size_t index = 0U; index < count; ++index) {
+        const double time = timeline.keyframes[index].time;
+        projected.push_back(
+            selected_indices.count(index) != 0U
+                ? pivot_time + (time - pivot_time) * scale
+                : time);
+    }
+    for (std::size_t index = 0U; index + 1U < count; ++index) {
+        const double original_gap =
+            timeline.keyframes[index + 1U].time - timeline.keyframes[index].time;
+        const bool selected_low = selected_indices.count(index) != 0U;
+        const bool selected_high = selected_indices.count(index + 1U) != 0U;
+        if (kind == TimelineKeyKind::Event &&
+            std::abs(original_gap) <= kKeyTimeEpsilon &&
+            selected_low != selected_high) {
+            *error_out = partial_event_tie_rejection(
+                timeline.keyframes[index].time, animation_name);
+            return false;
+        }
+        if (!selected_low && !selected_high) {
+            continue;
+        }
+        const double required_gap = std::min(spacing, original_gap);
+        const double projected_gap = projected[index + 1U] - projected[index];
+        if (projected_gap >= required_gap - kKeyTimeEpsilon) {
+            continue;
+        }
+        *error_out = "Scaling would place animation '" + std::string(animation_name) +
+            "' " + lane_label + " at " + std::to_string(projected[index + 1U]) +
+            " s, " + std::to_string(projected_gap) + " s from the " +
+            (selected_low ? "selected" : "unselected") + " key at " +
+            std::to_string(projected[index]) + " s; the minimum separation is " +
+            std::to_string(required_gap) + " s.";
+        return false;
+    }
+    return true;
+}
+
+template <typename Timeline>
+void apply_timeline_scale(
+    std::vector<Timeline>* timelines,
+    const ResolvedTimelineKey& resolved,
+    double pivot_time,
+    double scale) {
+    (*timelines)[resolved.timeline_index].keyframes[resolved.key_index].time =
+        pivot_time + (resolved.original_time - pivot_time) * scale;
+}
+
+void apply_resolved_scale(
+    ProjectData* project,
+    const ResolvedTimelineKey& resolved,
+    double pivot_time,
+    double scale) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        apply_timeline_scale(
+            &project->transform_timeline_edits, resolved, pivot_time, scale);
+        return;
+    case TimelineKeyKind::Deform:
+        apply_timeline_scale(
+            &project->mesh_deform_timeline_edits, resolved, pivot_time, scale);
+        return;
+    case TimelineKeyKind::DrawOrder:
+        apply_timeline_scale(
+            &project->draw_order_timeline_edits, resolved, pivot_time, scale);
+        return;
+    case TimelineKeyKind::Event:
+        apply_timeline_scale(
+            &project->event_timeline_edits, resolved, pivot_time, scale);
+        return;
+    case TimelineKeyKind::SlotColor:
+        apply_timeline_scale(
+            &project->slot_color_timeline_edits, resolved, pivot_time, scale);
+        return;
+    case TimelineKeyKind::SlotAttachment:
+        apply_timeline_scale(
+            &project->slot_attachment_timeline_edits, resolved, pivot_time, scale);
+        return;
     }
 }
 
@@ -551,7 +871,7 @@ void include_resolved_retime_bounds(
             project.transform_timeline_edits,
             resolved,
             all_resolved,
-            kNonEventKeySpacing,
+            family_key_spacing(resolved.kind),
             minimum_delta,
             maximum_delta);
         include_loop_boundary_retime_pins(
@@ -562,7 +882,7 @@ void include_resolved_retime_bounds(
             project.mesh_deform_timeline_edits,
             resolved,
             all_resolved,
-            kNonEventKeySpacing,
+            family_key_spacing(resolved.kind),
             minimum_delta,
             maximum_delta);
         include_loop_boundary_retime_pins(
@@ -573,7 +893,7 @@ void include_resolved_retime_bounds(
             project.draw_order_timeline_edits,
             resolved,
             all_resolved,
-            kNonEventKeySpacing,
+            family_key_spacing(resolved.kind),
             minimum_delta,
             maximum_delta);
         return;
@@ -582,7 +902,7 @@ void include_resolved_retime_bounds(
             project.event_timeline_edits,
             resolved,
             all_resolved,
-            0.0,
+            family_key_spacing(resolved.kind),
             minimum_delta,
             maximum_delta);
         return;
@@ -591,7 +911,7 @@ void include_resolved_retime_bounds(
             project.slot_color_timeline_edits,
             resolved,
             all_resolved,
-            kNonEventKeySpacing,
+            family_key_spacing(resolved.kind),
             minimum_delta,
             maximum_delta);
         include_loop_boundary_retime_pins(
@@ -602,7 +922,7 @@ void include_resolved_retime_bounds(
             project.slot_attachment_timeline_edits,
             resolved,
             all_resolved,
-            kNonEventKeySpacing,
+            family_key_spacing(resolved.kind),
             minimum_delta,
             maximum_delta);
         return;
@@ -1891,6 +2211,229 @@ TimelineRetimeResult retime_keyframes(
     sort_retimed_timelines(&candidate, resolved);
     *project = std::move(candidate);
     return {{true, {}}, applied_delta, resolved.size()};
+}
+
+std::string timeline_scale_selection_refusal(
+    const ProjectData& project,
+    const std::vector<TimelineKeySelector>& selectors) {
+    if (selectors.size() < 2U) {
+        return {};
+    }
+    std::vector<ResolvedTimelineKey> resolved;
+    resolved.reserve(selectors.size());
+    for (const TimelineKeySelector& selector : selectors) {
+        std::string ignored;
+        const auto key = resolve_timeline_key(project, selector, &ignored);
+        if (!key.has_value()) {
+            // An unresolvable selector is not a selection-shaped refusal; the
+            // primitive reports it with its own `not found` message.
+            return {};
+        }
+        resolved.push_back(*key);
+    }
+    const std::string_view animation_name = selectors.front().animation_name;
+    for (const ResolvedTimelineKey& key : resolved) {
+        if (resolved_key_is_loop_pinned(project, key)) {
+            return loop_pinned_rejection(project, key, animation_name);
+        }
+    }
+    std::set<std::size_t> event_indices;
+    std::optional<std::size_t> event_timeline;
+    for (const ResolvedTimelineKey& key : resolved) {
+        if (key.kind != TimelineKeyKind::Event) continue;
+        event_timeline = key.timeline_index;
+        event_indices.insert(key.key_index);
+    }
+    if (event_timeline.has_value()) {
+        const auto tie = partial_tie_time(
+            project.event_timeline_edits[*event_timeline], event_indices);
+        if (tie.has_value()) {
+            return partial_event_tie_rejection(*tie, animation_name);
+        }
+    }
+    return {};
+}
+
+TimelineScaleResult scale_keyframe_times(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    TimelineScalePivot pivot,
+    double scale) {
+    const auto fail = [](std::string message) {
+        return TimelineScaleResult{
+            {false, std::move(message)}, 0.0, 1.0, 0.0, 0.0, 0U, 0U};
+    };
+    if (project == nullptr) {
+        return fail("Timeline authoring requires an open project.");
+    }
+    if (selectors.empty()) {
+        return fail("At least one timeline key is required.");
+    }
+    if (!std::isfinite(scale) || scale <= 0.0) {
+        return fail("Timeline scale ratio must be finite and positive.");
+    }
+
+    ProjectData candidate = *project;
+    std::vector<ResolvedTimelineKey> resolved;
+    resolved.reserve(selectors.size());
+    std::set<std::tuple<int, std::size_t, std::size_t>> identities;
+    for (const TimelineKeySelector& selector : selectors) {
+        if (selector.animation_name.empty() || !std::isfinite(selector.time) ||
+            selector.time < 0.0) {
+            return fail(
+                "Timeline selectors require an animation and non-negative finite time.");
+        }
+        if (selector.animation_name != selectors.front().animation_name) {
+            // The dopesheet rebuilds `selected_keys` per animation, so a
+            // multi-animation set can only come from a script; the pivot is
+            // meaningless across two independent time lines.
+            return fail(
+                "Timeline scaling requires every key to belong to one animation.");
+        }
+        std::string error;
+        const auto key = resolve_timeline_key(candidate, selector, &error);
+        if (!key.has_value()) {
+            return fail(std::move(error));
+        }
+        const auto identity = std::make_tuple(
+            static_cast<int>(key->kind), key->timeline_index, key->key_index);
+        if (!identities.insert(identity).second) {
+            return fail("A timeline key was selected more than once.");
+        }
+        ResolvedTimelineKey snapshot = *key;
+        snapshot.original_time = resolved_stored_key_time(candidate, snapshot);
+        resolved.push_back(snapshot);
+    }
+    const std::string_view animation_name = selectors.front().animation_name;
+
+    // A partially pinned scale is not a scale, so this rejects where a retime
+    // would collapse to `changed == false`. Checked before any target is
+    // computed, so the project is untouched.
+    for (const ResolvedTimelineKey& key : resolved) {
+        if (!resolved_key_is_loop_pinned(candidate, key)) {
+            continue;
+        }
+        return fail(loop_pinned_rejection(candidate, key, animation_name));
+    }
+
+    const auto [minimum, maximum] = std::minmax_element(
+        resolved.begin(), resolved.end(), [](const auto& left, const auto& right) {
+            return left.original_time < right.original_time;
+        });
+    const double minimum_time = minimum->original_time;
+    const double maximum_time = maximum->original_time;
+    const double original_span = maximum_time - minimum_time;
+    if (original_span <= kKeyTimeEpsilon) {
+        return fail(
+            "Scaling requires a selection spanning at least two distinct key times.");
+    }
+    const double pivot_time =
+        pivot == TimelineScalePivot::RangeStart ? minimum_time : maximum_time;
+
+    // Every target reads the snapshot taken above, never a live value, so no
+    // write can observe another write and step 11's order cannot matter.
+    bool moved = false;
+    for (const ResolvedTimelineKey& key : resolved) {
+        const double target = pivot_time + (key.original_time - pivot_time) * scale;
+        if (!std::isfinite(target)) {
+            return fail(
+                "Scaling would place a key at a non-finite time in animation '" +
+                std::string(animation_name) + "'.");
+        }
+        if (target < 0.0) {
+            return fail(
+                "Scaling would place animation '" + std::string(animation_name) +
+                "' " + scale_lane_label(candidate, key) + " at " +
+                std::to_string(target) + " s, below zero; key times cannot be negative.");
+        }
+        if (!finite_animation_scalar(target)) {
+            return fail(
+                "Scaling would place animation '" + std::string(animation_name) +
+                "' " + scale_lane_label(candidate, key) + " at " +
+                std::to_string(target) + " s, which is not representable at runtime.");
+        }
+        if (std::abs(target - key.original_time) > 1e-12) {
+            moved = true;
+        }
+    }
+
+    // Validate the whole projected key set of every affected timeline before
+    // writing anything, so a transient mid-write state is never observed.
+    std::set<std::pair<int, std::size_t>> affected;
+    for (const ResolvedTimelineKey& key : resolved) {
+        affected.insert({static_cast<int>(key.kind), key.timeline_index});
+    }
+    for (const auto& [kind_token, timeline_index] : affected) {
+        const auto kind = static_cast<TimelineKeyKind>(kind_token);
+        std::set<std::size_t> selected_indices;
+        ResolvedTimelineKey sample;
+        for (const ResolvedTimelineKey& key : resolved) {
+            if (key.kind == kind && key.timeline_index == timeline_index) {
+                selected_indices.insert(key.key_index);
+                sample = key;
+            }
+        }
+        const std::string label = scale_lane_label(candidate, sample);
+        std::string error;
+        bool valid = true;
+        switch (kind) {
+        case TimelineKeyKind::Transform:
+            valid = validate_projected_scale(
+                candidate.transform_timeline_edits[timeline_index], selected_indices,
+                kind, animation_name, label, pivot_time, scale, &error);
+            break;
+        case TimelineKeyKind::Deform:
+            valid = validate_projected_scale(
+                candidate.mesh_deform_timeline_edits[timeline_index], selected_indices,
+                kind, animation_name, label, pivot_time, scale, &error);
+            break;
+        case TimelineKeyKind::DrawOrder:
+            valid = validate_projected_scale(
+                candidate.draw_order_timeline_edits[timeline_index], selected_indices,
+                kind, animation_name, label, pivot_time, scale, &error);
+            break;
+        case TimelineKeyKind::Event:
+            valid = validate_projected_scale(
+                candidate.event_timeline_edits[timeline_index], selected_indices,
+                kind, animation_name, label, pivot_time, scale, &error);
+            break;
+        case TimelineKeyKind::SlotColor:
+            valid = validate_projected_scale(
+                candidate.slot_color_timeline_edits[timeline_index], selected_indices,
+                kind, animation_name, label, pivot_time, scale, &error);
+            break;
+        case TimelineKeyKind::SlotAttachment:
+            valid = validate_projected_scale(
+                candidate.slot_attachment_timeline_edits[timeline_index],
+                selected_indices, kind, animation_name, label, pivot_time, scale,
+                &error);
+            break;
+        }
+        if (!valid) {
+            return fail(std::move(error));
+        }
+    }
+
+    const double scaled_span = original_span * scale;
+    if (std::abs(scale - 1.0) <= 1e-12 || !moved) {
+        return {{false, {}}, pivot_time, 1.0, original_span, original_span,
+                resolved.size(), 0U};
+    }
+
+    std::size_t moved_key_count = 0U;
+    for (const ResolvedTimelineKey& key : resolved) {
+        const double target = pivot_time + (key.original_time - pivot_time) * scale;
+        if (std::abs(target - key.original_time) > 1e-12) {
+            ++moved_key_count;
+        }
+        apply_resolved_scale(&candidate, key, pivot_time, scale);
+    }
+    // Defence in depth, and provably a no-op: the projected sequence validated
+    // above is non-decreasing in original index order, so nothing can reorder.
+    sort_retimed_timelines(&candidate, resolved);
+    *project = std::move(candidate);
+    return {{true, {}}, pivot_time, scale, original_span, scaled_span,
+            resolved.size(), moved_key_count};
 }
 
 TimelineScalarOffsetResult offset_keyframe_scalars(

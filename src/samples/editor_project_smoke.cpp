@@ -6801,6 +6801,1027 @@ bool validate_mar172_loop_boundary_sync(
     return true;
 }
 
+// ---------------------------------------------------------------------
+// MAR-173 atomic key time scaling.
+// ---------------------------------------------------------------------
+bool validate_mar173_key_time_scaling(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::TimelineCurveMode;
+    using marrow::editor::TimelineKeyKind;
+    using marrow::editor::TimelineKeySelector;
+    using marrow::editor::TimelineLaneKind;
+    using marrow::editor::TimelineLaneSelector;
+    using marrow::editor::TimelineScalarComponent;
+    using marrow::editor::TimelineScalePivot;
+    using marrow::editor::TransformTimelineChannel;
+    using marrow::runtime::InterpolationKind;
+
+    std::error_code ignored;
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto& skeleton = *project_result.skeleton_data;
+
+    const auto spine_selector = [](double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::Transform;
+        selector.animation_name = "idle";
+        selector.bone_name = "spine";
+        selector.transform_channel = TransformTimelineChannel::Rotate;
+        selector.time = time;
+        return selector;
+    };
+    const auto spine_lane =
+        [](const marrow::editor::ProjectData& project)
+        -> const marrow::editor::TransformTimelineEdit* {
+        return project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+    };
+    const auto spine_times = [&](const marrow::editor::ProjectData& project) {
+        std::vector<double> times;
+        const auto* lane = spine_lane(project);
+        if (lane != nullptr) {
+            for (const auto& key : lane->keyframes) times.push_back(key.time);
+        }
+        return times;
+    };
+    // Every rejection asserts the whole document, not merely the return code.
+    const auto rejects = [&](const marrow::editor::ProjectData& source,
+                             const std::vector<TimelineKeySelector>& selectors,
+                             TimelineScalePivot pivot,
+                             double scale,
+                             std::string_view needle,
+                             std::string_view label) {
+        marrow::editor::ProjectData project = source;
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto result = marrow::editor::scale_keyframe_times(
+            &project, selectors, pivot, scale);
+        if (result || result.error.empty() || result.changed ||
+            marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-173 must reject " << label << ": " << result.error << '\n';
+            return false;
+        }
+        if (!needle.empty() &&
+            result.error.find(std::string(needle)) == std::string::npos) {
+            std::cerr << "MAR-173 rejection message for " << label
+                      << " must name the cause: " << result.error << '\n';
+            return false;
+        }
+        return true;
+    };
+
+    const marrow::editor::ProjectData base = *project_result.project;
+    if (spine_times(base) != std::vector<double>{0.0, 0.5, 1.0}) {
+        std::cerr << "MAR-173 needs the fixture's {0.0, 0.5, 1.0} spine rotate lane.\n";
+        return false;
+    }
+
+    // --- Both pivots, and the negative-target rejection --------------------
+    {
+        marrow::editor::ProjectData project = base;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &project,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.25);
+        if (!scaled || !scaled.changed || scaled.pivot_time != 0.0 ||
+            scaled.applied_scale != 1.25 || scaled.original_span != 1.0 ||
+            scaled.scaled_span != 1.25 || scaled.key_count != 3U ||
+            scaled.moved_key_count != 2U) {
+            std::cerr << "MAR-173 RangeStart s=1.25 result shape is wrong: "
+                      << scaled.error << '\n';
+            return false;
+        }
+        const std::vector<double> times = spine_times(project);
+        if (times.size() != 3U || times[0] != 0.0 || times[1] != 0.625 ||
+            times[2] != 1.25) {
+            std::cerr << "MAR-173 RangeStart s=1.25 must produce {0, 0.625, 1.25}.\n";
+            return false;
+        }
+        // The pivot key is bit-identical by IEEE-754, not by tolerance.
+        if (times[0] != spine_times(base)[0]) {
+            std::cerr << "MAR-173 moved the RangeStart pivot key.\n";
+            return false;
+        }
+    }
+    {
+        marrow::editor::ProjectData project = base;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &project,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeEnd,
+            0.5);
+        if (!scaled || !scaled.changed || scaled.pivot_time != 1.0 ||
+            scaled.scaled_span != 0.5 || scaled.moved_key_count != 2U) {
+            std::cerr << "MAR-173 RangeEnd s=0.5 result shape is wrong: " << scaled.error
+                      << '\n';
+            return false;
+        }
+        const std::vector<double> times = spine_times(project);
+        if (times.size() != 3U || times[0] != 0.5 || times[1] != 0.75 ||
+            times[2] != 1.0) {
+            std::cerr << "MAR-173 RangeEnd s=0.5 must produce {0.5, 0.75, 1.0}.\n";
+            return false;
+        }
+        if (times[2] != spine_times(base)[2]) {
+            std::cerr << "MAR-173 moved the RangeEnd pivot key.\n";
+            return false;
+        }
+    }
+    // 1.0 + (0.0 - 1.0) * 1.25 = -0.25: a rejection, never a clamp.
+    if (!rejects(
+            base,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeEnd,
+            1.25,
+            "below zero",
+            "a target pushed below zero")) {
+        return false;
+    }
+
+    // --- Key order is unchanged, and only `time` is written ----------------
+    {
+        marrow::editor::ProjectData project = base;
+        const auto* before_lane = spine_lane(base);
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &project,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.25);
+        if (!scaled) {
+            std::cerr << "MAR-173 write-scope case failed: " << scaled.error << '\n';
+            return false;
+        }
+        const auto* after_lane = spine_lane(project);
+        if (before_lane == nullptr || after_lane == nullptr ||
+            before_lane->keyframes.size() != after_lane->keyframes.size()) {
+            std::cerr << "MAR-173 changed the spine lane's key count.\n";
+            return false;
+        }
+        for (std::size_t index = 0U; index < after_lane->keyframes.size(); ++index) {
+            const auto& before_key = before_lane->keyframes[index];
+            const auto& after_key = after_lane->keyframes[index];
+            if (after_key.time != 0.0 + (before_key.time - 0.0) * 1.25) {
+                std::cerr << "MAR-173 key order changed under a scale.\n";
+                return false;
+            }
+            if (after_key.angle != before_key.angle || after_key.x != before_key.x ||
+                after_key.y != before_key.y ||
+                after_key.curve_mode != before_key.curve_mode ||
+                after_key.curve_driver != before_key.curve_driver ||
+                after_key.interpolation.kind() != before_key.interpolation.kind()) {
+                std::cerr << "MAR-173 wrote a transform field other than time.\n";
+                return false;
+            }
+            if (after_key.interpolation.kind() == InterpolationKind::CubicBezier &&
+                (after_key.interpolation.cubic_bezier().cx1 !=
+                     before_key.interpolation.cubic_bezier().cx1 ||
+                 after_key.interpolation.cubic_bezier().cy1 !=
+                     before_key.interpolation.cubic_bezier().cy1 ||
+                 after_key.interpolation.cubic_bezier().cx2 !=
+                     before_key.interpolation.cubic_bezier().cx2 ||
+                 after_key.interpolation.cubic_bezier().cy2 !=
+                     before_key.interpolation.cubic_bezier().cy2)) {
+                std::cerr << "MAR-173 rewrote a manual curve's control points.\n";
+                return false;
+            }
+        }
+    }
+
+    // --- Unselected authored keys survive a subset scale --------------------
+    // MAR-172's review found a path that reported success while destroying the
+    // authored key beside the one it edited, so this asserts SURVIVAL of the
+    // neighbours by value, not merely that the call returned ok.
+    {
+        marrow::editor::ProjectData project = base;
+        const auto* before = spine_lane(base);
+        const double kept_time = before->keyframes[0].time;
+        const double kept_angle = before->keyframes[0].angle;
+        const auto kept_kind = before->keyframes[0].interpolation.kind();
+        const std::size_t kept_count = before->keyframes.size();
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &project,
+            {spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeEnd,
+            0.5);
+        const auto* after = spine_lane(project);
+        if (!scaled || !scaled.changed || after == nullptr ||
+            after->keyframes.size() != kept_count ||
+            after->keyframes[0].time != kept_time ||
+            after->keyframes[0].angle != kept_angle ||
+            after->keyframes[0].interpolation.kind() != kept_kind ||
+            after->keyframes[1].time != 0.75 || after->keyframes[2].time != 1.0) {
+            std::cerr << "MAR-173 subset scale did not leave the unselected key at "
+                      << kept_time << " s intact: " << scaled.error << '\n';
+            return false;
+        }
+        // The event lane the call never named keeps all three of its keys.
+        const auto* events = project.find_event_timeline_edit("idle");
+        if (events == nullptr || events->keyframes.size() != 3U ||
+            events->keyframes[0].time != 0.25 || events->keyframes[2].time != 0.8) {
+            std::cerr << "MAR-173 subset scale disturbed an unnamed timeline.\n";
+            return false;
+        }
+    }
+
+    // --- The two no-op guards ---------------------------------------------
+    {
+        marrow::editor::ProjectData project = base;
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto identity = marrow::editor::scale_keyframe_times(
+            &project,
+            {spine_selector(0.0), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.0);
+        if (!identity || identity.changed || !identity.error.empty() ||
+            marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-173 s = 1 must report changed == false with no error.\n";
+            return false;
+        }
+        // A 1 ms span with s = 1 + 1e-11 moves every key by 1e-14 s, which the
+        // second guard catches. `|s - 1| <= 1e-12` alone would not.
+        marrow::editor::ProjectData tight = base;
+        auto* lane = tight.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        lane->keyframes.resize(2U);
+        lane->keyframes[0].time = 0.0;
+        lane->keyframes[1].time = 0.001;
+        const std::string tight_before = marrow::editor::serialize_project(tight);
+        const auto unmoved = marrow::editor::scale_keyframe_times(
+            &tight,
+            {spine_selector(0.0), spine_selector(0.001)},
+            TimelineScalePivot::RangeStart,
+            1.0 + 1e-11);
+        if (!unmoved || unmoved.changed ||
+            marrow::editor::serialize_project(tight) != tight_before) {
+            std::cerr << "MAR-173 a ratio that moves nothing must report changed == false.\n";
+            return false;
+        }
+    }
+
+    // --- Argument and selector rejections, each byte-identical --------------
+    {
+        const std::vector<TimelineKeySelector> whole = {
+            spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)};
+        if (!rejects(base, whole, TimelineScalePivot::RangeStart, 0.0,
+                     "finite and positive", "s = 0") ||
+            !rejects(base, whole, TimelineScalePivot::RangeStart, -1.0,
+                     "finite and positive", "s = -1") ||
+            !rejects(base, whole, TimelineScalePivot::RangeStart,
+                     std::numeric_limits<double>::quiet_NaN(),
+                     "finite and positive", "s = NaN") ||
+            !rejects(base, whole, TimelineScalePivot::RangeStart,
+                     std::numeric_limits<double>::infinity(),
+                     "finite and positive", "s = inf") ||
+            !rejects(base, {}, TimelineScalePivot::RangeStart, 1.25,
+                     "At least one timeline key", "an empty selector list") ||
+            !rejects(base, {spine_selector(0.5)}, TimelineScalePivot::RangeStart, 1.25,
+                     "two distinct key times", "a single-key selection") ||
+            !rejects(base, {spine_selector(0.5), spine_selector(0.5)},
+                     TimelineScalePivot::RangeStart, 1.25,
+                     "selected more than once", "a duplicate selector") ||
+            !rejects(base, {spine_selector(0.0), spine_selector(0.42)},
+                     TimelineScalePivot::RangeStart, 1.25,
+                     "not found", "an unresolvable selector")) {
+            return false;
+        }
+        // Two animations in one selector set.
+        {
+            marrow::editor::ProjectData two = base;
+            if (marrow::editor::ensure_transform_timeline_edit(
+                    two, skeleton, "aim", "arm_l", TransformTimelineChannel::Rotate) ==
+                nullptr) {
+                std::cerr << "MAR-173 could not materialize the aim lane.\n";
+                return false;
+            }
+            TimelineKeySelector aim_key;
+            aim_key.kind = TimelineKeyKind::Transform;
+            aim_key.animation_name = "aim";
+            aim_key.bone_name = "arm_l";
+            aim_key.transform_channel = TransformTimelineChannel::Rotate;
+            aim_key.time = 0.0;
+            if (!rejects(two, {spine_selector(0.0), aim_key},
+                         TimelineScalePivot::RangeStart, 1.25,
+                         "one animation", "selectors naming two animations")) {
+                return false;
+            }
+        }
+        // An all-same-time selection has no span at all.
+        {
+            marrow::editor::ProjectData flat = base;
+            auto* lane = flat.find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Rotate);
+            lane->keyframes.resize(2U);
+            lane->keyframes[0].time = 0.5;
+            lane->keyframes[1].time = 0.5;
+            if (!rejects(flat, {spine_selector(0.5)}, TimelineScalePivot::RangeStart,
+                         1.25, "two distinct key times", "an all-same-time selection")) {
+                return false;
+            }
+        }
+        // A target beyond the float32 range.
+        {
+            marrow::editor::ProjectData huge = base;
+            // float32's maximum is ~3.4e38, so 1e39 s is finite and still
+            // unrepresentable in the runtime and both export formats.
+            if (!rejects(huge, whole, TimelineScalePivot::RangeStart, 1e39,
+                         "representable", "a target beyond the float32 range")) {
+                return false;
+            }
+        }
+    }
+
+    // --- Collision and intrusion -------------------------------------------
+    {
+        // Shrinking the whole lane until 0.5 and 1.0 land inside 1 ms.
+        if (!rejects(
+                base,
+                {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+                TimelineScalePivot::RangeStart,
+                0.001,
+                "minimum separation",
+                "a non-event collision between two selected keys")) {
+            return false;
+        }
+        // A selected key moving onto an unselected neighbour on its right.
+        if (!rejects(
+                base,
+                {spine_selector(0.0), spine_selector(0.5)},
+                TimelineScalePivot::RangeStart,
+                1.999,
+                "minimum separation",
+                "an intrusion into an unselected key on the right")) {
+            return false;
+        }
+        // ...and on its left, from a RangeEnd scale that drags 0.5 down onto 0.0.
+        if (!rejects(
+                base,
+                {spine_selector(0.5), spine_selector(1.0)},
+                TimelineScalePivot::RangeEnd,
+                1.999,
+                "minimum separation",
+                "an intrusion into an unselected key on the left")) {
+            return false;
+        }
+    }
+
+    // --- min(spacing, original_gap): never block a legal project ------------
+    {
+        const auto tight_lane = [&](double gap) {
+            marrow::editor::ProjectData project = base;
+            auto* lane = project.find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Rotate);
+            lane->keyframes.resize(2U);
+            lane->keyframes[0].time = 0.0;
+            lane->keyframes[1].time = gap;
+            return project;
+        };
+        // An authored 0.4 ms gap already violates the flat 1 ms rule. Widening
+        // it is legal; tightening it further is not.
+        {
+            marrow::editor::ProjectData project = tight_lane(0.0004);
+            const auto widened = marrow::editor::scale_keyframe_times(
+                &project,
+                {spine_selector(0.0), spine_selector(0.0004)},
+                TimelineScalePivot::RangeStart,
+                1.5);
+            if (!widened || !widened.changed) {
+                std::cerr << "MAR-173 must widen an already-tight gap: " << widened.error
+                          << '\n';
+                return false;
+            }
+        }
+        if (!rejects(tight_lane(0.0004),
+                     {spine_selector(0.0), spine_selector(0.0004)},
+                     TimelineScalePivot::RangeStart, 0.9, "minimum separation",
+                     "a scale that tightens an already-tight gap")) {
+            return false;
+        }
+        // A 10 ms gap: 0.09 takes it to 0.9 ms and rejects; 0.1 lands on 1.0 ms.
+        if (!rejects(tight_lane(0.01), {spine_selector(0.0), spine_selector(0.01)},
+                     TimelineScalePivot::RangeStart, 0.09, "minimum separation",
+                     "a scale that takes a 10 ms gap to 0.9 ms")) {
+            return false;
+        }
+        {
+            marrow::editor::ProjectData project = tight_lane(0.01);
+            const auto exact = marrow::editor::scale_keyframe_times(
+                &project,
+                {spine_selector(0.0), spine_selector(0.01)},
+                TimelineScalePivot::RangeStart,
+                0.1);
+            if (!exact || !exact.changed) {
+                std::cerr << "MAR-173 must accept a scale landing exactly on 1 ms: "
+                          << exact.error << '\n';
+                return false;
+            }
+        }
+    }
+
+    // --- Event ties are carried, and a partial tie rejects ------------------
+    {
+        const auto event_selector = [](double time, std::size_t ordinal) {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Event;
+            selector.animation_name = "idle";
+            selector.time = time;
+            selector.same_time_ordinal = ordinal;
+            return selector;
+        };
+        const auto* events = base.find_event_timeline_edit("idle");
+        if (events == nullptr || events->keyframes.size() != 3U ||
+            events->keyframes[0].time != 0.25 || events->keyframes[1].time != 0.25 ||
+            events->keyframes[2].time != 0.8) {
+            std::cerr << "MAR-173 needs the fixture's {0.25, 0.25, 0.8} event lane.\n";
+            return false;
+        }
+        {
+            marrow::editor::ProjectData project = base;
+            const auto scaled = marrow::editor::scale_keyframe_times(
+                &project,
+                {event_selector(0.25, 0U), event_selector(0.25, 1U),
+                 event_selector(0.8, 0U)},
+                TimelineScalePivot::RangeStart,
+                2.0);
+            if (!scaled || !scaled.changed) {
+                std::cerr << "MAR-173 event tie scale failed: " << scaled.error << '\n';
+                return false;
+            }
+            const auto* after = project.find_event_timeline_edit("idle");
+            if (after->keyframes[0].time != after->keyframes[1].time ||
+                after->keyframes[0].time != 0.25 ||
+                after->keyframes[2].time != 0.25 + (0.8 - 0.25) * 2.0) {
+                std::cerr << "MAR-173 did not carry the event tie bit-identically.\n";
+                return false;
+            }
+        }
+        // A three-key tie, all selected, stays one tie.
+        {
+            marrow::editor::ProjectData project = base;
+            auto* lane = project.find_event_timeline_edit("idle");
+            lane->keyframes[2].time = 0.25;
+            lane->keyframes.push_back(lane->keyframes[0]);
+            lane->keyframes.back().time = 0.9;
+            const auto scaled = marrow::editor::scale_keyframe_times(
+                &project,
+                {event_selector(0.25, 0U), event_selector(0.25, 1U),
+                 event_selector(0.25, 2U), event_selector(0.9, 0U)},
+                TimelineScalePivot::RangeEnd,
+                0.5);
+            if (!scaled || !scaled.changed) {
+                std::cerr << "MAR-173 three-key tie scale failed: " << scaled.error << '\n';
+                return false;
+            }
+            const auto* after = project.find_event_timeline_edit("idle");
+            if (after->keyframes[0].time != after->keyframes[1].time ||
+                after->keyframes[1].time != after->keyframes[2].time) {
+                std::cerr << "MAR-173 split a three-key event tie.\n";
+                return false;
+            }
+        }
+        // Naming one member of a tie would split it: rejected by name.
+        if (!rejects(base, {event_selector(0.25, 0U), event_selector(0.8, 0U)},
+                     TimelineScalePivot::RangeStart, 2.0, "must be scaled together",
+                     "a partial event tie")) {
+            return false;
+        }
+        // A selected event key landing exactly on an unselected one is legal.
+        {
+            marrow::editor::ProjectData project = base;
+            auto* lane = project.find_event_timeline_edit("idle");
+            lane->keyframes[0].time = 0.0;
+            lane->keyframes[1].time = 0.25;
+            lane->keyframes[2].time = 0.5;
+            const auto scaled = marrow::editor::scale_keyframe_times(
+                &project,
+                {event_selector(0.0, 0U), event_selector(0.5, 0U)},
+                TimelineScalePivot::RangeStart,
+                0.5);
+            if (!scaled || !scaled.changed) {
+                std::cerr << "MAR-173 must allow an event key to land on another: "
+                          << scaled.error << '\n';
+                return false;
+            }
+            const auto* after = project.find_event_timeline_edit("idle");
+            if (after->keyframes.size() != 3U ||
+                after->keyframes[1].time != after->keyframes[2].time) {
+                std::cerr << "MAR-173 event landing case did not produce a tie.\n";
+                return false;
+            }
+        }
+    }
+
+    // --- One case per family, values untouched ------------------------------
+    {
+        // Deform.
+        {
+            marrow::editor::ProjectData project = base;
+            const auto* before =
+                project.find_mesh_deform_timeline_edit("idle", "body", "body_mesh");
+            if (before == nullptr || before->keyframes.size() != 3U) {
+                std::cerr << "MAR-173 needs the fixture's deform lane.\n";
+                return false;
+            }
+            const std::vector<double> offsets = before->keyframes[1].vertex_offsets;
+            TimelineKeySelector key;
+            key.kind = TimelineKeyKind::Deform;
+            key.animation_name = "idle";
+            key.slot_name = "body";
+            key.attachment_name = "body_mesh";
+            std::vector<TimelineKeySelector> keys;
+            for (const double time : {0.0, 0.5, 1.0}) {
+                key.time = time;
+                keys.push_back(key);
+            }
+            const auto scaled = marrow::editor::scale_keyframe_times(
+                &project, keys, TimelineScalePivot::RangeStart, 1.5);
+            const auto* after =
+                project.find_mesh_deform_timeline_edit("idle", "body", "body_mesh");
+            if (!scaled || !scaled.changed || after->keyframes[1].time != 0.75 ||
+                after->keyframes[1].vertex_offsets != offsets) {
+                std::cerr << "MAR-173 deform scale failed or wrote a vertex offset: "
+                          << scaled.error << '\n';
+                return false;
+            }
+            // Against the unscaled project, so the selectors still resolve.
+            if (!rejects(base, {keys[0], keys[1]}, TimelineScalePivot::RangeStart, 0.001,
+                         "minimum separation", "a deform collision")) {
+                return false;
+            }
+        }
+        // Draw order.
+        {
+            marrow::editor::ProjectData project = base;
+            const auto* before = project.find_draw_order_timeline_edit("idle");
+            if (before == nullptr || before->keyframes.size() != 3U) {
+                std::cerr << "MAR-173 needs the fixture's draw-order lane.\n";
+                return false;
+            }
+            const std::vector<std::string> slots = before->keyframes[1].slot_names;
+            TimelineKeySelector key;
+            key.kind = TimelineKeyKind::DrawOrder;
+            key.animation_name = "idle";
+            std::vector<TimelineKeySelector> keys;
+            for (const double time : {0.0, 0.5, 1.0}) {
+                key.time = time;
+                keys.push_back(key);
+            }
+            const auto scaled = marrow::editor::scale_keyframe_times(
+                &project, keys, TimelineScalePivot::RangeStart, 1.5);
+            const auto* after = project.find_draw_order_timeline_edit("idle");
+            if (!scaled || !scaled.changed || after->keyframes[1].time != 0.75 ||
+                after->keyframes[1].slot_names != slots) {
+                std::cerr << "MAR-173 draw-order scale failed or wrote slot names: "
+                          << scaled.error << '\n';
+                return false;
+            }
+        }
+        // Slot colour and slot attachment, materialized from the runtime.
+        {
+            marrow::editor::ProjectData project = base;
+            if (marrow::editor::ensure_slot_color_timeline_edit(
+                    project, skeleton, "idle", "body") == nullptr ||
+                marrow::editor::ensure_slot_attachment_timeline_edit(
+                    project, skeleton, "idle", "body") == nullptr) {
+                std::cerr << "MAR-173 could not materialize the slot lanes.\n";
+                return false;
+            }
+            const auto* color_before = project.find_slot_color_timeline_edit("idle", "body");
+            const auto* attach_before =
+                project.find_slot_attachment_timeline_edit("idle", "body");
+            if (color_before == nullptr || color_before->keyframes.size() < 2U ||
+                attach_before == nullptr || attach_before->keyframes.size() < 2U) {
+                std::cerr << "MAR-173 needs multi-key slot colour and attachment lanes.\n";
+                return false;
+            }
+            const marrow::runtime::SlotColor color = color_before->keyframes.back().color;
+            const auto attachment = attach_before->keyframes.back().attachment_name;
+            const double color_last = color_before->keyframes.back().time;
+            const double attach_last = attach_before->keyframes.back().time;
+            std::vector<TimelineKeySelector> keys;
+            for (const auto& key : color_before->keyframes) {
+                TimelineKeySelector selector;
+                selector.kind = TimelineKeyKind::SlotColor;
+                selector.animation_name = "idle";
+                selector.slot_name = "body";
+                selector.time = key.time;
+                keys.push_back(selector);
+            }
+            for (const auto& key : attach_before->keyframes) {
+                TimelineKeySelector selector;
+                selector.kind = TimelineKeyKind::SlotAttachment;
+                selector.animation_name = "idle";
+                selector.slot_name = "body";
+                selector.time = key.time;
+                keys.push_back(selector);
+            }
+            const auto scaled = marrow::editor::scale_keyframe_times(
+                &project, keys, TimelineScalePivot::RangeStart, 1.5);
+            const auto* color_after = project.find_slot_color_timeline_edit("idle", "body");
+            const auto* attach_after =
+                project.find_slot_attachment_timeline_edit("idle", "body");
+            if (!scaled || !scaled.changed ||
+                color_after->keyframes.back().time != color_last * 1.5 ||
+                attach_after->keyframes.back().time != attach_last * 1.5 ||
+                color_after->keyframes.back().color.r != color.r ||
+                color_after->keyframes.back().color.g != color.g ||
+                color_after->keyframes.back().color.b != color.b ||
+                color_after->keyframes.back().color.a != color.a ||
+                attach_after->keyframes.back().attachment_name != attachment) {
+                std::cerr << "MAR-173 slot-family scale failed or wrote a value: "
+                          << scaled.error << '\n';
+                return false;
+            }
+        }
+    }
+
+    // --- MAR-171: a whole-track scale is auto-curve invariant ---------------
+    {
+        marrow::editor::ProjectData project = base;
+        // The fixture's {0, 8, -2} is non-monotone, so its middle tangent is
+        // clamped to zero and every normalized control point is trivially
+        // Delta-t invariant. A monotone series is what actually exercises the
+        // three-point tangent's dependence on the spacing distribution.
+        {
+            auto* lane = project.find_transform_timeline_edit(
+                "idle", "spine", TransformTimelineChannel::Rotate);
+            lane->keyframes[0].angle = 0.0;
+            lane->keyframes[1].angle = 5.0;
+            lane->keyframes[2].angle = 20.0;
+        }
+        const auto authored = marrow::editor::set_keyframe_curve_mode(
+            &project,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineCurveMode::Auto,
+            TimelineScalarComponent::Angle);
+        if (!authored || !authored.changed) {
+            std::cerr << "MAR-173 could not author automatic curves: " << authored.error
+                      << '\n';
+            return false;
+        }
+        marrow::editor::ProjectData whole = project;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &whole,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.25);
+        if (!scaled || !scaled.changed) {
+            std::cerr << "MAR-173 whole-track auto scale failed: " << scaled.error << '\n';
+            return false;
+        }
+        const auto resolved =
+            marrow::editor::resolve_automatic_curves(&whole, "idle");
+        if (!resolved || resolved.resolved_key_count != 0U) {
+            std::cerr << "MAR-173 a uniform Delta-t scale must leave automatic curves "
+                         "byte-identical; resolved "
+                      << resolved.resolved_key_count << " keys.\n";
+            return false;
+        }
+        // Scaling a subset changes the segment ratios, so the resolver rewrites.
+        marrow::editor::ProjectData subset = project;
+        const auto part = marrow::editor::scale_keyframe_times(
+            &subset,
+            {spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeEnd,
+            0.5);
+        if (!part || !part.changed) {
+            std::cerr << "MAR-173 subset auto scale failed: " << part.error << '\n';
+            return false;
+        }
+        const auto part_resolved =
+            marrow::editor::resolve_automatic_curves(&subset, "idle");
+        if (!part_resolved || part_resolved.resolved_key_count == 0U) {
+            std::cerr << "MAR-173 a subset scale must change the automatic curves.\n";
+            return false;
+        }
+    }
+
+    // --- MAR-172: scaling rejects where retiming pins -----------------------
+    {
+        marrow::editor::ProjectData project = base;
+        auto* lane = project.find_transform_timeline_edit(
+            "idle", "spine", TransformTimelineChannel::Rotate);
+        // Four keys, so a middle-only selection still spans two distinct times.
+        lane->keyframes.insert(lane->keyframes.begin() + 2, lane->keyframes[1]);
+        lane->keyframes[2].time = 0.75;
+        if (!marrow::editor::set_animation_duration(&project, skeleton, "idle", 1.0)) {
+            std::cerr << "MAR-173 could not author idle's duration.\n";
+            return false;
+        }
+        TimelineLaneSelector lane_selector;
+        lane_selector.kind = TimelineLaneKind::Transform;
+        lane_selector.animation_name = "idle";
+        lane_selector.bone_name = "spine";
+        lane_selector.transform_channel = TransformTimelineChannel::Rotate;
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            &project, skeleton, {lane_selector}, true);
+        if (!enabled || !enabled.changed) {
+            std::cerr << "MAR-173 could not opt the spine lane in: " << enabled.error
+                      << '\n';
+            return false;
+        }
+        if (!rejects(project, {spine_selector(0.0), spine_selector(0.5)},
+                     TimelineScalePivot::RangeEnd, 0.5, "loop synchronized",
+                     "a selection containing a pinned first key") ||
+            !rejects(project, {spine_selector(0.5), spine_selector(1.0)},
+                     TimelineScalePivot::RangeStart, 0.9, "loop synchronized",
+                     "a selection containing a pinned last key")) {
+            return false;
+        }
+        // Only middle keys: legal, and the boundary contract stays satisfied.
+        marrow::editor::ProjectData middle = project;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &middle,
+            {spine_selector(0.5), spine_selector(0.75)},
+            TimelineScalePivot::RangeStart,
+            1.2);
+        if (!scaled || !scaled.changed) {
+            std::cerr << "MAR-173 a middle-key scale on an opted-in lane must pass: "
+                      << scaled.error << '\n';
+            return false;
+        }
+        const auto synced =
+            marrow::editor::synchronize_loop_boundaries(&middle, skeleton, "idle");
+        if (!synced || synced.synchronized_lane_count != 0U) {
+            std::cerr << "MAR-173 a middle-key scale must leave the boundary alone: "
+                      << synced.error << " synchronized="
+                      << synced.synchronized_lane_count << '\n';
+            return false;
+        }
+    }
+
+    // --- Duration: grows through the seam, never shrinks --------------------
+    {
+        marrow::editor::ProjectData project = base;
+        if (!marrow::editor::set_animation_duration(&project, skeleton, "idle", 1.0)) {
+            std::cerr << "MAR-173 could not author idle's explicit duration.\n";
+            return false;
+        }
+        // The last SetDuration edit for `idle` in the ordered log wins.
+        const auto explicit_duration = [&](const marrow::editor::ProjectData& data)
+            -> std::optional<double> {
+            std::optional<double> duration;
+            for (const auto& edit : data.animation_edits) {
+                if (edit.kind == marrow::editor::AnimationEditKind::SetDuration &&
+                    edit.name == "idle") {
+                    duration = edit.duration;
+                }
+            }
+            return duration;
+        };
+        marrow::editor::ProjectData grown = project;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &grown,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            2.0);
+        if (!scaled || !scaled.changed) {
+            std::cerr << "MAR-173 duration-growth scale failed: " << scaled.error << '\n';
+            return false;
+        }
+        // The primitive itself writes no AnimationEdit.
+        if (explicit_duration(grown) != 1.0) {
+            std::cerr << "MAR-173 scale_keyframe_times() wrote a duration itself.\n";
+            return false;
+        }
+        const auto extended =
+            marrow::editor::auto_extend_explicit_animation_durations(&grown, skeleton);
+        if (!extended || !extended.changed || explicit_duration(grown) != 2.0) {
+            std::cerr << "MAR-173 the seam must grow the explicit duration to 2.0.\n";
+            return false;
+        }
+        marrow::editor::ProjectData shrunk = project;
+        const auto shrink = marrow::editor::scale_keyframe_times(
+            &shrunk,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            0.5);
+        if (!shrink || !shrink.changed || spine_times(shrunk) !=
+                std::vector<double>{0.0, 0.25, 0.5}) {
+            std::cerr << "MAR-173 shrink scale failed: " << shrink.error << '\n';
+            return false;
+        }
+        const auto not_shrunk =
+            marrow::editor::auto_extend_explicit_animation_durations(&shrunk, skeleton);
+        if (!not_shrunk || explicit_duration(shrunk) != 1.0) {
+            std::cerr << "MAR-173 the seam must never shrink an explicit duration.\n";
+            return false;
+        }
+        // With no explicit duration the animation stays inference-driven.
+        marrow::editor::ProjectData inferred = base;
+        const auto inferred_scale = marrow::editor::scale_keyframe_times(
+            &inferred,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.5);
+        if (!inferred_scale ||
+            marrow::editor::auto_extend_explicit_animation_durations(&inferred, skeleton)
+                .changed ||
+            explicit_duration(inferred).has_value()) {
+            std::cerr << "MAR-173 an inference-driven animation must gain no duration.\n";
+            return false;
+        }
+    }
+
+    // --- Save / reload bitwise round trip -----------------------------------
+    {
+        const auto round_trip_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar173_round_trip_" + path_token + ".marrow");
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = round_trip_path;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &project,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.25);
+        if (!scaled || !scaled.changed) {
+            std::cerr << "MAR-173 round-trip scale failed: " << scaled.error << '\n';
+            return false;
+        }
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        std::filesystem::remove(round_trip_path, ignored);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        if (marrow::editor::serialize_project(*reloaded.project) != before ||
+            spine_times(*reloaded.project) !=
+                std::vector<double>{0.0, 0.625, 1.25}) {
+            std::cerr << "MAR-173 scaled times did not survive the .marrow round trip.\n";
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Export. MAR-168 and MAR-169 both shipped an export criterion whose test
+    // mutated a ProjectData copy that never reached the exporter, so this block
+    // exports the MUTATED project and asserts the SERIALIZED KEY TIME that came
+    // back out of the runtime loader. Byte size is a secondary observation
+    // here, not the acceptance signal: see the printed note below.
+    // ------------------------------------------------------------------
+    {
+        const std::filesystem::path scale_json_path = "/tmp/marrow_mar173_scale.mskl";
+        const std::filesystem::path scale_binary_path = "/tmp/marrow_mar173_scale.mbin";
+        const std::filesystem::path baseline_json_path =
+            "/tmp/marrow_mar173_export_baseline.mskl";
+        const std::filesystem::path baseline_binary_path =
+            "/tmp/marrow_mar173_export_baseline.mbin";
+
+        marrow::editor::ProjectExportOptions baseline_options;
+        baseline_options.skeleton_output_path = baseline_json_path;
+        baseline_options.binary_output_path = baseline_binary_path;
+        const auto baseline_export = marrow::editor::export_runtime_assets(
+            *project_result.project,
+            *project_result.base_skeleton_document,
+            baseline_options);
+        if (!baseline_export) {
+            std::cerr << baseline_export.error->format() << '\n';
+            return false;
+        }
+
+        const auto* pre_scale_lane = spine_lane(*project_result.project);
+        if (pre_scale_lane == nullptr || pre_scale_lane->keyframes.size() != 3U) {
+            std::cerr << "MAR-173 export block needs the fixture's three spine keys.\n";
+            return false;
+        }
+        const std::array<double, 3> pre_angles{
+            pre_scale_lane->keyframes[0].angle,
+            pre_scale_lane->keyframes[1].angle,
+            pre_scale_lane->keyframes[2].angle};
+        const std::array<InterpolationKind, 3> pre_kinds{
+            pre_scale_lane->keyframes[0].interpolation.kind(),
+            pre_scale_lane->keyframes[1].interpolation.kind(),
+            pre_scale_lane->keyframes[2].interpolation.kind()};
+
+        // The mutation, on the project this block is about to hand the exporter.
+        marrow::editor::ProjectData exported_project = *project_result.project;
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            &exported_project,
+            {spine_selector(0.0), spine_selector(0.5), spine_selector(1.0)},
+            TimelineScalePivot::RangeStart,
+            1.25);
+        if (!scaled || !scaled.changed) {
+            std::cerr << "MAR-173 export block could not scale its keys: " << scaled.error
+                      << '\n';
+            return false;
+        }
+
+        marrow::editor::ProjectExportOptions scale_options;
+        scale_options.skeleton_output_path = scale_json_path;
+        scale_options.binary_output_path = scale_binary_path;
+        const auto scale_export = marrow::editor::export_runtime_assets(
+            exported_project, *project_result.base_skeleton_document, scale_options);
+        if (!scale_export) {
+            std::cerr << scale_export.error->format() << '\n';
+            return false;
+        }
+
+        // The acceptance signal: the times that came back out of the loader.
+        const auto reloaded = marrow::runtime::load_skeleton_data(scale_json_path);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* exported_idle = reloaded.skeleton_data->find_animation("idle");
+        const auto spine_index = reloaded.skeleton_data->find_bone_index("spine");
+        const auto* exported_spine =
+            exported_idle != nullptr && spine_index.has_value()
+            ? exported_idle->find_rotate_timeline(*spine_index)
+            : nullptr;
+        if (exported_spine == nullptr || exported_spine->keyframes.size() != 3U) {
+            std::cerr << "MAR-173 export did not carry the spine rotate timeline.\n";
+            return false;
+        }
+        const std::array<double, 3> expected_times{0.0, 0.625, 1.25};
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            const auto& key = exported_spine->keyframes[index];
+            if (key.time !=
+                static_cast<marrow::runtime::AnimationScalar>(expected_times[index])) {
+                std::cerr << "MAR-173 exported key " << index << " has time " << key.time
+                          << ", expected " << expected_times[index] << '\n';
+                return false;
+            }
+            if (key.angle !=
+                    static_cast<marrow::runtime::AnimationScalar>(pre_angles[index]) ||
+                key.interpolation.kind() != pre_kinds[index]) {
+                std::cerr << "MAR-173 scaling changed an exported value or easing at key "
+                          << index << '\n';
+                return false;
+            }
+        }
+
+        std::ifstream scaled_text(scale_json_path, std::ios::binary);
+        const std::string scaled_body(
+            (std::istreambuf_iterator<char>(scaled_text)),
+            std::istreambuf_iterator<char>());
+        std::ifstream baseline_text(baseline_json_path, std::ios::binary);
+        const std::string baseline_body(
+            (std::istreambuf_iterator<char>(baseline_text)),
+            std::istreambuf_iterator<char>());
+        if (scaled_body.empty() || baseline_body.empty()) {
+            std::cerr << "MAR-173 could not read the exported .mskl as text.\n";
+            return false;
+        }
+        // `0.625` appears nowhere in the untouched export, so finding it in the
+        // scaled one proves the mutated project is what reached the writer.
+        if (baseline_body.find("0.625") != std::string::npos ||
+            scaled_body.find("0.625") == std::string::npos ||
+            scaled_body.find("1.25") == std::string::npos) {
+            std::cerr << "MAR-173 scaled times did not reach the exported .mskl text.\n";
+            return false;
+        }
+        if (scaled_body.find("loop_sync") != std::string::npos ||
+            scaled_body.find("curve_mode") != std::string::npos) {
+            std::cerr << "MAR-173 leaked a project-local field into the runtime export.\n";
+            return false;
+        }
+
+        if (!scale_export.binary_path.has_value() ||
+            !validate_binary_export(scale_export.path, *scale_export.binary_path)) {
+            std::cerr << "MAR-173 scale export did not match its v2 binary payload.\n";
+            return false;
+        }
+
+        std::error_code size_error;
+        const auto scale_json_size =
+            std::filesystem::file_size(scale_json_path, size_error);
+        const auto scale_binary_size =
+            std::filesystem::file_size(scale_binary_path, size_error);
+        const auto baseline_json_size =
+            std::filesystem::file_size(baseline_json_path, size_error);
+        const auto baseline_binary_size =
+            std::filesystem::file_size(baseline_binary_path, size_error);
+        if (size_error || scale_json_size <= baseline_json_size) {
+            std::cerr << "MAR-173 scale export JSON must be strictly larger than the "
+                         "baseline: "
+                      << scale_json_size << " vs " << baseline_json_size << '\n';
+            return false;
+        }
+        std::cout << "MAR-173 scale export: JSON " << scale_json_size << " bytes, MBIN "
+                  << scale_binary_size << " bytes (baseline JSON " << baseline_json_size
+                  << " bytes, MBIN " << baseline_binary_size << " bytes).\n";
+        std::cout << "MAR-173 note: the MBIN size is expected to be unchanged -- key "
+                     "times are fixed-width float32. The acceptance signal is the loaded "
+                     "key time asserted above, not the byte count.\n";
+    }
+
+    std::cout << "MAR-173 atomic key time scaling validated as reject-not-clamp, "
+                 "pivot-exact, and value-preserving.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -6864,6 +7885,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar172_loop_boundary_sync(result)) {
+            return 1;
+        }
+        if (!validate_mar173_key_time_scaling(result)) {
             return 1;
         }
     }

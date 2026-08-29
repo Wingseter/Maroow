@@ -39,15 +39,16 @@ async def test(parameter_only=False):
         "timeline.set_interpolation",
         "timeline.set_curve_mode",
         "timeline.set_loop_sync",
+        "timeline.scale_key_times",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 59
+    assert len(registry_names) == 60
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 59
+    assert len(mcp_names) == 60
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -90,6 +91,13 @@ async def test(parameter_only=False):
     }
     assert registry_by_name["timeline.set_loop_sync"] == {
         "name": "timeline.set_loop_sync",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["timeline.scale_key_times"] == {
+        "name": "timeline.scale_key_times",
         "category": "edit",
         "mutating": True,
         "requires_review": False,
@@ -963,6 +971,101 @@ async def test(parameter_only=False):
     )
     assert after_loop_undo["scene_delta"]["lanes"][0]["previous_enabled"] is False
     require_ok("undo the loop-boundary duration", await client.send_command("undo"))
+
+    # MAR-173: timeline.scale_key_times, the 60th operation. The pivot names
+    # which edge of the selection's own time range stays fixed, only finite
+    # positive ratios are accepted, and a collision rejects the whole call
+    # rather than clamping it.
+    def spine_key(time: float) -> dict:
+        return {
+            "kind": "transform",
+            "animation": "idle",
+            "bone": "spine",
+            "channel": "rotate",
+            "time": time,
+        }
+
+    scale_keys = [spine_key(0.0), spine_key(0.5), spine_key(1.0)]
+    scale_dry = require_ok(
+        "timeline.scale_key_times dry-run",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 1.25, "pivot": "start", "dry_run": True},
+        ),
+    )
+    assert scale_dry["scene_delta"]["pivot"] == "start"
+    assert scale_dry["scene_delta"]["pivot_time"] == 0.0
+    assert round(scale_dry["scene_delta"]["original_span"], 4) == 1.0
+    assert round(scale_dry["scene_delta"]["scaled_span"], 4) == 1.25
+    assert scale_dry["scene_delta"]["moved_key_count"] == 2
+    assert scale_dry["scene_delta"]["keys_truncated"] is False
+    assert round(scale_dry["scene_delta"]["keys"][1]["previous_time"], 4) == 0.5
+    assert round(scale_dry["scene_delta"]["keys"][1]["time"], 4) == 0.625
+    assert scale_dry["scene_delta"]["keys"][0]["moved"] is False
+
+    # The same selection with the other pivot is a different edit.
+    scale_end = require_ok(
+        "timeline.scale_key_times dry-run with the end pivot",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 0.5, "pivot": "end", "dry_run": True},
+        ),
+    )
+    assert scale_end["scene_delta"]["pivot_time"] == 1.0
+    assert round(scale_end["scene_delta"]["keys"][0]["time"], 4) == 0.5
+    assert round(scale_end["scene_delta"]["keys"][2]["time"], 4) == 1.0
+
+    scale_live = require_ok(
+        "timeline.scale_key_times live",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 1.25, "pivot": "start"},
+        ),
+    )
+    assert scale_live["scene_delta"]["dry_run"] is False
+    assert scale_live["scene_delta"]["moved_key_count"] == 2
+
+    scale_read_back = require_ok(
+        "timeline.scale_key_times read-back",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {
+                "keys": [spine_key(0.0), spine_key(0.625), spine_key(1.25)],
+                "scale": 1.1,
+                "pivot": "start",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert round(scale_read_back["scene_delta"]["keys"][1]["previous_time"], 4) == 0.625
+    assert round(scale_read_back["scene_delta"]["keys"][2]["previous_time"], 4) == 1.25
+
+    require_ok("undo the timeline scale", await client.send_command("undo"))
+    after_scale_undo = require_ok(
+        "timeline.scale_key_times after undo",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 1.25, "pivot": "start", "dry_run": True},
+        ),
+    )
+    assert round(after_scale_undo["scene_delta"]["keys"][1]["previous_time"], 4) == 0.5
+    assert round(after_scale_undo["scene_delta"]["keys"][2]["previous_time"], 4) == 1.0
+
+    # The schema is advisory: the server forwards every call verbatim, so each
+    # of these is the C++ gate rejecting, not the JSON schema.
+    for label, args in (
+        ("a negative scale", {"keys": scale_keys, "scale": -1, "pivot": "start"}),
+        ("a string scale", {"keys": scale_keys, "scale": "1.5", "pivot": "start"}),
+        ("an unknown pivot", {"keys": scale_keys, "scale": 1.5, "pivot": "middle"}),
+        ("a missing pivot", {"keys": scale_keys, "scale": 1.5}),
+        ("a missing scale", {"keys": scale_keys, "pivot": "start"}),
+        ("a single-key selection", {"keys": [spine_key(0.5)], "scale": 1.5, "pivot": "start"}),
+        ("a collision", {"keys": scale_keys, "scale": 0.001, "pivot": "start"}),
+    ):
+        require_rejected(
+            f"timeline.scale_key_times rejects {label}",
+            await client.send_command("timeline.scale_key_times", args),
+        )
 
     require_ok(
         "set_transform dry-run",

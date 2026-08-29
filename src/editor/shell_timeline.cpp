@@ -148,6 +148,149 @@ void update_timeline_retime_gesture(
         state, tracks, requested_delta, snap_to_frames);
 }
 
+bool begin_timeline_scale_drag(
+    ShellState* state,
+    std::uint32_t item_id,
+    marrow::editor::TimelineScalePivot pivot,
+    double pointer_x,
+    double lane_min_x,
+    double pixels_per_second,
+    double view_start_seconds,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || authoring_gesture_active(*state) ||
+        state->timeline_editor.scale_drag.has_value() ||
+        !std::isfinite(pointer_x) || !std::isfinite(lane_min_x) ||
+        !std::isfinite(pixels_per_second) || pixels_per_second <= 0.0 ||
+        !std::isfinite(view_start_seconds)) {
+        return false;
+    }
+    const auto span = marrow::editor::timeline_model::selection_time_span(
+        state->timeline_editor.selected_keys, tracks);
+    if (!span.valid) {
+        return false;
+    }
+    // Refuse before anything appears to happen. The gesture repeats this check
+    // because the Agent and the drag both reach it, and both go through the
+    // primitive's own predicates.
+    if (state->session.project() != nullptr) {
+        std::vector<marrow::editor::TimelineKeySelector> selectors;
+        selectors.reserve(state->timeline_editor.selected_keys.size());
+        for (const TimelineKeyRef& key : state->timeline_editor.selected_keys) {
+            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+            const auto index =
+                track != nullptr ? timeline_key_index(*track, key) : std::nullopt;
+            if (track == nullptr || !index.has_value() ||
+                !timeline_track_is_editable(*track)) {
+                return false;
+            }
+            const auto selector = timeline_key_selector(*state, *track, *index);
+            if (!selector.has_value()) return false;
+            selectors.push_back(*selector);
+        }
+        const std::string refusal = marrow::editor::timeline_scale_selection_refusal(
+            *state->session.project(), selectors);
+        if (!refusal.empty()) {
+            state->status_message = refusal;
+            return false;
+        }
+    }
+
+    TimelineScaleDragCandidate candidate;
+    candidate.item_id = item_id;
+    candidate.pivot = pivot;
+    candidate.press_pointer_x = pointer_x;
+    candidate.pivot_time = pivot == marrow::editor::TimelineScalePivot::RangeStart
+        ? span.minimum_time
+        : span.maximum_time;
+    candidate.edge_original_time =
+        pivot == marrow::editor::TimelineScalePivot::RangeStart
+        ? span.maximum_time
+        : span.minimum_time;
+    // Frozen at the press and never re-read, so the pixel-to-ratio mapping
+    // cannot move under the pointer mid-drag.
+    candidate.frozen_pixels_per_second = pixels_per_second;
+    candidate.frozen_view_start_seconds = view_start_seconds;
+    candidate.frozen_lane_min_x = lane_min_x;
+    state->timeline_editor.scale_drag.emplace(std::move(candidate));
+    return true;
+}
+
+void cancel_timeline_scale_drag(ShellState* state) {
+    if (state == nullptr) return;
+    if (state->timeline_editor.scale_gesture.has_value()) {
+        finish_timeline_scale_gesture(state, false);
+    }
+    // A bare candidate holds no transaction, so dropping it touches no history.
+    state->timeline_editor.scale_drag.reset();
+}
+
+bool update_timeline_scale_drag(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double pointer_x,
+    bool pointer_down,
+    bool cancel_requested,
+    bool bypass_frame_snap) {
+    if (state == nullptr || !state->timeline_editor.scale_drag.has_value()) {
+        return false;
+    }
+    if (cancel_requested) {
+        cancel_timeline_scale_drag(state);
+        return false;
+    }
+    if (!pointer_down) {
+        if (state->timeline_editor.scale_gesture.has_value()) {
+            finish_timeline_scale_gesture(state, true);
+        }
+        state->timeline_editor.scale_drag.reset();
+        return false;
+    }
+    if (!std::isfinite(pointer_x)) {
+        // A structural failure, not a pointer position: cancel with rollback.
+        cancel_timeline_scale_drag(state);
+        return false;
+    }
+
+    TimelineScaleDragCandidate candidate = *state->timeline_editor.scale_drag;
+    if (!state->timeline_editor.scale_gesture.has_value()) {
+        if (std::abs(pointer_x - candidate.press_pointer_x) < 4.0) {
+            // Still inside the dead zone: no transaction, no history, and
+            // `authoring_gesture_active` stays false.
+            return true;
+        }
+        if (!begin_timeline_scale_gesture(
+                state, candidate.item_id, candidate.pivot, tracks)) {
+            state->timeline_editor.scale_drag.reset();
+            return false;
+        }
+    }
+
+    const double edge_target = candidate.frozen_view_start_seconds +
+        (pointer_x - candidate.frozen_lane_min_x) / candidate.frozen_pixels_per_second;
+    auto requested = marrow::editor::timeline_model::scale_from_edge_time(
+        candidate.pivot_time, candidate.edge_original_time, edge_target);
+    if (!requested.has_value()) {
+        // The pointer is at or past the pivot: hold the last accepted shape.
+        return true;
+    }
+    if (state->timeline_editor.snap_to_frames && !bypass_frame_snap) {
+        const auto snapped = marrow::editor::timeline_model::snap_scale_to_frames(
+            candidate.pivot_time,
+            candidate.edge_original_time,
+            *requested,
+            state->timeline_editor.frames_per_second);
+        if (!snapped.has_value()) {
+            return true;
+        }
+        requested = snapped;
+    }
+    if (!apply_timeline_scale_ratio(state, tracks, *requested)) {
+        state->timeline_editor.scale_drag.reset();
+        return false;
+    }
+    return true;
+}
+
 void draw_timeline_ruler(ShellState* state, double duration_seconds) {
     const float width = std::max(96.0f, ImGui::GetContentRegionAvail().x);
     constexpr float kHeight = 28.0f;
@@ -160,7 +303,13 @@ void draw_timeline_ruler(ShellState* state, double duration_seconds) {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     draw_list->AddRectFilled(rect_min, rect_max, IM_COL32(0x17, 0x1a, 0x21, 0xff));
 
-    if (ImGui::IsItemHovered() && std::abs(ImGui::GetIO().MouseWheel) > 1e-6f) {
+    // The scale drag freezes its view scalars at the press, so letting the
+    // ruler move `pixels_per_second` or `view_start_seconds` mid-drag would put
+    // the grip under a different time than the pointer.
+    const bool scale_drag_live = state->timeline_editor.scale_drag.has_value() ||
+        state->timeline_editor.scale_gesture.has_value();
+    if (!scale_drag_live && ImGui::IsItemHovered() &&
+        std::abs(ImGui::GetIO().MouseWheel) > 1e-6f) {
         const double cursor_time = timeline_time_from_x(
             *state, ImGui::GetIO().MousePos.x, rect_min.x);
         const double zoom_factor = std::pow(1.15, ImGui::GetIO().MouseWheel);
@@ -172,7 +321,8 @@ void draw_timeline_ruler(ShellState* state, double duration_seconds) {
                 static_cast<double>(ImGui::GetIO().MousePos.x - rect_min.x) /
                     state->timeline_editor.pixels_per_second);
     }
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+    if (!scale_drag_live && ImGui::IsItemActive() &&
+        ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
         state->timeline_editor.view_start_seconds = std::max(
             0.0,
             state->timeline_editor.view_start_seconds -
@@ -223,6 +373,117 @@ void draw_timeline_ruler(ShellState* state, double duration_seconds) {
         "%.0f FPS | mouse wheel zoom | middle-drag pan | span %.3fs",
         state->timeline_editor.frames_per_second,
         duration_seconds);
+}
+
+/**
+ * @brief Draws the dopesheet's selection range bar and drives its two grips.
+ *
+ * Skipped entirely — consuming no layout — unless a multi-time selection on an
+ * editable track exists, so every other dopesheet state keeps its current
+ * geometry byte for byte. Contains no pixel-to-ratio arithmetic and no project
+ * mutation: it samples the pointer and the keyboard and hands plain scalars to
+ * the ImGui-free drag driver.
+ */
+void draw_timeline_selection_range_bar(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || state->session.project() == nullptr || tracks.empty() ||
+        state->timeline_editor.view_mode != TimelineViewMode::Dopesheet) {
+        return;
+    }
+    const bool has_editable_selection = std::any_of(
+        state->timeline_editor.selected_keys.begin(),
+        state->timeline_editor.selected_keys.end(),
+        [&](const TimelineKeyRef& key) {
+            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+            return track != nullptr && timeline_track_is_editable(*track);
+        });
+    const auto span = marrow::editor::timeline_model::selection_time_span(
+        state->timeline_editor.selected_keys, tracks);
+    if (!has_editable_selection || !span.valid) {
+        return;
+    }
+
+    constexpr float kBarHeight = 14.0f;
+    constexpr float kGripHalfWidth = 7.0f;
+    const float width = std::max(96.0f, ImGui::GetContentRegionAvail().x);
+    ImGui::InvisibleButton("timeline_selection_range", ImVec2(width, kBarHeight));
+    const ImVec2 rect_min = ImGui::GetItemRectMin();
+    const ImVec2 rect_max = ImGui::GetItemRectMax();
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(rect_min, rect_max, IM_COL32(0x17, 0x1a, 0x21, 0xff));
+
+    const float start_x = timeline_x_from_time(*state, span.minimum_time, rect_min.x);
+    const float end_x = timeline_x_from_time(*state, span.maximum_time, rect_min.x);
+    draw_list->AddRectFilled(
+        ImVec2(start_x, rect_min.y + 3.0f),
+        ImVec2(end_x, rect_max.y - 3.0f),
+        IM_COL32(0x60, 0x8b, 0xff, 0x55),
+        2.0f);
+    for (const float grip_x : {start_x, end_x}) {
+        draw_list->AddRectFilled(
+            ImVec2(grip_x - kGripHalfWidth * 0.5f, rect_min.y),
+            ImVec2(grip_x + kGripHalfWidth * 0.5f, rect_max.y),
+            IM_COL32(0x60, 0x8b, 0xff, 0xff),
+            2.0f);
+    }
+
+    const ImGuiIO& io = ImGui::GetIO();
+    const double pointer_x = static_cast<double>(io.MousePos.x);
+    if (!state->timeline_editor.scale_drag.has_value() &&
+        ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+        // The nearer grip wins, and the pivot is always the other edge.
+        const bool grabbed_late =
+            std::abs(io.MousePos.x - end_x) <= std::abs(io.MousePos.x - start_x);
+        if (std::abs(io.MousePos.x - (grabbed_late ? end_x : start_x)) <=
+            kGripHalfWidth) {
+            (void)begin_timeline_scale_drag(
+                state,
+                ImGui::GetItemID(),
+                grabbed_late ? marrow::editor::TimelineScalePivot::RangeStart
+                             : marrow::editor::TimelineScalePivot::RangeEnd,
+                pointer_x,
+                static_cast<double>(rect_min.x),
+                state->timeline_editor.pixels_per_second,
+                state->timeline_editor.view_start_seconds,
+                tracks);
+        }
+    }
+    if (state->timeline_editor.scale_drag.has_value()) {
+        (void)update_timeline_scale_drag(
+            state,
+            tracks,
+            pointer_x,
+            ImGui::IsMouseDown(ImGuiMouseButton_Left),
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false),
+            io.KeyAlt);
+    }
+
+    if (state->timeline_editor.scale_gesture.has_value()) {
+        const TimelineScaleGesture& gesture = *state->timeline_editor.scale_gesture;
+        char readout[192]{};
+        std::snprintf(
+            readout,
+            sizeof(readout),
+            "Scale %.3fx   span %.3fs -> %.3fs   (pivot %.3fs)",
+            gesture.applied_scale,
+            span.maximum_time - span.minimum_time,
+            (span.maximum_time - span.minimum_time) * gesture.applied_scale,
+            gesture.pivot_time);
+        draw_list->AddText(
+            ImVec2(rect_min.x + 4.0f, rect_min.y - 1.0f), IM_COL32_WHITE, readout);
+        if (!gesture.rejection.empty()) {
+            // A rejection during a live drag is transient state, not an event,
+            // so it is reported here rather than in the status bar.
+            draw_list->AddText(
+                ImVec2(rect_min.x + 4.0f + ImGui::CalcTextSize(readout).x + 8.0f,
+                       rect_min.y - 1.0f),
+                IM_COL32(0xff, 0x54, 0x50, 0xff),
+                gesture.rejection.c_str());
+        }
+    }
+    ImGui::SetItemTooltip(
+        "Drag either grip to scale the selected key times about the opposite edge");
 }
 
 void draw_timeline_lane(
@@ -2080,6 +2341,7 @@ static void draw_dopesheet_body(
     }
 
     draw_timeline_ruler(state, duration_seconds);
+    draw_timeline_selection_range_bar(state, tracks);
 
     if (tracks.empty()) {
         ImGui::TextUnformatted("The selected animation does not contain keyed tracks.");
@@ -2389,6 +2651,12 @@ void draw_timeline_window(
     if (state->timeline_editor.requested_view_mode == TimelineViewMode::Dopesheet ||
         state->timeline_editor.view_mode != TimelineViewMode::Graph) {
         cancel_timeline_graph_point_drag(state);
+    }
+    // The mirror of the line above: leaving the Dopesheet ends any live scale
+    // before the graph body can see a half-owned gesture.
+    if (state->timeline_editor.requested_view_mode == TimelineViewMode::Graph ||
+        state->timeline_editor.view_mode == TimelineViewMode::Graph) {
+        cancel_timeline_scale_drag(state);
     }
     // Driven here, not inside the Graph body, so no fail-closed early return
     // in that body can strand a live gesture and its open transaction. A time

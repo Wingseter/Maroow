@@ -476,10 +476,15 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
         cancelled = true;
     }
     cancel_transaction_gesture(state->timeline_editor.retime_gesture);
+    cancel_transaction_gesture(state->timeline_editor.scale_gesture);
     cancel_transaction_gesture(state->timeline_editor.graph_value_gesture);
     cancel_transaction_gesture(state->timeline_editor.graph_handle_gesture);
     cancel_transaction_gesture(state->parameter_slider_gesture);
     cancel_transaction_gesture(state->parameter_geometry_gesture);
+    // A bare candidate holds no transaction, so releasing it alone must not
+    // report a cancelled edit; `cancelled` is already true when its gesture
+    // was live.
+    state->timeline_editor.scale_drag.reset();
     state->timeline_editor.graph_drag.reset();
     state->viewport_ffd_box_selection.reset();
     state->viewport_box_selection.reset();

@@ -21,6 +21,7 @@
 #include "viewport_renderer.hpp"
 #include "marrow/editor/preferences.hpp"
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/editor/selection.hpp"
@@ -560,6 +561,54 @@ struct TimelineRetimeGesture {
     marrow::editor::EditorSession::EditTransaction transaction;
 };
 
+/**
+ * @brief One armed dopesheet scale drag, from the press until the dead zone.
+ *
+ * Holds no transaction, so `authoring_gesture_active` stays false until the
+ * pointer leaves the dead zone and `TimelineScaleGesture` opens one. Every
+ * frozen field is captured at the press and never re-read from the live view,
+ * which is what keeps the pixel-to-ratio mapping constant for the whole drag.
+ */
+struct TimelineScaleDragCandidate {
+    std::uint32_t item_id{0U};
+    marrow::editor::TimelineScalePivot pivot{
+        marrow::editor::TimelineScalePivot::RangeStart};
+    double press_pointer_x{0.0};
+    double pivot_time{0.0};
+    double edge_original_time{0.0};
+    double frozen_pixels_per_second{160.0};
+    double frozen_view_start_seconds{0.0};
+    double frozen_lane_min_x{0.0};
+};
+
+/**
+ * @brief One live dopesheet scale gesture owning one open transaction.
+ *
+ * `rejection` holds the last frame's reason when `scale_keyframe_times()`
+ * refused. A refused frame deliberately does NOT end the gesture: dragging a
+ * scale handle inward past a collision and back out again is ordinary, and
+ * killing the drag there would lose the edit for touching a boundary.
+ */
+struct TimelineScaleGesture {
+    std::uint32_t item_id{0U};
+    marrow::editor::TimelineScalePivot pivot{
+        marrow::editor::TimelineScalePivot::RangeStart};
+    std::vector<TimelineKeyRef> keys;
+    // The pre-gesture refs, kept because `keys` is rebuilt on every accepted
+    // frame. A cancel restores the pre-gesture times, so these resolve again
+    // and the selection survives the round trip intact.
+    std::vector<TimelineKeyRef> keys_before;
+    std::optional<TimelineKeyRef> active_key_before;
+    std::vector<double> original_times;
+    double pivot_time{0.0};
+    double edge_original_time{0.0};
+    double applied_scale{1.0};
+    bool materialized{false};
+    bool changed{false};
+    std::string rejection;
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
 enum class TimelineViewMode : std::uint8_t {
     Dopesheet,
     Graph,
@@ -696,6 +745,8 @@ struct TimelineEditorState {
         marrow::editor::TimelineScalarComponent::Angle};
     std::optional<TimelineBoxSelection> box_selection;
     std::optional<TimelineRetimeGesture> retime_gesture;
+    std::optional<TimelineScaleDragCandidate> scale_drag;
+    std::optional<TimelineScaleGesture> scale_gesture;
     std::optional<TimelineGraphPointDrag> graph_drag;
     std::optional<TimelineGraphValueGesture> graph_value_gesture;
     std::optional<TimelineGraphHandleGesture> graph_handle_gesture;
@@ -809,6 +860,7 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
         state.parameter_slider_gesture.has_value() ||
         state.parameter_geometry_gesture.has_value() ||
         state.timeline_editor.retime_gesture.has_value() ||
+        state.timeline_editor.scale_gesture.has_value() ||
         state.timeline_editor.graph_value_gesture.has_value() ||
         state.timeline_editor.graph_handle_gesture.has_value() ||
         state.weight_paint_stroke.active;

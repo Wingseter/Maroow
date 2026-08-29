@@ -13,6 +13,7 @@
 #include "shell_preferences.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_selection.hpp"
+#include "shell_timeline.hpp"
 #include "timeline_controller.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/editor/project.hpp"
@@ -144,8 +145,8 @@ bool validate_timeline_graph_shell_smoke(
         marrow::editor::agent_operation_descriptor_count();
     const bool dirty_before = state.session.dirty();
     const bool shell_dirty_before = state.project_dirty;
-    if (operation_count_before != 59U) {
-        std::cerr << "Graph shell smoke requires the exact 59-operation registry.\n";
+    if (operation_count_before != 60U) {
+        std::cerr << "Graph shell smoke requires the exact 60-operation registry.\n";
         return false;
     }
 
@@ -632,8 +633,8 @@ bool validate_timeline_graph_edit_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 59U) {
-        std::cerr << "Graph edit shell smoke requires the exact 59-operation registry.\n";
+    if (operation_count_before != 60U) {
+        std::cerr << "Graph edit shell smoke requires the exact 60-operation registry.\n";
         return false;
     }
 
@@ -1554,8 +1555,8 @@ bool validate_timeline_curve_preset_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 59U) {
-        std::cerr << "Curve preset shell smoke requires the exact 59-operation registry.\n";
+    if (operation_count_before != 60U) {
+        std::cerr << "Curve preset shell smoke requires the exact 60-operation registry.\n";
         return false;
     }
 
@@ -2124,8 +2125,8 @@ bool validate_timeline_graph_easing_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 59U) {
-        std::cerr << "Graph easing shell smoke requires the exact 59-operation registry.\n";
+    if (operation_count_before != 60U) {
+        std::cerr << "Graph easing shell smoke requires the exact 60-operation registry.\n";
         return false;
     }
 
@@ -3138,8 +3139,8 @@ bool validate_timeline_curve_mode_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 59U) {
-        std::cerr << "Curve mode shell smoke requires the exact 59-operation registry.\n";
+    if (operation_count_before != 60U) {
+        std::cerr << "Curve mode shell smoke requires the exact 60-operation registry.\n";
         return false;
     }
 
@@ -3953,8 +3954,8 @@ bool validate_timeline_loop_sync_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 59U) {
-        std::cerr << "Loop sync shell smoke requires the exact 59-operation registry.\n";
+    if (operation_count_before != 60U) {
+        std::cerr << "Loop sync shell smoke requires the exact 60-operation registry.\n";
         return false;
     }
 
@@ -4569,6 +4570,814 @@ bool validate_timeline_loop_sync_shell_smoke(
 
     if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
         std::cerr << "Loop sync editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// MAR-173 atomic key time scaling.
+// ---------------------------------------------------------------------
+bool validate_timeline_scale_shell_smoke(
+    const std::filesystem::path& project_path) {
+    // Every scenario that touches the preference store isolates it, so a smoke
+    // run can never create, read, or write the real preference directory.
+    using TransformChannel = marrow::editor::TransformTimelineChannel;
+    using Pivot = marrow::editor::TimelineScalePivot;
+
+    const ScopedPreferenceIsolation isolation("key-scale");
+    if (!isolation.installed()) {
+        std::cerr << "Key scale shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Key scale smoke", false, true)) {
+        std::cerr << "Key scale shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 60U) {
+        std::cerr << "Key scale shell smoke requires the exact 60-operation registry.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    const auto key_of = [&](std::string_view track_id,
+                            std::size_t index) -> std::optional<TimelineKeyRef> {
+        const TimelineTrackRow* row =
+            find_timeline_track(cached_timeline_tracks(&state), track_id);
+        if (row == nullptr || index >= row->key_times.size()) {
+            std::cerr << "Key scale smoke could not resolve " << track_id << '#'
+                      << index << '\n';
+            return std::nullopt;
+        }
+        return timeline_key_ref(*row, index);
+    };
+    const auto spine_times = [&]() -> std::vector<double> {
+        const TimelineTrackRow* row =
+            find_timeline_track(cached_timeline_tracks(&state), "bone:1:Rotate");
+        return row != nullptr ? row->key_times : std::vector<double>{};
+    };
+    const auto select_spine = [&](std::initializer_list<std::size_t> indices) {
+        std::vector<TimelineKeyRef> keys;
+        for (const std::size_t index : indices) {
+            const auto key = key_of("bone:1:Rotate", index);
+            if (!key.has_value()) return false;
+            keys.push_back(*key);
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Rotate");
+        state.timeline_editor.active_key = keys.back();
+        state.timeline_editor.selected_keys = std::move(keys);
+        return true;
+    };
+    const auto near_time = [](double left, double right) {
+        return std::abs(left - right) <= 1e-6;
+    };
+
+    if (spine_times() != std::vector<double>{0.0, 0.5, 1.0}) {
+        std::cerr << "Key scale smoke needs the fixture's {0, 0.5, 1} spine lane.\n";
+        return false;
+    }
+
+    // --- A complete drag on the LATE grip: RangeStart pivot ----------------
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7301U, Pivot::RangeStart, cached_timeline_tracks(&state))) {
+            std::cerr << "Key scale smoke could not open its late-grip gesture.\n";
+            return false;
+        }
+        // Three accepted frames, each an absolute ratio composed incrementally.
+        for (const double ratio : {1.1, 1.2, 1.25}) {
+            if (!apply_timeline_scale_ratio(
+                    &state, cached_timeline_tracks(&state), ratio)) {
+                std::cerr << "Key scale smoke lost its gesture at ratio " << ratio << '\n';
+                return false;
+            }
+            // The pivot key never moves, bit for bit, at any point in the drag.
+            if (spine_times().front() != 0.0) {
+                std::cerr << "The RangeStart pivot key moved mid-drag.\n";
+                return false;
+            }
+            if (state.timeline_editor.selected_keys.size() != 3U ||
+                !state.timeline_editor.active_key.has_value()) {
+                std::cerr << "The scale gesture lost its selection mid-drag.\n";
+                return false;
+            }
+        }
+        if (!state.timeline_editor.scale_gesture.has_value() ||
+            state.timeline_editor.scale_gesture->applied_scale != 1.25) {
+            std::cerr << "The gesture did not record its applied ratio.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        const std::vector<double> times = spine_times();
+        if (state.session.undo_count() != undo_before + 1U || times.size() != 3U ||
+            times[0] != 0.0 || !near_time(times[1], 0.625) ||
+            !near_time(times[2], 1.25)) {
+            std::cerr << "A committed late-grip scale must be one entry ending at "
+                         "{0, 0.625, 1.25}.\n";
+            return false;
+        }
+        if (state.status_message != "Scaled timeline keys") {
+            std::cerr << "Wrong scale status message: " << state.status_message << '\n';
+            return false;
+        }
+    }
+
+    // --- Undo / redo, and the deterministic reconciled selection ------------
+    {
+        const std::string scaled_text =
+            marrow::editor::serialize_project(*state.session.project());
+        if (!state.session.undo()) {
+            std::cerr << "Key scale smoke could not undo its commit.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        marrow::editor::timeline_model::reconcile_selection(
+            &state.timeline_editor.selected_keys,
+            &state.timeline_editor.active_key,
+            cached_timeline_tracks(&state));
+        if (spine_times() != std::vector<double>{0.0, 0.5, 1.0}) {
+            std::cerr << "Undo did not restore the original key times.\n";
+            return false;
+        }
+        // MAR-168 §14's pre-existing shared behaviour: the post-commit refs no
+        // longer resolve, so the shared reconciler prunes them. Pinned by value.
+        if (state.timeline_editor.selected_keys.size() != 1U ||
+            state.timeline_editor.selected_keys.front().time_microseconds != 0) {
+            std::cerr << "Undo must leave exactly the reconciled pivot key selected; got "
+                      << state.timeline_editor.selected_keys.size() << " keys.\n";
+            return false;
+        }
+        if (!state.session.redo()) {
+            std::cerr << "Key scale smoke could not redo its commit.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        if (marrow::editor::serialize_project(*state.session.project()) != scaled_text) {
+            std::cerr << "Redo did not restore the scaled times.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- A complete drag on the EARLY grip: RangeEnd pivot ------------------
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7302U, Pivot::RangeEnd, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 0.5)) {
+            std::cerr << "Key scale smoke could not drive its early-grip gesture.\n";
+            return false;
+        }
+        if (spine_times().back() != 1.0) {
+            std::cerr << "The RangeEnd pivot key moved mid-drag.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        const std::vector<double> times = spine_times();
+        if (state.session.undo_count() != undo_before + 1U ||
+            !near_time(times[0], 0.5) || !near_time(times[1], 0.75) ||
+            times[2] != 1.0) {
+            std::cerr << "A committed early-grip scale must end at {0.5, 0.75, 1.0}.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- A rejected frame HOLDS the gesture ---------------------------------
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7303U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 0.5)) {
+            std::cerr << "Key scale smoke could not open its rejection gesture.\n";
+            return false;
+        }
+        const std::vector<double> accepted = spine_times();
+        // Shrinking to 0.001 puts 0.5 and 1.0 inside one millisecond.
+        if (!apply_timeline_scale_ratio(
+                &state, cached_timeline_tracks(&state), 0.001)) {
+            std::cerr << "A rejected frame must not end the gesture.\n";
+            return false;
+        }
+        if (!state.timeline_editor.scale_gesture.has_value() ||
+            timeline_scale_rejection(state).empty() || spine_times() != accepted ||
+            state.timeline_editor.scale_gesture->applied_scale != 0.5) {
+            std::cerr << "A rejected frame must hold the last accepted state and report "
+                         "a reason.\n";
+            return false;
+        }
+        // Dragging back out to a legal ratio resumes.
+        if (!apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 0.8) ||
+            !timeline_scale_rejection(state).empty()) {
+            std::cerr << "The gesture must accept again after a rejected frame.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U ||
+            !near_time(spine_times()[1], 0.4)) {
+            std::cerr << "The recovered drag must commit exactly one entry at 0.8x.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- A gesture that never moves, and one that returns to 1.0 -----------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!before.has_value()) return false;
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7304U, Pivot::RangeStart, cached_timeline_tracks(&state))) {
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        const auto after_idle = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!after_idle.has_value() ||
+            after_idle->undo_count != before->undo_count ||
+            after_idle->project != before->project) {
+            std::cerr << "A gesture that applied nothing must leave no history entry.\n";
+            return false;
+        }
+        // Out and exactly back: `completion_decision` still commits, because the
+        // project genuinely changed and changed back, but the times must match.
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7305U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 1.4) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 1.0)) {
+            std::cerr << "Key scale smoke could not drive its zero-net drag.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (spine_times() != std::vector<double>{0.0, 0.5, 1.0}) {
+            std::cerr << "A zero-net drag must return every key to its original time.\n";
+            return false;
+        }
+        while (state.session.undo_count() > before->undo_count) {
+            if (!state.session.undo()) return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- Cancel restores everything -----------------------------------------
+    {
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!before.has_value() || !select_spine({0U, 1U, 2U})) return false;
+        const std::vector<TimelineKeyRef> selection_before =
+            state.timeline_editor.selected_keys;
+        if (!begin_timeline_scale_gesture(
+                &state, 7306U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 1.3)) {
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, false);
+        sync_shell_from_editor_session(&state);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after) ||
+            state.timeline_editor.selected_keys != selection_before ||
+            state.status_message != "Cancelled timeline scale") {
+            std::cerr << "Cancelling a scale must restore the project and the selection.\n";
+            return false;
+        }
+        // The shared cancel path releases the transaction too.
+        if (!select_spine({0U, 1U, 2U}) ||
+            !begin_timeline_scale_gesture(
+                &state, 7307U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 1.3)) {
+            return false;
+        }
+        cancel_authoring_gestures(&state, "smoke");
+        sync_shell_from_editor_session(&state);
+        const auto after_shared = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (state.timeline_editor.scale_gesture.has_value() ||
+            !after_shared.has_value() ||
+            !graph_edit_snapshots_match(*before, *after_shared)) {
+            std::cerr << "cancel_authoring_gestures must release a live scale gesture.\n";
+            return false;
+        }
+    }
+
+    // --- Mutual exclusion, and TimelineEditorState{} adoption ---------------
+    {
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7308U, Pivot::RangeStart, cached_timeline_tracks(&state))) {
+            return false;
+        }
+        if (begin_timeline_retime_gesture(
+                &state, 7309U, 0.0F, cached_timeline_tracks(&state))) {
+            std::cerr << "A retime must refuse to arm while a scale gesture is live.\n";
+            return false;
+        }
+        if (!authoring_gesture_active(state)) {
+            std::cerr << "A live scale gesture must set authoring_gesture_active.\n";
+            return false;
+        }
+        cancel_authoring_gestures(&state, "smoke");
+        sync_shell_from_editor_session(&state);
+        state.timeline_editor.scale_drag.emplace();
+        state.timeline_editor = TimelineEditorState{};
+        if (state.timeline_editor.scale_drag.has_value() ||
+            state.timeline_editor.scale_gesture.has_value()) {
+            std::cerr << "TimelineEditorState{} adoption must clear both scale slots.\n";
+            return false;
+        }
+        state.timeline_editor.frames_per_second = 60.0;
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- Drift enforcement over 5000 composed frames -----------------------
+    {
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7310U, Pivot::RangeStart, cached_timeline_tracks(&state))) {
+            return false;
+        }
+        double requested = 1.0;
+        for (int frame = 1; frame <= 5000; ++frame) {
+            requested = 0.6 + 0.8 * (static_cast<double>(frame) / 5000.0);
+            if (!apply_timeline_scale_ratio(
+                    &state, cached_timeline_tracks(&state), requested)) {
+                std::cerr << "The sweep lost its gesture at frame " << frame << '\n';
+                return false;
+            }
+        }
+        if (!timeline_scale_rejection(state).empty()) {
+            std::cerr << "The sweep must never reject: " << timeline_scale_rejection(state)
+                      << '\n';
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "The commit path rejected a drift-free 5000-frame sweep.\n";
+            return false;
+        }
+        const std::vector<double> times = spine_times();
+        for (std::size_t index = 0U; index < times.size(); ++index) {
+            const double expected =
+                0.0 + (static_cast<double>(index) * 0.5 - 0.0) * requested;
+            if (std::abs(times[index] - expected) >
+                marrow::editor::timeline_model::kKeyTimeEpsilon) {
+                std::cerr << "5000 composed frames drifted at key " << index << ": "
+                          << times[index] << " vs " << expected << '\n';
+                return false;
+            }
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- MAR-171: one entry carries the times and the re-resolved curves ----
+    {
+        if (!select_spine({0U, 1U, 2U})) return false;
+        const auto authored = apply_timeline_curve_mode(
+            &state,
+            cached_timeline_tracks(&state),
+            marrow::editor::TimelineCurveMode::Auto,
+            marrow::editor::TimelineScalarComponent::Angle);
+        if (!authored.applied) {
+            std::cerr << "Key scale smoke could not author automatic curves: "
+                      << authored.error << '\n';
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7311U, Pivot::RangeEnd, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 0.5)) {
+            std::cerr << "Key scale smoke could not scale its automatic subset.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U ||
+            !near_time(spine_times()[1], 0.75)) {
+            std::cerr << "A scale over automatic keys must stay one history entry.\n";
+            return false;
+        }
+        // Undoing once restores both the times and the curves: they shared an entry.
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        if (!near_time(spine_times()[1], 0.5)) {
+            std::cerr << "One undo must restore both the times and the curves.\n";
+            return false;
+        }
+        while (state.session.undo_count() > 0U) {
+            if (!state.session.undo()) return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- Explicit duration grows inside the same transaction ---------------
+    {
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 1.0) ||
+            !finish_animation_duration_gesture(&state, true)) {
+            std::cerr << "Key scale smoke could not author idle's duration.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        const auto idle_duration = [&]() -> double {
+            const auto* animation = state.session.runtime_data() != nullptr
+                ? state.session.runtime_data()->find_animation("idle")
+                : nullptr;
+            return animation != nullptr ? animation->duration() : -1.0;
+        };
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7312U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 2.0)) {
+            std::cerr << "Key scale smoke could not drive its duration-growth scale.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != undo_before + 1U ||
+            !near_time(idle_duration(), 2.0)) {
+            std::cerr << "Growing past an explicit duration must stay one entry; duration="
+                      << idle_duration() << '\n';
+            return false;
+        }
+        // Shrinking never shrinks the duration back.
+        const std::size_t shrink_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7313U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 0.5)) {
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        if (state.session.undo_count() != shrink_before + 1U ||
+            !near_time(idle_duration(), 2.0)) {
+            std::cerr << "A shrinking scale must leave the explicit duration alone.\n";
+            return false;
+        }
+        while (state.session.undo_count() > 0U) {
+            if (!state.session.undo()) return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+    }
+
+    // --- The ImGui-free drag driver ----------------------------------------
+    // The grip geometry: 160 px/s, view start 0 s, lane origin x = 100, so the
+    // RangeStart pivot grip sits at x = 100 and the moved edge at x = 260.
+    constexpr double kLaneMinX = 100.0;
+    constexpr double kPixelsPerSecond = 160.0;
+    constexpr double kViewStart = 0.0;
+    const auto edge_x = [&](double time) {
+        return kLaneMinX + (time - kViewStart) * kPixelsPerSecond;
+    };
+    {
+        // Arming refuses while another authoring gesture is live.
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7320U, Pivot::RangeStart, cached_timeline_tracks(&state))) {
+            return false;
+        }
+        if (begin_timeline_scale_drag(
+                &state, 7321U, Pivot::RangeStart, edge_x(1.0), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state))) {
+            std::cerr << "A drag must refuse to arm while a gesture is live.\n";
+            return false;
+        }
+        cancel_authoring_gestures(&state, "smoke");
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+
+        // A single-key selection has no span, so there is no grip to press.
+        if (!select_spine({1U})) return false;
+        if (begin_timeline_scale_drag(
+                &state, 7322U, Pivot::RangeStart, edge_x(0.5), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state))) {
+            std::cerr << "A drag must refuse to arm on a degenerate span.\n";
+            return false;
+        }
+        // A non-finite or non-positive frozen view is refused outright.
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (begin_timeline_scale_drag(
+                &state, 7323U, Pivot::RangeStart, edge_x(1.0), kLaneMinX, 0.0,
+                kViewStart, cached_timeline_tracks(&state))) {
+            std::cerr << "A drag must refuse a non-positive frozen scale.\n";
+            return false;
+        }
+    }
+    {
+        // A partial event tie refuses at arm time, naming the shared time.
+        const TimelineTrackRow* events =
+            find_timeline_track(cached_timeline_tracks(&state), "global:events");
+        if (events == nullptr || events->key_times.size() != 3U) {
+            std::cerr << "The drag cases need the fixture's three event keys.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*events, 0U), timeline_key_ref(*events, 2U)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.back();
+        state.selected_timeline_track_id = std::string("global:events");
+        state.status_message.clear();
+        if (begin_timeline_scale_drag(
+                &state, 7324U, Pivot::RangeStart, edge_x(0.8), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state))) {
+            std::cerr << "A drag must refuse to arm on a partial event tie.\n";
+            return false;
+        }
+        if (state.status_message.find("must be scaled together") == std::string::npos) {
+            std::cerr << "The tie refusal must name the remedy: " << state.status_message
+                      << '\n';
+            return false;
+        }
+        // Both members of the tie plus the third key: legal, and it arms.
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*events, 0U), timeline_key_ref(*events, 1U),
+            timeline_key_ref(*events, 2U)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.back();
+        if (!begin_timeline_scale_drag(
+                &state, 7325U, Pivot::RangeStart, edge_x(0.8), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state))) {
+            std::cerr << "A complete event tie must arm.\n";
+            return false;
+        }
+        cancel_timeline_scale_drag(&state);
+    }
+    {
+        // The dead zone: a press that never travels 4 px opens no transaction.
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!before.has_value() || !select_spine({0U, 1U, 2U})) return false;
+        state.status_message.clear();
+        if (!begin_timeline_scale_drag(
+                &state, 7326U, Pivot::RangeStart, edge_x(1.0), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state))) {
+            std::cerr << "The dead-zone case could not arm its drag.\n";
+            return false;
+        }
+        if (authoring_gesture_active(state)) {
+            std::cerr << "A bare drag candidate must not block other authoring.\n";
+            return false;
+        }
+        if (!update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), edge_x(1.0) + 3.0, true, false,
+                false) ||
+            state.timeline_editor.scale_gesture.has_value()) {
+            std::cerr << "A 3 px move must stay inside the dead zone.\n";
+            return false;
+        }
+        // Releasing inside the dead zone commits nothing at all.
+        if (update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), edge_x(1.0) + 3.0, false, false,
+                false) ||
+            state.timeline_editor.scale_drag.has_value()) {
+            std::cerr << "Releasing inside the dead zone must end the drag.\n";
+            return false;
+        }
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after) ||
+            !state.status_message.empty()) {
+            std::cerr << "A press without motion must leave no trace.\n";
+            return false;
+        }
+        // ...and cancelling a bare candidate touches no history either.
+        if (!begin_timeline_scale_drag(
+                &state, 7327U, Pivot::RangeStart, edge_x(1.0), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state))) {
+            return false;
+        }
+        cancel_timeline_scale_drag(&state);
+        const auto after_cancel = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (state.timeline_editor.scale_drag.has_value() ||
+            !after_cancel.has_value() ||
+            !graph_edit_snapshots_match(*before, *after_cancel) ||
+            !state.status_message.empty()) {
+            std::cerr << "Cancelling a bare candidate must touch no history.\n";
+            return false;
+        }
+    }
+    {
+        // Leaving the dead zone with snapping on lands the moved edge exactly
+        // on a 60 fps frame boundary; Alt lands it off one.
+        state.timeline_editor.snap_to_frames = true;
+        state.timeline_editor.frames_per_second = 60.0;
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({0U, 1U, 2U})) return false;
+        const double pointer = edge_x(1.0) + 5.0;
+        if (!begin_timeline_scale_drag(
+                &state, 7328U, Pivot::RangeStart, edge_x(1.0), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state)) ||
+            !update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), pointer, true, false, false) ||
+            !state.timeline_editor.scale_gesture.has_value()) {
+            std::cerr << "Leaving the dead zone must open the gesture.\n";
+            return false;
+        }
+        // Compared in seconds, not frames: `spine_times()` reads the runtime
+        // rows, whose float32 narrowing is ~1e-7 s and would be multiplied by
+        // 60 into a false failure if the comparison were done in frame units.
+        const double snapped_edge = spine_times().back();
+        if (std::abs(snapped_edge - std::round(snapped_edge * 60.0) / 60.0) > 1e-6) {
+            std::cerr << "The snapped moved edge must land on a frame boundary: "
+                      << snapped_edge << '\n';
+            return false;
+        }
+        if (update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), pointer, false, false, false) ||
+            state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "Releasing must commit exactly one history entry.\n";
+            return false;
+        }
+        if (!state.session.undo()) return false;
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+
+        // The same drag with the Alt bypass keeps the raw pointer ratio.
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_drag(
+                &state, 7329U, Pivot::RangeStart, edge_x(1.0), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state)) ||
+            !update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), pointer, true, false, true)) {
+            std::cerr << "The Alt bypass drag could not run.\n";
+            return false;
+        }
+        const double raw_edge = spine_times().back();
+        if (!near_time(raw_edge, (pointer - kLaneMinX) / kPixelsPerSecond) ||
+            std::abs(raw_edge - std::round(raw_edge * 60.0) / 60.0) <= 1e-6) {
+            std::cerr << "The Alt bypass must land off the frame boundary: " << raw_edge
+                      << '\n';
+            return false;
+        }
+        // Escape mid-drag cancels with a full rollback.
+        const auto during = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!during.has_value()) return false;
+        if (update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), pointer, true, true, false) ||
+            state.timeline_editor.scale_drag.has_value() ||
+            state.timeline_editor.scale_gesture.has_value()) {
+            std::cerr << "Escape must end both the candidate and the gesture.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        if (spine_times() != std::vector<double>{0.0, 0.5, 1.0}) {
+            std::cerr << "Escape must roll the project back.\n";
+            return false;
+        }
+        // A non-finite pointer is a structural failure, not a position.
+        if (!select_spine({0U, 1U, 2U})) return false;
+        if (!begin_timeline_scale_drag(
+                &state, 7330U, Pivot::RangeStart, edge_x(1.0), kLaneMinX,
+                kPixelsPerSecond, kViewStart, cached_timeline_tracks(&state)) ||
+            !update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state), pointer, true, false, true)) {
+            return false;
+        }
+        if (update_timeline_scale_drag(
+                &state, cached_timeline_tracks(&state),
+                std::numeric_limits<double>::quiet_NaN(), true, false, true) ||
+            state.timeline_editor.scale_gesture.has_value() ||
+            state.timeline_editor.scale_drag.has_value()) {
+            std::cerr << "A non-finite pointer must cancel the whole drag.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        if (spine_times() != std::vector<double>{0.0, 0.5, 1.0}) {
+            std::cerr << "A non-finite pointer must roll the project back.\n";
+            return false;
+        }
+        state.timeline_editor.snap_to_frames = true;
+    }
+
+    // --- MAR-172: arming refuses on a boundary key, middle keys scale -------
+    {
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 1.5) ||
+            !finish_animation_duration_gesture(&state, true)) {
+            std::cerr << "Key scale smoke could not author the loop duration.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        marrow::editor::TimelineLaneSelector lane;
+        lane.kind = marrow::editor::TimelineLaneKind::Transform;
+        lane.animation_name = "idle";
+        lane.bone_name = "spine";
+        lane.transform_channel = TransformChannel::Rotate;
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Enable loop synchronization",
+            "timeline:loop-sync",
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) return false;
+        const auto enabled = marrow::editor::set_timeline_loop_sync(
+            transaction.project(), *state.session.runtime_data(), {lane}, true);
+        if (!enabled || !enabled.changed || !transaction.refresh_runtime() ||
+            !transaction.commit()) {
+            std::cerr << "Key scale smoke could not opt the spine lane in: "
+                      << enabled.error << '\n';
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        (void)cached_timeline_tracks(&state);
+        // The lane is now {0, 0.5, 1.0, 1.5}: 1.5 is the managed boundary.
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!before.has_value() || before->dopesheet_key_times.size() != 4U) {
+            std::cerr << "The opted-in lane must carry four keys.\n";
+            return false;
+        }
+        state.status_message.clear();
+        if (!select_spine({0U, 1U})) return false;
+        if (begin_timeline_scale_gesture(
+                &state, 7314U, Pivot::RangeEnd, cached_timeline_tracks(&state))) {
+            std::cerr << "Arming must refuse a selection containing the pinned key 0.\n";
+            return false;
+        }
+        if (state.status_message.find("loop synchronized") == std::string::npos) {
+            std::cerr << "The refusal must name the reason: " << state.status_message
+                      << '\n';
+            return false;
+        }
+        const auto after_refusal = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!after_refusal.has_value() ||
+            !graph_edit_snapshots_match(*before, *after_refusal)) {
+            std::cerr << "A refused arm must open no transaction and change nothing.\n";
+            return false;
+        }
+        state.status_message.clear();
+        if (!select_spine({2U, 3U})) return false;
+        if (begin_timeline_scale_gesture(
+                &state, 7315U, Pivot::RangeStart, cached_timeline_tracks(&state))) {
+            std::cerr << "Arming must refuse a selection containing the boundary key.\n";
+            return false;
+        }
+        // The drag entry point refuses the same selection, through the same
+        // predicate, and reports it before anything appears to happen.
+        state.status_message.clear();
+        if (begin_timeline_scale_drag(
+                &state, 7317U, Pivot::RangeStart, 100.0 + 1.5 * 160.0, 100.0, 160.0,
+                0.0, cached_timeline_tracks(&state)) ||
+            state.status_message.find("loop synchronized") == std::string::npos ||
+            state.timeline_editor.scale_drag.has_value()) {
+            std::cerr << "The drag must refuse a pinned selection too: "
+                      << state.status_message << '\n';
+            return false;
+        }
+        // Middle keys only: legal, and the boundary stays at the duration.
+        const std::size_t undo_before = state.session.undo_count();
+        if (!select_spine({1U, 2U})) return false;
+        if (!begin_timeline_scale_gesture(
+                &state, 7316U, Pivot::RangeStart, cached_timeline_tracks(&state)) ||
+            !apply_timeline_scale_ratio(&state, cached_timeline_tracks(&state), 1.2)) {
+            std::cerr << "A middle-key scale on an opted-in lane must arm and apply.\n";
+            return false;
+        }
+        finish_timeline_scale_gesture(&state, true);
+        sync_shell_from_editor_session(&state);
+        const std::vector<double> times = spine_times();
+        if (state.session.undo_count() != undo_before + 1U || times.size() != 4U ||
+            times[0] != 0.0 || !near_time(times[1], 0.5) ||
+            !near_time(times[2], 1.1) || !near_time(times[3], 1.5)) {
+            std::cerr << "A middle-key scale must move only the middle keys and leave "
+                         "the boundary at the duration.\n";
+            return false;
+        }
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Key scaling changed the Agent operation surface.\n";
         return false;
     }
     return true;

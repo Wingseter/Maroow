@@ -1112,6 +1112,157 @@ void test_loop_boundary_inferred_duration_floor(TestSuite& suite) {
         "the other lanes still hold the floor when the opted-in lane has one key");
 }
 
+void test_scale_ratio_math(TestSuite& suite) {
+    using model::SelectionTimeSpan;
+
+    // --- selection_time_span() --------------------------------------------
+    model::TrackRow left;
+    left.id = "bone:0:Rotate";
+    left.kind = model::TimelineTrackKind::Rotate;
+    left.key_times = {0.0, 0.5, 1.0};
+    model::TrackRow right;
+    right.id = "bone:1:Translate";
+    right.kind = model::TimelineTrackKind::Translate;
+    right.key_times = {0.25, 2.0};
+    const std::vector<model::TrackRow> tracks{left, right};
+
+    suite.expect(
+        !model::selection_time_span({}, tracks).valid,
+        "an empty selection has no span");
+    suite.expect(
+        !model::selection_time_span({model::key_ref(left, 1U)}, tracks).valid,
+        "a single-key selection has no span");
+    {
+        model::TrackRow flat;
+        flat.id = "bone:2:Scale";
+        flat.kind = model::TimelineTrackKind::Scale;
+        flat.key_times = {0.5, 0.5 + 1e-9};
+        const std::vector<model::TrackRow> flat_tracks{flat};
+        const auto span = model::selection_time_span(
+            {model::key_ref(flat, 0U), model::key_ref(flat, 1U)}, flat_tracks);
+        suite.expect(
+            !span.valid && span.key_count == 2U,
+            "keys sharing one time within the epsilon have no span");
+    }
+    {
+        const auto span = model::selection_time_span(
+            {model::key_ref(left, 0U), model::key_ref(right, 1U),
+             model::key_ref(left, 1U)},
+            tracks);
+        suite.expect(
+            span.valid && span.key_count == 3U && span.minimum_time == 0.0 &&
+                span.maximum_time == 2.0,
+            "the span spreads across two tracks");
+    }
+    {
+        model::KeyRef stale;
+        stale.track_id = "bone:9:Rotate";
+        stale.time_microseconds = 1;
+        const auto span = model::selection_time_span(
+            {model::key_ref(left, 0U), stale, model::key_ref(left, 2U)}, tracks);
+        suite.expect(
+            span.valid && span.key_count == 2U && span.maximum_time == 1.0,
+            "an unresolvable ref is ignored rather than counted");
+    }
+
+    // --- scale_from_edge_time() -------------------------------------------
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double nan_value = std::numeric_limits<double>::quiet_NaN();
+    suite.expect(
+        model::scale_from_edge_time(0.0, 1.0, 1.25).value_or(0.0) == 1.25,
+        "dragging the late edge out gives the positive ratio");
+    suite.expect(
+        model::scale_from_edge_time(1.0, 0.0, 0.5).value_or(0.0) == 0.5,
+        "dragging the early edge in gives the positive ratio");
+    suite.expect(
+        !model::scale_from_edge_time(0.0, 1.0, 0.0).has_value(),
+        "a target exactly on the pivot yields no ratio");
+    suite.expect(
+        !model::scale_from_edge_time(0.0, 1.0, -0.5).has_value(),
+        "a target past the pivot yields no ratio");
+    suite.expect(
+        !model::scale_from_edge_time(0.0, 0.0, 1.0).has_value(),
+        "a degenerate span yields no ratio");
+    suite.expect(
+        !model::scale_from_edge_time(nan_value, 1.0, 1.25).has_value() &&
+            !model::scale_from_edge_time(0.0, nan_value, 1.25).has_value() &&
+            !model::scale_from_edge_time(0.0, 1.0, infinity).has_value(),
+        "every non-finite input yields no ratio");
+
+    // --- snap_scale_to_frames() -------------------------------------------
+    for (const double fps : {24.0, 30.0, 60.0}) {
+        const double frame = 1.0 / fps;
+        const auto snapped = model::snap_scale_to_frames(0.0, 1.0, 1.23456, fps);
+        suite.expect(snapped.has_value(), "a positive snapped ratio must exist");
+        if (!snapped.has_value()) continue;
+        const double edge = 0.0 + (1.0 - 0.0) * *snapped;
+        suite.expect(
+            std::abs(edge / frame - std::round(edge / frame)) < 1e-9,
+            "the moved edge lands on a frame boundary");
+        // The reuse is real: the same edge time comes from the shared helper.
+        const double shared = 1.0 +
+            *model::snap_delta_to_frames(1.0, 1.0 * 1.23456 - 1.0, fps);
+        suite.expect(
+            std::abs(edge - shared) <= 1e-12,
+            "snap_scale_to_frames must agree with snap_delta_to_frames");
+        // Round trip through scale_from_edge_time().
+        const auto back = model::scale_from_edge_time(0.0, 1.0, edge);
+        suite.expect(
+            back.has_value() && std::abs(*back - *snapped) <= 1e-12,
+            "the snapped ratio round-trips through scale_from_edge_time");
+    }
+    {
+        // RangeEnd: the pivot is late, the moved edge early and below it.
+        const auto snapped = model::snap_scale_to_frames(1.0, 0.0, 0.4321, 60.0);
+        suite.expect(snapped.has_value(), "the RangeEnd direction snaps too");
+        if (snapped.has_value()) {
+            const double edge = 1.0 + (0.0 - 1.0) * *snapped;
+            suite.expect(
+                std::abs(edge * 60.0 - std::round(edge * 60.0)) < 1e-9,
+                "the RangeEnd moved edge lands on a frame boundary");
+        }
+    }
+    suite.expect(
+        !model::snap_scale_to_frames(0.0, 1.0, 1.25, 0.0).has_value() &&
+            !model::snap_scale_to_frames(0.0, 1.0, 1.25, -60.0).has_value() &&
+            !model::snap_scale_to_frames(0.0, 1.0, -1.0, 60.0).has_value() &&
+            !model::snap_scale_to_frames(0.0, 0.0, 1.25, 60.0).has_value() &&
+            !model::snap_scale_to_frames(nan_value, 1.0, 1.25, 60.0).has_value(),
+        "every degenerate snap input yields no ratio");
+    suite.expect(
+        !model::snap_scale_to_frames(0.0, 0.001, 0.1, 60.0).has_value(),
+        "a snapped target landing on the pivot yields no ratio");
+
+    // --- incremental_scale_ratio() ----------------------------------------
+    suite.expect(
+        model::incremental_scale_ratio(1.5, 0.5).value_or(0.0) == 3.0,
+        "the incremental ratio is requested / applied");
+    suite.expect(
+        !model::incremental_scale_ratio(1.5, 0.0).has_value() &&
+            !model::incremental_scale_ratio(-1.0, 1.0).has_value() &&
+            !model::incremental_scale_ratio(nan_value, 1.0).has_value() &&
+            !model::incremental_scale_ratio(1.0, infinity).has_value(),
+        "non-finite or non-positive ratios on either side yield nothing");
+    {
+        // 5000 accepted frames sweeping the ratio, composed exactly as the
+        // gesture composes them, must land on the last requested ratio.
+        double applied = 1.0;
+        double composed = 1.0;
+        double requested = 1.0;
+        for (int frame = 1; frame <= 5000; ++frame) {
+            requested = 0.5 + 1.5 * (static_cast<double>(frame) / 5000.0);
+            const auto step = model::incremental_scale_ratio(requested, applied);
+            suite.expect(step.has_value(), "every sweep frame yields a ratio");
+            if (!step.has_value()) break;
+            composed *= *step;
+            applied = requested;
+        }
+        suite.expect(
+            std::abs(composed - requested) <= 1e-12,
+            "5000 composed frames land on the requested ratio");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1162,5 +1313,6 @@ int main() {
     suite.run("loop boundary inferred duration floor", [&] {
         test_loop_boundary_inferred_duration_floor(suite);
     });
+    suite.run("scale ratio math", [&] { test_scale_ratio_math(suite); });
     return suite.finish();
 }

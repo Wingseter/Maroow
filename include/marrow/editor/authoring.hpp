@@ -488,4 +488,66 @@ bool timeline_key_is_managed_loop_boundary(
 std::string_view timeline_lane_kind_token(TimelineLaneKind kind);
 std::optional<TimelineLaneKind> timeline_lane_kind_from_token(std::string_view token);
 
+/** @brief Which edge of the selection's time range stays fixed while scaling. */
+enum class TimelineScalePivot : std::uint8_t {
+    RangeStart,  // the earliest selected time is the pivot; the late edge moves
+    RangeEnd,    // the latest selected time is the pivot; the early edge moves
+};
+
+struct TimelineScaleResult : AuthoringResult {
+    double pivot_time{0.0};
+    double applied_scale{1.0};
+    double original_span{0.0};
+    double scaled_span{0.0};
+    std::size_t key_count{0U};
+    std::size_t moved_key_count{0U};
+};
+
+/**
+ * @brief Atomically scales persisted key times about one edge of their range.
+ *
+ * The pivot is never a caller-supplied time: it is the opposite edge of the
+ * resolved selectors' own time range, so `t' = pivot + (t - pivot) * scale`
+ * leaves the pivot key bit-identical by construction. `scale` must be finite
+ * and strictly positive; a ratio of exactly one, or one that moves nothing,
+ * reports `changed == false` with no error and writes nothing.
+ *
+ * Unlike `retime_keyframes()`, this **rejects** rather than clamps. Any
+ * projected pair on an affected timeline that would fall closer than the
+ * family's minimum separation — including a selected key intruding on an
+ * unselected neighbour — rejects the whole call. Event keys sharing a time are
+ * carried together because the mapping is a function of time, and a selection
+ * naming only part of such a tie is rejected by name. A key pinned by loop
+ * synchronization rejects rather than pinning, because a partially pinned scale
+ * is not a scale.
+ *
+ * Only `keyframe.time` is written. Callers materialize imported runtime-only
+ * tracks through the shared `ensure_*_timeline_edit` project operations first,
+ * and re-resolve automatic curves afterwards inside the same transaction. A
+ * rejected edit leaves the project unchanged.
+ */
+/**
+ * @brief Why a selection cannot be scaled at all, or empty when it can.
+ *
+ * Reports only the **selection-shaped** refusals a caller can fix before
+ * dragging — a key pinned by loop synchronization, and a selection naming part
+ * of an event tie. It deliberately reports no collision, because a collision
+ * depends on the ratio and is decided per frame by `scale_keyframe_times()`,
+ * which stays the sole authority on whether one call is legal.
+ *
+ * The GUI calls this to refuse to arm a drag with a message, rather than
+ * letting the first frame fail; both answers come from the same private
+ * predicates the primitive uses, so the two surfaces cannot disagree about
+ * which key is pinned or which tie is split.
+ */
+std::string timeline_scale_selection_refusal(
+    const ProjectData& project,
+    const std::vector<TimelineKeySelector>& selectors);
+
+TimelineScaleResult scale_keyframe_times(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    TimelineScalePivot pivot,
+    double scale);
+
 } // namespace marrow::editor

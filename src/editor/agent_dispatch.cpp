@@ -61,6 +61,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"timeline.set_interpolation", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.set_curve_mode", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.set_loop_sync", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.scale_key_times", "edit", true, false, true, true, &handle_editing_operation},
     {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_event_keyframe", "edit", true, false, true, true, &handle_editing_operation},

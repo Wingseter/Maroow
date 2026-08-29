@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-172, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-173 is the next product milestone and depends on MAR-172. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-173, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-174 is the next product milestone and depends on MAR-173. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -158,7 +158,7 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (59 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, and timeline-loop-boundary authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (60 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, and timeline key-time scaling authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
@@ -226,6 +226,126 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-173 Atomic Key Time Scaling Validation Results
+
+Validated 2026-08-30. Every other timing edit in Marrow is a *translation*:
+`retime_keyframes()` adds one shared delta. MAR-173 adds the missing operation —
+a **scale** about one edge of the selection's own time range, where
+`t' = pivot + (t - pivot) * s` for one finite, strictly positive ratio. The
+pivot is never a caller-supplied time: `TimelineScalePivot::RangeStart` /
+`RangeEnd` names which *edge* stays fixed and the primitive computes the pivot
+from the resolved selector times, which makes the story's criterion structural
+rather than documented. The pivot key is therefore bit-identical by IEEE-754
+(`p + 0.0 * s == p`), not by tolerance, and that is what makes the gesture's
+incremental composition sound. The one place MAR-173 deliberately departs from
+`retime_keyframes()` is its collision policy: **retime clamps, scaling rejects.**
+A clamped translation still delivers a translation, just a shorter one; a clamped
+scale would have to either stop every key at the first collision (a ratio the
+user did not choose and cannot see) or move keys by different ratios (not a scale
+at all). The minimum-separation rule is `min(spacing, original_gap)`, not a flat
+1 ms, so an imported or MAR-172-adopted timeline already carrying a tight gap
+stays scalable as long as the scale does not make that gap worse. Loop-sync
+pinning becomes a **rejection** here, though retime pins to zero, for the same
+reason: a partially pinned scale is not a scale. Atomicity is claimed at three
+separate scales so no claim borrows another's strength — one primitive call is a
+candidate copy plus a single move-assign; one gesture *frame* holds its last
+accepted state on a rejection rather than dying, because dragging a scale handle
+inward past a collision and back out is ordinary; one gesture is one history
+entry. The Agent/MCP surface grew by exactly one operation,
+`timeline.scale_key_times`, taking the registry to exactly **60**. `.mskl` v1,
+`.mbin` v2, C ABI v1, and `editor-settings.json` v1 are unchanged, and the
+operation writes `keyframe.time` and nothing else.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Pivot exactness and both directions | `RangeStart`, `s = 1.25` on `{0.0, 0.5, 1.0}` produces exactly `{0.0, 0.625, 1.25}` with `pivot_time == 0.0`, `original_span == 1.0`, `scaled_span == 1.25`, `moved_key_count == 2`; `RangeEnd`, `s = 0.5` produces `{0.5, 0.75, 1.0}` with `pivot_time == 1.0`. The pivot key is compared with `==` on the stored `double`, not within an epsilon, in both directions and throughout a live drag. `RangeEnd`, `s = 1.25` puts the first key at `-0.25` and is **rejected**, not clamped | PASS |
+| Reject, never clamp | Fifteen rejections each leave `serialize_project()` byte-identical: `s = 0`, `s = -1`, `s = NaN`, `s = inf`, an empty selector list, a single-key selection, an all-same-time selection, a duplicate selector, an unresolvable selector, selectors naming two animations, a non-event collision, an intrusion into an unselected neighbour on the right, the same on the left, a target below zero, and a target beyond the float32 range | PASS |
+| `min(spacing, original_gap)` | A lane carrying an authored 0.4 ms gap **accepts** `s = 1.5` on that pair and **rejects** `s = 0.9`; a 10 ms gap rejects the ratio that would take it to 0.9 ms and accepts the one that lands it exactly on 1.0 ms. Inverting the rule to a flat `spacing` makes the first case fail, which is how the rule was proved to have teeth rather than being a restatement | PASS |
+| Event ties as a theorem | A two-key tie and a three-key tie stay bit-identical after a scale, because both members go through one expression from bit-identical inputs; a selected event key landing exactly on an unselected one is **accepted**, matching retime's `0.0` spacing for the family; a selection naming only one member of a tie is **rejected by name** rather than silently widened, at the primitive, at the Agent, and at GUI arm time | PASS |
+| Only `time` is written | After a whole-track scale every Transform key's `angle`/`x`/`y`, all four `interpolation` control points, and MAR-171's `curve_mode`/`curve_driver` compare bit-equal; a Slot Color key's four channels and a Deform key's whole `vertex_offsets` vector are unchanged; key order is unchanged index by index; a Draw Order key's `slot_names` and a Slot Attachment key's `attachment_name` survive | PASS |
+| Neighbour survival, not just a return code | A subset scale of `{0.5, 1.0}` about `RangeEnd` leaves the unselected key at 0.0 with its time, angle, and easing kind intact and the lane's key count unchanged, and leaves the event lane the call never named with all three of its keys. This is the assertion shape MAR-172's data-loss defect was caught by; the Agent block repeats it with a read-back after the rejected pinned-key scale | PASS |
+| MAR-171 interaction | Scaling **every** key of a monotone `Auto` track leaves the resolved control points byte-identical — `resolved_key_count == 0` — because the normalized cubic points depend on *ratios* of Δt; scaling a **subset** changes them, and the resolver reports a non-zero count. The fixture's own `{0, 8, -2}` angles are non-monotone, so the middle tangent clamps to zero and both cases would trivially agree; the test authors `{0, 5, 20}` first so the three-point tangent's dependence on the spacing distribution is actually exercised | PASS |
+| MAR-172 interaction | A selection containing an opted-in lane's first key or its managed boundary key is rejected with `is loop synchronized; its first and last keys are pinned…`, at the primitive and at GUI arm time, with no transaction opened; a middle-key-only scale on the same lane commits one entry, moves only the middle keys, leaves the boundary at the duration, and the following `synchronize_loop_boundaries()` reports `synchronized_lane_count == 0`. The pin predicate is **extracted from** MAR-172's own `include_loop_boundary_retime_pins()` and shared, so retime and scale can never disagree about which keys an opt-in freezes | PASS |
+| Duration, both directions | An explicit duration of 1.0 with keys at `{0, 0.5, 1.0}` scaled by `s = 2.0` grows to 2.0 through the session's own `auto_extend_explicit_animation_durations()` inside the same history entry; the same animation scaled by `s = 0.5` keeps its explicit duration at 1.0 while the keys move to `{0, 0.25, 0.5}`; an animation with no explicit duration gains none. `scale_keyframe_times()` writes no `AnimationEdit` itself, asserted directly | PASS |
+| One gesture, one entry | A complete drag on the late grip commits exactly one history entry; three accepted frames each keep the pivot key at exactly `0.0` and keep `selected_keys` and `active_key` resolving; the same on the early grip with the opposite pivot; a press that never leaves the 4.0 px dead zone opens no transaction and leaves `authoring_gesture_active` false; a zero-net drag returns every key to its original time; `cancel_authoring_gestures()` and Escape both restore `serialize_project()`, `undo_count()`, `redo_count()`, `project_revision()`, `dirty()`, the rebuilt dopesheet `key_times`, **and** the pre-gesture selection | PASS |
+| A rejected frame holds the gesture | Dragging inward until two keys collide leaves the gesture **live**, `timeline_scale_rejection()` non-empty, and the project exactly at the last accepted state; dragging back out to a legal ratio clears the rejection and accepts again, and the release commits one entry. Inverting this to retime's cancel-on-error shape fails the case, so the divergence is under test rather than merely documented | PASS |
+| Drift is enforced, not argued | 5000 successive `apply_timeline_scale_ratio()` calls sweeping the ratio from 0.6 to 1.4, then a commit: the commit path accepts and every final time is within `kKeyTimeEpsilon` of `pivot + (original - pivot) * applied_scale`. **This check earned its place**: it caught a real defect in the first implementation, where the primitive snapshotted the *selector's* time — which a shell selector carries narrowed to float32 — and so re-rounded every key through float32 once per frame. The primitive now snapshots the stored `double`, and the design's `2·N·u` bound holds | PASS |
+| Agent and MCP parity at 60 | `timeline.scale_key_times` sits immediately after `timeline.set_loop_sync` as (`edit`, mutating, not review, dry-run supported); `scale` and `pivot` are both **required**, and `snap` defaults to **false** here while retime's defaults to true, because a scripted ratio is exact; the dry run reports `pivot_time`, `applied_scale`, both spans, and each key's `previous_time`/`time`/`moved` without touching `project_revision()`, `undo_count()`, or `dirty()`; a live call adds exactly one entry; a second identical call returns `no_change`; both pivots produce the documented different results; `snap: true` at 60 fps reshapes `applied_scale` so the moved edge lands on a frame boundary; fifteen rejection cases each leave the project provably unchanged, with `not_found` reserved for the unresolvable selector | PASS |
+| The two extractions | `timeline_key_selectors_arg()` moves the whole `timeline.retime_keyframes` key loop into one shared parser and `resolved_key_is_loop_pinned()` / `family_key_spacing()` factor MAR-172's pin and the per-family spacing table out of `include_resolved_retime_bounds()`. Both were gated by the **inverted** test: `marrow_agent_dispatch_smoke`, `marrow_project_smoke`, `marrow_timeline_model_tests`, and the shell smoke each produced byte-identical output before any new behaviour was written | PASS |
+| Export, on the MUTATED project | `export_runtime_assets()` runs on the project the validator just scaled. The exported `.mskl`'s three `spine` rotate key times load back as exactly `float32(0.0)`, `float32(0.625)`, and `float32(1.25)`, with all three `angle` values and all three `interpolation` records bit-equal to the pre-scale ones; the exported text contains `0.625`, which appears nowhere in the baseline exported in the same run, and no `loop_sync` or `curve_mode`; the `.mbin` matches the `.mskl`. Deliberately exporting the *unmutated* project instead makes the loaded-time assertion fail before any byte count is consulted, which is the MAR-168/169 defect reproduced and then closed | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, and C ABI v1 unchanged with a zero-byte diff on `src/runtime/**`, `include/marrow/runtime/**`, `include/marrow/marrow_c.h`, and `src/c_api/**`; `editor-settings.json` v1 unchanged with a zero-byte diff on `src/editor/preferences.cpp` and `include/marrow/editor/preferences.hpp`; a zero-byte diff on `src/editor/session.cpp`; `include/marrow/editor/authoring.hpp` grows by **62 lines with zero removed**; `.marrow` gains no field, so `docs/root1/format-spec.md` needs no change | PASS |
+
+Command output recorded during validation:
+
+- `cmake -S . -B build && cmake --build build -j8` -> configured and built with zero new warnings; `cmake --build build --target marrow_verify_third_party` and `--target marrow_constraint_warning_check` -> both built
+- `./build/marrow_timeline_model_tests` -> `Timeline model: 17 cases passed`, up from 16, with one new `scale ratio math` case covering `selection_time_span()` (empty / single / all-same-time / two tracks / unresolvable ref), `scale_from_edge_time()` in both directions and every `nullopt` path, `snap_scale_to_frames()` at 24/30/60 fps for both pivots including the **equivalence assertion against a direct `snap_delta_to_frames()` call**, and `incremental_scale_ratio()` composed over 5000 synthetic frames to within `1e-12`
+- `./build/marrow_unit_tests` -> passed; `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 20 cases passed`; `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`; `./build/marrow_preference_tests` -> `PreferenceStore: 11 cases passed` (unchanged; MAR-173 touches no preference code); `./build/marrow_viewport_interaction_tests` -> passed; `./build/marrow_windowing_tests` -> `Windowing: 4 cases passed`; `./build/marrow_pen_input_tests` -> `Pen input: 34 cases passed`
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting `MAR-173 scale export: JSON 14341 bytes, MBIN 3984 bytes (baseline JSON 14336 bytes, MBIN 3984 bytes).` and, on its own line, `MAR-173 note: the MBIN size is expected to be unchanged -- key times are fixed-width float32. The acceptance signal is the loaded key time asserted above, not the byte count.`, then `MAR-173 atomic key time scaling validated as reject-not-clamp, pivot-exact, and value-preserving.`
+- `./build/marrow_project_smoke --create /tmp/player_idle.marrow` -> `Created minimal project defaults, references, and round trip validated.`; `./build/marrow_parameter_project_smoke assets/fixtures/parameter_face_basic.marrow` -> passed
+- `./build/marrow_inspect --compare /tmp/marrow_mar173_scale.mbin /tmp/marrow_mar173_scale.mskl` -> `matches`; `./build/marrow_fixture_smoke /tmp/marrow_mar173_scale.mskl /tmp/player_idle.matl` -> `Generic runtime asset smoke test passed.`; `./build/marrow_renderer_sample /tmp/marrow_mar173_scale.mskl /tmp/player_idle.matl --auto-close 2` -> presented through sokol_gfx; `grep -c loop_sync /tmp/marrow_mar173_scale.mskl` -> `0`; `python3 -m json.tool /tmp/marrow_mar173_scale.mskl` -> valid, `"version": 1`
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new `validate_timeline_scale_shell_smoke` scenario. Like every sibling scenario it prints nothing on success; that it executes was proved by inverting six production behaviours in turn (the dead zone, the frame snap, the non-finite-pointer cancel, the rejected-frame hold, `authoring_gesture_active`, and the arm-time refusal) and observing this scenario's own message fail each time. `--project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> passed unchanged; `--verify-launch-focus` -> `Verified macOS editor launch focus configuration.`
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` with **324** `[ OK ]` cases (up from 291) against the exact **60**-operation registry, including the new `timeline.scale_key_times` expectation row immediately after `timeline.set_loop_sync`, its dry-run/both-pivots/live/read-back/`no_change`/undo sequence, fifteen rejection cases with a proven-unchanged project, and the loop-pin rejection followed by an authored-key survival read-back
+- `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py` -> compiled
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py` against `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` -> `mcp test_client: PASSED` with **60/60** exact C++/Python name parity, the explicit `timeline.scale_key_times` registry metadata row, and a dry-run -> both-pivots -> live -> read-back -> undo -> read-back sequence asserting `0.625` and `1.25` to four decimal places, plus rejection of `"scale": -1`, `"scale": "1.5"`, `"pivot": "middle"`, a missing `pivot`, a missing `scale`, a single-key selection, and a collision — proving the advisory schema did not loosen the C++ gate
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only` against `parameter_face_basic.marrow` -> `mcp parameter test_client: PASSED`, unchanged. The MCP tool-removal negative was verified by hand once: deleting the new `types.Tool` makes the client fail on `assert len(mcp_names) == 60`, and it was restored
+- `ctest --test-dir build -N` -> `Total Tests: 21`; `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21`; `-L runtime` -> 4/4; `-L editor` -> 11/11; `-R marrow.renderer_link_boundary` -> 1/1. MAR-173 registers no new CTest
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j8 && ctest --test-dir build-display --output-on-failure` -> 24/24; `-L windowing` -> 3/3; `-L display` -> 3/3; `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j8 && ctest --test-dir build-platform-release --output-on-failure` -> 24/24
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after every gate above, including the four `--agent-port` runs of the production `shell_main.cpp` startup load, which resolves the real path with no override. No `/tmp/marrow-shell-config-*` directory was left behind. The new `validate_timeline_scale_shell_smoke` scenario installs its own `ScopedPreferenceIsolation` even though MAR-173 reads no preference, so it cannot resolve that path at all
+
+**Four divergences from the design, recorded rather than glossed.**
+
+First, **the design's §12.6 export-preview assertion is factually wrong about the
+code.** It requires `export.preview` to return *different* payloads before and
+after a live scale. `export.preview` reports the resolved export **target
+paths**, not the exported content, so a time-only edit correctly leaves its
+payload identical; the naive assertion passes only because the response envelope
+carries revision metadata, which would make it a test of the envelope rather than
+of the operation. The agent smoke now asserts what the operation actually
+promises — a scaled project still previews the same targets, before, after, and
+across the undo — and the content-level proof stays where it belongs, in
+`marrow_project_smoke`'s export block, which exports the mutated project and
+asserts the loaded key time.
+
+Second, **MAR-172's pin block was already extracted when MAR-173 started.** The
+design's §8.5 describes lifting an *inline* block out of
+`include_resolved_retime_bounds()`; as built (`596f0c7`) it was already the
+file-local template `include_loop_boundary_retime_pins()`. What MAR-173 extracted
+is that helper's *predicate*, so retime and scale share one condition. This is
+deliberately **not** unified with `879aadb`'s `managed_boundary_index()`, which
+answers a different and stricter question — "does the boundary contract *own*
+this key, so may synchronization overwrite it?" — and never names key 0. Using
+it for the scale pin would have made scaling disagree with retiming about which
+keys an opt-in freezes.
+
+Third, **the primitive snapshots the stored `double`, not the selector's time.**
+`resolve_timeline_key()` carries the *selector's* time into
+`ResolvedTimelineKey::original_time`, and a shell selector is built from the
+runtime track rows, whose times are already narrowed to `float32`. A retime adds
+one shared delta and does not care; a scale multiplies, and a live gesture
+re-derives its selectors every frame, so reading the narrowed value re-rounded
+every key through `float32` once per frame. The commit-time drift check caught
+this on the first 5000-frame run rather than a reviewer catching it later, which
+is exactly the value §16.12 claimed for it.
+
+Fourth, **two public symbols were added beyond §11.2's three, and one parser
+parameter beyond §12.2's one.** `timeline_scale_selection_refusal()` exists so
+the GUI can refuse to arm through the primitive's *own* predicates instead of
+restating the pin and tie rules a third time in shell code; and
+`timeline_key_selectors_arg()` takes a `family_noun` alongside
+`operation_label`, because six of the retime parser's messages embed the bare
+word "retime" rather than the operation name and a single label cannot reproduce
+them byte-identically for both callers. Both additions are what kept the
+inverted gates meaningful.
+
+**One coverage gap, stated rather than implied.** The Agent response's 256-entry
+`keys` cap is asserted only through `keys_truncated == false` on a three-key
+call; no case builds a selection larger than 256. This matches MAR-172's own
+precedent for its identical `lanes` cap, and the truncation branch is the same
+`std::min` shape, but it is untested on both surfaces.
+
+No manual-visible-UI, Windows 11, or physical-input qualification credit is
+claimed. MAR-192 through MAR-210 stay open.
 
 ## MAR-172 Loop Boundary Key Synchronization Validation Results
 

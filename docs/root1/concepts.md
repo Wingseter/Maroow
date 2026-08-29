@@ -230,6 +230,36 @@ can carry a stale marker through a copy, a paste, or a retime, and the flag
 itself is one `.marrow`-only boolean that never reaches a runtime file. The
 boundary key does reach it, as an ordinary keyframe, which is the whole point.
 
+MAR-173 adds the one timing edit that is not a translation. Every other timing
+operation moves keys by one shared delta; **scaling** moves each key by a delta
+proportional to its distance from a pivot, and that pivot is never a free
+parameter — it is always the *opposite edge of the selection's own time range*,
+named by an enum rather than passed as a time, so a caller cannot ask for
+something the operation does not mean. Every selected key lands at
+`pivot + (time - pivot) * scale` for one finite, strictly positive ratio, which
+makes the pivot key bit-identical by IEEE-754 rather than by tolerance and is
+what lets a live drag compose its ratio incrementally without drifting.
+**Scaling rejects where retiming clamps**, and the difference is not an
+oversight. A clamped translation still delivers a translation, just a shorter
+one; a clamped scale would have to either stop every key at the first collision,
+producing a ratio the user did not choose and cannot see, or move keys by
+different ratios, producing something that is not a scale at all. So a
+projected pair falling closer than its family's minimum separation — including a
+selected key intruding on an unselected neighbour — rejects the whole call and
+names the pair. The threshold is `min(spacing, original_gap)` rather than a flat
+millisecond, which says exactly what is meant: a gap that satisfied the spacing
+must still satisfy it, and a gap that was already tighter must not get tighter,
+so an imported timeline already carrying a sub-millisecond gap stays editable.
+The same principle turns MAR-172's loop pin into a rejection here: pinning one
+key while the rest scale would produce a shape that is not a scale for any
+ratio. Tied event keys move together as a consequence of the mapping being a
+function of time, not as a defensive loop, and a selection naming only part of a
+tie is rejected by name rather than silently widened. Rejection is per *call*,
+not per gesture: a drag that crosses a collision on its way somewhere legal
+holds its last accepted shape and explains why, because dragging a scale handle
+inward and back out again is ordinary and killing the drag there would lose the
+edit.
+
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active
 `EditorSession`, while live Alt and platform Cmd/Ctrl state flows only through

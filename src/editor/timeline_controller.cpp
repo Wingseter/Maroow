@@ -2422,6 +2422,307 @@ bool apply_timeline_retime_delta(
 
 namespace {
 
+/** @brief The selectors the current scale selection resolves to, or nothing. */
+std::optional<std::vector<marrow::editor::TimelineKeySelector>> scale_selectors(
+    const ShellState& state,
+    const std::vector<TimelineKeyRef>& keys,
+    const std::vector<TimelineTrackRow>& tracks,
+    std::vector<std::size_t>* indices_out) {
+    std::vector<marrow::editor::TimelineKeySelector> selectors;
+    selectors.reserve(keys.size());
+    if (indices_out != nullptr) indices_out->clear();
+    for (const TimelineKeyRef& key : keys) {
+        const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+        const auto index =
+            track != nullptr ? timeline_key_index(*track, key) : std::nullopt;
+        if (track == nullptr || !index.has_value() ||
+            !timeline_track_is_editable(*track)) {
+            return std::nullopt;
+        }
+        const auto selector = timeline_key_selector(state, *track, *index);
+        if (!selector.has_value()) {
+            return std::nullopt;
+        }
+        if (indices_out != nullptr) indices_out->push_back(*index);
+        selectors.push_back(*selector);
+    }
+    return selectors;
+}
+
+} // namespace
+
+bool begin_timeline_scale_gesture(
+    ShellState* state,
+    std::uint32_t item_id,
+    marrow::editor::TimelineScalePivot pivot,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || authoring_gesture_active(*state) ||
+        state->timeline_editor.selected_keys.empty()) {
+        return false;
+    }
+    const auto span = marrow::editor::timeline_model::selection_time_span(
+        state->timeline_editor.selected_keys, tracks);
+    if (!span.valid) {
+        return false;
+    }
+    // Refuse before anything appears to happen, rather than on the first frame,
+    // and refuse through the primitive's own predicates so the two surfaces can
+    // never disagree about which key is pinned or which tie would be split.
+    const auto preflight_selectors = scale_selectors(
+        *state, state->timeline_editor.selected_keys, tracks, nullptr);
+    if (!preflight_selectors.has_value()) {
+        return false;
+    }
+    if (state->session.project() != nullptr) {
+        const std::string refusal = marrow::editor::timeline_scale_selection_refusal(
+            *state->session.project(), *preflight_selectors);
+        if (!refusal.empty()) {
+            state->status_message = refusal;
+            return false;
+        }
+    }
+
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        state->timeline_editor.selected_keys.size() == 1U
+            ? "Scale timeline key"
+            : "Scale timeline keys",
+        "timeline:scale",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+    TimelineScaleGesture gesture;
+    gesture.item_id = item_id;
+    gesture.pivot = pivot;
+    gesture.keys = state->timeline_editor.selected_keys;
+    gesture.keys_before = state->timeline_editor.selected_keys;
+    gesture.active_key_before = state->timeline_editor.active_key;
+    gesture.transaction = std::move(transaction);
+    for (const TimelineKeyRef& key : gesture.keys) {
+        const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+        const auto key_index =
+            track != nullptr ? timeline_key_index(*track, key) : std::nullopt;
+        if (track == nullptr || !key_index.has_value() ||
+            !timeline_track_is_editable(*track)) {
+            gesture.transaction.cancel();
+            return false;
+        }
+        gesture.original_times.push_back(track->key_times[*key_index]);
+    }
+    gesture.pivot_time = pivot == marrow::editor::TimelineScalePivot::RangeStart
+        ? span.minimum_time
+        : span.maximum_time;
+    gesture.edge_original_time =
+        pivot == marrow::editor::TimelineScalePivot::RangeStart
+        ? span.maximum_time
+        : span.minimum_time;
+    state->timeline_editor.scale_gesture.emplace(std::move(gesture));
+    return true;
+}
+
+void finish_timeline_scale_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->timeline_editor.scale_gesture.has_value()) return;
+    TimelineScaleGesture gesture =
+        std::move(*state->timeline_editor.scale_gesture);
+    state->timeline_editor.scale_gesture.reset();
+    auto completion = marrow::editor::timeline_model::completion_decision(
+        commit, gesture.changed);
+    // §7.3's error bound is argued in the design and enforced here: an argument
+    // in a document does not fail a build. Re-derive every key's expected time
+    // from the snapshot and cancel rather than commit on any real drift.
+    bool drifted = false;
+    if (completion.action ==
+        marrow::editor::timeline_model::CompletionAction::Commit) {
+        const auto* animation = state->session.runtime_data() != nullptr
+            ? state->session.runtime_data()->find_animation(
+                  state->selected_animation_name)
+            : nullptr;
+        const std::vector<TimelineTrackRow> current = animation != nullptr
+            ? build_timeline_tracks(*state->session.runtime_data(), *animation)
+            : std::vector<TimelineTrackRow>{};
+        for (std::size_t index = 0U; index < gesture.keys.size(); ++index) {
+            const TimelineTrackRow* track =
+                find_timeline_track(current, gesture.keys[index].track_id);
+            const auto key_index =
+                track != nullptr ? timeline_key_index(*track, gesture.keys[index])
+                                 : std::nullopt;
+            const double expected = gesture.pivot_time +
+                (gesture.original_times[index] - gesture.pivot_time) *
+                    gesture.applied_scale;
+            if (!key_index.has_value() ||
+                std::abs(track->key_times[*key_index] - expected) >
+                    marrow::editor::timeline_model::kKeyTimeEpsilon) {
+                drifted = true;
+                break;
+            }
+        }
+        if (drifted) {
+            completion = {
+                marrow::editor::timeline_model::CompletionAction::Cancel, false, 0U};
+        }
+    }
+    if (completion.action ==
+        marrow::editor::timeline_model::CompletionAction::Cancel) {
+        gesture.transaction.cancel();
+        // The rollback restored the pre-gesture times, so the pre-gesture refs
+        // resolve again; `keys` holds the last accepted frame's refs, which now
+        // name times that no longer exist.
+        state->timeline_editor.selected_keys = std::move(gesture.keys_before);
+        state->timeline_editor.active_key = std::move(gesture.active_key_before);
+        sync_shell_from_editor_session(state);
+        if (drifted) {
+            state->error_message = "Timeline scale drifted; the edit was discarded";
+            state->status_message = "Timeline scale failed";
+        } else if (completion.report_cancelled) {
+            state->status_message = "Cancelled timeline scale";
+        }
+        return;
+    }
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Timeline scale failed";
+    } else {
+        state->status_message = gesture.keys.size() == 1U
+            ? "Scaled timeline key"
+            : "Scaled timeline keys";
+    }
+}
+
+std::string_view timeline_scale_rejection(const ShellState& state) {
+    return state.timeline_editor.scale_gesture.has_value()
+        ? std::string_view(state.timeline_editor.scale_gesture->rejection)
+        : std::string_view{};
+}
+
+bool apply_timeline_scale_ratio(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double requested_scale) {
+    if (state == nullptr || !state->timeline_editor.scale_gesture.has_value()) {
+        return false;
+    }
+    TimelineScaleGesture& gesture = *state->timeline_editor.scale_gesture;
+    if (std::abs(requested_scale - gesture.applied_scale) <= 1e-12) return true;
+    const auto incremental =
+        marrow::editor::timeline_model::incremental_scale_ratio(
+            requested_scale, gesture.applied_scale);
+    if (!incremental.has_value()) {
+        finish_timeline_scale_gesture(state, false);
+        state->error_message = "Timeline scale ratio must be finite and positive.";
+        state->status_message = "Timeline scale failed";
+        return false;
+    }
+
+    if (!gesture.materialized) {
+        for (const TimelineKeyRef& key : gesture.keys) {
+            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+            if (track == nullptr ||
+                !visit_editable_timeline_keys(state, *track, [](auto&) {})) {
+                finish_timeline_scale_gesture(state, false);
+                state->status_message = "Could not materialize the selected timeline keys";
+                return false;
+            }
+        }
+        gesture.materialized = true;
+    }
+    std::vector<std::size_t> resolved_indices;
+    const auto selectors =
+        scale_selectors(*state, gesture.keys, tracks, &resolved_indices);
+    if (!selectors.has_value()) {
+        finish_timeline_scale_gesture(state, false);
+        state->status_message = "The selected timeline keys changed during scaling";
+        return false;
+    }
+
+    const marrow::editor::TimelineScaleResult scaled =
+        marrow::editor::scale_keyframe_times(
+            gesture.transaction.project(),
+            *selectors,
+            gesture.pivot,
+            *incremental);
+    if (!scaled) {
+        // The one deliberate divergence from the retime gesture: an illegal
+        // frame holds the last accepted state instead of ending the drag.
+        gesture.rejection = scaled.error;
+        return true;
+    }
+    gesture.rejection.clear();
+    if (!scaled.changed) return true;
+
+    // MAR-171: every segment's span changed, so every automatic curve is stale.
+    std::string auto_curve_error;
+    if (!resolve_timeline_auto_curves(
+            gesture.transaction.project(),
+            state->selected_animation_name,
+            &auto_curve_error)) {
+        finish_timeline_scale_gesture(state, false);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
+    }
+
+    const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
+    if (!refresh) {
+        const std::string error = refresh.error->format();
+        finish_timeline_scale_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Timeline scale preview failed";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    const auto* rebuilt_animation =
+        state->session.runtime_data()->find_animation(state->selected_animation_name);
+    const std::vector<TimelineTrackRow> rebuilt_tracks =
+        rebuilt_animation != nullptr
+        ? build_timeline_tracks(*state->session.runtime_data(), *rebuilt_animation)
+        : std::vector<TimelineTrackRow>{};
+    std::vector<TimelineKeyRef> rebuilt_selection;
+    rebuilt_selection.reserve(gesture.keys.size());
+    // A positive ratio is strictly increasing and the primitive rejects any
+    // projected inversion, so every key keeps its index within its timeline.
+    for (std::size_t selection_index = 0U;
+         selection_index < gesture.keys.size();
+         ++selection_index) {
+        const TimelineTrackRow* rebuilt_track =
+            find_timeline_track(rebuilt_tracks, gesture.keys[selection_index].track_id);
+        if (rebuilt_track == nullptr ||
+            resolved_indices[selection_index] >= rebuilt_track->key_times.size()) {
+            finish_timeline_scale_gesture(state, false);
+            state->status_message = "Could not preserve timeline selection after scaling";
+            return false;
+        }
+        rebuilt_selection.push_back(
+            timeline_key_ref(*rebuilt_track, resolved_indices[selection_index]));
+    }
+    std::optional<TimelineKeyRef> rebuilt_active;
+    if (state->timeline_editor.active_key.has_value()) {
+        for (std::size_t selection_index = 0U;
+             selection_index < gesture.keys.size();
+             ++selection_index) {
+            if (gesture.keys[selection_index] == *state->timeline_editor.active_key) {
+                rebuilt_active = rebuilt_selection[selection_index];
+                break;
+            }
+        }
+    }
+    gesture.keys = rebuilt_selection;
+    state->timeline_editor.selected_keys = std::move(rebuilt_selection);
+    state->timeline_editor.active_key = std::move(rebuilt_active);
+    gesture.applied_scale = requested_scale;
+    gesture.changed = true;
+    return true;
+}
+
+
+namespace {
+
 std::optional<marrow::editor::TimelineScalarComponent> to_scalar_component(
     timeline_graph_model::Component component) {
     switch (component) {

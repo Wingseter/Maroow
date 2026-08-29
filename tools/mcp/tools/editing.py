@@ -728,6 +728,46 @@ def get_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="timeline.scale_key_times",
+            description=(
+                "Scale the times of a timeline key selection about one edge of its own "
+                "range. `pivot` names which edge stays fixed -- \"start\" pins the "
+                "earliest selected time and moves the late edge, \"end\" pins the "
+                "latest and moves the early edge -- and every selected key lands at "
+                "pivot + (time - pivot) * scale, so the pivot key never moves. Only "
+                "finite, strictly positive ratios are accepted; there is no time "
+                "reversal. Unlike timeline.retime_keyframes, which clamps, a collision "
+                "REJECTS the whole call: any projected pair that would fall closer than "
+                "the family's one-millisecond minimum -- including a selected key "
+                "intruding on an unselected neighbour -- leaves the project untouched. "
+                "Event keys sharing a time move together, and a selection naming only "
+                "part of such a tie is rejected by name. Every key must belong to one "
+                "animation, and a key pinned by loop synchronization rejects. `snap` "
+                "defaults to FALSE here because a scripted ratio is exact; when true it "
+                "reshapes the ratio so the MOVED EDGE ONLY lands on a frame boundary, "
+                "leaving interior keys where the ratio puts them. A dry run reports the "
+                "pivot, both spans, and each key's previous and resulting time without "
+                "mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_retime_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "scale": {"type": "number", "exclusiveMinimum": 0},
+                    "pivot": {"type": "string", "enum": ["start", "end"]},
+                    "snap": {"type": "boolean"},
+                    "frames_per_second": {"type": "number", "exclusiveMinimum": 0},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["keys", "scale", "pivot"],
+            },
+        ),
+        types.Tool(
             name="save",
             description="Request editor approval to save the project",
             inputSchema={"type": "object", "properties": {}}

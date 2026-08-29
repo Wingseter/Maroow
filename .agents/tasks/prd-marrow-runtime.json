@@ -3541,7 +3541,8 @@
       "dependsOn": [
         "MAR-172"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-30"
     },
     {
       "id": "MAR-174",
