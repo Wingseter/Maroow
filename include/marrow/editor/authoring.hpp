@@ -464,6 +464,26 @@ double inferred_duration_excluding_loop_boundaries(
     const runtime::SkeletonData& effective_skeleton,
     const runtime::AnimationData& animation);
 
+/**
+ * @brief Reports whether one persisted key is a lane's managed loop boundary.
+ *
+ * Identity is derived, never stored. The contract owns a lane's last key when
+ * that key satisfies one half of the contract: it already sits at
+ * `float32(explicit duration)`, or it is still the bit-exact mirror of the key
+ * at time zero that a previous synchronization wrote, which is what makes a
+ * duration change a move rather than a promotion. Every other key of an
+ * opted-in lane, and every key of a lane that is not opted in, is authored data.
+ *
+ * The GUI skips such a key and reports it; the Agent rejects it, naming the
+ * remedy. Both surfaces call this so they can never disagree about which key is
+ * derived, and `synchronize_loop_boundaries()` uses the same derivation, so a
+ * key this reports as authored is a key the sync will never overwrite.
+ */
+bool timeline_key_is_managed_loop_boundary(
+    const ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    const TimelineKeySelector& selector);
+
 /** @brief The `.marrow` token for one lane kind, and its inverse. */
 std::string_view timeline_lane_kind_token(TimelineLaneKind kind);
 std::optional<TimelineLaneKind> timeline_lane_kind_from_token(std::string_view token);

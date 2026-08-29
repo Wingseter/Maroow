@@ -910,30 +910,11 @@ bool timeline_key_is_managed_loop_boundary(
         return false;
     }
     const auto selector = timeline_key_selector(state, track, key_index);
-    if (!selector.has_value()) return false;
-    // Identity is derived, never stored: the managed boundary IS the lane's
-    // last key while the lane is opted in, so nothing can carry a stale marker
-    // through a copy, a paste, or a retime.
-    const auto is_boundary = [&](const auto* lane) {
-        return lane != nullptr && lane->loop_sync && !lane->keyframes.empty() &&
-            std::abs(lane->keyframes.back().time - selector->time) <= 1e-6;
-    };
-    switch (selector->kind) {
-    case marrow::editor::TimelineKeyKind::Transform:
-        return is_boundary(state.load_result.project->find_transform_timeline_edit(
-            selector->animation_name, selector->bone_name, selector->transform_channel));
-    case marrow::editor::TimelineKeyKind::SlotColor:
-        return is_boundary(state.load_result.project->find_slot_color_timeline_edit(
-            selector->animation_name, selector->slot_name));
-    case marrow::editor::TimelineKeyKind::Deform:
-        return is_boundary(state.load_result.project->find_mesh_deform_timeline_edit(
-            selector->animation_name, selector->slot_name, selector->attachment_name));
-    case marrow::editor::TimelineKeyKind::DrawOrder:
-    case marrow::editor::TimelineKeyKind::Event:
-    case marrow::editor::TimelineKeyKind::SlotAttachment:
-        return false;
-    }
-    return false;
+    if (!selector.has_value() || state.session.runtime_data() == nullptr) return false;
+    // One derivation, shared with the Agent guard and with the synchronization
+    // itself, so no two surfaces can disagree about which key is derived.
+    return marrow::editor::timeline_key_is_managed_loop_boundary(
+        *state.load_result.project, *state.session.runtime_data(), *selector);
 }
 
 template <typename Fn>

@@ -2954,6 +2954,65 @@ bool copy_boundary_easing(MeshDeformTimelineEdit* lane, std::size_t from, std::s
     return changed;
 }
 
+/** @brief Whether key `index` is still the bit-exact mirror of key 0. */
+bool boundary_mirrors_first(const TransformTimelineEdit& lane, std::size_t index) {
+    const TransformKeyframeEdit& first = lane.keyframes.front();
+    const TransformKeyframeEdit& key = lane.keyframes[index];
+    const bool value_matches = lane.channel == TransformTimelineChannel::Rotate
+        ? key.angle == first.angle
+        : key.x == first.x && key.y == first.y;
+    return value_matches &&
+        same_interpolation(key.interpolation, first.interpolation) &&
+        key.curve_mode == first.curve_mode && key.curve_driver == first.curve_driver;
+}
+
+bool boundary_mirrors_first(const SlotColorTimelineEdit& lane, std::size_t index) {
+    const SlotColorKeyframeEdit& first = lane.keyframes.front();
+    const SlotColorKeyframeEdit& key = lane.keyframes[index];
+    return key.color.r == first.color.r && key.color.g == first.color.g &&
+        key.color.b == first.color.b && key.color.a == first.color.a &&
+        same_interpolation(key.interpolation, first.interpolation) &&
+        key.curve_mode == first.curve_mode && key.curve_driver == first.curve_driver;
+}
+
+bool boundary_mirrors_first(const MeshDeformTimelineEdit& lane, std::size_t index) {
+    const DeformKeyframeEdit& first = lane.keyframes.front();
+    const DeformKeyframeEdit& key = lane.keyframes[index];
+    return key.vertex_offsets == first.vertex_offsets &&
+        same_interpolation(key.interpolation, first.interpolation);
+}
+
+/**
+ * @brief The index of the key the contract owns on an opted-in lane, or none.
+ *
+ * The managed boundary is derived, never stored. Clause 4 makes it the lane's
+ * last key, but only when that key satisfies one half of the contract: clause 1
+ * (it already sits at the boundary) or clauses 2 and 3 (it is still the
+ * bit-exact mirror of key 0 a previous synchronization wrote, so a duration
+ * change is moving it rather than stranding it).
+ *
+ * A last key that satisfies neither is authored data no synchronization
+ * produced -- a hand-edited document, or a lane whose boundary key was removed
+ * behind the GUI and Agent guards. Promoting it would move it to the duration
+ * and overwrite its value from key 0, silently destroying it, so the boundary is
+ * created beside it instead.
+ */
+template <typename Timeline>
+std::optional<std::size_t> managed_boundary_index(
+    const Timeline& lane,
+    double boundary_time) {
+    const std::size_t count = lane.keyframes.size();
+    if (!lane.loop_sync || count < 2U) {
+        return std::nullopt;
+    }
+    const std::size_t last = count - 1U;
+    if (std::abs(lane.keyframes[last].time - boundary_time) <= kKeyTimeEpsilon ||
+        boundary_mirrors_first(lane, last)) {
+        return last;
+    }
+    return std::nullopt;
+}
+
 /**
  * @brief The boundary contract's structural checks over one lane's other keys.
  *
@@ -3028,11 +3087,8 @@ bool synchronize_lane_structure(
         return false;
     }
 
-    // The managed boundary is derived, never stored: clause 4 makes it the
-    // lane's last key, and a lane holding only its time-zero key has none yet.
-    const std::size_t count = lane->keyframes.size();
     const std::optional<std::size_t> managed =
-        count >= 2U ? std::optional<std::size_t>(count - 1U) : std::nullopt;
+        managed_boundary_index(*lane, boundary_time);
     if (!check_boundary_neighbours(
             *lane, boundary_time, managed, animation_name, label, error_out)) {
         return false;
@@ -3091,6 +3147,42 @@ bool project_has_opted_in_lane(
 }
 
 } // namespace
+
+bool timeline_key_is_managed_loop_boundary(
+    const ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    const TimelineKeySelector& selector) {
+    std::string ignored;
+    const auto key = resolve_timeline_key(project, selector, &ignored);
+    if (!key.has_value()) {
+        return false;
+    }
+    // Only the three continuous families carry the flag at all; the discrete
+    // three have no member to read, which is the compile-enforced exclusion.
+    const auto boundary_of = [&](const auto& lanes) {
+        const auto& lane = lanes[key->timeline_index];
+        if (!lane.loop_sync) return false;
+        const auto duration = animation_explicit_duration(
+            project, effective_skeleton, lane.animation_name);
+        if (!duration.has_value()) return false;
+        const auto managed =
+            managed_boundary_index(lane, loop_boundary_time(*duration));
+        return managed.has_value() && *managed == key->key_index;
+    };
+    switch (key->kind) {
+    case TimelineKeyKind::Transform:
+        return boundary_of(project.transform_timeline_edits);
+    case TimelineKeyKind::SlotColor:
+        return boundary_of(project.slot_color_timeline_edits);
+    case TimelineKeyKind::Deform:
+        return boundary_of(project.mesh_deform_timeline_edits);
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return false;
+    }
+    return false;
+}
 
 double inferred_duration_excluding_loop_boundaries(
     const ProjectData& project,

@@ -229,6 +229,45 @@ bool same_curve_value(const json::Value& left, const json::Value& right) {
  * @brief Splits primitive rejections into "the key is not there" and
  *        "the request was malformed", matching timeline.retime_keyframes.
  */
+/**
+ * @brief The Agent's rejection for a write or removal on a derived key.
+ *
+ * A managed boundary key's value and easing are copies of the key at time zero,
+ * so writing one would be reverted by the synchronization in the same
+ * transaction -- the "the command appears to do nothing and nothing explains
+ * why" outcome -- and removing one would leave the lane without the key its
+ * opt-in asserts. The GUI skips such a key and reports the skip because a
+ * dopesheet box selection routinely spans it; a scripted selector list does not,
+ * so the Agent rejects atomically and names the remedy.
+ */
+std::string managed_loop_boundary_rejection(
+    const ProjectData& project,
+    const runtime::SkeletonData& skeleton,
+    const TimelineKeySelector& selector) {
+    if (!marrow::editor::timeline_key_is_managed_loop_boundary(
+            project, skeleton, selector)) {
+        return {};
+    }
+    return "That key is a managed loop boundary; edit the key at time 0 of the "
+           "same timeline instead, or disable loop synchronization on that "
+           "timeline.";
+}
+
+/** @brief The same rejection for a whole selector list, first hit wins. */
+std::string managed_loop_boundary_rejection(
+    const ProjectData& project,
+    const runtime::SkeletonData& skeleton,
+    const std::vector<TimelineKeySelector>& selectors) {
+    for (const TimelineKeySelector& selector : selectors) {
+        std::string rejection =
+            managed_loop_boundary_rejection(project, skeleton, selector);
+        if (!rejection.empty()) {
+            return rejection;
+        }
+    }
+    return {};
+}
+
 std::string_view classify_timeline_key_error(std::string_view error) {
     return error.find("not found") != std::string_view::npos ? "not_found"
                                                              : "invalid_request";
@@ -575,6 +614,20 @@ AgentDispatchResult handle_editing_operation(
                 "not_found");
         }
 
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Transform;
+            selector.animation_name = std::string(*anim_name);
+            selector.bone_name = std::string(*bone_name);
+            selector.transform_channel = channel;
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    *session.project(), skeleton, selector);
+                !rejection.empty()) {
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
+
         if (bool_arg(args, "dry_run")) {
             json::Value::Object preview;
             preview.emplace("dry_run", bool_value(true));
@@ -702,6 +755,20 @@ AgentDispatchResult handle_editing_operation(
             });
         if (key_it == edit->keyframes.end()) {
             return make_error("Keyframe not found at that time.", op, spec, "not_found");
+        }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Transform;
+            selector.animation_name = std::string(*anim_name);
+            selector.bone_name = std::string(*bone_name);
+            selector.transform_channel = channel;
+            selector.time = key_it->time;
+            if (const std::string rejection =
+                    managed_loop_boundary_rejection(project, skeleton, selector);
+                !rejection.empty()) {
+                transaction.cancel();
+                return make_error(rejection, op, spec, "invalid_request");
+            }
         }
         edit->keyframes.erase(key_it);
 
@@ -1068,6 +1135,14 @@ AgentDispatchResult handle_timeline_editing_operation(
             return make_error(interpolation_error, op, spec);
         }
 
+        // MAR-172: a managed boundary key's easing is a copy of key 0's, so
+        // writing it here would be reverted by the synchronization in the same
+        // transaction. Reject before anything is materialized.
+        if (const std::string rejection = managed_loop_boundary_rejection(
+                *session.project(), skeleton, selectors);
+            !rejection.empty()) {
+            return make_error(rejection, op, spec, "invalid_request");
+        }
         const auto materialize = [&](ProjectData* project) {
             for (const TimelineKeySelector& selector : selectors) {
                 switch (selector.kind) {
@@ -1344,6 +1419,14 @@ AgentDispatchResult handle_timeline_editing_operation(
             return make_error(mode_error, op, spec);
         }
 
+        // MAR-172: a managed boundary key's easing is a copy of key 0's, so
+        // writing it here would be reverted by the synchronization in the same
+        // transaction. Reject before anything is materialized.
+        if (const std::string rejection = managed_loop_boundary_rejection(
+                *session.project(), skeleton, selectors);
+            !rejection.empty()) {
+            return make_error(rejection, op, spec, "invalid_request");
+        }
         const auto materialize = [&](ProjectData* project) {
             for (const TimelineKeySelector& selector : selectors) {
                 if (selector.kind == TimelineKeyKind::Transform) {
@@ -2010,6 +2093,19 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (offsets.size() != attachment->mesh_geometry->vertices.size()) {
             return make_error("offsets must match the target mesh vertex offset count.", op, spec);
         }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Deform;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.attachment_name = std::string(*attachment_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    *session.project(), skeleton, selector);
+                !rejection.empty()) {
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         std::string interpolation_error;
         const auto interpolation = interpolation_arg(*args, "interpolation", &interpolation_error);
         if (!interpolation.has_value()) {
@@ -2103,6 +2199,20 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (key_it == edit_it->keyframes.end()) {
             transaction.cancel();
             return make_error("Deform keyframe not found.", op, spec, "not_found");
+        }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Deform;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.attachment_name = std::string(*attachment_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    project, skeleton, selector);
+                !rejection.empty()) {
+                transaction.cancel();
+                return make_error(rejection, op, spec, "invalid_request");
+            }
         }
         if (edit_it->keyframes.size() <= 1U) {
             transaction.cancel();
@@ -2241,6 +2351,18 @@ AgentDispatchResult handle_timeline_editing_operation(
             !skeleton.find_slot_index(*slot_name).has_value()) {
             return make_error("Animation or slot not found.", op, spec, "not_found");
         }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::SlotColor;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    *session.project(), skeleton, selector);
+                !rejection.empty()) {
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         std::string color_error;
         const auto color = color_arg(*args, "color", &color_error);
         if (!color.has_value()) {
@@ -2340,6 +2462,19 @@ AgentDispatchResult handle_timeline_editing_operation(
             return make_error(transaction.error()->format(), op, spec, "transaction_active");
         }
         ProjectData& project = *transaction.project();
+        if (op == "remove_slot_color_keyframe") {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::SlotColor;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    project, skeleton, selector);
+                !rejection.empty()) {
+                transaction.cancel();
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         bool removed = false;
         if (op == "remove_slot_color_keyframe") {
             SlotColorTimelineEdit* materialized = ensure_slot_color_timeline_edit(

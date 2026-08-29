@@ -828,6 +828,50 @@ void test_loop_boundary_create_adopt_move_rewrite(TestSuite& suite) {
     }
 }
 
+void test_loop_boundary_never_promotes_an_authored_key(TestSuite& suite) {
+    const LoopSyncFixture fixture = load_loop_sync_fixture();
+    suite.expect(fixture.ready(), "fixture project must load");
+    if (!fixture.ready()) return;
+
+    // A hand-edited document, or any future caller that reaches the sync with an
+    // opted-in lane whose managed key is gone, must not have its last authored
+    // key promoted into the boundary -- moved to the duration and overwritten
+    // from key 0. The contract owns the last key only when that key satisfies
+    // one half of the contract: it already sits at the boundary, or it is still
+    // the bit-exact mirror of key 0 a previous sync wrote.
+    marrow::editor::ProjectData project;
+    if (!prepare_opted_in_idle(fixture, 1.5, &project, suite)) return;
+    auto* lane = project.find_transform_timeline_edit(
+        "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+    suite.expect(
+        lane != nullptr && lane->keyframes.size() == 4U,
+        "the promotion case needs its created boundary key");
+    if (lane == nullptr || lane->keyframes.size() != 4U) return;
+    lane->keyframes.pop_back();
+
+    const auto result =
+        marrow::editor::synchronize_loop_boundaries(&project, fixture.skeleton());
+    suite.expect(static_cast<bool>(result), "the sync must accept a missing boundary");
+    suite.expect(
+        result.created_key_count == 1U && result.moved_key_count == 0U,
+        "a missing boundary key must be created, never promoted from an authored key");
+    const auto* after = project.find_transform_timeline_edit(
+        "idle", "spine", marrow::editor::TransformTimelineChannel::Rotate);
+    suite.expect(
+        after != nullptr && after->keyframes.size() == 4U,
+        "the lane must regain a fourth key rather than keep three");
+    if (after == nullptr || after->keyframes.size() != 4U) return;
+    suite.expect(
+        near(after->keyframes[2].time, 1.0) && near(after->keyframes[2].angle, -2.0),
+        "the authored key at 1.0 must keep its time and its value");
+    suite.expect(
+        after->keyframes[3].time ==
+                static_cast<double>(
+                    static_cast<marrow::runtime::AnimationScalar>(1.5)) &&
+            after->keyframes[3].angle == after->keyframes[0].angle,
+        "the created boundary key must mirror key 0 at the duration");
+}
+
 void test_loop_boundary_rejections(TestSuite& suite) {
     const LoopSyncFixture fixture = load_loop_sync_fixture();
     suite.expect(fixture.ready(), "fixture project must load");
@@ -1105,6 +1149,9 @@ int main() {
     });
     suite.run("loop boundary create, adopt, move, and rewrite", [&] {
         test_loop_boundary_create_adopt_move_rewrite(suite);
+    });
+    suite.run("loop boundary never promotes an authored key", [&] {
+        test_loop_boundary_never_promotes_an_authored_key(suite);
     });
     suite.run("loop boundary rejections and disable", [&] {
         test_loop_boundary_rejections(suite);

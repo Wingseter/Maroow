@@ -795,6 +795,15 @@ byte-identically and behaves identically.
   that lane's last key. No per-key marker exists, so no marker can travel through
   a copy/paste into a lane where it would be a lie, and adopting an existing key
   at that time needs no code at all.
+- **A derived key is never authored directly.** The GUI skips a managed boundary
+  key in every value, easing, preset, and curve-mode selection and reports the
+  skip, because a dopesheet box selection routinely spans one; the Agent rejects
+  it atomically, because a scripted selector list does not. Removing one is
+  filtered in the GUI and rejected by the Agent. The contract owns a lane's last
+  key only when that key satisfies one half of the contract — it already sits at
+  the boundary, or it is still the bit-exact mirror of the key at time zero that
+  a previous synchronization wrote — so a last key satisfying neither is authored
+  data and the boundary is created beside it rather than promoted from it.
 - **The contract.** For every opted-in lane, the last key sits at
   `float32(duration)` exactly; its every value component equals the lane's first
   key's corresponding component bit for bit; its `curve` — and its `curve_mode`

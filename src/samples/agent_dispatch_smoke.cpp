@@ -2064,6 +2064,116 @@ int main(int argc, char** argv) {
             false,
             "no_change");
 
+        // A managed boundary key's value and easing are derived from the key at
+        // time zero, so an Agent write there would be reverted by the sync in
+        // the same transaction and a removal would strand the lane's contract.
+        // The GUI skips such a key and reports it; the Agent rejects it
+        // atomically, naming the remedy. This block proves both halves of the
+        // rejection: the operation fails AND the lane's authored keys survive.
+        {
+            const char* kBoundaryKey =
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":1.5}";
+            const char* kMiddleKey =
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":1.0}";
+            const auto still_there = [&](const char* label, const char* key) {
+                return harness.invoke(
+                    label,
+                    std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                        key + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+            };
+            still_there("the spine key at 1.0 exists before the guards", kMiddleKey);
+
+            harness.invoke(
+                "timeline.set_interpolation rejects a managed loop boundary",
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kBoundaryKey + "],\"interpolation\":\"ease\"}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "timeline.set_curve_mode rejects a managed loop boundary",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBoundaryKey + "],\"mode\":\"auto\"}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "set_transform rejects a managed loop boundary",
+                "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":1.5,\"angle\":45}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "remove_transform_keyframe rejects a managed loop boundary",
+                "{\"op\":\"remove_transform_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":1.5}}",
+                false,
+                "invalid_request");
+            // The data-loss assertion. Before the guard existed the removal
+            // returned `ok` and the authored key at 1.0 was promoted to the
+            // boundary -- moved to 1.5 and overwritten from key 0 -- so a test
+            // that only checked the return code would have missed it.
+            still_there("the spine key at 1.0 survived the rejected removal", kMiddleKey);
+            still_there(
+                "the spine key at 0.5 survived the rejected removal",
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":0.5}");
+
+            // The same guard on the other two families, each opted in here and
+            // undone at the end of the block.
+            harness.invoke(
+                "timeline.set_loop_sync enables the colour and deform lanes",
+                "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+                "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\"},"
+                "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"attachment\":\"body_mesh\"}],\"enabled\":true}}");
+
+            harness.invoke(
+                "set_slot_color_keyframe rejects a managed loop boundary",
+                "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":1.5,"
+                "\"color\":{\"r\":0.1,\"g\":0.2,\"b\":0.3,\"a\":0.4}}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "remove_slot_color_keyframe rejects a managed loop boundary",
+                "{\"op\":\"remove_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":1.5}}",
+                false,
+                "invalid_request");
+            still_there(
+                "the body colour key at 1.0 survived the rejected removal",
+                "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"time\":1.0}");
+
+            harness.invoke(
+                "remove_deform_keyframe rejects a managed loop boundary",
+                "{\"op\":\"remove_deform_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"time\":1.5}}",
+                false,
+                "invalid_request");
+            still_there(
+                "the body deform key at 1.0 survived the rejected removal",
+                "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"attachment\":\"body_mesh\",\"time\":1.0}");
+
+            // Every guarded operation still works on a key that is NOT the
+            // managed boundary, so the guard is boundary-specific rather than a
+            // blanket lock on an opted-in lane.
+            harness.invoke(
+                "timeline.set_interpolation still writes a non-boundary key",
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kMiddleKey + "],\"interpolation\":\"ease\"}}");
+            harness.invoke("undo the non-boundary easing", "{\"op\":\"undo\"}");
+            harness.invoke(
+                "remove_transform_keyframe still removes a non-boundary key",
+                "{\"op\":\"remove_transform_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.5}}");
+            harness.invoke("undo the non-boundary removal", "{\"op\":\"undo\"}");
+
+            harness.invoke("undo the colour and deform enable", "{\"op\":\"undo\"}");
+        }
+
         // set_transform on the time-zero key updates the boundary key in the
         // SAME history entry, proven by the following dry run's read-back.
         harness.invoke(
