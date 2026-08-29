@@ -2000,4 +2000,237 @@ bool apply_timeline_graph_value_delta(
     return true;
 }
 
+namespace {
+
+/** @brief Reports whether a frozen segment frame is usable for a drag. */
+bool segment_frame_is_finite(const timeline_graph_model::SegmentFrame& frame) {
+    return std::isfinite(frame.start_time_seconds) &&
+        std::isfinite(frame.end_time_seconds) &&
+        std::isfinite(frame.start_value) && std::isfinite(frame.end_value) &&
+        std::isfinite(frame.time_span) &&
+        frame.time_span > timeline_graph_model::kMinimumSegmentSeconds &&
+        std::isfinite(frame.value_span) && frame.value_span != 0.0;
+}
+
+bool control_points_are_finite(const std::array<double, 4>& control_points) {
+    for (const double control_point : control_points) {
+        if (!std::isfinite(control_point)) return false;
+    }
+    return true;
+}
+
+bool same_control_points(
+    const std::array<double, 4>& left,
+    const std::array<double, 4>& right) {
+    for (std::size_t index = 0U; index < left.size(); ++index) {
+        if (std::abs(left[index] - right[index]) > 1e-12) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool begin_timeline_graph_handle_gesture(
+    ShellState* state,
+    std::uint32_t item_id,
+    const TimelineTrackRow& track,
+    const TimelineKeyRef& key,
+    timeline_graph_model::HandleIndex handle,
+    const timeline_graph_model::SegmentFrame& frame,
+    const std::array<double, 4>& seed_control_points,
+    marrow::runtime::InterpolationKind original_kind,
+    const std::vector<TimelineTrackRow>& tracks) {
+    if (state == nullptr || authoring_gesture_active(*state) ||
+        !timeline_track_is_editable(track) ||
+        find_timeline_track(tracks, track.id) == nullptr ||
+        !segment_frame_is_finite(frame) ||
+        !control_points_are_finite(seed_control_points)) {
+        return false;
+    }
+    const auto key_index = timeline_key_index(track, key);
+    // The last key owns no outgoing segment, so it anchors no handles.
+    if (!key_index.has_value() || *key_index + 1U >= track.key_times.size()) {
+        return false;
+    }
+
+    const auto& projection = cached_timeline_graph_projection(state, track);
+    if (projection.status != timeline_graph_model::ProjectionStatus::Ready ||
+        !projection.track.has_value()) {
+        return false;
+    }
+    const auto projected = std::find_if(
+        projection.track->keys.begin(),
+        projection.track->keys.end(),
+        [&](const timeline_graph_model::Key& candidate) {
+            return candidate.identity == key;
+        });
+    if (projected == projection.track->keys.end()) return false;
+
+    // The displayed component only labels the gesture; the primitive writes the
+    // one shared easing of the parent key and takes no component argument.
+    std::size_t component_index = 0U;
+    if (state->timeline_editor.graph_view.active_component.has_value()) {
+        const auto slot = std::find_if(
+            projection.track->components.begin(),
+            projection.track->components.end(),
+            [&](const timeline_graph_model::ComponentDescriptor& descriptor) {
+                return descriptor.component ==
+                    *state->timeline_editor.graph_view.active_component;
+            });
+        if (slot != projection.track->components.end()) {
+            component_index = static_cast<std::size_t>(
+                std::distance(projection.track->components.begin(), slot));
+        }
+    }
+    if (component_index >= projection.track->components.size()) return false;
+
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Edit key easing",
+        "timeline:graph-easing",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    TimelineGraphHandleGesture gesture;
+    gesture.item_id = item_id;
+    gesture.track_id = track.id;
+    gesture.key = key;
+    gesture.component = projection.track->components[component_index].component;
+    gesture.component_index = component_index;
+    gesture.handle = handle;
+    gesture.frame = frame;
+    gesture.original_kind = original_kind;
+    gesture.original_control_points = seed_control_points;
+    gesture.applied_control_points = seed_control_points;
+    gesture.transaction = std::move(transaction);
+    state->timeline_editor.graph_handle_gesture.emplace(std::move(gesture));
+    return true;
+}
+
+void finish_timeline_graph_handle_gesture(ShellState* state, bool commit) {
+    if (state == nullptr || !state->timeline_editor.graph_handle_gesture.has_value()) {
+        return;
+    }
+    TimelineGraphHandleGesture gesture =
+        std::move(*state->timeline_editor.graph_handle_gesture);
+    state->timeline_editor.graph_handle_gesture.reset();
+    const auto completion =
+        marrow::editor::timeline_model::completion_decision(commit, gesture.changed);
+    if (completion.action ==
+        marrow::editor::timeline_model::CompletionAction::Cancel) {
+        gesture.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        if (completion.report_cancelled) {
+            state->status_message = "Cancelled easing edit";
+        }
+        return;
+    }
+    const marrow::editor::SessionResult result = gesture.transaction.commit();
+    sync_shell_from_editor_session(state);
+    if (!result) {
+        state->error_message = result.error->format();
+        state->status_message = "Easing edit failed";
+    } else {
+        state->status_message = "Edited key easing";
+    }
+}
+
+bool apply_timeline_graph_handle_control_points(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    const std::array<double, 4>& requested_control_points) {
+    if (state == nullptr || !state->timeline_editor.graph_handle_gesture.has_value()) {
+        return false;
+    }
+    TimelineGraphHandleGesture& gesture =
+        *state->timeline_editor.graph_handle_gesture;
+    if (!control_points_are_finite(requested_control_points)) {
+        finish_timeline_graph_handle_gesture(state, false);
+        state->error_message = "Bezier control points must be finite.";
+        state->status_message = "Easing edit failed";
+        return false;
+    }
+    if (gesture.changed &&
+        same_control_points(requested_control_points, gesture.applied_control_points)) {
+        return true;
+    }
+
+    const TimelineTrackRow* track = find_timeline_track(tracks, gesture.track_id);
+    if (track == nullptr || !timeline_track_is_editable(*track)) {
+        finish_timeline_graph_handle_gesture(state, false);
+        state->status_message = "The graph editing context changed during editing";
+        return false;
+    }
+
+    // The first edit copies every imported runtime key into the project, so an
+    // easing edit never replaces an unmaterialized track with one key.
+    if (!gesture.materialized) {
+        if (!visit_editable_timeline_keys(state, *track, [](auto&) {})) {
+            finish_timeline_graph_handle_gesture(state, false);
+            state->status_message = "Could not materialize the selected timeline key";
+            return false;
+        }
+        gesture.materialized = true;
+    }
+
+    const TimelineTrackRow* resolved_track =
+        find_timeline_track(tracks, gesture.track_id);
+    const auto key_index = resolved_track != nullptr
+        ? timeline_key_index(*resolved_track, gesture.key)
+        : std::nullopt;
+    if (!key_index.has_value()) {
+        finish_timeline_graph_handle_gesture(state, false);
+        state->status_message = "The selected graph key changed during editing";
+        return false;
+    }
+    const auto selector =
+        timeline_key_selector(*state, *resolved_track, *key_index);
+    if (!selector.has_value()) {
+        finish_timeline_graph_handle_gesture(state, false);
+        state->status_message = "Could not resolve the selected graph key";
+        return false;
+    }
+
+    const marrow::editor::TimelineInterpolationResult result =
+        marrow::editor::set_keyframe_interpolation(
+            gesture.transaction.project(),
+            {*selector},
+            marrow::runtime::InterpolationKind::CubicBezier,
+            requested_control_points);
+    if (!result) {
+        const std::string error = result.error;
+        finish_timeline_graph_handle_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Easing edit failed";
+        return false;
+    }
+    if (!result.changed) {
+        // A no-change frame is not a failure: the authored value is already
+        // exactly what was requested.
+        gesture.applied_control_points = requested_control_points;
+        return true;
+    }
+
+    const marrow::editor::SessionResult refresh = gesture.transaction.refresh_runtime();
+    if (!refresh) {
+        const std::string error = refresh.error->format();
+        finish_timeline_graph_handle_gesture(state, false);
+        state->error_message = error;
+        state->status_message = "Easing edit preview failed";
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    // An easing edit never moves a key in time, so every TimelineKeyRef stays
+    // bit-identical and selection/active_key need no rebuild.
+    gesture.applied_control_points = requested_control_points;
+    gesture.changed = true;
+    return true;
+}
+
 } // namespace marrow::editor::shell

@@ -785,4 +785,196 @@ std::optional<Geometry> build_geometry(
     return result;
 }
 
+std::array<double, 4> seed_control_points(
+    SegmentKind kind,
+    const std::array<double, 4>& existing) {
+    return kind == SegmentKind::Cubic ? existing : kLinearEquivalentControlPoints;
+}
+
+std::optional<SegmentFrame> make_segment_frame(
+    const Track& track,
+    std::size_t key_index,
+    std::size_t component_index,
+    const View& view) {
+    if (!is_finite_view(view)) return std::nullopt;
+    // The last key owns no outgoing segment, so it anchors no handles.
+    if (key_index + 1U >= track.keys.size()) return std::nullopt;
+    if (component_index >= track.components.size()) return std::nullopt;
+    const Key& start = track.keys[key_index];
+    const Key& end = track.keys[key_index + 1U];
+    if (component_index >= start.value_count || component_index >= end.value_count) {
+        return std::nullopt;
+    }
+
+    SegmentFrame frame;
+    frame.start_time_seconds = start.time_seconds;
+    frame.end_time_seconds = end.time_seconds;
+    frame.start_value = start.values[component_index];
+    frame.end_value = end.values[component_index];
+    if (!std::isfinite(frame.start_time_seconds) ||
+        !std::isfinite(frame.end_time_seconds) ||
+        !std::isfinite(frame.start_value) || !std::isfinite(frame.end_value)) {
+        return std::nullopt;
+    }
+
+    frame.time_span = frame.end_time_seconds - frame.start_time_seconds;
+    // A zero-duration segment has no fallback that means anything: the runtime
+    // never evaluates its curve, and cx would be a ratio over a zero span.
+    if (!std::isfinite(frame.time_span) || !(frame.time_span > kMinimumSegmentSeconds)) {
+        return std::nullopt;
+    }
+
+    const double raw_span = frame.end_value - frame.start_value;
+    // View-relative rather than exact equality: the failure mode is numerical
+    // conditioning, not equality. Two anchors less than one logical pixel apart
+    // cannot express a handle position on this component's own value axis.
+    frame.flat_value_span = !std::isfinite(raw_span) ||
+        std::abs(raw_span) * view.pixels_per_value < kMinimumSegmentValuePixels;
+    frame.value_span = frame.flat_value_span
+        ? kFlatSegmentHandlePixels / view.pixels_per_value
+        : raw_span;
+    if (!std::isfinite(frame.value_span) || frame.value_span == 0.0) {
+        return std::nullopt;
+    }
+    return frame;
+}
+
+std::optional<HandleGeometry> build_handle_geometry(
+    const Track& track,
+    const timeline_model::KeyRef& active_key,
+    std::size_t component_index,
+    const View& view,
+    PlotRect rect) {
+    if (!is_finite_rect(rect) || !is_finite_view(view)) return std::nullopt;
+    const auto found = std::find_if(
+        track.keys.begin(),
+        track.keys.end(),
+        [&](const Key& candidate) { return candidate.identity == active_key; });
+    if (found == track.keys.end()) return std::nullopt;
+    const auto key_index =
+        static_cast<std::size_t>(std::distance(track.keys.begin(), found));
+    const auto frame = make_segment_frame(track, key_index, component_index, view);
+    if (!frame.has_value()) return std::nullopt;
+    if (!interpolation_is_finite(found->outgoing_easing)) return std::nullopt;
+
+    HandleGeometry geometry;
+    geometry.key = active_key;
+    geometry.component = track.components[component_index].component;
+    geometry.component_index = component_index;
+    geometry.key_index = key_index;
+    geometry.kind = segment_kind(found->outgoing_easing);
+    geometry.frame = *frame;
+
+    std::array<double, 4> stored{0.0, 0.0, 1.0, 1.0};
+    if (geometry.kind == SegmentKind::Cubic) {
+        const auto& points = found->outgoing_easing.cubic_bezier();
+        stored = {
+            static_cast<double>(points.cx1),
+            static_cast<double>(points.cy1),
+            static_cast<double>(points.cx2),
+            static_cast<double>(points.cy2)};
+    }
+    geometry.control_points = seed_control_points(geometry.kind, stored);
+    for (const double control_point : geometry.control_points) {
+        if (!std::isfinite(control_point)) return std::nullopt;
+    }
+
+    const auto start_anchor =
+        plot_point(view, rect, frame->start_time_seconds, frame->start_value);
+    const auto end_anchor =
+        plot_point(view, rect, frame->end_time_seconds, frame->end_value);
+    const auto first_handle = plot_point(
+        view,
+        rect,
+        frame->start_time_seconds + geometry.control_points[0] * frame->time_span,
+        frame->start_value + geometry.control_points[1] * frame->value_span);
+    const auto second_handle = plot_point(
+        view,
+        rect,
+        frame->start_time_seconds + geometry.control_points[2] * frame->time_span,
+        frame->start_value + geometry.control_points[3] * frame->value_span);
+    if (!start_anchor.has_value() || !end_anchor.has_value() ||
+        !first_handle.has_value() || !second_handle.has_value()) {
+        return std::nullopt;
+    }
+    geometry.start_anchor = *start_anchor;
+    geometry.end_anchor = *end_anchor;
+    geometry.first_handle = *first_handle;
+    geometry.second_handle = *second_handle;
+    return geometry;
+}
+
+std::optional<HandleHit> hit_test_handle(
+    const HandleGeometry& geometry,
+    double pointer_x,
+    double pointer_y,
+    double inclusive_radius) {
+    if (!std::isfinite(pointer_x) || !std::isfinite(pointer_y) ||
+        !std::isfinite(inclusive_radius) || inclusive_radius < 0.0) {
+        return std::nullopt;
+    }
+    const double radius_squared = inclusive_radius * inclusive_radius;
+    if (!std::isfinite(radius_squared)) return std::nullopt;
+
+    const std::array<PlotPoint, 2> handles{
+        geometry.first_handle, geometry.second_handle};
+    std::optional<HandleIndex> winner;
+    double winner_distance_squared = std::numeric_limits<double>::infinity();
+    for (std::size_t index = 0U; index < handles.size(); ++index) {
+        const PlotPoint& handle = handles[index];
+        if (!std::isfinite(handle.x) || !std::isfinite(handle.y)) continue;
+        const double delta_x = handle.x - pointer_x;
+        const double delta_y = handle.y - pointer_y;
+        const double distance_squared = delta_x * delta_x + delta_y * delta_y;
+        if (!std::isfinite(distance_squared) || distance_squared > radius_squared) {
+            continue;
+        }
+        // Strictly nearer wins, so an exact tie keeps the first handle.
+        if (!winner.has_value() || distance_squared < winner_distance_squared) {
+            winner = index == 0U ? HandleIndex::First : HandleIndex::Second;
+            winner_distance_squared = distance_squared;
+        }
+    }
+    if (!winner.has_value()) return std::nullopt;
+    return HandleHit{geometry.key, *winner};
+}
+
+std::optional<std::array<double, 4>> control_points_from_handle_pointer(
+    const SegmentFrame& frame,
+    const std::array<double, 4>& current,
+    HandleIndex handle,
+    const View& view,
+    PlotRect rect,
+    double pointer_x,
+    double pointer_y) {
+    if (!is_finite_rect(rect) || !is_finite_view(view) ||
+        !std::isfinite(pointer_x) || !std::isfinite(pointer_y)) {
+        return std::nullopt;
+    }
+    if (!std::isfinite(frame.start_time_seconds) ||
+        !std::isfinite(frame.start_value) || !std::isfinite(frame.time_span) ||
+        !std::isfinite(frame.value_span) ||
+        !(frame.time_span > kMinimumSegmentSeconds) || frame.value_span == 0.0) {
+        return std::nullopt;
+    }
+    for (const double control_point : current) {
+        if (!std::isfinite(control_point)) return std::nullopt;
+    }
+
+    const double time_seconds = time_at_x(rect, view, pointer_x);
+    const double value = value_at_y(rect, view, pointer_y);
+    if (!std::isfinite(time_seconds) || !std::isfinite(value)) return std::nullopt;
+    const double cx_raw = (time_seconds - frame.start_time_seconds) / frame.time_span;
+    const double cy = (value - frame.start_value) / frame.value_span;
+    if (!std::isfinite(cx_raw) || !std::isfinite(cy)) return std::nullopt;
+
+    // X is clamped, never rejected: the handle stops at the boundary and the
+    // drag continues. Y is never clamped, so finite overshoot survives.
+    std::array<double, 4> result = current;
+    const std::size_t offset = handle == HandleIndex::First ? 0U : 2U;
+    result[offset] = std::clamp(cx_raw, 0.0, 1.0);
+    result[offset + 1U] = cy;
+    return result;
+}
+
 } // namespace marrow::editor::timeline_graph_model

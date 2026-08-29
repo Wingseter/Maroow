@@ -204,6 +204,14 @@ Keyframe fields vary by timeline type but always include `time` and may include 
 - `"stepped"`
 - `[cx1, cy1, cx2, cy2]`
 
+Both the `.marrow` and `.mskl` loaders reject a cubic curve whose `cx1` or `cx2`
+falls outside `[0, 1]`, because that range is what makes the runtime's
+`X(t) = alpha` inverse single-valued. The editor's authoring path guarantees the
+same predicate: the graph clamps a dragged x control point into `[0, 1]` and the
+shared authoring primitive rejects any out-of-range or non-finite value
+atomically, while `cy1` and `cy2` allow finite overshoot outside `[0, 1]`. No
+field and no version changes as a result.
+
 ### `mixing`
 
 The current runtime reads:

@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 56> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 57> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -69,6 +69,7 @@ constexpr std::array<OperationExpectation, 56> kExpectedOperations{{
     {"animation.delete", "edit", true, false, true},
     {"animation.set_duration", "edit", true, false, true},
     {"timeline.retime_keyframes", "edit", true, false, true},
+    {"timeline.set_interpolation", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
     {"set_event_keyframe", "edit", true, false, true},
@@ -1384,6 +1385,190 @@ int main(int argc, char** argv) {
         "timeline.retime_keyframes",
         "atomic retime metadata changed");
     harness.invoke("undo timeline retime", "{\"op\":\"undo\"}");
+
+    // --- MAR-169: timeline.set_interpolation. The dry run doubles as the
+    // read-back channel, reporting each selected key's current curve without
+    // mutating anything. ---
+    {
+        const char* kTranslateKey =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.0}";
+        const auto previous_curve = [&](const DispatchObservation& observation)
+            -> const json::Value* {
+            const json::Value* keys = member(observation.scene_delta(), "keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&keys->as_array()[0], "previous_interpolation");
+        };
+        const auto curve_is_string = [&](const json::Value* curve,
+                                         std::string_view expected) {
+            return curve != nullptr && curve->is_string() &&
+                curve->as_string() == expected;
+        };
+        const auto curve_matches = [&](const json::Value* curve,
+                                       const std::array<double, 4>& expected) {
+            if (curve == nullptr || !curve->is_array() ||
+                curve->as_array().size() != 4U) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                const json::Value& value = curve->as_array()[index];
+                if (!value.is_number() ||
+                    std::abs(value.as_number() - expected[index]) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        const DispatchObservation before_revision = harness.invoke(
+            "scene.describe before interpolation dry run", "{\"op\":\"scene.describe\"}");
+        (void)before_revision;
+        const DispatchObservation interpolation_dry_run = harness.invoke(
+            "timeline.set_interpolation dry run",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey +
+                "],\"interpolation\":[0.2,-0.4,0.8,1.6],\"dry_run\":true}}");
+        harness.expect(
+            bool_member(interpolation_dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(interpolation_dry_run.scene_delta(), "key_count") ==
+                    std::optional<double>(1.0) &&
+                number_member(
+                    interpolation_dry_run.scene_delta(), "changed_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(interpolation_dry_run.scene_delta(), "keys_truncated") ==
+                    std::optional<bool>(false) &&
+                curve_is_string(previous_curve(interpolation_dry_run), "linear"),
+            "timeline.set_interpolation dry run",
+            "dry run did not report the current curve of every selected key");
+
+        const DispatchObservation interpolation_live = harness.invoke(
+            "timeline.set_interpolation",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[0.2,-0.4,0.8,1.6]}}");
+        harness.expect(
+            number_member(interpolation_live.scene_delta(), "changed_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(interpolation_live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false),
+            "timeline.set_interpolation live",
+            "a live easing write did not report its changed key count");
+
+        const DispatchObservation read_back = harness.invoke(
+            "timeline.set_interpolation read-back",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_matches(previous_curve(read_back), {0.2, -0.4, 0.8, 1.6}),
+            "timeline.set_interpolation read-back",
+            "the stored overshoot curve did not survive the live write");
+
+        // A second identical live call changes nothing.
+        harness.invoke(
+            "timeline.set_interpolation no_change",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[0.2,-0.4,0.8,1.6]}}",
+            false,
+            "no_change");
+
+        // A slot-colour key and a deform key are both supported families.
+        harness.invoke(
+            "timeline.set_interpolation slot_color",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\","
+            "\"time\":0.0}],\"interpolation\":[0.1,0.9,0.4,0.2]}}");
+        harness.invoke(
+            "timeline.set_interpolation deform",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+            "\"attachment\":\"body_mesh\",\"time\":0.0}],"
+            "\"interpolation\":[0.15,0.85,0.45,0.25]}}");
+        harness.invoke("undo interpolation deform", "{\"op\":\"undo\"}");
+        harness.invoke("undo interpolation slot_color", "{\"op\":\"undo\"}");
+
+        // Undo restores the previous curve, verified through a follow-up dry run.
+        harness.invoke("undo timeline interpolation", "{\"op\":\"undo\"}");
+        const DispatchObservation after_undo = harness.invoke(
+            "timeline.set_interpolation after undo",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_undo), "linear"),
+            "undo timeline interpolation",
+            "undo did not restore the previous curve");
+
+        // Rejections. Each leaves the project untouched, which the follow-up
+        // read-back proves.
+        harness.invoke(
+            "timeline.set_interpolation requires interpolation",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects out-of-range x",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[1.5,0.0,0.5,1.0]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects a short array",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[0.0,0.0,0.5]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects an unknown kind string",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"quadratic\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects draw_order keys",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"draw_order\",\"animation\":\"idle\",\"time\":0.0}],"
+            "\"interpolation\":\"linear\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects slot_attachment keys",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"slot_attachment\",\"animation\":\"idle\",\"slot\":\"body\","
+            "\"time\":0.0}],\"interpolation\":\"linear\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects an empty key list",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[],"
+            "\"interpolation\":\"linear\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects duplicate keys",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "," + kTranslateKey +
+                "],\"interpolation\":[0.3,0.3,0.6,0.6]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects an unresolvable key",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":99.0}],"
+            "\"interpolation\":[0.3,0.3,0.6,0.6]}}",
+            false,
+            "not_found");
+        const DispatchObservation after_rejections = harness.invoke(
+            "timeline.set_interpolation unchanged after rejections",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_rejections), "linear"),
+            "timeline.set_interpolation rejection atomicity",
+            "a rejected easing request mutated the project");
+    }
 
     // Two merge-enabled transform edits must form one undo group. Temporary
     // JSON/binary comparison gives an implementation-independent key count.

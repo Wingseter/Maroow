@@ -17,7 +17,7 @@ The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04
 - Preview/playback, asset watching, timeline, constraints, selection, inspector, weight-paint, viewport UI, project/runtime panels, and agent panels have feature-owned source/header pairs.
 - `marrow_editor` contains UI-free project/session/agent authoring code and links only `marrow_runtime` and Zlib; icon/UI/OpenGL code is compiled only into `marrow_editor_shell`.
 - The C API and socket dispatcher use `EditorSession` plus `AgentControlState`, and C ABI version 1 is unchanged.
-- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the current registry to the exact 56-operation total recorded below.
+- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the registry to 56, and MAR-169's `timeline.set_interpolation` raises the current registry to the exact 57-operation total recorded below.
 
 ## Target ownership
 
@@ -100,16 +100,16 @@ This roadmap does not split the existing combined C API or renderer targets, and
 | MAR-155 | Editor duration authoring | MAR-154 | Done (validated 2026-07-17) |
 | MAR-156 | Versioned user preference store | MAR-155 | Done (validated 2026-07-18) |
 | MAR-157–167 | Typed selection through synchronized scalar graph checkpoints | Each story depends on the immediately preceding story | Done (validated 2026-07-18 through 2026-08-20) |
-| MAR-169–191 | Remaining Editing P1 product chain | Each story depends on the immediately preceding story | Open backlog beginning at MAR-169 |
+| MAR-170–191 | Remaining Editing P1 product chain | Each story depends on the immediately preceding story | Open backlog beginning at MAR-170 |
 
-Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, MAR-154–156 are complete, and MAR-157–168 remain completed functional checkpoints. The next dependency sequence is the remaining linear MAR-169–191 P1 product chain. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
+Numeric IDs are intentionally not execution order. The PRD array put MAR-141–153 immediately after MAR-120 so editing P0 could close before the parameter track; both that checkpoint and MAR-122–128 are now implemented. MAR-121 is a done tombstone integrated into MAR-122, MAR-154–156 are complete, and MAR-157–169 remain completed functional checkpoints. The next dependency sequence is the remaining linear MAR-170–191 P1 product chain. MAR-129–140 remain in their historical location but are already complete. Constraint rename/delete is deliberately deferred to MAR-178 rather than being credited to the refactor-only MAR-137.
 
 ## Compatibility boundary
 
 The refactor must preserve:
 
 - C ABI version 1, all C functions, status codes, and ownership rules;
-- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations, six MAR-128 parameter operations, and MAR-155 `animation.set_duration` for an exact current total of 56;
+- all 44 refactor-baseline agent operations, JSON request/response shapes, error messages, permissions, dry runs, reviews, and IDs, plus five P0 operations, six MAR-128 parameter operations, MAR-155 `animation.set_duration`, and MAR-169 `timeline.set_interpolation` for an exact current total of 57;
 - existing `.marrow` compatibility, `.mskl` v1, `.mbin` v2, and `.matl` v1; P1 project fields remain optional and additive;
 - optional parameter-model roots default to empty for old assets, unknown additive `.marrow` fields survive load/save, and direct preview parameter input is not serialized;
 - byte-identical unchanged `.marrow` serialization and equivalent `.mskl`/`.mbin` exports;
@@ -329,8 +329,8 @@ passed this completion gate on both hosts:
   staged-folder and new-directory extracted runs both exited 0.
 
 Task #28, MAR-163, and MAR-164 remain complete at that checkpoint. MAR-165,
-MAR-166, and MAR-167 were completed separately on 2026-08-20 and MAR-168 on
-2026-08-30; MAR-169 is the next product milestone.
+MAR-166, and MAR-167 were completed separately on 2026-08-20 and MAR-168 and
+MAR-169 on 2026-08-30; MAR-170 is the next product milestone.
 Windows 11 high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain
 deferred MAR-192 through MAR-210 qualification evidence and received no
 Task #28 or platform-qualification credit. Those stories remain `open`, and

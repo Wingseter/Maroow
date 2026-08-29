@@ -477,6 +477,7 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
     }
     cancel_transaction_gesture(state->timeline_editor.retime_gesture);
     cancel_transaction_gesture(state->timeline_editor.graph_value_gesture);
+    cancel_transaction_gesture(state->timeline_editor.graph_handle_gesture);
     cancel_transaction_gesture(state->parameter_slider_gesture);
     cancel_transaction_gesture(state->parameter_geometry_gesture);
     state->timeline_editor.graph_drag.reset();

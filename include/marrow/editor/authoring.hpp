@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -218,5 +219,31 @@ TimelineScalarOffsetResult offset_keyframe_scalars(
     const std::vector<TimelineKeySelector>& selectors,
     TimelineScalarComponent component,
     double requested_delta);
+
+struct TimelineInterpolationResult : AuthoringResult {
+    std::size_t key_count{0U};
+    std::size_t changed_key_count{0U};
+};
+
+/**
+ * @brief Atomically replaces the outgoing easing of persisted timeline keys.
+ *
+ * The easing is a property of the whole parent key and is shared by every
+ * component of that key, so this operation takes no component argument. Cubic
+ * control points must be finite, must survive float32 narrowing, and must keep
+ * `cx1`/`cx2` inside [0, 1], which is the same invariant the `.marrow` and
+ * `.mskl` loaders enforce and exactly the condition that makes the runtime's
+ * `X(t) = alpha` inverse well posed. Finite Y overshoot is allowed. Linear and
+ * Stepped ignore `control_points` entirely, because the stored value carries
+ * none. Draw-order, event, and slot-attachment keys carry no easing and are
+ * rejected. Callers materialize imported runtime-only tracks through the
+ * shared `ensure_*_timeline_edit` project operations first. A rejected edit
+ * leaves the project unchanged.
+ */
+TimelineInterpolationResult set_keyframe_interpolation(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    runtime::InterpolationKind kind,
+    const std::array<double, 4>& control_points = {0.0, 0.0, 1.0, 1.0});
 
 } // namespace marrow::editor

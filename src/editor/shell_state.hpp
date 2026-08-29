@@ -583,6 +583,12 @@ struct TimelineGraphViewState {
     bool needs_fit{true};
 };
 
+/** @brief What a graph drag candidate is pointed at. */
+enum class GraphDragTarget : std::uint8_t {
+    Point,
+    Handle,
+};
+
 /**
  * @brief One live graph point drag, from the press until the pointer is released.
  *
@@ -594,6 +600,7 @@ struct TimelineGraphViewState {
  */
 struct TimelineGraphPointDrag {
     std::uint32_t item_id{0U};
+    GraphDragTarget target{GraphDragTarget::Point};
     timeline_graph_model::DragAxis axis{timeline_graph_model::DragAxis::Undecided};
     std::string track_id;
     timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
@@ -602,6 +609,44 @@ struct TimelineGraphPointDrag {
     double press_time_seconds{0.0};
     double press_value{0.0};
     timeline_graph_model::View frozen_view{};
+    // Handle-only. The Point path leaves these default-constructed and never
+    // reads them; the Handle path needs the frozen plot and the pressed key
+    // because its mapping is absolute rather than a delta from the press.
+    timeline_graph_model::PlotRect frozen_plot{};
+    TimelineKeyRef pressed_key{};
+    std::size_t component_index{0U};
+    timeline_graph_model::HandleIndex handle{
+        timeline_graph_model::HandleIndex::First};
+    timeline_graph_model::SegmentFrame frame{};
+    std::array<double, 4> seed_control_points{};
+    marrow::runtime::InterpolationKind segment_kind{
+        marrow::runtime::InterpolationKind::Linear};
+};
+
+/**
+ * @brief Live handle gesture owning one open transaction.
+ *
+ * A handle drag writes only `interpolation`, so no key ever moves in time and
+ * every `TimelineKeyRef` stays bit-identical across preview, commit, cancel,
+ * undo, and redo.
+ */
+struct TimelineGraphHandleGesture {
+    std::uint32_t item_id{0U};
+    std::string track_id;
+    TimelineKeyRef key;
+    timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
+    std::size_t component_index{0U};
+    timeline_graph_model::HandleIndex handle{
+        timeline_graph_model::HandleIndex::First};
+    timeline_graph_model::SegmentFrame frame{};
+    marrow::runtime::InterpolationKind original_kind{
+        marrow::runtime::InterpolationKind::Linear};
+    std::array<double, 4> original_control_points{};
+    std::array<double, 4> applied_control_points{};
+    bool clamped_x{false};
+    bool materialized{false};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
 };
 
 /** @brief Live value-axis graph gesture owning one open transaction. */
@@ -645,6 +690,7 @@ struct TimelineEditorState {
     std::optional<TimelineRetimeGesture> retime_gesture;
     std::optional<TimelineGraphPointDrag> graph_drag;
     std::optional<TimelineGraphValueGesture> graph_value_gesture;
+    std::optional<TimelineGraphHandleGesture> graph_handle_gesture;
 };
 
 using AgentReviewKind = marrow::editor::AgentReviewKind;
@@ -748,6 +794,7 @@ inline bool authoring_gesture_active(const ShellState& state) noexcept {
         state.parameter_geometry_gesture.has_value() ||
         state.timeline_editor.retime_gesture.has_value() ||
         state.timeline_editor.graph_value_gesture.has_value() ||
+        state.timeline_editor.graph_handle_gesture.has_value() ||
         state.weight_paint_stroke.active;
 }
 

@@ -32,8 +32,8 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168 checkpoints or the
-next MAR-169 product milestone.
+Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169 checkpoints
+or the next MAR-170 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -78,7 +78,25 @@ Translate, Scale, and Shear are unclamped, so a signed or exactly zero scale
 stays authorable. Dragging a key past an authored explicit duration grows that
 duration inside the same undo entry.
 
-Bezier handle and easing editing is still MAR-169. FFD and discrete Inherit,
+The active key's outgoing segment also draws two light-blue square Bezier
+handles, for the active component only, joined to their anchors by thin tangent
+lines. One curve therefore has exactly one pair of handles even when several
+components are visible, because the easing belongs to the whole parent key.
+Pressing a handle wins over pressing a key point and does not scrub the playhead
+or change the selection. Dragging is free 2-D, with no axis lock: the horizontal
+control point stops at exactly `0` and `1` and the drag keeps going, while
+vertical overshoot past the anchors is allowed and is what produces anticipation
+and follow-through. Grabbing a handle on a Linear or Stepped segment converts
+that segment to Bezier, seeded at the curve that is exactly equal to Linear, in
+the same undo entry as the drag. A segment whose two anchors sit less than one
+pixel apart vertically still edits: 100 logical pixels of vertical travel is
+defined to equal `1.0` there, and the readout says so. A zero-duration segment
+gets no handles at all. The component checkboxes and **Fit** are disabled while
+any graph drag is live, so the dragged component cannot be hidden underneath the
+gesture. Escape, leaving the Graph tab, and losing focus cancel an easing drag
+exactly as they cancel a point drag, and one handle drag is one undo entry.
+
+Curve presets and a remembered default curve arrive in MAR-170. FFD and discrete Inherit,
 Attachment, Draw Order, and Event lanes show an unsupported empty state instead
 of stale graph data. Graph tab, visibility, Fit, pan, zoom, hover,
 active-component, and drag state are shell-private and are not saved to

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -2440,6 +2441,581 @@ bool validate_editing_p1_animation_duration(
 // MAR-168: the shared scalar-offset primitive that the Graph value drag writes
 // through. Every case runs on an isolated ProjectData so a rejection can be
 // proven byte-atomic against `serialize_project`.
+bool validate_mar169_graph_interpolation_authoring(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::TimelineKeyKind;
+    using marrow::editor::TimelineKeySelector;
+    using marrow::editor::TransformTimelineChannel;
+    using marrow::runtime::InterpolationKind;
+
+    constexpr double kExact = 1e-12;
+    constexpr double kFloatTolerance = 1e-6;
+    const auto near_float = [](double left, double right) {
+        return std::abs(left - right) <= kFloatTolerance;
+    };
+    const auto narrowed = [](double value) {
+        return static_cast<double>(
+            static_cast<marrow::runtime::AnimationScalar>(value));
+    };
+    const auto control_points_match = [&](const marrow::runtime::Interpolation& easing,
+                                          const std::array<double, 4>& expected) {
+        if (easing.kind() != InterpolationKind::CubicBezier) return false;
+        const auto& points = easing.cubic_bezier();
+        return static_cast<double>(points.cx1) == narrowed(expected[0]) &&
+            static_cast<double>(points.cy1) == narrowed(expected[1]) &&
+            static_cast<double>(points.cx2) == narrowed(expected[2]) &&
+            static_cast<double>(points.cy2) == narrowed(expected[3]);
+    };
+
+    const auto make_transform_track = [](std::string bone,
+                                         TransformTimelineChannel channel,
+                                         std::vector<marrow::editor::TransformKeyframeEdit> keys) {
+        marrow::editor::TransformTimelineEdit edit;
+        edit.animation_name = "mar169";
+        edit.bone_name = std::move(bone);
+        edit.channel = channel;
+        edit.keyframes = std::move(keys);
+        return edit;
+    };
+
+    const auto build_project = [&]() {
+        marrow::editor::ProjectData project;
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Rotate,
+            {{0.0, 10.0, 0.0, 0.0,
+              marrow::runtime::Interpolation::cubic_bezier(0.25, 0.1, 0.75, 0.9)},
+             {0.5, 20.0, 0.0, 0.0, marrow::runtime::Interpolation::stepped()}}));
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Translate,
+            {{0.0, 0.0, 3.0, 7.0, marrow::runtime::Interpolation::linear()},
+             {0.5, 0.0, 9.0, -2.0, marrow::runtime::Interpolation::stepped()}}));
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Scale,
+            {{0.0, 0.0, -1.25, 2.0, marrow::runtime::Interpolation::linear()},
+             {0.5, 0.0, 0.5, 1.0, marrow::runtime::Interpolation::stepped()}}));
+        project.transform_timeline_edits.push_back(make_transform_track(
+            "spine",
+            TransformTimelineChannel::Shear,
+            {{0.0, 0.0, 4.0, -6.0, marrow::runtime::Interpolation::linear()},
+             {0.5, 0.0, 8.0, 12.0, marrow::runtime::Interpolation::linear()}}));
+
+        marrow::editor::SlotColorTimelineEdit color;
+        color.animation_name = "mar169";
+        color.slot_name = "body";
+        color.keyframes.push_back(
+            {0.0, marrow::runtime::SlotColor{0.25, 0.5, 0.75, 0.4},
+             marrow::runtime::Interpolation::linear()});
+        color.keyframes.push_back(
+            {0.5, marrow::runtime::SlotColor{0.5, 0.25, 0.125, 0.9},
+             marrow::runtime::Interpolation::stepped()});
+        project.slot_color_timeline_edits.push_back(std::move(color));
+
+        marrow::editor::MeshDeformTimelineEdit deform;
+        deform.animation_name = "mar169";
+        deform.slot_name = "body";
+        deform.attachment_name = "body_mesh";
+        deform.keyframes.push_back(
+            {0.0, {0.0, 0.0, 1.0, 2.0}, marrow::runtime::Interpolation::linear()});
+        project.mesh_deform_timeline_edits.push_back(std::move(deform));
+
+        marrow::editor::DrawOrderTimelineEdit draw_order;
+        draw_order.animation_name = "mar169";
+        draw_order.keyframes.push_back({0.0, {"body", "arm_l"}});
+        project.draw_order_timeline_edits.push_back(std::move(draw_order));
+
+        marrow::editor::EventTimelineEdit events;
+        events.animation_name = "mar169";
+        events.keyframes.push_back(
+            {0.0, "footstep", std::nullopt, std::nullopt, std::nullopt,
+             std::nullopt, std::nullopt, std::nullopt});
+        project.event_timeline_edits.push_back(std::move(events));
+
+        marrow::editor::SlotAttachmentTimelineEdit attachment;
+        attachment.animation_name = "mar169";
+        attachment.slot_name = "body";
+        attachment.keyframes.push_back({0.0, std::string("body")});
+        project.slot_attachment_timeline_edits.push_back(std::move(attachment));
+        return project;
+    };
+
+    const auto transform_selector = [](std::string bone,
+                                       TransformTimelineChannel channel,
+                                       double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::Transform;
+        selector.animation_name = "mar169";
+        selector.bone_name = std::move(bone);
+        selector.transform_channel = channel;
+        selector.time = time;
+        return selector;
+    };
+    const auto color_selector = [](double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::SlotColor;
+        selector.animation_name = "mar169";
+        selector.slot_name = "body";
+        selector.time = time;
+        return selector;
+    };
+    const auto deform_selector = [](double time) {
+        TimelineKeySelector selector;
+        selector.kind = TimelineKeyKind::Deform;
+        selector.animation_name = "mar169";
+        selector.slot_name = "body";
+        selector.attachment_name = "body_mesh";
+        selector.time = time;
+        return selector;
+    };
+
+    constexpr std::array<double, 4> kOvershoot{0.2, -0.4, 0.8, 1.6};
+    // The unique evenly spaced cubic that is exactly identical to Linear.
+    constexpr std::array<double, 4> kLinearEquivalentSeed{
+        1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0};
+
+    // --- One case per supported Transform family: the curve lands and every
+    // other field of the parent key is byte-identical. ---
+    {
+        const TransformTimelineChannel channels[] = {
+            TransformTimelineChannel::Rotate,
+            TransformTimelineChannel::Translate,
+            TransformTimelineChannel::Scale,
+            TransformTimelineChannel::Shear,
+        };
+        for (const TransformTimelineChannel channel : channels) {
+            marrow::editor::ProjectData project = build_project();
+            const auto* source =
+                project.find_transform_timeline_edit("mar169", "spine", channel);
+            if (source == nullptr || source->keyframes.empty()) {
+                std::cerr << "MAR-169 is missing a transform source timeline.\n";
+                return false;
+            }
+            const marrow::editor::TransformKeyframeEdit original =
+                source->keyframes.front();
+            const std::size_t original_count = source->keyframes.size();
+            const auto set = marrow::editor::set_keyframe_interpolation(
+                &project,
+                {transform_selector("spine", channel, 0.0)},
+                InterpolationKind::CubicBezier,
+                kOvershoot);
+            if (!set || !set.changed || set.key_count != 1U ||
+                set.changed_key_count != 1U) {
+                std::cerr << "MAR-169 could not author a transform curve: "
+                          << set.error << '\n';
+                return false;
+            }
+            const auto* edited =
+                project.find_transform_timeline_edit("mar169", "spine", channel);
+            if (edited == nullptr || edited->keyframes.size() != original_count) {
+                std::cerr << "MAR-169 reshaped a transform timeline.\n";
+                return false;
+            }
+            const marrow::editor::TransformKeyframeEdit& key = edited->keyframes.front();
+            if (key.time != original.time || key.angle != original.angle ||
+                key.x != original.x || key.y != original.y ||
+                !control_points_match(key.interpolation, kOvershoot)) {
+                std::cerr << "MAR-169 interpolation write did not preserve the parent key.\n";
+                return false;
+            }
+        }
+    }
+
+    // --- Slot Color and Deform families. ---
+    {
+        marrow::editor::ProjectData project = build_project();
+        const auto* color_source = project.find_slot_color_timeline_edit("mar169", "body");
+        const auto* deform_source =
+            project.find_mesh_deform_timeline_edit("mar169", "body", "body_mesh");
+        if (color_source == nullptr || color_source->keyframes.empty() ||
+            deform_source == nullptr || deform_source->keyframes.empty()) {
+            std::cerr << "MAR-169 is missing its colour or deform source timeline.\n";
+            return false;
+        }
+        const marrow::editor::SlotColorKeyframeEdit original_color =
+            color_source->keyframes.front();
+        const marrow::editor::DeformKeyframeEdit original_deform =
+            deform_source->keyframes.front();
+        const auto set = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {color_selector(0.0), deform_selector(0.0)},
+            InterpolationKind::CubicBezier,
+            kOvershoot);
+        const auto* color_edited = project.find_slot_color_timeline_edit("mar169", "body");
+        const auto* deform_edited =
+            project.find_mesh_deform_timeline_edit("mar169", "body", "body_mesh");
+        if (!set || !set.changed || set.key_count != 2U || set.changed_key_count != 2U ||
+            color_edited == nullptr || deform_edited == nullptr ||
+            color_edited->keyframes.front().time != original_color.time ||
+            color_edited->keyframes.front().color.r != original_color.color.r ||
+            color_edited->keyframes.front().color.g != original_color.color.g ||
+            color_edited->keyframes.front().color.b != original_color.color.b ||
+            color_edited->keyframes.front().color.a != original_color.color.a ||
+            !control_points_match(color_edited->keyframes.front().interpolation, kOvershoot) ||
+            deform_edited->keyframes.front().time != original_deform.time ||
+            deform_edited->keyframes.front().vertex_offsets !=
+                original_deform.vertex_offsets ||
+            !control_points_match(deform_edited->keyframes.front().interpolation, kOvershoot)) {
+            std::cerr << "MAR-169 could not author a slot-colour or deform curve: "
+                      << set.error << '\n';
+            return false;
+        }
+    }
+
+    // --- Segment-wide identity: exactly one `interpolation` field in the
+    // whole project moves, and the key's own X and Y are untouched. The easing
+    // is a property of the parent key, so `set_keyframe_interpolation()` has
+    // no component argument to write through. ---
+    {
+        marrow::editor::ProjectData project = build_project();
+        const marrow::editor::ProjectData before = project;
+        const std::string before_text = marrow::editor::serialize_project(project);
+        const auto* source = project.find_transform_timeline_edit(
+            "mar169", "spine", TransformTimelineChannel::Translate);
+        if (source == nullptr || source->keyframes.empty()) return false;
+        const marrow::editor::TransformKeyframeEdit original = source->keyframes.front();
+        const auto set = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::CubicBezier,
+            kOvershoot);
+        const auto* edited = project.find_transform_timeline_edit(
+            "mar169", "spine", TransformTimelineChannel::Translate);
+        if (!set || edited == nullptr || edited->keyframes.front().x != original.x ||
+            edited->keyframes.front().y != original.y ||
+            edited->keyframes.front().time != original.time) {
+            std::cerr << "MAR-169 segment-wide write moved a scalar component.\n";
+            return false;
+        }
+        // Count every keyframe in the project whose easing differs.
+        std::size_t differing = 0U;
+        const auto same_easing = [](const marrow::runtime::Interpolation& left,
+                                    const marrow::runtime::Interpolation& right) {
+            if (left.kind() != right.kind()) return false;
+            if (left.kind() != InterpolationKind::CubicBezier) return true;
+            const auto& a = left.cubic_bezier();
+            const auto& b = right.cubic_bezier();
+            return a.cx1 == b.cx1 && a.cy1 == b.cy1 && a.cx2 == b.cx2 &&
+                a.cy2 == b.cy2;
+        };
+        if (before.transform_timeline_edits.size() !=
+                project.transform_timeline_edits.size() ||
+            before.slot_color_timeline_edits.size() !=
+                project.slot_color_timeline_edits.size() ||
+            before.mesh_deform_timeline_edits.size() !=
+                project.mesh_deform_timeline_edits.size()) {
+            std::cerr << "MAR-169 reshaped the project's timeline collections.\n";
+            return false;
+        }
+        for (std::size_t timeline = 0U;
+             timeline < before.transform_timeline_edits.size();
+             ++timeline) {
+            const auto& left = before.transform_timeline_edits[timeline].keyframes;
+            const auto& right = project.transform_timeline_edits[timeline].keyframes;
+            if (left.size() != right.size()) return false;
+            for (std::size_t key = 0U; key < left.size(); ++key) {
+                if (!same_easing(left[key].interpolation, right[key].interpolation)) {
+                    ++differing;
+                }
+            }
+        }
+        for (std::size_t timeline = 0U;
+             timeline < before.slot_color_timeline_edits.size();
+             ++timeline) {
+            const auto& left = before.slot_color_timeline_edits[timeline].keyframes;
+            const auto& right = project.slot_color_timeline_edits[timeline].keyframes;
+            if (left.size() != right.size()) return false;
+            for (std::size_t key = 0U; key < left.size(); ++key) {
+                if (!same_easing(left[key].interpolation, right[key].interpolation)) {
+                    ++differing;
+                }
+            }
+        }
+        for (std::size_t timeline = 0U;
+             timeline < before.mesh_deform_timeline_edits.size();
+             ++timeline) {
+            const auto& left = before.mesh_deform_timeline_edits[timeline].keyframes;
+            const auto& right = project.mesh_deform_timeline_edits[timeline].keyframes;
+            if (left.size() != right.size()) return false;
+            for (std::size_t key = 0U; key < left.size(); ++key) {
+                if (!same_easing(left[key].interpolation, right[key].interpolation)) {
+                    ++differing;
+                }
+            }
+        }
+        if (differing != 1U) {
+            std::cerr << "MAR-169 changed " << differing
+                      << " interpolation fields instead of exactly one.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(project) == before_text) {
+            std::cerr << "MAR-169 reported a change it did not persist.\n";
+            return false;
+        }
+    }
+
+    // --- Linear -> Cubic, Stepped -> Cubic, Cubic -> Linear, Cubic -> Stepped. ---
+    {
+        marrow::editor::ProjectData project = build_project();
+        const auto linear_to_cubic = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::CubicBezier,
+            kLinearEquivalentSeed);
+        const auto stepped_to_cubic = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.5)},
+            InterpolationKind::CubicBezier,
+            kLinearEquivalentSeed);
+        const auto* translate = project.find_transform_timeline_edit(
+            "mar169", "spine", TransformTimelineChannel::Translate);
+        if (!linear_to_cubic || !stepped_to_cubic || translate == nullptr ||
+            translate->keyframes.size() != 2U ||
+            !control_points_match(
+                translate->keyframes[0].interpolation,
+                kLinearEquivalentSeed) ||
+            !control_points_match(
+                translate->keyframes[1].interpolation,
+                kLinearEquivalentSeed)) {
+            std::cerr << "MAR-169 did not convert linear and stepped segments to cubic.\n";
+            return false;
+        }
+
+        const auto to_linear = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Rotate, 0.0)},
+            InterpolationKind::Linear,
+            kOvershoot);
+        const auto to_stepped = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::Stepped,
+            kOvershoot);
+        const auto* rotate = project.find_transform_timeline_edit(
+            "mar169", "spine", TransformTimelineChannel::Rotate);
+        translate = project.find_transform_timeline_edit(
+            "mar169", "spine", TransformTimelineChannel::Translate);
+        if (!to_linear || !to_stepped || rotate == nullptr || translate == nullptr ||
+            rotate->keyframes.front().interpolation.kind() != InterpolationKind::Linear ||
+            translate->keyframes.front().interpolation.kind() !=
+                InterpolationKind::Stepped) {
+            std::cerr << "MAR-169 did not convert a cubic segment back to linear/stepped.\n";
+            return false;
+        }
+        const std::string serialized = marrow::editor::serialize_project(project);
+        if (serialized.find("\"curve\": \"linear\"") == std::string::npos ||
+            serialized.find("\"curve\": \"stepped\"") == std::string::npos) {
+            std::cerr << "MAR-169 linear/stepped conversion still serialized control points.\n";
+            return false;
+        }
+        // Linear and Stepped ignore control_points entirely, so an
+        // out-of-range array must not be validated against the X limits.
+        marrow::editor::ProjectData ignored = build_project();
+        const auto ignores_points = marrow::editor::set_keyframe_interpolation(
+            &ignored,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::Stepped,
+            {std::numeric_limits<double>::quiet_NaN(), 0.0, 5.0, 1.0});
+        if (!ignores_points || !ignores_points.changed) {
+            std::cerr << "MAR-169 validated control points for a non-cubic kind.\n";
+            return false;
+        }
+    }
+
+    // --- X limits and finiteness, in that order: NaN must be rejected by the
+    // finiteness test, because NaN < 0 and NaN > 1 are both false. ---
+    {
+        marrow::editor::ProjectData project = build_project();
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto boundary = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::CubicBezier,
+            {0.0, 0.0, 1.0, 1.0});
+        if (!boundary || !boundary.changed) {
+            std::cerr << "MAR-169 rejected the exactly-in-range boundary curve: "
+                      << boundary.error << '\n';
+            return false;
+        }
+
+        const double nan_value = std::numeric_limits<double>::quiet_NaN();
+        const double infinity = std::numeric_limits<double>::infinity();
+        const struct {
+            const char* label;
+            std::array<double, 4> points;
+        } rejections[] = {
+            {"cx1 just below zero", {-1e-6, 0.0, 0.5, 1.0}},
+            {"cx2 just above one", {0.0, 0.0, 1.0000001, 1.0}},
+            {"cx1 NaN", {nan_value, 0.0, 0.5, 1.0}},
+            {"cx1 +inf", {infinity, 0.0, 0.5, 1.0}},
+            {"cx1 -inf", {-infinity, 0.0, 0.5, 1.0}},
+            {"cy1 NaN", {0.0, nan_value, 0.5, 1.0}},
+            {"cy1 out of float32 range", {0.0, 1e300, 0.5, 1.0}},
+            {"cy2 -inf", {0.0, 0.0, 0.5, -infinity}},
+        };
+        marrow::editor::ProjectData rejection_project = build_project();
+        const std::string rejection_before =
+            marrow::editor::serialize_project(rejection_project);
+        for (const auto& rejection : rejections) {
+            const auto result = marrow::editor::set_keyframe_interpolation(
+                &rejection_project,
+                {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+                InterpolationKind::CubicBezier,
+                rejection.points);
+            if (result || result.changed || result.error.empty() ||
+                marrow::editor::serialize_project(rejection_project) !=
+                    rejection_before) {
+                std::cerr << "MAR-169 did not atomically reject " << rejection.label
+                          << ".\n";
+                return false;
+            }
+        }
+        (void)before;
+        (void)kExact;
+    }
+
+    // --- Unsupported key kinds and structural rejections. ---
+    {
+        marrow::editor::ProjectData project = build_project();
+        const std::string before = marrow::editor::serialize_project(project);
+        TimelineKeySelector draw_order;
+        draw_order.kind = TimelineKeyKind::DrawOrder;
+        draw_order.animation_name = "mar169";
+        draw_order.time = 0.0;
+        TimelineKeySelector event;
+        event.kind = TimelineKeyKind::Event;
+        event.animation_name = "mar169";
+        event.time = 0.0;
+        TimelineKeySelector slot_attachment;
+        slot_attachment.kind = TimelineKeyKind::SlotAttachment;
+        slot_attachment.animation_name = "mar169";
+        slot_attachment.slot_name = "body";
+        slot_attachment.time = 0.0;
+        const auto duplicate =
+            transform_selector("spine", TransformTimelineChannel::Translate, 0.0);
+        const auto unresolvable =
+            transform_selector("spine", TransformTimelineChannel::Translate, 99.0);
+
+        const struct {
+            const char* label;
+            std::vector<TimelineKeySelector> selectors;
+        } rejections[] = {
+            {"a draw-order selector", {draw_order}},
+            {"an event selector", {event}},
+            {"a slot-attachment selector", {slot_attachment}},
+            {"a duplicated selector", {duplicate, duplicate}},
+            {"an unresolvable selector", {unresolvable}},
+            {"an empty selector list", {}},
+            {"a mixed batch with one unsupported kind", {duplicate, draw_order}},
+        };
+        for (const auto& rejection : rejections) {
+            const auto result = marrow::editor::set_keyframe_interpolation(
+                &project,
+                rejection.selectors,
+                InterpolationKind::CubicBezier,
+                kOvershoot);
+            if (result || result.changed || result.error.empty() ||
+                marrow::editor::serialize_project(project) != before) {
+                std::cerr << "MAR-169 did not atomically reject " << rejection.label
+                          << ".\n";
+                return false;
+            }
+        }
+        const auto null_project = marrow::editor::set_keyframe_interpolation(
+            nullptr, {duplicate}, InterpolationKind::CubicBezier, kOvershoot);
+        if (null_project || null_project.error.empty()) {
+            std::cerr << "MAR-169 did not reject a null project.\n";
+            return false;
+        }
+    }
+
+    // --- No change: writing the identical curve twice is a silent no-op, and
+    // a partially-identical batch reports the split counts. ---
+    {
+        marrow::editor::ProjectData project = build_project();
+        const auto first = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::CubicBezier,
+            kOvershoot);
+        const std::string after_first = marrow::editor::serialize_project(project);
+        const auto second = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0)},
+            InterpolationKind::CubicBezier,
+            kOvershoot);
+        if (!first || !first.changed || second.changed || !second.error.empty() ||
+            second.key_count != 1U || second.changed_key_count != 0U ||
+            marrow::editor::serialize_project(project) != after_first) {
+            std::cerr << "MAR-169 did not report an identical rewrite as a no-op.\n";
+            return false;
+        }
+        const auto partial = marrow::editor::set_keyframe_interpolation(
+            &project,
+            {transform_selector("spine", TransformTimelineChannel::Translate, 0.0),
+             transform_selector("spine", TransformTimelineChannel::Translate, 0.5)},
+            InterpolationKind::CubicBezier,
+            kOvershoot);
+        if (!partial || !partial.changed || partial.key_count != 2U ||
+            partial.changed_key_count != 1U) {
+            std::cerr << "MAR-169 did not split key_count and changed_key_count.\n";
+            return false;
+        }
+    }
+
+    // --- Save/reload: the strongest available proof that the write gate and
+    // the loader's read gate are the same predicate. ---
+    {
+        const std::filesystem::path round_trip_path =
+            "/tmp/marrow_mar169_interpolation.marrow";
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = round_trip_path;
+
+        TimelineKeySelector fixture_selector;
+        fixture_selector.kind = TimelineKeyKind::Transform;
+        fixture_selector.animation_name = "idle";
+        fixture_selector.bone_name = "arm_l";
+        fixture_selector.transform_channel = TransformTimelineChannel::Rotate;
+        fixture_selector.time = 0.25;
+        const auto set = marrow::editor::set_keyframe_interpolation(
+            &project, {fixture_selector}, InterpolationKind::CubicBezier, kOvershoot);
+        if (!set || !set.changed) {
+            std::cerr << "MAR-169 round trip could not author the fixture curve: "
+                      << set.error << '\n';
+            return false;
+        }
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        if (!reloaded) {
+            std::cerr << reloaded.error->format();
+            return false;
+        }
+        const auto* reloaded_track = reloaded.project->find_transform_timeline_edit(
+            "idle", "arm_l", TransformTimelineChannel::Rotate);
+        if (reloaded_track == nullptr || reloaded_track->keyframes.empty() ||
+            !control_points_match(
+                reloaded_track->keyframes.front().interpolation, kOvershoot)) {
+            std::cerr << "MAR-169 overshoot curve did not survive save and reload.\n";
+            return false;
+        }
+        (void)near_float;
+    }
+    std::cout << "MAR-169 shared bezier interpolation authoring validated "
+                 "across transform, slot-colour, and deform families.\n";
+    return true;
+}
+
 bool validate_mar168_graph_scalar_authoring(
     const marrow::editor::ProjectLoadResult& project_result) {
     using marrow::editor::TimelineKeyKind;
@@ -3732,6 +4308,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar168_graph_scalar_authoring(result)) {
+            return 1;
+        }
+        if (!validate_mar169_graph_interpolation_authoring(result)) {
             return 1;
         }
     }

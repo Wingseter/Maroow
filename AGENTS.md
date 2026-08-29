@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-168, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-169 is the next product milestone and depends on MAR-168. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-169, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-170 is the next product milestone and depends on MAR-169. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -158,7 +158,7 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (56 operations, including parameter and animation-duration authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (57 operations, including parameter, animation-duration, and timeline-interpolation authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
@@ -226,6 +226,61 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-169 Graphical Shared Bezier Handle Editing Validation Results
+
+Validated 2026-08-30. The Timeline Graph tab now edits the active key's outgoing
+shared `[cx1, cy1, cx2, cy2]` easing directly. A left press on a drawn handle
+arms the same MAR-168 drag candidate, holding no transaction, and the first
+motion past the shared inclusive 4.0 logical-pixel dead zone opens one
+`EditTransaction`. A handle drag is free 2-D: `decide_drag_axis()` is
+deliberately not called, because `cx` and `cy` are two parameters of one curve
+written by one primitive. `cx` is clamped into `[0, 1]` by the pure pointer
+mapping so a drag past the boundary stops there and stays live, while the new
+additive `set_keyframe_interpolation()` primitive independently *rejects* any
+out-of-range or non-finite value atomically; finiteness is tested before range,
+because `NaN < 0` and `NaN > 1` are both false. Finite `cy` overshoot is
+preserved. Grabbing a Linear or Stepped handle converts the segment to Cubic
+seeded at `[1/3, 1/3, 2/3, 2/3]` inside the same transaction and the same undo
+entry. The identical mutation is exposed as the 57th Agent operation
+`timeline.set_interpolation` and as one matching MCP tool, both calling the same
+primitive. Curve presets and remembered defaults remain MAR-170.
+
+| Slice | Verification | Result |
+| --- | --- | --- |
+| Handle mapping | Handles sit at `[cx1, cy1]` and `[cx2, cy2]` along the frozen segment frame; the pixel/control-point mapping round-trips within `1e-9` and its anchors agree with the polyline `build_geometry()` renders; a flat segment substitutes a positive 100 logical-pixel reference span with `flat_value_span` set, and a zero-duration segment exposes no handles at all | PASS |
+| X limits and Y overshoot | Drags clamp `cx` to exactly `0.0` and `1.0` and keep the gesture live; the primitive rejects `-1e-6`, `1.0000001`, NaN, `±inf`, and `1e300` atomically with the project byte-identical; finite `cy` overshoot `[0.2, -0.4, 0.8, 1.6]` round-trips through save/reload and through JSON plus v2 MBIN export | PASS |
+| Segment-wide curve identity | `set_keyframe_interpolation()` takes no component parameter; editing while displaying Translate Y makes the Translate X segment report the same `SegmentKind` and control points; exactly one `interpolation` field in the whole project differs; switching the displayed scalar never forks the curve | PASS |
+| Conversion and transaction | Grabbing a Linear or Stepped handle converts to Cubic seeded at `[1/3, 1/3, 2/3, 2/3]` inside one transaction; a press without motion opens none; a drag that ends on its original Cubic points commits none; Escape, `cancel_authoring_gestures()`, `cancel_timeline_graph_point_drag()`, a mid-drag Dopesheet tab switch, a lost active key, a non-finite pointer, and every primitive rejection restore project bytes, history, redo depth, project revision, dirty state, dopesheet key times, graph values, graph segment kinds, and graph control points | PASS |
+| Agent and MCP parity | `timeline.set_interpolation` is the 57th operation (`edit`, mutating, no review, dry-run supported) with matching C++/Python dry-run, validation, per-key `previous_interpolation` reporting, mutation, `no_change`, and undo behaviour; the growth is purely additive and no existing operation's name, category, flags, arguments, or response shape changed | PASS |
+| Persistence and compatibility | Save/reload and JSON/MBIN export preserve the authored curve bitwise; `.marrow` schema, `.mskl` v1, `.mbin` v2, C ABI v1, `SelectionSet`, and GPU ownership are unchanged, and only the pre-existing `curve` field is written | PASS |
+
+Validated commands and outputs:
+
+- `cmake -S . -B build && cmake --build build -j10` -> configure and all default targets built
+- `./build/marrow_timeline_graph_model_tests` -> `Timeline graph model: 20 cases passed`, including the new `handle geometry and pointer mapping` case
+- `./build/marrow_timeline_model_tests` -> `Timeline model: 9 cases passed`
+- `./build/marrow_viewport_interaction_tests` -> `Viewport interaction kernel tests passed.`; `./build/marrow_selection_tests` -> `SelectionSet: 8 cases passed`
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed; `MAR-169 shared bezier interpolation authoring validated across transform, slot-colour, and deform families` covering Rotate/Translate/Scale/Shear, Slot Color, Deform, the exactly-one-`interpolation`-field identity assertion, Linear/Stepped -> Cubic and Cubic -> Linear/Stepped conversion, the `[0, 0, 1, 1]` boundary, eight atomic control-point rejections, seven structural rejections, the split `key_count`/`changed_key_count` no-op, and an overshoot save/reload round trip
+- `./build/marrow_project_smoke --create /tmp/player_idle.marrow` -> minimal project defaults, references, and round trip validated
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, including the new headless `validate_timeline_graph_easing_shell_smoke` scenario and the actual-frame handle frames, which reported `Timeline Graph actual-frame handles: first=(592.909,775.303) second=(747.455,749.235)`
+- `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> parameter-mode shell smoke passed
+- `ctest --test-dir build -N` -> `Total Tests: 21`; `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 21` in 1.69 s. MAR-169 registers no new CTest.
+- `cmake -S . -B build-display -DCMAKE_BUILD_TYPE=Debug -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-display -j10 && ctest --test-dir build-display --output-on-failure` -> automated Debug display-enabled suite `100% tests passed, 0 tests failed out of 24`, including 3 display-labelled tests
+- `cmake -S . -B build-platform-release -DCMAKE_BUILD_TYPE=Release -DMARROW_ENABLE_DISPLAY_TESTS=ON && cmake --build build-platform-release -j10 && ctest --test-dir build-platform-release --output-on-failure` -> automated Release display-enabled suite `100% tests passed, 0 tests failed out of 24`, including 3 display-labelled tests
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_mar169.mskl --export-binary /tmp/marrow_mar169.mbin` -> export passed; binary errors `rotation=0.00274662deg`, `position=0.000811016px`
+- `./build/marrow_inspect --compare /tmp/marrow_mar169.mbin /tmp/marrow_mar169.mskl` -> `Comparison: /tmp/marrow_mar169.mskl matches /tmp/marrow_mar169.mbin`; `rotate_keys=10->10`, `translate_keys=6->6`, JSON `14336` bytes, MBIN v2 `3984` bytes with `version=2 optimized=yes animations=3 rotate_channels=4 translate_channels=2 keys=16 sorted=yes`
+- `./build/marrow_fixture_smoke /tmp/marrow_mar169.mskl /tmp/player_idle.matl` -> exported runtime passed with 16 bones, 7 slots, 5 skins, 3 animations, 2 events, 3 draw commands, and 1 clip
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` against the exact 57-operation registry, including the new `timeline.set_interpolation` expectation row and its dry-run/live/read-back/`no_change`/undo sequence plus ten rejection cases. `agent_operation_descriptor_count()` is asserted to equal 57 at the start of each of the three graph shell scenarios and compared for equality at their ends
+- `./build/marrow_agent_socket_tests` -> `Agent socket tests: 4 cases passed`; `./build/marrow_c_smoke` -> C ABI loaded 3 commands, 6 indices, and 2 callback events
+- `tools/mcp/venv/bin/python tools/mcp/test_client.py` against `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` -> `mcp test_client: PASSED` with 57/57 exact C++/Python name parity, the asserted `timeline.set_interpolation` registry metadata row, and the dry-run/live/read-back/undo sequence proving `[0.2, -0.4, 0.8, 1.6]` survives and is restored
+- MCP schema `py_compile`, `cmake --build build --target marrow_verify_third_party`, fixture/`.mskl`/PRD JSON parsing, `git diff --check`, and `git lfs status` -> passed; no LFS object was staged or queued to push
+- `git diff --stat -- include/marrow/c_api src/c_api` and `git diff --stat -- src/editor/project.cpp src/runtime/skeleton_parse.cpp src/runtime/binary.cpp` -> empty; the `include/marrow/editor/authoring.hpp`, `src/editor/agent_dispatch.cpp`, and `src/editor/agent_handlers_editing.cpp` diffs contain added lines only
+
+The display suites are automated evidence only. This checkpoint adds no manual
+visible-UI, Windows 11, physical-input, or platform qualification credit.
+MAR-192 through MAR-210 remain open, and support qualification remains governed
+by `docs/root1/platform-validation.md`.
 
 ## MAR-168 Graph Key Time and Value Editing Validation Results
 

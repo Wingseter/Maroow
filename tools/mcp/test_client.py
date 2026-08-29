@@ -36,15 +36,16 @@ async def test(parameter_only=False):
         "animation.delete",
         "animation.set_duration",
         "timeline.retime_keyframes",
+        "timeline.set_interpolation",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 56
+    assert len(registry_names) == 57
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 56
+    assert len(mcp_names) == 57
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -71,6 +72,13 @@ async def test(parameter_only=False):
             "requires_review": False,
             "dry_run_supported": True,
         }
+    assert registry_by_name["timeline.set_interpolation"] == {
+        "name": "timeline.set_interpolation",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
     assert registry_by_name["animation.set_duration"] == {
         "name": "animation.set_duration",
         "category": "edit",
@@ -530,6 +538,91 @@ async def test(parameter_only=False):
             },
         ),
     )
+
+    # MAR-169: dry run -> live -> read-back -> undo, proving mutation,
+    # overshoot preservation, and undo through the echoed previous curve.
+    interpolation_key = {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "translate",
+        "time": 0.0,
+    }
+    before = require_ok(
+        "timeline.set_interpolation dry-run",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [interpolation_key],
+                "interpolation": [0.2, -0.4, 0.8, 1.6],
+                "dry_run": True,
+            },
+        ),
+    )
+    assert before["scene_delta"]["key_count"] == 1
+    assert before["scene_delta"]["changed_key_count"] == 1
+    assert before["scene_delta"]["keys_truncated"] is False
+    original_curve = before["scene_delta"]["keys"][0]["previous_interpolation"]
+
+    require_ok(
+        "timeline.set_interpolation",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": [0.2, -0.4, 0.8, 1.6]},
+        ),
+    )
+    after = require_ok(
+        "timeline.set_interpolation read-back",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [interpolation_key],
+                "interpolation": "linear",
+                "dry_run": True,
+            },
+        ),
+    )
+    stored = after["scene_delta"]["keys"][0]["previous_interpolation"]
+    assert [round(value, 4) for value in stored] == [0.2, -0.4, 0.8, 1.6]
+
+    require_rejected(
+        "timeline.set_interpolation rejects out-of-range x",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": [1.5, 0.0, 0.8, 1.0]},
+        ),
+    )
+    require_rejected(
+        "timeline.set_interpolation rejects draw_order keys",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [{"kind": "draw_order", "animation": "idle", "time": 0.0}],
+                "interpolation": "linear",
+            },
+        ),
+    )
+    require_rejected(
+        "timeline.set_interpolation requires interpolation",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key]},
+        ),
+    )
+
+    require_ok("undo timeline interpolation", await client.send_command("undo"))
+    restored = require_ok(
+        "timeline.set_interpolation after undo",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [interpolation_key],
+                "interpolation": "linear",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert restored["scene_delta"]["keys"][0]["previous_interpolation"] == original_curve
 
     require_ok(
         "set_transform dry-run",

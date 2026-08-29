@@ -23,6 +23,12 @@ constexpr ImU32 kGraphAxisText = IM_COL32(0xb7, 0xbd, 0xc9, 0xff);
 constexpr ImU32 kGraphPlayhead = IM_COL32(0xff, 0x54, 0x50, 0xff);
 constexpr ImU32 kGraphSelection = IM_COL32(0xff, 0xc1, 0x5c, 0xff);
 constexpr ImU32 kGraphActiveCenter = IM_COL32(0xe6, 0xea, 0xf2, 0xff);
+// Squares, not circles, so a handle never reads as a key point; light blue so
+// it stays distinguishable from the gold selection ring at any component hue.
+constexpr ImU32 kGraphHandleTangent = IM_COL32(0x9a, 0xd8, 0xff, 0x80);
+constexpr ImU32 kGraphHandleFill = IM_COL32(0x9a, 0xd8, 0xff, 0xff);
+constexpr float kGraphHandleHalfExtent = 4.0f;
+constexpr double kGraphHandleHitRadius = 7.0;
 
 ImU32 component_color(timeline_graph_model::Component component) {
     using Component = timeline_graph_model::Component;
@@ -306,6 +312,61 @@ std::string timeline_graph_drag_readout(
     return {};
 }
 
+/**
+ * @brief Resolves the one component the handles are drawn and grabbed for.
+ *
+ * One curve gets exactly one pair of handles: drawing a pair per visible
+ * component would suggest each component owns its own curve, which is the
+ * misconception the shared-easing contract exists to prevent. Both the
+ * geometry call and the press branch read this, so the drawn handle and the
+ * grabbed handle always agree.
+ */
+std::optional<std::size_t> resolve_handle_component_index(
+    const timeline_graph_model::Track& track,
+    const TimelineGraphViewState& graph_view) {
+    if (graph_view.active_component.has_value()) {
+        for (std::size_t index = 0U; index < track.components.size(); ++index) {
+            if (track.components[index].component == *graph_view.active_component &&
+                graph_view.component_visible[index]) {
+                return index;
+            }
+        }
+    }
+    for (std::size_t index = 0U; index < track.components.size(); ++index) {
+        if (graph_view.component_visible[index]) return index;
+    }
+    return std::nullopt;
+}
+
+const char* interpolation_kind_label(marrow::runtime::InterpolationKind kind) {
+    switch (kind) {
+    case marrow::runtime::InterpolationKind::Linear: return "Linear";
+    case marrow::runtime::InterpolationKind::Stepped: return "Stepped";
+    case marrow::runtime::InterpolationKind::CubicBezier: return "Bezier";
+    }
+    return "Linear";
+}
+
+/** @brief One-line readout of the live easing drag, or empty when none is. */
+std::string timeline_graph_easing_readout(const ShellState& state) {
+    if (!state.timeline_editor.graph_handle_gesture.has_value()) return {};
+    const TimelineGraphHandleGesture& gesture =
+        *state.timeline_editor.graph_handle_gesture;
+    char buffer[224]{};
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "Easing  %s -> [%.3f, %.3f, %.3f, %.3f]%s%s",
+        interpolation_kind_label(gesture.original_kind),
+        gesture.applied_control_points[0],
+        gesture.applied_control_points[1],
+        gesture.applied_control_points[2],
+        gesture.applied_control_points[3],
+        gesture.clamped_x ? "  (X clamped)" : "",
+        gesture.frame.flat_value_span ? "  (flat segment: 100 px = 1.0)" : "");
+    return buffer;
+}
+
 std::array<bool, 4> available_components(
     const timeline_graph_model::Projection& projection) {
     std::array<bool, 4> visible{false, false, false, false};
@@ -457,16 +518,190 @@ bool begin_timeline_graph_point_drag(
     return true;
 }
 
+bool begin_timeline_graph_handle_drag(
+    ShellState* state,
+    const TimelineTrackRow& track,
+    const timeline_graph_model::HandleGeometry& handles,
+    timeline_graph_model::HandleIndex handle,
+    std::uint32_t item_id,
+    timeline_graph_model::PlotRect plot,
+    const timeline_graph_model::View& view,
+    double pointer_x,
+    double pointer_y) {
+    if (state == nullptr || authoring_gesture_active(*state) ||
+        state->timeline_editor.graph_drag.has_value() ||
+        !timeline_track_is_editable(track) ||
+        !timeline_graph_component_is_editable(track, handles.component) ||
+        !std::isfinite(pointer_x) || !std::isfinite(pointer_y) ||
+        !graph_view_is_finite(view) ||
+        !std::isfinite(plot.min_x) || !std::isfinite(plot.min_y) ||
+        !std::isfinite(plot.max_x) || !std::isfinite(plot.max_y)) {
+        return false;
+    }
+    // Handles belong to the active key's outgoing segment only.
+    if (!state->timeline_editor.active_key.has_value() ||
+        !(*state->timeline_editor.active_key == handles.key)) {
+        return false;
+    }
+    if (!timeline_key_index(track, handles.key).has_value()) return false;
+    const auto& projection = cached_timeline_graph_projection(state, track);
+    if (projection.status != timeline_graph_model::ProjectionStatus::Ready ||
+        !projection.track.has_value()) {
+        return false;
+    }
+    if (!std::isfinite(handles.frame.time_span) ||
+        !(handles.frame.time_span > timeline_graph_model::kMinimumSegmentSeconds) ||
+        !std::isfinite(handles.frame.value_span) ||
+        handles.frame.value_span == 0.0 ||
+        !std::isfinite(handles.frame.start_time_seconds) ||
+        !std::isfinite(handles.frame.start_value)) {
+        return false;
+    }
+
+    marrow::runtime::InterpolationKind segment_kind =
+        marrow::runtime::InterpolationKind::Linear;
+    switch (handles.kind) {
+    case timeline_graph_model::SegmentKind::Linear:
+        segment_kind = marrow::runtime::InterpolationKind::Linear;
+        break;
+    case timeline_graph_model::SegmentKind::Stepped:
+        segment_kind = marrow::runtime::InterpolationKind::Stepped;
+        break;
+    case timeline_graph_model::SegmentKind::Cubic:
+        segment_kind = marrow::runtime::InterpolationKind::CubicBezier;
+        break;
+    }
+
+    TimelineGraphPointDrag drag;
+    drag.item_id = item_id;
+    drag.target = GraphDragTarget::Handle;
+    drag.axis = timeline_graph_model::DragAxis::Undecided;
+    drag.track_id = track.id;
+    drag.component = handles.component;
+    drag.press_pointer_x = pointer_x;
+    drag.press_pointer_y = pointer_y;
+    drag.press_time_seconds = handles.frame.start_time_seconds;
+    drag.press_value = handles.frame.start_value;
+    drag.frozen_view = view;
+    drag.frozen_plot = plot;
+    drag.pressed_key = handles.key;
+    drag.component_index = handles.component_index;
+    drag.handle = handle;
+    drag.frame = handles.frame;
+    drag.seed_control_points = handles.control_points;
+    drag.segment_kind = segment_kind;
+    state->timeline_editor.graph_drag.emplace(std::move(drag));
+    return true;
+}
+
 void cancel_timeline_graph_point_drag(ShellState* state) {
     if (state == nullptr || !state->timeline_editor.graph_drag.has_value()) return;
+    const GraphDragTarget target = state->timeline_editor.graph_drag->target;
     const timeline_graph_model::DragAxis axis = state->timeline_editor.graph_drag->axis;
     state->timeline_editor.graph_drag.reset();
+    if (target == GraphDragTarget::Handle) {
+        finish_timeline_graph_handle_gesture(state, false);
+        return;
+    }
     if (axis == timeline_graph_model::DragAxis::Time) {
         finish_timeline_retime_gesture(state, false);
     } else if (axis == timeline_graph_model::DragAxis::Value) {
         finish_timeline_graph_value_gesture(state, false);
     }
 }
+
+namespace {
+
+/**
+ * @brief Advances the Handle branch of the shared graph drag driver.
+ *
+ * A handle drag is free 2-D: `decide_drag_axis()` is deliberately not called,
+ * because `cx` and `cy` are two parameters of one curve written by one
+ * primitive, so MAR-168's axis lock has no rollback proof to protect here and
+ * would make the curve un-authorable.
+ */
+bool update_timeline_graph_handle_drag(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    const TimelineTrackRow* row,
+    double pointer_x,
+    double pointer_y) {
+    TimelineGraphPointDrag& drag = *state->timeline_editor.graph_drag;
+    // The handle belongs to the active key; losing that identity mid-drag
+    // would write the curve of a key the user never grabbed.
+    if (!state->timeline_editor.active_key.has_value() ||
+        !(*state->timeline_editor.active_key == drag.pressed_key)) {
+        const bool had_gesture =
+            state->timeline_editor.graph_handle_gesture.has_value();
+        cancel_timeline_graph_point_drag(state);
+        if (!had_gesture) {
+            state->status_message = "The graph editing context changed during editing";
+        }
+        return false;
+    }
+
+    if (!state->timeline_editor.graph_handle_gesture.has_value()) {
+        if (!std::isfinite(pointer_x) || !std::isfinite(pointer_y)) {
+            state->timeline_editor.graph_drag.reset();
+            state->status_message = "Graph easing drag pointer became unusable";
+            return false;
+        }
+        if (std::max(
+                std::abs(pointer_x - drag.press_pointer_x),
+                std::abs(pointer_y - drag.press_pointer_y)) <
+            timeline_graph_model::kDragDeadZonePixels) {
+            return true;
+        }
+        if (!begin_timeline_graph_handle_gesture(
+                state,
+                drag.item_id,
+                *row,
+                drag.pressed_key,
+                drag.handle,
+                drag.frame,
+                drag.seed_control_points,
+                drag.segment_kind,
+                tracks)) {
+            state->timeline_editor.graph_drag.reset();
+            state->status_message = "Could not start the graph easing drag";
+            return false;
+        }
+    }
+
+    const TimelineGraphPointDrag& live = *state->timeline_editor.graph_drag;
+    const std::array<double, 4> applied =
+        state->timeline_editor.graph_handle_gesture->applied_control_points;
+    const auto control_points =
+        timeline_graph_model::control_points_from_handle_pointer(
+            live.frame,
+            applied,
+            live.handle,
+            live.frozen_view,
+            live.frozen_plot,
+            pointer_x,
+            pointer_y);
+    if (!control_points.has_value()) {
+        state->timeline_editor.graph_drag.reset();
+        finish_timeline_graph_handle_gesture(state, false);
+        state->status_message = "Graph easing drag pointer became unusable";
+        return false;
+    }
+    state->timeline_editor.graph_handle_gesture->clamped_x =
+        (*control_points)[live.handle == timeline_graph_model::HandleIndex::First
+                              ? 0U
+                              : 2U] == 0.0 ||
+        (*control_points)[live.handle == timeline_graph_model::HandleIndex::First
+                              ? 0U
+                              : 2U] == 1.0;
+    if (!apply_timeline_graph_handle_control_points(state, tracks, *control_points)) {
+        // apply_* already cancelled its own gesture.
+        state->timeline_editor.graph_drag.reset();
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 bool update_timeline_graph_point_drag(
     ShellState* state,
@@ -482,9 +717,14 @@ bool update_timeline_graph_point_drag(
         return false;
     }
     const auto finish_live_axis = [&](bool commit) {
+        const GraphDragTarget target = state->timeline_editor.graph_drag->target;
         const timeline_graph_model::DragAxis axis =
             state->timeline_editor.graph_drag->axis;
         state->timeline_editor.graph_drag.reset();
+        if (target == GraphDragTarget::Handle) {
+            finish_timeline_graph_handle_gesture(state, commit);
+            return;
+        }
         if (axis == timeline_graph_model::DragAxis::Time) {
             finish_timeline_retime_gesture(state, commit);
         } else if (axis == timeline_graph_model::DragAxis::Value) {
@@ -506,12 +746,17 @@ bool update_timeline_graph_point_drag(
             timeline_graph_model::ProjectionStatus::Ready) {
         const bool had_gesture =
             state->timeline_editor.graph_drag->axis !=
-            timeline_graph_model::DragAxis::Undecided;
+                timeline_graph_model::DragAxis::Undecided ||
+            state->timeline_editor.graph_handle_gesture.has_value();
         cancel_timeline_graph_point_drag(state);
         if (!had_gesture) {
             state->status_message = "The graph editing context changed during editing";
         }
         return false;
+    }
+
+    if (state->timeline_editor.graph_drag->target == GraphDragTarget::Handle) {
+        return update_timeline_graph_handle_drag(state, tracks, row, pointer_x, pointer_y);
     }
 
     TimelineGraphPointDrag& drag = *state->timeline_editor.graph_drag;
@@ -628,6 +873,15 @@ TimelineGraphRenderStats draw_timeline_graph_body(
 
     const timeline_graph_model::Track& track = *projection.track;
     auto& graph_view = state->timeline_editor.graph_view;
+    // Hiding the dragged component mid-gesture would leave an invisible drag
+    // running against a frozen component index, so both graph drag kinds lock
+    // the visibility controls for as long as they are live.
+    const bool graph_drag_or_gesture_live =
+        state->timeline_editor.graph_drag.has_value() ||
+        state->timeline_editor.graph_value_gesture.has_value() ||
+        state->timeline_editor.graph_handle_gesture.has_value();
+    stats.component_controls_disabled = graph_drag_or_gesture_live;
+    ImGui::BeginDisabled(graph_drag_or_gesture_live);
     bool had_visible_component = false;
     for (std::size_t component = 0U; component < track.components.size(); ++component) {
         had_visible_component = had_visible_component ||
@@ -662,11 +916,14 @@ TimelineGraphRenderStats draw_timeline_graph_body(
     }
     if (!had_visible_component && has_visible_component) graph_view.needs_fit = true;
 
+    ImGui::EndDisabled();
+
     ImGui::SameLine();
     // The same shared TimelineEditorState::snap_to_frames field the Dopesheet
     // tab owns; toggling it in either tab is visible in the other.
     ImGui::Checkbox("Snap", &state->timeline_editor.snap_to_frames);
     ImGui::SameLine();
+    ImGui::BeginDisabled(graph_drag_or_gesture_live);
     const bool fit_clicked = ImGui::SmallButton("Fit");
     const ImVec2 fit_item_min = ImGui::GetItemRectMin();
     const ImVec2 fit_item_max = ImGui::GetItemRectMax();
@@ -674,16 +931,20 @@ TimelineGraphRenderStats draw_timeline_graph_body(
     stats.fit_min_y = fit_item_min.y;
     stats.fit_max_x = fit_item_max.x;
     stats.fit_max_y = fit_item_max.y;
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled(
         "Outgoing: %s",
         outgoing_kind_label(track, state->timeline_editor.active_key));
 
     if (track.components.size() == 1U) {
-        ImGui::TextUnformatted("Outgoing easing is shared by this key.");
+        ImGui::TextUnformatted(
+            "Outgoing easing is shared by this key; dragging a handle edits that one curve.");
     } else {
         ImGui::TextUnformatted(
             "Outgoing easing is shared by every X/Y or RGBA component of this key; per-component curves are not supported.");
+        ImGui::TextUnformatted(
+            "Dragging a handle edits that one shared curve for every component of the key.");
     }
 
     const float total_width = std::max(160.0f, ImGui::GetContentRegionAvail().x);
@@ -776,10 +1037,55 @@ TimelineGraphRenderStats draw_timeline_graph_body(
         return stats;
     }
 
+    // Handles belong to the active key's outgoing segment, for one component.
+    const auto handle_component_index =
+        resolve_handle_component_index(track, graph_view);
+    std::optional<timeline_graph_model::HandleGeometry> handles;
+    if (handle_component_index.has_value() &&
+        state->timeline_editor.active_key.has_value() &&
+        state->timeline_editor.active_key->track_id == track.track_id) {
+        handles = timeline_graph_model::build_handle_geometry(
+            track,
+            *state->timeline_editor.active_key,
+            *handle_component_index,
+            graph_view.view,
+            plot);
+    }
+    if (handles.has_value()) {
+        stats.handles_drawn = true;
+        stats.first_handle_x = static_cast<float>(handles->first_handle.x);
+        stats.first_handle_y = static_cast<float>(handles->first_handle.y);
+        stats.second_handle_x = static_cast<float>(handles->second_handle.x);
+        stats.second_handle_y = static_cast<float>(handles->second_handle.y);
+        stats.handle_flat_value_span = handles->frame.flat_value_span;
+        stats.active_segment_kind = handles->kind;
+    }
+
     if (plot_hovered && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-        const auto hit = timeline_graph_model::hit_test(
-            *geometry, io.MousePos.x, io.MousePos.y, 8.0);
-        if (hit.has_value()) {
+        // The handle hit test runs first: a handle press must not scrub the
+        // playhead or change the selection, because that would move the very
+        // anchors the frozen segment frame depends on.
+        const auto handle_hit = handles.has_value()
+            ? timeline_graph_model::hit_test_handle(
+                  *handles,
+                  static_cast<double>(io.MousePos.x),
+                  static_cast<double>(io.MousePos.y),
+                  kGraphHandleHitRadius)
+            : std::nullopt;
+        if (handle_hit.has_value()) {
+            (void)begin_timeline_graph_handle_drag(
+                state,
+                *row,
+                *handles,
+                handle_hit->handle,
+                ImGui::GetItemID(),
+                plot,
+                graph_view.view,
+                static_cast<double>(io.MousePos.x),
+                static_cast<double>(io.MousePos.y));
+        } else if (const auto hit = timeline_graph_model::hit_test(
+                       *geometry, io.MousePos.x, io.MousePos.y, 8.0);
+                   hit.has_value()) {
             const bool additive = io.KeyCtrl || io.KeySuper;
             if (activate_timeline_graph_point(
                     state, *row, *hit, additive, "Timeline Graph")) {
@@ -805,7 +1111,10 @@ TimelineGraphRenderStats draw_timeline_graph_body(
             state->timeline_editor.active_key = active_key;
         }
     }
-    const std::string drag_readout = timeline_graph_drag_readout(*state, track.kind);
+    std::string drag_readout = timeline_graph_drag_readout(*state, track.kind);
+    if (drag_readout.empty()) drag_readout = timeline_graph_easing_readout(*state);
+    stats.handle_gesture_active =
+        state->timeline_editor.graph_handle_gesture.has_value();
     stats.drag_active = state->timeline_editor.graph_drag.has_value();
     stats.value_gesture_active =
         state->timeline_editor.graph_value_gesture.has_value();
@@ -859,6 +1168,30 @@ TimelineGraphRenderStats draw_timeline_graph_body(
             ++stats.cubic_segment_count;
             draw_list->AddCircle(marker, 3.5f, color, 12, 1.0f);
             break;
+        }
+    }
+    if (handles.has_value()) {
+        const ImVec2 start_anchor(
+            static_cast<float>(handles->start_anchor.x),
+            static_cast<float>(handles->start_anchor.y));
+        const ImVec2 end_anchor(
+            static_cast<float>(handles->end_anchor.x),
+            static_cast<float>(handles->end_anchor.y));
+        const ImVec2 first(
+            static_cast<float>(handles->first_handle.x),
+            static_cast<float>(handles->first_handle.y));
+        const ImVec2 second(
+            static_cast<float>(handles->second_handle.x),
+            static_cast<float>(handles->second_handle.y));
+        draw_list->AddLine(start_anchor, first, kGraphHandleTangent, 1.0f);
+        draw_list->AddLine(end_anchor, second, kGraphHandleTangent, 1.0f);
+        for (const ImVec2& handle : {first, second}) {
+            draw_list->AddRectFilled(
+                ImVec2(handle.x - kGraphHandleHalfExtent,
+                       handle.y - kGraphHandleHalfExtent),
+                ImVec2(handle.x + kGraphHandleHalfExtent,
+                       handle.y + kGraphHandleHalfExtent),
+                kGraphHandleFill);
         }
     }
     if (geometry->playhead_x.has_value()) {

@@ -140,8 +140,8 @@ bool validate_timeline_graph_shell_smoke(
         marrow::editor::agent_operation_descriptor_count();
     const bool dirty_before = state.session.dirty();
     const bool shell_dirty_before = state.project_dirty;
-    if (operation_count_before != 56U) {
-        std::cerr << "Graph shell smoke requires the unchanged 56-operation registry.\n";
+    if (operation_count_before != 57U) {
+        std::cerr << "Graph shell smoke requires the exact 57-operation registry.\n";
         return false;
     }
 
@@ -502,6 +502,10 @@ struct GraphEditSnapshot {
     std::vector<double> dopesheet_key_times;
     std::vector<double> graph_times;
     std::vector<double> graph_values;
+    // MAR-169: an easing rollback must restore the curve as exactly as it
+    // restores the values, so the snapshot carries both.
+    std::vector<int> graph_segment_kinds;
+    std::vector<double> graph_control_points;
 };
 
 /**
@@ -535,6 +539,13 @@ std::optional<GraphEditSnapshot> capture_graph_edit_snapshot(
         for (std::size_t component = 0U; component < key.value_count; ++component) {
             snapshot.graph_values.push_back(key.values[component]);
         }
+        snapshot.graph_segment_kinds.push_back(
+            static_cast<int>(key.outgoing_easing.kind()));
+        const auto& points = key.outgoing_easing.cubic_bezier();
+        snapshot.graph_control_points.push_back(static_cast<double>(points.cx1));
+        snapshot.graph_control_points.push_back(static_cast<double>(points.cy1));
+        snapshot.graph_control_points.push_back(static_cast<double>(points.cx2));
+        snapshot.graph_control_points.push_back(static_cast<double>(points.cy2));
     }
     return snapshot;
 }
@@ -548,7 +559,9 @@ bool graph_edit_snapshots_match(
         left.dirty == right.dirty && left.shell_dirty == right.shell_dirty &&
         left.dopesheet_key_times == right.dopesheet_key_times &&
         left.graph_times == right.graph_times &&
-        left.graph_values == right.graph_values;
+        left.graph_values == right.graph_values &&
+        left.graph_segment_kinds == right.graph_segment_kinds &&
+        left.graph_control_points == right.graph_control_points;
 }
 
 struct ProjectedKey {
@@ -557,6 +570,7 @@ struct ProjectedKey {
     std::size_t value_count{0U};
     marrow::runtime::InterpolationKind easing{
         marrow::runtime::InterpolationKind::Linear};
+    std::array<double, 4> control_points{};
 };
 
 std::optional<ProjectedKey> projected_key(
@@ -579,6 +593,12 @@ std::optional<ProjectedKey> projected_key(
         result.values = candidate.values;
         result.value_count = candidate.value_count;
         result.easing = candidate.outgoing_easing.kind();
+        const auto& points = candidate.outgoing_easing.cubic_bezier();
+        result.control_points = {
+            static_cast<double>(points.cx1),
+            static_cast<double>(points.cy1),
+            static_cast<double>(points.cx2),
+            static_cast<double>(points.cy2)};
         return result;
     }
     return std::nullopt;
@@ -601,8 +621,8 @@ bool validate_timeline_graph_edit_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 56U) {
-        std::cerr << "Graph edit shell smoke requires the unchanged 56-operation registry.\n";
+    if (operation_count_before != 57U) {
+        std::cerr << "Graph edit shell smoke requires the exact 57-operation registry.\n";
         return false;
     }
 
@@ -1490,6 +1510,905 @@ bool validate_timeline_graph_edit_shell_smoke(
 
     if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
         std::cerr << "Graph value editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
+bool validate_timeline_graph_easing_shell_smoke(
+    const std::filesystem::path& project_path) {
+    using marrow::runtime::InterpolationKind;
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Graph easing smoke", false, true)) {
+        std::cerr << "Graph easing shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 57U) {
+        std::cerr << "Graph easing shell smoke requires the exact 57-operation registry.\n";
+        return false;
+    }
+
+    const auto row_of = [&](std::string_view id) {
+        return find_timeline_track(cached_timeline_tracks(&state), id);
+    };
+    const auto key_of = [&](std::string_view id, std::size_t index)
+        -> std::optional<TimelineKeyRef> {
+        const TimelineTrackRow* row = row_of(id);
+        if (row == nullptr || index >= row->key_times.size()) return std::nullopt;
+        return timeline_key_ref(*row, index);
+    };
+
+    constexpr timeline_graph_model::PlotRect plot{0.0, 0.0, 640.0, 320.0};
+    const timeline_graph_model::View view{0.0, 200.0, 0.0, 10.0};
+    state.timeline_editor.graph_view.view = view;
+    state.timeline_editor.graph_view.needs_fit = false;
+
+    const auto handles_for = [&](std::string_view track_id,
+                                 const TimelineKeyRef& key,
+                                 std::size_t component_index)
+        -> std::optional<timeline_graph_model::HandleGeometry> {
+        const TimelineTrackRow* row = row_of(track_id);
+        if (row == nullptr) return std::nullopt;
+        const auto& projection = cached_timeline_graph_projection(&state, *row);
+        if (projection.status != GraphProjectionStatus::Ready ||
+            !projection.track.has_value()) {
+            return std::nullopt;
+        }
+        return timeline_graph_model::build_handle_geometry(
+            *projection.track, key, component_index, view, plot);
+    };
+
+    const auto near_points = [](const std::array<double, 4>& left,
+                                const std::array<double, 4>& right) {
+        for (std::size_t index = 0U; index < 4U; ++index) {
+            if (std::abs(left[index] - right[index]) > 1e-6) return false;
+        }
+        return true;
+    };
+
+    constexpr std::array<double, 4> kOvershoot{0.2, -0.4, 0.8, 1.6};
+
+    // --- One handle gesture on the runtime-only spine Translate track:
+    // exactly one history entry, the parent key's time/x/y byte-identical, and
+    // the one shared curve re-projected identically for X and Y. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        if (!first_key.has_value()) {
+            std::cerr << "Graph easing smoke requires a spine Translate key.\n";
+            return false;
+        }
+        const auto before_key = projected_key(&state, "bone:1:Translate", *first_key);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!before_key.has_value() || !before.has_value()) {
+            std::cerr << "Graph easing smoke could not capture its Translate baseline.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Y;
+
+        const auto handles = handles_for("bone:1:Translate", *first_key, 1U);
+        TimelineTrackRow const* translate = row_of("bone:1:Translate");
+        if (translate == nullptr || !handles.has_value() ||
+            handles->kind != timeline_graph_model::SegmentKind::Linear ||
+            handles->control_points !=
+                timeline_graph_model::kLinearEquivalentControlPoints) {
+            std::cerr << "Graph easing smoke expected a seeded linear outgoing segment.\n";
+            return false;
+        }
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4343U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            !authoring_gesture_active(state) ||
+            state.session.undo_count() != before->undo_count) {
+            std::cerr << "Beginning a handle gesture must open exactly one transaction.\n";
+            return false;
+        }
+        if (!apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), kOvershoot) ||
+            state.session.undo_count() != before->undo_count) {
+            std::cerr << "Applying handle control points did not preview without history.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        if (authoring_gesture_active(state) ||
+            state.timeline_editor.graph_handle_gesture.has_value() ||
+            state.session.undo_count() != before->undo_count + 1U ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*first_key))) {
+            std::cerr << "One handle gesture did not produce one stable-selection undo entry.\n";
+            return false;
+        }
+
+        const auto after_key = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!after_key.has_value() ||
+            after_key->time_seconds != before_key->time_seconds ||
+            after_key->values != before_key->values ||
+            after_key->easing != InterpolationKind::CubicBezier ||
+            !near_points(after_key->control_points, kOvershoot)) {
+            std::cerr << "A handle drag moved a scalar value or lost its curve.\n";
+            return false;
+        }
+
+        // Criterion 3, direct: the displayed component was Y, and the X segment
+        // re-projects the same single curve.
+        const auto x_handles = handles_for("bone:1:Translate", *first_key, 0U);
+        const auto y_handles = handles_for("bone:1:Translate", *first_key, 1U);
+        if (!x_handles.has_value() || !y_handles.has_value() ||
+            x_handles->kind != timeline_graph_model::SegmentKind::Cubic ||
+            y_handles->kind != x_handles->kind ||
+            x_handles->control_points != y_handles->control_points ||
+            !near_points(x_handles->control_points, kOvershoot)) {
+            std::cerr << "Editing while displaying Y did not change the X segment identically.\n";
+            return false;
+        }
+
+        // Materialization copied every runtime key into the project rather
+        // than replacing the track with the one edited key.
+        const auto* materialized =
+            state.session.project()->find_transform_timeline_edit(
+                "idle", "spine", marrow::editor::TransformTimelineChannel::Translate);
+        if (materialized == nullptr || materialized->keyframes.size() != 3U) {
+            std::cerr << "A handle gesture did not materialize the whole runtime track.\n";
+            return false;
+        }
+
+        // Undo then redo restores the curve with selection bit-identical.
+        if (!state.session.undo()) {
+            std::cerr << "A handle easing edit could not be undone.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const auto undone = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!undone.has_value() || undone->easing != before_key->easing ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*first_key))) {
+            std::cerr << "Undoing a handle easing edit lost its curve or selection.\n";
+            return false;
+        }
+        if (!state.session.redo()) {
+            std::cerr << "A handle easing edit could not be redone.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const auto redone = projected_key(&state, "bone:1:Translate", *first_key);
+        if (!redone.has_value() || redone->easing != InterpolationKind::CubicBezier ||
+            !near_points(redone->control_points, kOvershoot) ||
+            state.timeline_editor.selected_keys !=
+                std::vector<TimelineKeyRef>{*first_key} ||
+            !(state.timeline_editor.active_key ==
+              std::optional<TimelineKeyRef>(*first_key))) {
+            std::cerr << "Redoing a handle easing edit lost its curve or selection.\n";
+            return false;
+        }
+    }
+
+    // --- With the track already materialized, exactly one interpolation field
+    // in the whole project moves when a Stepped segment converts to Cubic. ---
+    {
+        const auto stepped_key = key_of("bone:1:Translate", 1U);
+        if (!stepped_key.has_value()) return false;
+        const marrow::editor::ProjectData before = *state.session.project();
+        const auto before_key = projected_key(&state, "bone:1:Translate", *stepped_key);
+        if (!before_key.has_value() ||
+            before_key->easing != InterpolationKind::Stepped) {
+            std::cerr << "Graph easing smoke requires a stepped spine Translate segment.\n";
+            return false;
+        }
+        state.timeline_editor.selected_keys = {*stepped_key};
+        state.timeline_editor.active_key = *stepped_key;
+        const auto handles = handles_for("bone:1:Translate", *stepped_key, 0U);
+        TimelineTrackRow const* translate = row_of("bone:1:Translate");
+        if (translate == nullptr || !handles.has_value() ||
+            handles->kind != timeline_graph_model::SegmentKind::Stepped ||
+            handles->control_points !=
+                timeline_graph_model::kLinearEquivalentControlPoints) {
+            std::cerr << "A stepped segment did not expose the linear-equivalent seed.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        constexpr std::array<double, 4> kSecondCurve{0.4, 0.6, 0.9, 0.2};
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4344U, *translate, *stepped_key,
+                timeline_graph_model::HandleIndex::Second, handles->frame,
+                handles->control_points, InterpolationKind::Stepped,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), kSecondCurve)) {
+            std::cerr << "A stepped-to-cubic handle gesture did not apply.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "A stepped-to-cubic conversion did not commit one entry.\n";
+            return false;
+        }
+        const marrow::editor::ProjectData& after = *state.session.project();
+        const auto same_easing = [](const marrow::runtime::Interpolation& left,
+                                    const marrow::runtime::Interpolation& right) {
+            if (left.kind() != right.kind()) return false;
+            if (left.kind() != InterpolationKind::CubicBezier) return true;
+            const auto& first = left.cubic_bezier();
+            const auto& second = right.cubic_bezier();
+            return first.cx1 == second.cx1 && first.cy1 == second.cy1 &&
+                first.cx2 == second.cx2 && first.cy2 == second.cy2;
+        };
+        std::size_t differing = 0U;
+        if (before.transform_timeline_edits.size() !=
+            after.transform_timeline_edits.size()) {
+            std::cerr << "A handle gesture reshaped the project's transform timelines.\n";
+            return false;
+        }
+        for (std::size_t timeline = 0U;
+             timeline < before.transform_timeline_edits.size();
+             ++timeline) {
+            const auto& left = before.transform_timeline_edits[timeline].keyframes;
+            const auto& right = after.transform_timeline_edits[timeline].keyframes;
+            if (left.size() != right.size()) {
+                std::cerr << "A handle gesture reshaped a transform timeline.\n";
+                return false;
+            }
+            for (std::size_t key = 0U; key < left.size(); ++key) {
+                if (!same_easing(left[key].interpolation, right[key].interpolation)) {
+                    ++differing;
+                }
+            }
+        }
+        if (differing != 1U) {
+            std::cerr << "A handle gesture changed " << differing
+                      << " interpolation fields instead of exactly one.\n";
+            return false;
+        }
+        state.session.clear_history();
+    }
+
+    // --- A drag on an already-cubic segment that ends on its original control
+    // points commits nothing. ---
+    {
+        const auto rotate_key = key_of("bone:1:Rotate", 0U);
+        const TimelineTrackRow* rotate = row_of("bone:1:Rotate");
+        if (!rotate_key.has_value() || rotate == nullptr) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Rotate");
+        state.timeline_editor.selected_keys = {*rotate_key};
+        state.timeline_editor.active_key = *rotate_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Angle;
+        const auto handles = handles_for("bone:1:Rotate", *rotate_key, 0U);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!handles.has_value() || !before.has_value() ||
+            handles->kind != timeline_graph_model::SegmentKind::Cubic) {
+            std::cerr << "Graph easing smoke requires a cubic spine Rotate segment.\n";
+            return false;
+        }
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4345U, *rotate, *rotate_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), handles->control_points)) {
+            std::cerr << "An unchanged cubic handle gesture did not stay live.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Rotate");
+        if (!after.has_value() || !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "An unchanged handle gesture created a history entry.\n";
+            return false;
+        }
+    }
+
+    // --- The flat Blue segment of slot:0:Color: a drag succeeds through the
+    // substituted 100 px reference span while R, G, and A vary across the same
+    // shared curve. ---
+    {
+        const auto color_key = key_of("slot:0:Color", 0U);
+        const TimelineTrackRow* color = row_of("slot:0:Color");
+        if (!color_key.has_value() || color == nullptr) {
+            std::cerr << "Graph easing smoke requires a body Colour key.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("slot:0:Color");
+        state.timeline_editor.selected_keys = {*color_key};
+        state.timeline_editor.active_key = *color_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::Blue;
+        const auto blue = handles_for("slot:0:Color", *color_key, 2U);
+        const auto red = handles_for("slot:0:Color", *color_key, 0U);
+        if (!blue.has_value() || !red.has_value() || !blue->frame.flat_value_span ||
+            red->frame.flat_value_span) {
+            std::cerr << "The body Colour key did not expose a flat Blue segment "
+                         "sharing its curve with a varying Red segment.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        constexpr std::array<double, 4> kFlatCurve{0.3, 0.8, 0.7, 0.25};
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4346U, *color, *color_key,
+                timeline_graph_model::HandleIndex::First, blue->frame,
+                blue->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), kFlatCurve)) {
+            std::cerr << "A flat-segment handle gesture did not apply.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, true);
+        const auto after = projected_key(&state, "slot:0:Color", *color_key);
+        if (state.session.undo_count() != undo_before + 1U || !after.has_value() ||
+            after->easing != InterpolationKind::CubicBezier ||
+            !near_points(after->control_points, kFlatCurve)) {
+            std::cerr << "A flat-segment handle gesture did not persist its curve.\n";
+            return false;
+        }
+        state.session.clear_history();
+    }
+
+    // --- Atomic cancel and atomic rejection. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        TimelineTrackRow const* translate = row_of("bone:1:Translate");
+        if (!first_key.has_value() || translate == nullptr) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::X;
+
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        const auto handles = handles_for("bone:1:Translate", *first_key, 0U);
+        translate = row_of("bone:1:Translate");
+        if (!before.has_value() || !handles.has_value() || translate == nullptr) {
+            return false;
+        }
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4347U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), {0.15, -1.25, 0.85, 2.5})) {
+            std::cerr << "A cancellable handle gesture did not stage its preview.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, false);
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (state.timeline_editor.graph_handle_gesture.has_value() ||
+            authoring_gesture_active(state) || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "A cancelled handle gesture did not roll back atomically.\n";
+            return false;
+        }
+
+        // A control point the primitive rejects cancels the whole gesture. The
+        // row pointer is re-resolved because the shared track cache is rebuilt
+        // whenever a gesture syncs the shell from the session.
+        state.error_message.clear();
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4348U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state))) {
+            std::cerr << "The rejection case could not stage its gesture.\n";
+            return false;
+        }
+        if (apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), {1.5, 0.0, 0.5, 1.0})) {
+            std::cerr << "An out-of-range control point was accepted by the gesture.\n";
+            return false;
+        }
+        const auto rejected = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (state.timeline_editor.graph_handle_gesture.has_value() ||
+            authoring_gesture_active(state) || state.error_message.empty() ||
+            !rejected.has_value() || !graph_edit_snapshots_match(*before, *rejected)) {
+            std::cerr << "A rejected handle control point did not roll back atomically.\n";
+            return false;
+        }
+
+        // A non-finite request cancels the same way.
+        state.error_message.clear();
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4349U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::Second, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            apply_timeline_graph_handle_control_points(
+                &state,
+                cached_timeline_tracks(&state),
+                {0.2, 0.0, 0.5, std::numeric_limits<double>::quiet_NaN()}) ||
+            state.timeline_editor.graph_handle_gesture.has_value() ||
+            state.error_message.empty()) {
+            std::cerr << "A non-finite handle control point did not cancel the gesture.\n";
+            return false;
+        }
+        const auto after_nonfinite =
+            capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!after_nonfinite.has_value() ||
+            !graph_edit_snapshots_match(*before, *after_nonfinite)) {
+            std::cerr << "A non-finite handle request did not roll back atomically.\n";
+            return false;
+        }
+    }
+
+    // --- Fail-closed begin contracts. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        const auto last_key = key_of("bone:1:Translate", 2U);
+        TimelineTrackRow const* translate = row_of("bone:1:Translate");
+        const TimelineTrackRow* attachment = row_of("slot:0:Attachment");
+        const auto attachment_key = key_of("slot:0:Attachment", 0U);
+        if (!first_key.has_value() || !last_key.has_value() || translate == nullptr ||
+            attachment == nullptr || !attachment_key.has_value()) {
+            return false;
+        }
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        const auto handles = handles_for("bone:1:Translate", *first_key, 0U);
+        if (!handles.has_value()) return false;
+
+        // A row the graph cannot author.
+        if (begin_timeline_graph_handle_gesture(
+                &state, 4350U, *attachment, *attachment_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            state.timeline_editor.graph_handle_gesture.has_value()) {
+            std::cerr << "An unsupported row opened a handle gesture.\n";
+            return false;
+        }
+        // The last key owns no outgoing segment.
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (begin_timeline_graph_handle_gesture(
+                &state, 4351U, *translate, *last_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            state.timeline_editor.graph_handle_gesture.has_value()) {
+            std::cerr << "The last key opened a handle gesture.\n";
+            return false;
+        }
+        // A key that does not belong to the row.
+        const TimelineKeyRef stranger{"bone:1:Rotate", 0, 0U, 1U};
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (begin_timeline_graph_handle_gesture(
+                &state, 4352U, *translate, stranger,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            state.timeline_editor.graph_handle_gesture.has_value()) {
+            std::cerr << "A key from another track opened a handle gesture.\n";
+            return false;
+        }
+        // A non-finite frame.
+        timeline_graph_model::SegmentFrame broken = handles->frame;
+        broken.value_span = std::numeric_limits<double>::quiet_NaN();
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (begin_timeline_graph_handle_gesture(
+                &state, 4353U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, broken,
+                handles->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            state.timeline_editor.graph_handle_gesture.has_value()) {
+            std::cerr << "A non-finite segment frame opened a handle gesture.\n";
+            return false;
+        }
+        // Another live authoring gesture blocks the press entirely.
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (!begin_timeline_graph_value_gesture(
+                &state, 4354U, *translate, GraphComponent::X,
+                cached_timeline_tracks(&state))) {
+            std::cerr << "Handle exclusivity smoke could not stage its value gesture.\n";
+            return false;
+        }
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (begin_timeline_graph_handle_gesture(
+                &state, 4355U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::Linear,
+                cached_timeline_tracks(&state)) ||
+            state.timeline_editor.graph_handle_gesture.has_value()) {
+            std::cerr << "A handle gesture opened during another authoring gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_value_gesture(&state, false);
+        // A null state never crashes and never opens anything.
+        if (apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), kOvershoot)) {
+            std::cerr << "Applying control points without a live gesture succeeded.\n";
+            return false;
+        }
+    }
+
+    // --- cancel_authoring_gestures and TimelineEditorState{} adoption both
+    // release a live handle gesture. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        TimelineTrackRow const* translate = row_of("bone:1:Translate");
+        if (!first_key.has_value() || translate == nullptr) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        const auto handles = handles_for("bone:1:Translate", *first_key, 0U);
+        const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (!handles.has_value() || !before.has_value()) return false;
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4356U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state)) ||
+            !apply_timeline_graph_handle_control_points(
+                &state, cached_timeline_tracks(&state), {0.1, 0.2, 0.3, 0.4})) {
+            std::cerr << "The cancel-all case could not stage its gesture.\n";
+            return false;
+        }
+        cancel_authoring_gestures(&state, "Graph easing smoke");
+        const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+        if (state.timeline_editor.graph_handle_gesture.has_value() ||
+            authoring_gesture_active(state) || !after.has_value() ||
+            !graph_edit_snapshots_match(*before, *after)) {
+            std::cerr << "cancel_authoring_gestures did not release the handle gesture.\n";
+            return false;
+        }
+
+        translate = row_of("bone:1:Translate");
+        if (translate == nullptr) return false;
+        if (!begin_timeline_graph_handle_gesture(
+                &state, 4357U, *translate, *first_key,
+                timeline_graph_model::HandleIndex::First, handles->frame,
+                handles->control_points, InterpolationKind::CubicBezier,
+                cached_timeline_tracks(&state))) {
+            std::cerr << "The source-adoption case could not stage its gesture.\n";
+            return false;
+        }
+        finish_timeline_graph_handle_gesture(&state, false);
+        state.timeline_editor = TimelineEditorState{};
+        if (state.timeline_editor.graph_handle_gesture.has_value() ||
+            state.timeline_editor.graph_drag.has_value() ||
+            authoring_gesture_active(state)) {
+            std::cerr << "TimelineEditorState source adoption did not clear the handle slot.\n";
+            return false;
+        }
+    }
+
+    // --- Full handle drags through the shared MAR-168 drag driver. ---
+    {
+        const auto first_key = key_of("bone:1:Translate", 0U);
+        if (!first_key.has_value()) return false;
+        state.selected_timeline_track_id = std::string("bone:1:Translate");
+        state.timeline_editor.selected_keys = {*first_key};
+        state.timeline_editor.active_key = *first_key;
+        state.timeline_editor.graph_view.active_component = GraphComponent::X;
+
+        const auto stage = [&]() -> std::optional<timeline_graph_model::HandleGeometry> {
+            state.timeline_editor.graph_view.view = view;
+            return handles_for("bone:1:Translate", *first_key, 0U);
+        };
+
+        // A press on a handle arms a candidate and opens no transaction.
+        {
+            const auto handles = stage();
+            const TimelineTrackRow* translate = row_of("bone:1:Translate");
+            const auto before = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+            if (!handles.has_value() || translate == nullptr || !before.has_value()) {
+                return false;
+            }
+            if (!begin_timeline_graph_handle_drag(
+                    &state, *translate, *handles,
+                    timeline_graph_model::HandleIndex::First, 4360U, plot, view,
+                    handles->first_handle.x, handles->first_handle.y) ||
+                !state.timeline_editor.graph_drag.has_value() ||
+                authoring_gesture_active(state) ||
+                state.session.undo_count() != before->undo_count) {
+                std::cerr << "A handle press must arm a candidate without a transaction.\n";
+                return false;
+            }
+            // Inside the dead zone nothing starts.
+            (void)update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                handles->first_handle.x + 2.0, handles->first_handle.y + 1.0,
+                true, false, false);
+            if (state.timeline_editor.graph_handle_gesture.has_value()) {
+                std::cerr << "A handle drag inside the dead zone opened a gesture.\n";
+                return false;
+            }
+            // Leaving the dead zone opens the handle gesture and no other.
+            (void)update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                handles->first_handle.x + 30.0, handles->first_handle.y - 40.0,
+                true, false, false);
+            if (!state.timeline_editor.graph_handle_gesture.has_value() ||
+                state.timeline_editor.retime_gesture.has_value() ||
+                state.timeline_editor.graph_value_gesture.has_value()) {
+                std::cerr << "A handle drag must open only the handle gesture.\n";
+                return false;
+            }
+            // Free 2-D: one diagonal frame moves cx and cy together, so no
+            // axis lock is applied to handles.
+            const auto& live = *state.timeline_editor.graph_handle_gesture;
+            if (near_points(live.applied_control_points, handles->control_points) ||
+                std::abs(live.applied_control_points[0] - handles->control_points[0]) <=
+                    1e-9 ||
+                std::abs(live.applied_control_points[1] - handles->control_points[1]) <=
+                    1e-9 ||
+                live.applied_control_points[2] != handles->control_points[2] ||
+                live.applied_control_points[3] != handles->control_points[3]) {
+                std::cerr << "A diagonal handle drag did not move cx and cy together, "
+                             "or disturbed the untouched handle.\n";
+                return false;
+            }
+            // Releasing commits and clears both the candidate and the gesture.
+            (void)update_timeline_graph_point_drag(
+                &state, cached_timeline_tracks(&state),
+                handles->first_handle.x + 30.0, handles->first_handle.y - 40.0,
+                false, false, false);
+            if (state.timeline_editor.graph_drag.has_value() ||
+                state.timeline_editor.graph_handle_gesture.has_value() ||
+                state.session.undo_count() != before->undo_count + 1U) {
+                std::cerr << "Releasing a handle drag did not commit exactly one entry.\n";
+                return false;
+            }
+            state.session.clear_history();
+        }
+
+        // An X-clamped drag stops at exactly 1.0 and stays live.
+        {
+            const auto handles = stage();
+            const TimelineTrackRow* translate = row_of("bone:1:Translate");
+            if (!handles.has_value() || translate == nullptr) return false;
+            if (!begin_timeline_graph_handle_drag(
+                    &state, *translate, *handles,
+                    timeline_graph_model::HandleIndex::First, 4361U, plot, view,
+                    handles->first_handle.x, handles->first_handle.y)) {
+                std::cerr << "The clamp case could not arm its candidate.\n";
+                return false;
+            }
+            if (!update_timeline_graph_point_drag(
+                    &state, cached_timeline_tracks(&state),
+                    handles->end_anchor.x + 400.0, handles->first_handle.y,
+                    true, false, false) ||
+                !state.timeline_editor.graph_handle_gesture.has_value() ||
+                state.timeline_editor.graph_handle_gesture->applied_control_points[0] !=
+                    1.0) {
+                std::cerr << "A drag past the end anchor did not clamp cx to exactly 1.0 "
+                             "while staying live.\n";
+                return false;
+            }
+            if (!update_timeline_graph_point_drag(
+                    &state, cached_timeline_tracks(&state),
+                    handles->start_anchor.x - 400.0, handles->first_handle.y,
+                    true, false, false) ||
+                !state.timeline_editor.graph_handle_gesture.has_value() ||
+                state.timeline_editor.graph_handle_gesture->applied_control_points[0] !=
+                    0.0) {
+                std::cerr << "A drag past the start anchor did not clamp cx to exactly 0.0 "
+                             "while staying live.\n";
+                return false;
+            }
+            cancel_timeline_graph_point_drag(&state);
+            if (state.timeline_editor.graph_drag.has_value() ||
+                state.timeline_editor.graph_handle_gesture.has_value()) {
+                std::cerr << "cancel_timeline_graph_point_drag left a handle gesture live.\n";
+                return false;
+            }
+        }
+
+        // Finite Y overshoot in both directions survives the drag.
+        {
+            const auto handles = stage();
+            const TimelineTrackRow* translate = row_of("bone:1:Translate");
+            if (!handles.has_value() || translate == nullptr) return false;
+            const double low_y = timeline_graph_model::y_at_value(
+                plot, view,
+                handles->frame.start_value - 1.5 * handles->frame.value_span);
+            const double high_y = timeline_graph_model::y_at_value(
+                plot, view,
+                handles->frame.start_value + 2.25 * handles->frame.value_span);
+            if (!begin_timeline_graph_handle_drag(
+                    &state, *translate, *handles,
+                    timeline_graph_model::HandleIndex::First, 4362U, plot, view,
+                    handles->first_handle.x, handles->first_handle.y) ||
+                !update_timeline_graph_point_drag(
+                    &state, cached_timeline_tracks(&state),
+                    handles->first_handle.x, low_y, true, false, false) ||
+                !state.timeline_editor.graph_handle_gesture.has_value() ||
+                state.timeline_editor.graph_handle_gesture->applied_control_points[1] >
+                    -1.0) {
+                std::cerr << "A downward handle drag did not produce negative overshoot.\n";
+                return false;
+            }
+            cancel_timeline_graph_point_drag(&state);
+
+            const auto second = stage();
+            translate = row_of("bone:1:Translate");
+            if (!second.has_value() || translate == nullptr) return false;
+            if (!begin_timeline_graph_handle_drag(
+                    &state, *translate, *second,
+                    timeline_graph_model::HandleIndex::Second, 4363U, plot, view,
+                    second->second_handle.x, second->second_handle.y) ||
+                !update_timeline_graph_point_drag(
+                    &state, cached_timeline_tracks(&state),
+                    second->second_handle.x, high_y, true, false, false) ||
+                !state.timeline_editor.graph_handle_gesture.has_value() ||
+                state.timeline_editor.graph_handle_gesture->applied_control_points[3] <
+                    1.5) {
+                std::cerr << "An upward handle drag did not produce positive overshoot.\n";
+                return false;
+            }
+            cancel_timeline_graph_point_drag(&state);
+        }
+
+        // cancel_requested, a non-finite pointer, and a mid-drag active-key
+        // change each roll back to the pre-press bytes.
+        {
+            struct CancelCase {
+                const char* label;
+                int mode;  // 0 = cancel_requested, 1 = non-finite, 2 = key change
+            };
+            const CancelCase cases[] = {
+                {"an Escape-cancelled handle drag", 0},
+                {"a non-finite handle pointer", 1},
+                {"an active key that changed mid-drag", 2},
+            };
+            for (const CancelCase& scenario : cases) {
+                state.timeline_editor.active_key = *first_key;
+                state.timeline_editor.selected_keys = {*first_key};
+                const auto handles = stage();
+                const TimelineTrackRow* translate = row_of("bone:1:Translate");
+                const auto before =
+                    capture_graph_edit_snapshot(&state, "bone:1:Translate");
+                if (!handles.has_value() || translate == nullptr || !before.has_value()) {
+                    return false;
+                }
+                if (!begin_timeline_graph_handle_drag(
+                        &state, *translate, *handles,
+                        timeline_graph_model::HandleIndex::First, 4364U, plot, view,
+                        handles->first_handle.x, handles->first_handle.y) ||
+                    !update_timeline_graph_point_drag(
+                        &state, cached_timeline_tracks(&state),
+                        handles->first_handle.x + 40.0, handles->first_handle.y - 30.0,
+                        true, false, false) ||
+                    !state.timeline_editor.graph_handle_gesture.has_value()) {
+                    std::cerr << "Cancel case " << scenario.label
+                              << " could not stage its live gesture.\n";
+                    return false;
+                }
+                if (scenario.mode == 0) {
+                    (void)update_timeline_graph_point_drag(
+                        &state, cached_timeline_tracks(&state),
+                        handles->first_handle.x + 40.0, handles->first_handle.y - 30.0,
+                        true, true, false);
+                } else if (scenario.mode == 1) {
+                    (void)update_timeline_graph_point_drag(
+                        &state, cached_timeline_tracks(&state),
+                        std::numeric_limits<double>::quiet_NaN(),
+                        handles->first_handle.y, true, false, false);
+                } else {
+                    state.timeline_editor.active_key = key_of("bone:1:Translate", 1U);
+                    (void)update_timeline_graph_point_drag(
+                        &state, cached_timeline_tracks(&state),
+                        handles->first_handle.x + 50.0, handles->first_handle.y - 35.0,
+                        true, false, false);
+                }
+                const auto after = capture_graph_edit_snapshot(&state, "bone:1:Translate");
+                if (state.timeline_editor.graph_drag.has_value() ||
+                    state.timeline_editor.graph_handle_gesture.has_value() ||
+                    authoring_gesture_active(state) || !after.has_value() ||
+                    !graph_edit_snapshots_match(*before, *after)) {
+                    std::cerr << "Cancel case " << scenario.label
+                              << " did not roll back atomically.\n";
+                    return false;
+                }
+            }
+            state.timeline_editor.active_key = *first_key;
+            state.timeline_editor.selected_keys = {*first_key};
+        }
+
+        // Fail-closed press contracts for the candidate itself.
+        {
+            const auto handles = stage();
+            const TimelineTrackRow* translate = row_of("bone:1:Translate");
+            const TimelineTrackRow* attachment = row_of("slot:0:Attachment");
+            if (!handles.has_value() || translate == nullptr || attachment == nullptr) {
+                return false;
+            }
+            if (begin_timeline_graph_handle_drag(
+                    &state, *attachment, *handles,
+                    timeline_graph_model::HandleIndex::First, 4365U, plot, view,
+                    handles->first_handle.x, handles->first_handle.y) ||
+                state.timeline_editor.graph_drag.has_value()) {
+                std::cerr << "An unsupported row armed a handle candidate.\n";
+                return false;
+            }
+            if (begin_timeline_graph_handle_drag(
+                    &state, *translate, *handles,
+                    timeline_graph_model::HandleIndex::First, 4366U, plot, view,
+                    std::numeric_limits<double>::quiet_NaN(), handles->first_handle.y) ||
+                state.timeline_editor.graph_drag.has_value()) {
+                std::cerr << "A non-finite handle press armed a candidate.\n";
+                return false;
+            }
+            // A geometry whose key is no longer the active key never arms.
+            state.timeline_editor.active_key = key_of("bone:1:Translate", 1U);
+            if (begin_timeline_graph_handle_drag(
+                    &state, *translate, *handles,
+                    timeline_graph_model::HandleIndex::First, 4367U, plot, view,
+                    handles->first_handle.x, handles->first_handle.y) ||
+                state.timeline_editor.graph_drag.has_value()) {
+                std::cerr << "A stale handle geometry armed a candidate.\n";
+                return false;
+            }
+            state.timeline_editor.active_key = *first_key;
+            // Another live authoring gesture blocks the press entirely.
+            translate = row_of("bone:1:Translate");
+            if (translate == nullptr ||
+                !begin_timeline_graph_value_gesture(
+                    &state, 4368U, *translate, GraphComponent::X,
+                    cached_timeline_tracks(&state))) {
+                std::cerr << "Handle candidate exclusivity could not stage its gesture.\n";
+                return false;
+            }
+            translate = row_of("bone:1:Translate");
+            if (translate == nullptr ||
+                begin_timeline_graph_handle_drag(
+                    &state, *translate, *handles,
+                    timeline_graph_model::HandleIndex::First, 4369U, plot, view,
+                    handles->first_handle.x, handles->first_handle.y) ||
+                state.timeline_editor.graph_drag.has_value()) {
+                std::cerr << "A handle press during another authoring gesture armed a candidate.\n";
+                return false;
+            }
+            finish_timeline_graph_value_gesture(&state, false);
+        }
+
+        // Hit priority: the handle hit test wins wherever a handle and a key
+        // point are both within their radii of the same pointer.
+        {
+            const auto handles = stage();
+            const TimelineTrackRow* translate = row_of("bone:1:Translate");
+            if (!handles.has_value() || translate == nullptr) return false;
+            const auto& projection =
+                cached_timeline_graph_projection(&state, *translate);
+            if (!projection.track.has_value()) return false;
+            const auto geometry = timeline_graph_model::build_geometry(
+                *projection.track,
+                state.timeline_editor.graph_view.component_visible,
+                view,
+                plot,
+                state.timeline_time_seconds);
+            if (!geometry.has_value()) return false;
+            const auto handle_hit = timeline_graph_model::hit_test_handle(
+                *handles, handles->first_handle.x, handles->first_handle.y, 7.0);
+            const auto point_hit = timeline_graph_model::hit_test(
+                *geometry, handles->first_handle.x, handles->first_handle.y, 1e6);
+            if (!handle_hit.has_value() || !point_hit.has_value() ||
+                !(handle_hit->key == *first_key)) {
+                std::cerr << "The handle hit test did not resolve the pressed segment key.\n";
+                return false;
+            }
+        }
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Graph easing editing changed the Agent operation surface.\n";
         return false;
     }
     return true;

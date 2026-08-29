@@ -965,6 +965,280 @@ bool render_headless_smoke_frames(
         render_graph_frame(nullptr);
     }
 
+    // --- MAR-169: actual-frame handle drags through real ImGui mouse events
+    // aimed at real submitted handle coordinates. ---
+    {
+        // The shared track cache was rebuilt many times by now, so the row is
+        // re-resolved rather than reusing the pointer taken at setup.
+        const TimelineTrackRow* handle_row = find_timeline_track(
+            cached_timeline_tracks(&shell_state), "bone:1:Translate");
+        if (handle_row == nullptr || handle_row->key_times.size() < 2U) {
+            std::cerr << "Actual-frame handle smoke lost its Translate row.\n";
+            return false;
+        }
+        const std::string handle_track_id = handle_row->id;
+        const TimelineKeyRef handle_key = timeline_model::key_ref(*handle_row, 0U);
+        shell_state.selected_timeline_track_id = handle_track_id;
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        const auto reset_handle_selection = [&]() {
+            shell_state.timeline_editor.selected_keys = {handle_key};
+            shell_state.timeline_editor.active_key = handle_key;
+            // The displayed component is Y; the shared curve it edits is the
+            // parent key's, so X re-projects the same easing.
+            shell_state.timeline_editor.graph_view.active_component =
+                timeline_graph_model::Component::Y;
+        };
+        render_graph_frame(nullptr);
+        reset_handle_selection();
+        shell_state.timeline_editor.graph_view.needs_fit = true;
+        TimelineGraphRenderStats handle_stats;
+        render_graph_frame(&handle_stats);
+        if (ImGuiWindow* scroll_window = ImGui::FindWindowByName(kTimelineWindowTitle)) {
+            ImGui::SetScrollY(scroll_window, scroll_window->ScrollMax.y);
+        }
+        reset_handle_selection();
+        render_graph_frame(&handle_stats);
+        reset_handle_selection();
+        render_graph_frame(&handle_stats);
+        // The plot is taller than the Timeline window, so scrolling to the
+        // bottom can leave the handles above the visible area. Nudge the
+        // scroll until the first handle sits inside the clip with room for the
+        // drag, instead of assuming a fixed scroll position.
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            ImGuiWindow* scroll_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+            if (scroll_window == nullptr || !handle_stats.handles_drawn) break;
+            const float lower = scroll_window->InnerClipRect.Min.y + 48.0f;
+            const float upper = scroll_window->InnerClipRect.Max.y - 48.0f;
+            if (handle_stats.first_handle_y >= lower &&
+                handle_stats.first_handle_y <= upper) {
+                break;
+            }
+            const float target = (lower + upper) * 0.5f;
+            const float shift = target - handle_stats.first_handle_y;
+            ImGui::SetScrollY(
+                scroll_window,
+                std::clamp(
+                    scroll_window->Scroll.y - shift, 0.0f, scroll_window->ScrollMax.y));
+            reset_handle_selection();
+            render_graph_frame(&handle_stats);
+            reset_handle_selection();
+            render_graph_frame(&handle_stats);
+        }
+        ImGuiWindow* handle_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+        if (handle_window == nullptr || !handle_stats.handles_drawn ||
+            !std::isfinite(handle_stats.first_handle_x) ||
+            !std::isfinite(handle_stats.first_handle_y) ||
+            !std::isfinite(handle_stats.second_handle_x) ||
+            !std::isfinite(handle_stats.second_handle_y) ||
+            handle_stats.handle_flat_value_span ||
+            handle_stats.active_segment_kind !=
+                timeline_graph_model::SegmentKind::Linear ||
+            handle_stats.handle_gesture_active ||
+            handle_stats.component_controls_disabled) {
+            std::cerr << "Actual-frame graph smoke did not draw the active key handles: drawn="
+                      << handle_stats.handles_drawn
+                      << " kind=" << static_cast<int>(handle_stats.active_segment_kind)
+                      << " first=(" << handle_stats.first_handle_x << ","
+                      << handle_stats.first_handle_y << ").\n";
+            return false;
+        }
+        const ImVec2 handle_press{
+            handle_stats.first_handle_x, handle_stats.first_handle_y};
+        if (handle_press.x < handle_window->InnerClipRect.Min.x + 1.0f ||
+            handle_press.x > handle_window->InnerClipRect.Max.x - 41.0f ||
+            handle_press.y < handle_window->InnerClipRect.Min.y + 1.0f ||
+            handle_press.y > handle_window->InnerClipRect.Max.y - 41.0f) {
+            std::cerr << "Actual-frame handle smoke could not reach a visible handle: point=("
+                      << handle_press.x << "," << handle_press.y << ") clip=("
+                      << handle_window->InnerClipRect.Min.x << ","
+                      << handle_window->InnerClipRect.Min.y << ")-("
+                      << handle_window->InnerClipRect.Max.x << ","
+                      << handle_window->InnerClipRect.Max.y << ") plot=("
+                      << handle_stats.plot_min_x << "," << handle_stats.plot_min_y
+                      << ")-(" << handle_stats.plot_max_x << ","
+                      << handle_stats.plot_max_y << ") second=("
+                      << handle_stats.second_handle_x << ","
+                      << handle_stats.second_handle_y << ").\n";
+            return false;
+        }
+
+        const std::string handle_project_before =
+            marrow::editor::serialize_project(*shell_state.session.project());
+        const std::size_t handle_undo_before = shell_state.session.undo_count();
+        const std::uint64_t handle_revision_before =
+            shell_state.session.project_revision();
+        const auto visible_before =
+            shell_state.timeline_editor.graph_view.component_visible;
+
+        io.AddMousePosEvent(handle_press.x, handle_press.y);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(&handle_stats);
+        if (!handle_stats.drag_active || handle_stats.handle_gesture_active ||
+            shell_state.session.undo_count() != handle_undo_before) {
+            std::cerr << "An actual-frame handle press did not arm a candidate without a transaction.\n";
+            return false;
+        }
+        const auto view_before_handle_drag =
+            shell_state.timeline_editor.graph_view.view;
+        io.AddMousePosEvent(handle_press.x + 26.0f, handle_press.y - 34.0f);
+        render_graph_frame(&handle_stats);
+        if (!handle_stats.handle_gesture_active ||
+            shell_state.timeline_editor.graph_value_gesture.has_value() ||
+            shell_state.timeline_editor.retime_gesture.has_value() ||
+            !handle_stats.component_controls_disabled) {
+            std::cerr << "An actual-frame handle drag did not open the handle gesture: handle="
+                      << handle_stats.handle_gesture_active
+                      << " value=" << handle_stats.value_gesture_active
+                      << " retime=" << handle_stats.graph_owns_retime
+                      << " disabled=" << handle_stats.component_controls_disabled << ".\n";
+            return false;
+        }
+        // The view stays frozen and the component visibility cannot change
+        // while the handle drag is live.
+        io.AddMouseWheelEvent(0.0f, -1.0f);
+        io.AddMousePosEvent(handle_press.x + 30.0f, handle_press.y - 38.0f);
+        render_graph_frame(&handle_stats);
+        shell_state.timeline_editor.graph_view.needs_fit = true;
+        io.AddMousePosEvent(handle_press.x + 34.0f, handle_press.y - 42.0f);
+        render_graph_frame(&handle_stats);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Middle, true);
+        io.AddMousePosEvent(handle_press.x + 48.0f, handle_press.y - 50.0f);
+        render_graph_frame(&handle_stats);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Middle, false);
+        render_graph_frame(&handle_stats);
+        const auto view_after_handle_drag =
+            shell_state.timeline_editor.graph_view.view;
+        if (view_after_handle_drag.pixels_per_second !=
+                view_before_handle_drag.pixels_per_second ||
+            view_after_handle_drag.pixels_per_value !=
+                view_before_handle_drag.pixels_per_value ||
+            view_after_handle_drag.view_start_seconds !=
+                view_before_handle_drag.view_start_seconds ||
+            view_after_handle_drag.value_center !=
+                view_before_handle_drag.value_center ||
+            !shell_state.timeline_editor.graph_view.needs_fit ||
+            shell_state.timeline_editor.graph_view.component_visible !=
+                visible_before) {
+            std::cerr << "A live handle drag did not freeze its view or component visibility.\n";
+            return false;
+        }
+
+        // Switching to the Dopesheet mid-drag cancels with a full rollback.
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Dopesheet;
+        render_graph_frame(nullptr);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(nullptr);
+        if (shell_state.timeline_editor.graph_drag.has_value() ||
+            shell_state.timeline_editor.graph_handle_gesture.has_value() ||
+            authoring_gesture_active(shell_state) ||
+            marrow::editor::serialize_project(*shell_state.session.project()) !=
+                handle_project_before ||
+            shell_state.session.undo_count() != handle_undo_before ||
+            shell_state.session.project_revision() != handle_revision_before) {
+            std::cerr << "A mid-drag Dopesheet tab switch did not cancel the handle gesture with rollback.\n";
+            return false;
+        }
+        // The dopesheet retime lane still works afterwards.
+        reset_handle_selection();
+        if (!begin_timeline_retime_gesture(
+                &shell_state, 778U, 0.0f, cached_timeline_tracks(&shell_state)) ||
+            !apply_timeline_retime_delta(
+                &shell_state, cached_timeline_tracks(&shell_state), 0.1, true)) {
+            std::cerr << "The dopesheet retime lane did not work after a cancelled handle drag.\n";
+            return false;
+        }
+        finish_timeline_retime_gesture(&shell_state, true);
+        if (authoring_gesture_active(shell_state) ||
+            shell_state.session.undo_count() != handle_undo_before + 1U) {
+            std::cerr << "The dopesheet retime lane did not commit after a cancelled handle drag.\n";
+            return false;
+        }
+        if (!shell_state.session.undo()) return false;
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+        reconcile_timeline_key_selection(
+            &shell_state, cached_timeline_tracks(&shell_state));
+        if (marrow::editor::serialize_project(*shell_state.session.project()) !=
+            handle_project_before) {
+            std::cerr << "Actual-frame handle smoke did not restore its project bytes.\n";
+            return false;
+        }
+
+        // A committed handle drag: press the drawn handle, move, release.
+        shell_state.selected_timeline_track_id = handle_track_id;
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        render_graph_frame(nullptr);
+        reset_handle_selection();
+        render_graph_frame(&handle_stats);
+        reset_handle_selection();
+        render_graph_frame(&handle_stats);
+        if (!handle_stats.handles_drawn) {
+            std::cerr << "Actual-frame handle commit smoke lost its handles.\n";
+            return false;
+        }
+        const ImVec2 commit_press{
+            handle_stats.first_handle_x, handle_stats.first_handle_y};
+        const std::size_t commit_undo_before = shell_state.session.undo_count();
+        io.AddMousePosEvent(commit_press.x, commit_press.y);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(&handle_stats);
+        io.AddMousePosEvent(commit_press.x + 22.0f, commit_press.y - 28.0f);
+        render_graph_frame(&handle_stats);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(&handle_stats);
+        if (handle_stats.drag_active || handle_stats.handle_gesture_active ||
+            shell_state.session.undo_count() != commit_undo_before + 1U ||
+            handle_stats.active_segment_kind !=
+                timeline_graph_model::SegmentKind::Cubic) {
+            std::cerr << "Releasing an actual-frame handle drag did not commit one cubic entry: undo="
+                      << shell_state.session.undo_count() << "/" << commit_undo_before
+                      << " kind=" << static_cast<int>(handle_stats.active_segment_kind)
+                      << ".\n";
+            return false;
+        }
+        // Pressing a key point where no handle is within its radius still
+        // opens MAR-168's point path.
+        reset_handle_selection();
+        render_graph_frame(&handle_stats);
+        if (!handle_stats.active_point_valid) {
+            std::cerr << "Actual-frame handle smoke lost its active point.\n";
+            return false;
+        }
+        const ImVec2 point_press{
+            handle_stats.active_point_x, handle_stats.active_point_y};
+        io.AddMousePosEvent(point_press.x, point_press.y);
+        render_graph_frame(nullptr);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_graph_frame(&handle_stats);
+        io.AddMousePosEvent(point_press.x, point_press.y - 40.0f);
+        render_graph_frame(&handle_stats);
+        const bool point_path_won = handle_stats.value_gesture_active &&
+            !handle_stats.handle_gesture_active;
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_graph_frame(nullptr);
+        if (!point_path_won) {
+            std::cerr << "A press on a key point away from every handle did not open "
+                         "the MAR-168 point path.\n";
+            return false;
+        }
+        while (shell_state.session.undo_count() > 0U) {
+            if (!shell_state.session.undo()) break;
+        }
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+        reconcile_timeline_key_selection(
+            &shell_state, cached_timeline_tracks(&shell_state));
+        std::cout << "Timeline Graph actual-frame handles: first=("
+                  << commit_press.x << "," << commit_press.y << ") second=("
+                  << handle_stats.second_handle_x << ","
+                  << handle_stats.second_handle_y << ").\n";
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Graph;
+        render_graph_frame(nullptr);
+    }
+
     // MAR-159: the anchor resets only when filter/tree-collapse removes it
     // from the visible order. A Hierarchy window whose dock tab is hidden
     // renders no rows at all; that degenerate frame must not clear it.

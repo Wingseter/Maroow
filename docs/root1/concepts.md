@@ -146,7 +146,22 @@ time drag through the dopesheet's `retime_keyframes()`, both inside one
 time, and the parent key's single shared outgoing easing are carried through
 unchanged, and explicit-duration auto-grow runs inside the same transaction and
 the same undo entry. The drag candidate itself holds no transaction, so a press
-never blocks another editing surface. Easing authoring begins at MAR-169.
+never blocks another editing surface.
+
+MAR-169 adds easing authoring on the same foundation. The graph writes the
+outgoing easing through the additive `set_keyframe_interpolation()` primitive
+inside one `EditTransaction`, and that primitive deliberately takes **no**
+component argument: the easing is a property of the whole parent key, so a
+per-component curve is not merely disallowed but unrepresentable in `.marrow`,
+`.mskl`, `.mbin`, and the runtime alike. The pure pointer mapping clamps the
+Bezier x control points into `[0, 1]`, which is exactly the invariant both file
+loaders already enforce and exactly the condition that makes the runtime's
+`X(t) = alpha` inverse well posed; the primitive independently rejects any
+out-of-range or non-finite value atomically, testing finiteness before range so
+NaN cannot slip through. Finite y overshoot is preserved. The same mutation is
+exposed to the Agent registry and the Python MCP facade as
+`timeline.set_interpolation`, calling the identical primitive, which is what
+makes their behaviour structurally rather than coincidentally the same.
 
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active

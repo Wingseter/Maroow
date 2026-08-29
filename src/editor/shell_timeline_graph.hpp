@@ -50,6 +50,20 @@ struct TimelineGraphRenderStats {
     bool graph_owns_retime{false};
     timeline_graph_model::DragAxis drag_axis{
         timeline_graph_model::DragAxis::Undecided};
+    // MAR-169 handle overlay. Coordinates are the submitted handle centres, so
+    // an actual-frame smoke can aim a real mouse at a real handle.
+    bool handles_drawn{false};
+    float first_handle_x{0.0f};
+    float first_handle_y{0.0f};
+    float second_handle_x{0.0f};
+    float second_handle_y{0.0f};
+    bool handle_flat_value_span{false};
+    bool handle_gesture_active{false};
+    // True while any graph candidate or gesture is live, which is exactly when
+    // the component checkboxes and Fit are wrapped in BeginDisabled.
+    bool component_controls_disabled{false};
+    timeline_graph_model::SegmentKind active_segment_kind{
+        timeline_graph_model::SegmentKind::Linear};
 };
 
 const TimelineTrackRow* resolve_timeline_graph_track(
@@ -79,6 +93,28 @@ bool begin_timeline_graph_point_drag(
     ShellState* state,
     const TimelineTrackRow& track,
     const timeline_graph_model::PointHit& point,
+    std::uint32_t item_id,
+    timeline_graph_model::PlotRect plot,
+    const timeline_graph_model::View& view,
+    double pointer_x,
+    double pointer_y);
+
+/**
+ * @brief Arms a graph handle drag candidate on a left press.
+ *
+ * Shares MAR-168's candidate slot and dead zone, so a press owns no
+ * transaction until the pointer leaves the zone. Fails closed on a
+ * non-editable or unprojectable row, a geometry whose key is no longer the
+ * active key, another live authoring gesture, and non-finite pointer, view,
+ * plot, or frame input. A handle press deliberately does not activate the
+ * point under it: scrubbing the playhead or changing the selection mid-grab
+ * would move the very anchors the frozen frame depends on.
+ */
+bool begin_timeline_graph_handle_drag(
+    ShellState* state,
+    const TimelineTrackRow& track,
+    const timeline_graph_model::HandleGeometry& handles,
+    timeline_graph_model::HandleIndex handle,
     std::uint32_t item_id,
     timeline_graph_model::PlotRect plot,
     const timeline_graph_model::View& view,

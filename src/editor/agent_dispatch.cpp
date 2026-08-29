@@ -57,6 +57,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"animation.delete", "edit", true, false, true, true, &handle_editing_operation},
     {"animation.set_duration", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.retime_keyframes", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.set_interpolation", "edit", true, false, true, true, &handle_editing_operation},
     {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_event_keyframe", "edit", true, false, true, true, &handle_editing_operation},
@@ -282,6 +283,51 @@ std::optional<marrow::runtime::Interpolation> interpolation_arg(
     }
     return marrow::runtime::Interpolation::cubic_bezier(
         coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+}
+
+bool interpolation_request_arg(
+    const json::Value& args,
+    std::string_view name,
+    marrow::runtime::InterpolationKind* kind_out,
+    std::array<double, 4>* control_points_out,
+    std::string* error_out) {
+    const std::string missing = std::string(name) +
+        " is required and must be linear, stepped, or a 4-number bezier array.";
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || value->is_null()) {
+        *error_out = missing;
+        return false;
+    }
+    if (value->is_string()) {
+        if (value->as_string() == "linear") {
+            *kind_out = marrow::runtime::InterpolationKind::Linear;
+            *control_points_out = {0.0, 0.0, 1.0, 1.0};
+            return true;
+        }
+        if (value->as_string() == "stepped") {
+            *kind_out = marrow::runtime::InterpolationKind::Stepped;
+            *control_points_out = {0.0, 0.0, 1.0, 1.0};
+            return true;
+        }
+        *error_out = missing;
+        return false;
+    }
+    if (!value->is_array() || value->as_array().size() != 4U) {
+        *error_out = missing;
+        return false;
+    }
+    std::array<double, 4> coordinates{};
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        const json::Value& coordinate = value->as_array()[index];
+        if (!coordinate.is_number()) {
+            *error_out = "bezier interpolation values must be numbers.";
+            return false;
+        }
+        coordinates[index] = coordinate.as_number();
+    }
+    *kind_out = marrow::runtime::InterpolationKind::CubicBezier;
+    *control_points_out = coordinates;
+    return true;
 }
 
 bool parse_number_array(

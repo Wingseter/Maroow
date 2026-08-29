@@ -15,6 +15,83 @@ def _interpolation_schema() -> dict:
     }
 
 
+def _bezier_interpolation_schema() -> dict:
+    """Easing request schema for ``timeline.set_interpolation``.
+
+    The tuple form expresses the x constraint the C++ primitive enforces:
+    ``cx1``/``cx2`` must stay in ``[0, 1]`` because that is exactly what makes
+    the runtime's ``X(t) = alpha`` inverse well posed and what both file
+    loaders already require. ``cy1``/``cy2`` are unbounded so finite overshoot
+    stays authorable. The schema is advisory - the server forwards every call
+    verbatim and the C++ primitive remains the sole authority.
+    """
+    return {
+        "oneOf": [
+            {"type": "string", "enum": ["linear", "stepped"]},
+            {
+                "type": "array",
+                "items": [
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {"type": "number"},
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {"type": "number"},
+                ],
+                "minItems": 4,
+                "maxItems": 4,
+            },
+        ]
+    }
+
+
+def _timeline_interpolation_key_schema() -> dict:
+    """Only the three families whose keys carry an ``interpolation`` field.
+
+    Deliberately not a reuse of ``_timeline_retime_key_schema()``, which also
+    admits ``draw_order``, ``event``, and ``slot_attachment`` keys - those
+    structs have no easing at all.
+    """
+    common = {
+        "animation": {"type": "string", "minLength": 1},
+        "time": {"type": "number", "minimum": 0},
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "deform"},
+                    "slot": {"type": "string", "minLength": 1},
+                    "attachment": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "attachment", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "time"],
+            },
+        ]
+    }
+
+
 def _color_schema() -> dict:
     return {
         "type": "object",
@@ -454,6 +531,29 @@ def get_tools() -> list[types.Tool]:
                     "dry_run": {"type": "boolean"},
                 },
                 "required": ["delta", "keys"],
+            },
+        ),
+        types.Tool(
+            name="timeline.set_interpolation",
+            description=(
+                "Replace the outgoing easing of timeline keys. The easing is shared by "
+                "every component of a key, so this never creates per-component curves. "
+                "Bezier x control points must stay in [0, 1]; finite y overshoot is "
+                "allowed. A dry run reports each key's current curve without mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_interpolation_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "interpolation": _bezier_interpolation_schema(),
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["keys", "interpolation"],
             },
         ),
         types.Tool(

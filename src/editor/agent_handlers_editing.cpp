@@ -3,6 +3,7 @@
 #include "marrow/editor/authoring.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -33,6 +34,148 @@ json::Value animation_duration_value(
             number_value(*animation.explicit_duration));
     }
     return object_value(std::move(payload));
+}
+
+std::string transform_channel_name(TransformTimelineChannel channel) {
+    switch (channel) {
+    case TransformTimelineChannel::Rotate: return "rotate";
+    case TransformTimelineChannel::Translate: return "translate";
+    case TransformTimelineChannel::Scale: return "scale";
+    case TransformTimelineChannel::Shear: return "shear";
+    }
+    return "rotate";
+}
+
+std::string timeline_key_kind_name(TimelineKeyKind kind) {
+    switch (kind) {
+    case TimelineKeyKind::Transform: return "transform";
+    case TimelineKeyKind::Deform: return "deform";
+    case TimelineKeyKind::DrawOrder: return "draw_order";
+    case TimelineKeyKind::Event: return "event";
+    case TimelineKeyKind::SlotColor: return "slot_color";
+    case TimelineKeyKind::SlotAttachment: return "slot_attachment";
+    }
+    return "transform";
+}
+
+/** @brief Encodes an easing exactly as the `.marrow`/`.mskl` `curve` field. */
+json::Value interpolation_curve_value(const runtime::Interpolation& interpolation) {
+    switch (interpolation.kind()) {
+    case runtime::InterpolationKind::Linear:
+        return string_value("linear");
+    case runtime::InterpolationKind::Stepped:
+        return string_value("stepped");
+    case runtime::InterpolationKind::CubicBezier: {
+        const auto& points = interpolation.cubic_bezier();
+        json::Value::Array control_points;
+        control_points.reserve(4U);
+        control_points.push_back(number_value(static_cast<double>(points.cx1)));
+        control_points.push_back(number_value(static_cast<double>(points.cy1)));
+        control_points.push_back(number_value(static_cast<double>(points.cx2)));
+        control_points.push_back(number_value(static_cast<double>(points.cy2)));
+        return array_value(std::move(control_points));
+    }
+    }
+    return string_value("linear");
+}
+
+json::Value interpolation_request_value(
+    runtime::InterpolationKind kind,
+    const std::array<double, 4>& control_points) {
+    switch (kind) {
+    case runtime::InterpolationKind::Linear:
+        return string_value("linear");
+    case runtime::InterpolationKind::Stepped:
+        return string_value("stepped");
+    case runtime::InterpolationKind::CubicBezier: {
+        json::Value::Array points;
+        points.reserve(4U);
+        for (const double value : control_points) {
+            points.push_back(number_value(value));
+        }
+        return array_value(std::move(points));
+    }
+    }
+    return string_value("linear");
+}
+
+/**
+ * @brief Reads the stored easing of one selected key, or null when the key
+ *        does not resolve in `project`.
+ */
+json::Value timeline_key_curve_value(
+    const ProjectData& project,
+    const TimelineKeySelector& selector) {
+    const auto matching = [&](const auto& keyframes) -> const auto* {
+        for (const auto& keyframe : keyframes) {
+            if (std::abs(keyframe.time - selector.time) <= kKeyTimeEpsilon) {
+                return &keyframe;
+            }
+        }
+        return decltype(&keyframes.front()){nullptr};
+    };
+    switch (selector.kind) {
+    case TimelineKeyKind::Transform: {
+        const auto* edit = project.find_transform_timeline_edit(
+            selector.animation_name, selector.bone_name, selector.transform_channel);
+        if (edit == nullptr || edit->keyframes.empty()) break;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return interpolation_curve_value(keyframe->interpolation);
+        }
+        break;
+    }
+    case TimelineKeyKind::Deform: {
+        const auto* edit = project.find_mesh_deform_timeline_edit(
+            selector.animation_name, selector.slot_name, selector.attachment_name);
+        if (edit == nullptr || edit->keyframes.empty()) break;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return interpolation_curve_value(keyframe->interpolation);
+        }
+        break;
+    }
+    case TimelineKeyKind::SlotColor: {
+        const auto* edit = project.find_slot_color_timeline_edit(
+            selector.animation_name, selector.slot_name);
+        if (edit == nullptr || edit->keyframes.empty()) break;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return interpolation_curve_value(keyframe->interpolation);
+        }
+        break;
+    }
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        break;
+    }
+    return json::Value{};
+}
+
+bool same_curve_value(const json::Value& left, const json::Value& right) {
+    if (left.is_string() && right.is_string()) {
+        return left.as_string() == right.as_string();
+    }
+    if (left.is_array() && right.is_array()) {
+        if (left.as_array().size() != right.as_array().size()) return false;
+        for (std::size_t index = 0U; index < left.as_array().size(); ++index) {
+            const json::Value& first = left.as_array()[index];
+            const json::Value& second = right.as_array()[index];
+            if (!first.is_number() || !second.is_number() ||
+                first.as_number() != second.as_number()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return left.is_null() && right.is_null();
+}
+
+/**
+ * @brief Splits primitive rejections into "the key is not there" and
+ *        "the request was malformed", matching timeline.retime_keyframes.
+ */
+std::string_view classify_timeline_key_error(std::string_view error) {
+    return error.find("not found") != std::string_view::npos ? "not_found"
+                                                             : "invalid_request";
 }
 
 } // namespace
@@ -727,6 +870,280 @@ AgentDispatchResult handle_timeline_editing_operation(
             op,
             spec,
             response_delta(result, false));
+    }
+
+    if (op == "timeline.set_interpolation") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.set_interpolation requires an 'args' object.", op, spec);
+        }
+        const json::Value* keys_value = json::find_member(*args, "keys");
+        if (keys_value == nullptr || !keys_value->is_array() ||
+            keys_value->as_array().empty()) {
+            return make_error(
+                "timeline.set_interpolation requires a non-empty keys(array).",
+                op,
+                spec);
+        }
+        if (keys_value->as_array().size() > 4096U) {
+            return make_error(
+                "timeline.set_interpolation accepts at most 4096 keys.", op, spec);
+        }
+
+        std::vector<TimelineKeySelector> selectors;
+        selectors.reserve(keys_value->as_array().size());
+        for (std::size_t index = 0U; index < keys_value->as_array().size(); ++index) {
+            const json::Value& key_value = keys_value->as_array()[index];
+            if (!key_value.is_object()) {
+                return make_error(
+                    "timeline.set_interpolation key " + std::to_string(index) +
+                        " must be an object.",
+                    op,
+                    spec);
+            }
+            const auto kind = string_arg_any(key_value, {"kind", "type"});
+            const auto animation = string_arg(key_value, "animation");
+            const auto time = number_arg(key_value, "time");
+            if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
+                return make_error(
+                    "timeline.set_interpolation key " + std::to_string(index) +
+                        " requires kind, animation, and time.",
+                    op,
+                    spec);
+            }
+
+            TimelineKeySelector selector;
+            selector.animation_name = std::string(*animation);
+            selector.time = *time;
+            if (*kind == "transform") {
+                const auto bone = string_arg(key_value, "bone");
+                const auto channel = string_arg(key_value, "channel");
+                if (!bone.has_value() || !channel.has_value()) {
+                    return make_error(
+                        "Transform easing keys require bone and channel.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::Transform;
+                selector.bone_name = std::string(*bone);
+                if (*channel == "rotate") {
+                    selector.transform_channel = TransformTimelineChannel::Rotate;
+                } else if (*channel == "translate") {
+                    selector.transform_channel = TransformTimelineChannel::Translate;
+                } else if (*channel == "scale") {
+                    selector.transform_channel = TransformTimelineChannel::Scale;
+                } else if (*channel == "shear") {
+                    selector.transform_channel = TransformTimelineChannel::Shear;
+                } else {
+                    return make_error(
+                        "Transform easing channel must be rotate, translate, scale, or shear.",
+                        op,
+                        spec);
+                }
+            } else if (*kind == "deform") {
+                const auto slot = string_arg(key_value, "slot");
+                const auto attachment = string_arg(key_value, "attachment");
+                if (!slot.has_value() || !attachment.has_value()) {
+                    return make_error(
+                        "Deform easing keys require slot and attachment.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::Deform;
+                selector.slot_name = std::string(*slot);
+                selector.attachment_name = std::string(*attachment);
+            } else if (*kind == "slot_color") {
+                const auto slot = string_arg(key_value, "slot");
+                if (!slot.has_value()) {
+                    return make_error("Slot-colour easing keys require slot.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::SlotColor;
+                selector.slot_name = std::string(*slot);
+            } else if (*kind == "draw_order" || *kind == "event" ||
+                       *kind == "slot_attachment") {
+                // These families carry no `interpolation` field at all.
+                return make_error(
+                    "timeline.set_interpolation does not support " +
+                        std::string(*kind) + " keys.",
+                    op,
+                    spec);
+            } else {
+                return make_error(
+                    "Unknown timeline easing key kind: " + std::string(*kind), op, spec);
+            }
+            selectors.push_back(std::move(selector));
+        }
+
+        marrow::runtime::InterpolationKind requested_kind =
+            marrow::runtime::InterpolationKind::Linear;
+        std::array<double, 4> requested_points{0.0, 0.0, 1.0, 1.0};
+        std::string interpolation_error;
+        if (!interpolation_request_arg(
+                *args,
+                "interpolation",
+                &requested_kind,
+                &requested_points,
+                &interpolation_error)) {
+            return make_error(interpolation_error, op, spec);
+        }
+
+        const auto materialize = [&](ProjectData* project) {
+            for (const TimelineKeySelector& selector : selectors) {
+                switch (selector.kind) {
+                case TimelineKeyKind::Transform:
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name,
+                        selector.transform_channel);
+                    break;
+                case TimelineKeyKind::Deform:
+                    (void)ensure_mesh_deform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name,
+                        selector.attachment_name);
+                    break;
+                case TimelineKeyKind::SlotColor:
+                    (void)ensure_slot_color_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name);
+                    break;
+                case TimelineKeyKind::DrawOrder:
+                case TimelineKeyKind::Event:
+                case TimelineKeyKind::SlotAttachment:
+                    break;
+                }
+            }
+        };
+        // Previous curves are read from the materialized candidate, so a
+        // runtime-only track reports its runtime curve instead of "not found".
+        const auto collect_previous = [&](const ProjectData& project) {
+            std::vector<json::Value> curves;
+            curves.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                curves.push_back(timeline_key_curve_value(project, selector));
+            }
+            return curves;
+        };
+        const auto apply = [&](ProjectData* project) {
+            materialize(project);
+            return set_keyframe_interpolation(
+                project, selectors, requested_kind, requested_points);
+        };
+        const auto response_delta =
+            [&](const TimelineInterpolationResult& result,
+                bool dry_run,
+                const std::vector<json::Value>& previous,
+                const std::vector<json::Value>& current) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace(
+                    "interpolation",
+                    interpolation_request_value(requested_kind, requested_points));
+                response.emplace("key_count", number_value(result.key_count));
+                response.emplace(
+                    "changed_key_count", number_value(result.changed_key_count));
+                constexpr std::size_t kMaxReportedKeys = 256U;
+                const std::size_t reported =
+                    std::min(selectors.size(), kMaxReportedKeys);
+                response.emplace(
+                    "keys_truncated", bool_value(selectors.size() > reported));
+                json::Value::Array keys;
+                keys.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    json::Value::Object entry;
+                    const TimelineKeySelector& selector = selectors[index];
+                    entry.emplace(
+                        "kind", string_value(timeline_key_kind_name(selector.kind)));
+                    entry.emplace("animation", string_value(selector.animation_name));
+                    if (selector.kind == TimelineKeyKind::Transform) {
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(selector.transform_channel))));
+                    } else {
+                        entry.emplace("slot", string_value(selector.slot_name));
+                        if (selector.kind == TimelineKeyKind::Deform) {
+                            entry.emplace(
+                                "attachment", string_value(selector.attachment_name));
+                        }
+                    }
+                    entry.emplace("time", number_value(selector.time));
+                    entry.emplace(
+                        "previous_interpolation",
+                        index < previous.size() ? previous[index] : json::Value{});
+                    const bool changed = index < previous.size() &&
+                        index < current.size() &&
+                        !same_curve_value(previous[index], current[index]);
+                    entry.emplace("changed", bool_value(changed));
+                    keys.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("keys", array_value(std::move(keys)));
+                return object_value(std::move(response));
+            };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            materialize(&candidate);
+            const std::vector<json::Value> previous = collect_previous(candidate);
+            const TimelineInterpolationResult result = set_keyframe_interpolation(
+                &candidate, selectors, requested_kind, requested_points);
+            if (!result && !result.error.empty()) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            const std::vector<json::Value> current = collect_previous(candidate);
+            return make_success(
+                "Timeline key easing validated.",
+                op,
+                spec,
+                response_delta(result, true, previous, current));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            selectors.size() == 1U
+                ? "Set timeline key easing via Agent"
+                : "Set timeline key easings via Agent",
+            "timeline:interpolation",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        materialize(transaction.project());
+        const std::vector<json::Value> previous = collect_previous(*transaction.project());
+        const TimelineInterpolationResult result = set_keyframe_interpolation(
+            transaction.project(), selectors, requested_kind, requested_points);
+        if (!result && !result.error.empty()) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const std::vector<json::Value> current = collect_previous(*transaction.project());
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to set timeline key easing: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Set timeline key easing successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous, current));
     }
 
     if (op == "set_event_keyframe") {

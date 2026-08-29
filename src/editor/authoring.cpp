@@ -1873,4 +1873,196 @@ TimelineScalarOffsetResult offset_keyframe_scalars(
     return {{true, {}}, applied_delta, resolved.size()};
 }
 
+namespace {
+
+/**
+ * @brief Value comparison for `runtime::Interpolation`, which has no `==`.
+ *
+ * Both sides are already float32, so an exact comparison is the right test:
+ * a rewrite that narrows to the same bits genuinely changes nothing.
+ */
+bool same_interpolation(
+    const runtime::Interpolation& left,
+    const runtime::Interpolation& right) {
+    if (left.kind() != right.kind()) return false;
+    if (left.kind() != runtime::InterpolationKind::CubicBezier) return true;
+    const auto& first = left.cubic_bezier();
+    const auto& second = right.cubic_bezier();
+    return first.cx1 == second.cx1 && first.cy1 == second.cy1 &&
+        first.cx2 == second.cx2 && first.cy2 == second.cy2;
+}
+
+/**
+ * @brief Reads the outgoing easing of a resolved key, or nullptr for kinds
+ *        that carry none.
+ */
+const runtime::Interpolation* read_key_interpolation(
+    const ProjectData& project,
+    const ResolvedTimelineKey& resolved) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        return &project.transform_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .interpolation;
+    case TimelineKeyKind::Deform:
+        return &project.mesh_deform_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .interpolation;
+    case TimelineKeyKind::SlotColor:
+        return &project.slot_color_timeline_edits[resolved.timeline_index]
+                    .keyframes[resolved.key_index]
+                    .interpolation;
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return nullptr;
+    }
+    return nullptr;
+}
+
+/** @brief Writes the outgoing easing of a resolved key that carries one. */
+void write_key_interpolation(
+    ProjectData* project,
+    const ResolvedTimelineKey& resolved,
+    const runtime::Interpolation& interpolation) {
+    switch (resolved.kind) {
+    case TimelineKeyKind::Transform:
+        project->transform_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .interpolation = interpolation;
+        return;
+    case TimelineKeyKind::Deform:
+        project->mesh_deform_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .interpolation = interpolation;
+        return;
+    case TimelineKeyKind::SlotColor:
+        project->slot_color_timeline_edits[resolved.timeline_index]
+            .keyframes[resolved.key_index]
+            .interpolation = interpolation;
+        return;
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+        return;
+    }
+}
+
+/**
+ * @brief Validates one cubic control point value.
+ *
+ * The finiteness test must precede the range test: `NaN < 0.0` and
+ * `NaN > 1.0` are both false, so a naive range check would let NaN through.
+ * The float32 narrowing is checked as well, so `1e300` is rejected rather
+ * than silently stored as infinity.
+ */
+bool valid_bezier_control_point(double value, bool is_x, std::string* error_out) {
+    if (!std::isfinite(value)) {
+        *error_out = "Bezier control points must be finite.";
+        return false;
+    }
+    if (std::abs(value) >
+        static_cast<double>(std::numeric_limits<runtime::AnimationScalar>::max())) {
+        *error_out = "Bezier control points must fit the runtime float32 range.";
+        return false;
+    }
+    const double narrowed =
+        static_cast<double>(static_cast<runtime::AnimationScalar>(value));
+    if (!std::isfinite(narrowed)) {
+        *error_out = "Bezier control points must stay finite after float32 narrowing.";
+        return false;
+    }
+    if (is_x && (value < 0.0 || value > 1.0 || narrowed < 0.0 || narrowed > 1.0)) {
+        *error_out = "bezier x control points must stay within [0, 1]";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+TimelineInterpolationResult set_keyframe_interpolation(
+    ProjectData* project,
+    const std::vector<TimelineKeySelector>& selectors,
+    runtime::InterpolationKind kind,
+    const std::array<double, 4>& control_points) {
+    if (project == nullptr) {
+        return {{false, "Timeline authoring requires an open project."}, 0U, 0U};
+    }
+    if (selectors.empty()) {
+        return {{false, "At least one timeline key is required."}, 0U, 0U};
+    }
+    if (kind == runtime::InterpolationKind::CubicBezier) {
+        for (std::size_t index = 0U; index < control_points.size(); ++index) {
+            std::string error;
+            if (!valid_bezier_control_point(
+                    control_points[index], index % 2U == 0U, &error)) {
+                return {{false, std::move(error)}, 0U, 0U};
+            }
+        }
+    }
+
+    ProjectData candidate = *project;
+    std::vector<ResolvedTimelineKey> resolved;
+    resolved.reserve(selectors.size());
+    std::set<std::tuple<int, std::size_t, std::size_t>> identities;
+    for (const TimelineKeySelector& selector : selectors) {
+        if (selector.animation_name.empty() || !std::isfinite(selector.time) ||
+            selector.time < 0.0) {
+            return {{false, "Timeline selectors require an animation and non-negative finite time."},
+                    0U,
+                    0U};
+        }
+        std::string error;
+        const auto key = resolve_timeline_key(candidate, selector, &error);
+        if (!key.has_value()) {
+            return {{false, std::move(error)}, 0U, 0U};
+        }
+        const auto identity = std::make_tuple(
+            static_cast<int>(key->kind), key->timeline_index, key->key_index);
+        if (!identities.insert(identity).second) {
+            return {{false, "A timeline key was selected more than once."}, 0U, 0U};
+        }
+        if (read_key_interpolation(candidate, *key) == nullptr) {
+            return {{false, "The selected timeline key does not carry an outgoing easing."},
+                    0U,
+                    0U};
+        }
+        resolved.push_back(*key);
+    }
+
+    // The Interpolation is constructed only after every value passed, so a
+    // rejected request never enters the process-wide cubic LUT cache.
+    runtime::Interpolation interpolation;
+    switch (kind) {
+    case runtime::InterpolationKind::Linear:
+        interpolation = runtime::Interpolation::linear();
+        break;
+    case runtime::InterpolationKind::Stepped:
+        interpolation = runtime::Interpolation::stepped();
+        break;
+    case runtime::InterpolationKind::CubicBezier:
+        interpolation = runtime::Interpolation::cubic_bezier(
+            control_points[0], control_points[1], control_points[2], control_points[3]);
+        break;
+    }
+
+    std::size_t changed_key_count = 0U;
+    for (const ResolvedTimelineKey& key : resolved) {
+        const runtime::Interpolation* current = read_key_interpolation(candidate, key);
+        if (current != nullptr && !same_interpolation(*current, interpolation)) {
+            ++changed_key_count;
+        }
+    }
+    if (changed_key_count == 0U) {
+        return {{false, {}}, resolved.size(), 0U};
+    }
+
+    for (const ResolvedTimelineKey& key : resolved) {
+        write_key_interpolation(&candidate, key, interpolation);
+    }
+    *project = std::move(candidate);
+    return {{true, {}}, resolved.size(), changed_key_count};
+}
+
 } // namespace marrow::editor

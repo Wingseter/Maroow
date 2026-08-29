@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <filesystem>
 #include <initializer_list>
 #include <optional>
@@ -94,6 +95,22 @@ std::optional<int> integer_arg(const json::Value& args, std::string_view name);
 std::optional<marrow::runtime::Interpolation> interpolation_arg(
     const json::Value& args,
     std::string_view name,
+    std::string* error_out);
+/**
+ * @brief Parses an easing request into a kind plus four raw control points.
+ *
+ * Unlike `interpolation_arg()`, a missing member is an error rather than a
+ * silent linearization, because silently linearizing every selected key would
+ * be a destructive default. The raw doubles are returned without constructing
+ * a `runtime::Interpolation`, so a rejected request never enters the
+ * process-wide cubic LUT cache and validation still sees the pre-narrowing
+ * value.
+ */
+bool interpolation_request_arg(
+    const json::Value& args,
+    std::string_view name,
+    marrow::runtime::InterpolationKind* kind_out,
+    std::array<double, 4>* control_points_out,
     std::string* error_out);
 bool parse_number_array(
     const json::Value& args,
