@@ -32,7 +32,8 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28/MAR-163/MAR-164 checkpoints or the next MAR-165 product milestone.
+Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167 checkpoints or the next
+MAR-168 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -42,6 +43,30 @@ cmake -S . -B build-display -DMARROW_ENABLE_DISPLAY_TESTS=ON
 cmake --build build-display
 ctest --test-dir build-display --output-on-failure -L display
 ```
+
+## Inspect a timeline in Graph mode
+
+Open the canonical project, select an animation, then use the **Graph** tab in
+the **Timeline** window. The graph shows one focused continuous parent track at
+a time: Bone Rotate, Translate, Scale, or Shear, or Slot Color. Use the colored
+per-component checkboxes to show or hide Angle, X/Y, or R/G/B/A. **Fit** (or
+`F` while the plot is hovered) frames the visible series. Mouse wheel zooms time
+at the cursor, Shift-wheel zooms the value axis, and middle-button drag pans
+both axes.
+
+Graph points reuse the dopesheet's parent `TimelineKeyRef`. Selecting a point
+therefore updates the shared parent-key selection, active key, focused parent
+track, and playhead; component choice is only transient graph context. The
+display plots effective runtime values and the actual outgoing Linear, Stepped,
+or Cubic easing. One outgoing easing belongs to the complete Transform or RGBA
+parent key, not to an individual component.
+
+MAR-167 is read-only. Point dragging displays the MAR-168 editing boundary and
+does not change key time or value. FFD and discrete Inherit, Attachment, Draw
+Order, and Event lanes show an unsupported empty state instead of stale graph
+data. Graph tab, visibility, Fit, pan, zoom, hover, and active-component state
+are shell-private and are not saved to `.marrow`, runtime export, history,
+dirty state, runtime revision, or Agent/MCP.
 
 ## Auto-key an attachment-local FFD vertex group
 
@@ -71,6 +96,36 @@ rolls back the entire group. Vertex sub-selection is transient: it survives
 time, animation, parameter preview, undo/redo, and ordinary rebuilds for the
 same exact displayed Attachment, but is not saved and clears on context or
 successful source/project replacement.
+
+## Use viewport snapping
+
+Open **Properties → Viewport Snapping** to configure world grid, magnetic FFD
+vertices, local angle, and absolute scale snapping. Checked-in defaults are all
+off with steps of 10 world units, 15 degrees, and 0.1 scale units; the magnetic
+radius is a fixed inclusive 8 logical pixels and is not serialized. Changing a
+toggle creates one project undo item; one continuous numeric drag is coalesced
+into one undo item.
+
+While dragging a translate, rotate, or scale gizmo, hold Cmd on macOS (Ctrl on
+other platforms) to temporarily enable that domain even when its project toggle
+is off. Hold Alt to bypass snapping; Alt wins if both modifiers are down. These
+modifiers are sampled live and do not dirty the project. Translation aligns to
+the configured world-origin snap grid (10 world units by default); the displayed
+grid may skip integer multiples while zoomed out. Rotation preserves raw
+multi-turn angles, and signed scale can cross through exact zero.
+
+During an FFD drag, the pressed selected vertex is the group anchor. When the
+group drag activates, the editor snapshots finite vertices from positive-alpha
+displayed meshes while excluding selected members. Each update reprojects that
+snapshot and reevaluates which candidates are inside the current canvas before
+falling back to the same world grid. Magnetic vertices within 8 logical pixels
+win over the grid; exact distance then the stable slot/skin/attachment/vertex
+identity resolves ties. Cmd on macOS (Ctrl elsewhere) temporarily enables both
+disabled FFD sources, while Alt bypasses both; the live modifiers remain
+transient. The resulting common world delta moves the whole selected group,
+including linked-child edits that write their immediate-parent deform timeline.
+A transient cyan or gold guide shows the correction and disappears on bypass,
+cancel, or gesture completion.
 
 ## Minimal C++ embedding example
 

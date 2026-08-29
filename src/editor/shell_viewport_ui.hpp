@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "shell_coalesced_edit.hpp"
 #include "shell_state.hpp"
 #include "viewport_interaction_controller.hpp"
 
@@ -30,7 +31,61 @@ bool execute_viewport_setting_edit_action(
         EditActionKind::EditProperty,
         std::move(label),
         std::move(group),
-        allow_merge);
+        allow_merge,
+        marrow::editor::EditImpact::Project);
+}
+
+template <typename MutateFn>
+bool apply_snap_setting_edit(
+    ShellState* state,
+    std::string label,
+    std::string group,
+    MutateFn mutate) {
+    return execute_viewport_setting_edit_action(
+        state,
+        std::move(label),
+        std::move(group),
+        false,
+        [&]() {
+            auto settings = state->load_result.project->snap_settings.value_or(
+                marrow::editor::ProjectSnapSettings{});
+            mutate(&settings);
+            state->load_result.project->snap_settings = std::move(settings);
+        });
+}
+
+template <typename MutateFn>
+bool apply_coalesced_snap_setting_edit(
+    ShellState* state,
+    const CoalescedEditFrame& frame,
+    std::string label,
+    std::string group,
+    MutateFn mutate) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.project == nullptr) {
+        return false;
+    }
+    if (frame.activated && authoring_gesture_active(*state)) {
+        state->status_message =
+            "Finish the active edit before changing viewport settings";
+        return false;
+    }
+    return apply_coalesced_edit_frame(
+        state,
+        frame,
+        CoalescedEditDescriptor{
+            EditActionKind::EditProperty,
+            std::move(label),
+            std::move(group),
+            false,
+            CoalescedEditPolicy::ProjectMetadataOnly,
+            {}},
+        [&]() {
+            auto settings = state->load_result.project->snap_settings.value_or(
+                marrow::editor::ProjectSnapSettings{});
+            mutate(&settings);
+            state->load_result.project->snap_settings = std::move(settings);
+        });
 }
 
 template <typename MutateFn>
@@ -79,6 +134,12 @@ std::optional<marrow::runtime::AttachmentVertex> bone_local_position_from_world(
     const marrow::runtime::Skeleton& skeleton,
     std::size_t bone_index,
     const ViewportWorldPoint& target);
+std::optional<float> viewport_grid_spacing_pixels(
+    const ShellState& state,
+    const ViewportLayout& layout);
+std::optional<ImVec2> ffd_snap_guide_start(
+    const ViewportFfdGesture& gesture,
+    const ViewportLayout& layout);
 const char* onion_skin_mode_name(marrow::editor::OnionSkinMode mode);
 void draw_viewport_fallback_scene(
     const ShellState& state,

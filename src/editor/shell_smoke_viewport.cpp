@@ -1768,6 +1768,625 @@ bool validate_viewport_camera_smoke(
     return true;
 }
 
+bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) || state.preview_skeleton == nullptr ||
+        state.session.runtime_data() == nullptr ||
+        !scrub_timeline_time(&state, 0.333, "Viewport snap smoke", false)) {
+        std::cerr << "Viewport snap smoke could not load its animation context.\n";
+        return false;
+    }
+
+    const std::string snap_baseline_snapshot =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto runtime_before_toggle = state.session.runtime_data();
+    if (!apply_snap_setting_edit(
+            &state,
+            "Enable world-grid snapping",
+            "viewport:snap:world-enabled",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->world_grid_enabled = true;
+            }) ||
+        state.session.undo_count() != 1U ||
+        state.session.runtime_data() != runtime_before_toggle ||
+        !state.session.project()->snap_settings.has_value() ||
+        !state.session.project()->snap_settings->world_grid_enabled ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) !=
+            snap_baseline_snapshot) {
+        std::cerr << "Snap checkbox was not one project-only undo item.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    const std::string magnetic_baseline =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto* runtime_before_magnetic = state.session.runtime_data();
+    const bool dirty_before_magnetic = state.session.dirty();
+    const std::uint64_t project_revision_before_magnetic =
+        state.session.project_revision();
+    const std::uint64_t runtime_revision_before_magnetic =
+        state.session.runtime_revision();
+    const std::uint64_t preview_revision_before_magnetic =
+        state.session.preview_revision();
+    if (!apply_snap_setting_edit(
+            &state,
+            "Enable magnetic vertex snapping",
+            "viewport:snap:magnetic-vertex-enabled",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->magnetic_vertex_enabled = true;
+            }) ||
+        !state.session.project()->snap_settings.has_value() ||
+        !state.session.project()->snap_settings->magnetic_vertex_enabled ||
+        state.session.undo_count() != 1U ||
+        state.session.runtime_data() != runtime_before_magnetic ||
+        state.session.project_revision() != project_revision_before_magnetic + 1U ||
+        state.session.runtime_revision() != runtime_revision_before_magnetic ||
+        state.session.preview_revision() != preview_revision_before_magnetic) {
+        std::cerr << "Magnetic vertex checkbox was not one project-only edit.\n";
+        return false;
+    }
+    const std::string magnetic_after =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t magnetic_undo = state.session.undo_count();
+    const std::uint64_t magnetic_project_revision =
+        state.session.project_revision();
+    if (apply_snap_setting_edit(
+            &state,
+            "Enable magnetic vertex snapping",
+            "viewport:snap:magnetic-vertex-enabled",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->magnetic_vertex_enabled = true;
+            }) ||
+        marrow::editor::serialize_project(*state.session.project()) != magnetic_after ||
+        state.session.undo_count() != magnetic_undo ||
+        state.session.project_revision() != magnetic_project_revision ||
+        state.session.runtime_revision() != runtime_revision_before_magnetic ||
+        state.session.preview_revision() != preview_revision_before_magnetic ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) !=
+            magnetic_baseline ||
+        state.session.dirty() != dirty_before_magnetic) {
+        std::cerr << "Magnetic vertex same-value edit or undo changed unrelated state.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    constexpr ImGuiID kSnapStepItem = 0x4d415235U;
+    const auto runtime_before_step_drag = state.session.runtime_data();
+    if (!apply_coalesced_snap_setting_edit(
+            &state,
+            CoalescedEditFrame{kSnapStepItem, true, true, false, false},
+            "Update world-grid snap step",
+            "viewport:snap:world-step",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->world_grid_step = 12.0;
+            }) ||
+        !apply_coalesced_snap_setting_edit(
+            &state,
+            CoalescedEditFrame{kSnapStepItem, false, true, false, false},
+            "Update world-grid snap step",
+            "viewport:snap:world-step",
+            [](marrow::editor::ProjectSnapSettings* value) {
+                value->world_grid_step = 12.5;
+            }) ||
+        !apply_coalesced_snap_setting_edit(
+            &state,
+            CoalescedEditFrame{kSnapStepItem, false, false, true, true},
+            "Update world-grid snap step",
+            "viewport:snap:world-step",
+            [](marrow::editor::ProjectSnapSettings*) {}) ||
+        state.session.undo_count() != 1U ||
+        state.session.runtime_data() != runtime_before_step_drag ||
+        !state.session.project()->snap_settings.has_value() ||
+        std::abs(state.session.project()->snap_settings->world_grid_step - 12.5) > 1e-9 ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) !=
+            snap_baseline_snapshot) {
+        std::cerr << "Snap numeric drag was not one coalesced project-only undo item.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    constexpr ImGuiID kBlockingEditItem = 0x424c4f43U;
+    constexpr ImGuiID kBlockedSnapItem = 0x534e4150U;
+    const std::string blocked_snap_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const auto blocked_runtime_before = state.session.runtime_data();
+    const bool blocked_dirty_before = state.session.dirty();
+    const std::size_t blocked_undo_before = state.session.undo_count();
+    PendingEditAction blocking_edit;
+    blocking_edit.item_id = kBlockingEditItem;
+    blocking_edit.label = "Blocking authoring gesture";
+    blocking_edit.group = "viewport:snap:blocker";
+    blocking_edit.impacts = marrow::editor::EditImpact::Project;
+    blocking_edit.before_snapshot = capture_history_snapshot(state);
+    state.pending_edit_action = std::move(blocking_edit);
+    const bool blocked_activation = !apply_coalesced_snap_setting_edit(
+        &state,
+        CoalescedEditFrame{kBlockedSnapItem, true, true, false, false},
+        "Blocked snap step",
+        "viewport:snap:blocked-step",
+        [](marrow::editor::ProjectSnapSettings* value) {
+            value->local_angle_step_degrees = 33.0;
+        });
+    const bool blocked_continuation = !apply_coalesced_snap_setting_edit(
+        &state,
+        CoalescedEditFrame{kBlockedSnapItem, false, true, false, false},
+        "Blocked snap step",
+        "viewport:snap:blocked-step",
+        [](marrow::editor::ProjectSnapSettings* value) {
+            value->local_angle_step_degrees = 33.0;
+        });
+    if (!blocked_activation || !blocked_continuation ||
+        marrow::editor::serialize_project(*state.session.project()) !=
+            blocked_snap_before ||
+        state.session.runtime_data() != blocked_runtime_before ||
+        state.session.dirty() != blocked_dirty_before ||
+        state.session.undo_count() != blocked_undo_before) {
+        std::cerr << "Blocked snap drag continuation mutated project state or history.\n";
+        return false;
+    }
+    if (!cancel_coalesced_edit(&state)) {
+        return false;
+    }
+
+    marrow::editor::ProjectSnapSettings settings;
+    settings.world_grid_enabled = true;
+    settings.local_angle_enabled = true;
+    settings.absolute_scale_enabled = true;
+    const auto runtime_before_settings = state.session.runtime_data();
+    auto settings_transaction = state.session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Configure viewport snapping",
+        "viewport-snap-settings",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!settings_transaction) {
+        std::cerr << settings_transaction.error()->format();
+        return false;
+    }
+    settings_transaction.project()->snap_settings = settings;
+    const auto settings_commit = settings_transaction.commit();
+    sync_shell_from_editor_session(&state);
+    if (!settings_commit || state.session.undo_count() != 1U ||
+        state.session.runtime_data() != runtime_before_settings) {
+        std::cerr << "Snap settings were not one project-only transaction.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    const auto arm_index = state.session.runtime_data()->find_bone_index("arm_l");
+    const auto root_index = state.session.runtime_data()->find_bone_index("root");
+    if (!arm_index.has_value() || !root_index.has_value()) {
+        std::cerr << "Viewport snap smoke could not find root/arm_l.\n";
+        return false;
+    }
+    const auto parent_index = state.session.runtime_data()->bones()[*arm_index].parent_index;
+    if (!parent_index.has_value()) {
+        std::cerr << "Viewport snap smoke expected arm_l to have a parent.\n";
+        return false;
+    }
+    const std::string parent_name =
+        state.session.runtime_data()->bones()[*parent_index].name;
+    auto reflection_transaction = state.session.begin_edit({
+        marrow::editor::EditKind::AddKeyframe,
+        "Stage reflected parent for snapping",
+        "viewport-snap-reflection",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!reflection_transaction) {
+        std::cerr << reflection_transaction.error()->format();
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        *reflection_transaction.project(),
+        *state.session.runtime_data(),
+        "idle",
+        parent_name,
+        marrow::editor::TransformTimelineChannel::Scale,
+        0.333,
+        marrow::editor::TransformKeyframePatch{
+            std::nullopt, -1.25, 0.75});
+    if (!reflection_transaction.refresh_runtime() ||
+        !reflection_transaction.commit()) {
+        std::cerr << "Viewport snap smoke could not stage a reflected parent.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    const auto reflected_arm_world =
+        state.preview_skeleton->bone_world_transforms()[*arm_index];
+    const ViewportWorldPoint staged_off_grid_world{
+        std::round(static_cast<double>(reflected_arm_world.world_x) / 10.0) * 10.0 +
+            3.0,
+        static_cast<double>(reflected_arm_world.world_y)};
+    const auto staged_off_grid_local =
+        viewport_interaction::local_position_for_world_target(
+            *state.preview_skeleton, *arm_index, staged_off_grid_world);
+    auto off_grid_translate_transaction = state.session.begin_edit({
+        marrow::editor::EditKind::AddKeyframe,
+        "Stage off-grid constrained translation",
+        "viewport-snap-axis-noop",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!staged_off_grid_local.has_value() || !off_grid_translate_transaction) {
+        std::cerr << "Viewport snap smoke could not stage an off-grid translation.\n";
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        *off_grid_translate_transaction.project(),
+        *state.session.runtime_data(),
+        "idle",
+        "arm_l",
+        marrow::editor::TransformTimelineChannel::Translate,
+        0.333,
+        marrow::editor::TransformKeyframePatch{
+            std::nullopt,
+            staged_off_grid_local->x,
+            staged_off_grid_local->y});
+    if (!off_grid_translate_transaction.refresh_runtime() ||
+        !off_grid_translate_transaction.commit()) {
+        std::cerr << "Viewport snap smoke could not commit an off-grid translation.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    const ImVec2 canvas_origin(23.0f, 41.0f);
+    const ImVec2 canvas_size(1000.0f, 700.0f);
+    select_bone(&state, *arm_index, "Snap smoke", false);
+    auto layout = build_viewport_layout(state, canvas_origin, canvas_size);
+    if (!layout.has_value()) {
+        return false;
+    }
+    const auto grid_spacing = viewport_grid_spacing_pixels(state, *layout);
+    const double visible_world_step = grid_spacing.has_value()
+        ? static_cast<double>(*grid_spacing) /
+            static_cast<double>(layout->pixels_per_unit)
+        : 0.0;
+    if (!grid_spacing.has_value() ||
+        std::abs(
+            visible_world_step / settings.world_grid_step -
+            std::round(visible_world_step / settings.world_grid_step)) > 1e-6) {
+        std::cerr << std::setprecision(17)
+                  << "Visible grid was not an integer multiple of the snap grid: spacing="
+                  << grid_spacing.value_or(0.0f)
+                  << " pixels_per_unit=" << layout->pixels_per_unit
+                  << " world_step=" << visible_world_step
+                  << " ratio=" << visible_world_step / settings.world_grid_step
+                  << ".\n";
+        return false;
+    }
+    const auto arm_start =
+        state.preview_skeleton->bone_world_transforms()[*arm_index];
+    const ImVec2 translate_start = screen_from_world(
+        *layout, arm_start.world_x, arm_start.world_y);
+    const std::string constrained_click_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t constrained_click_undo_before = state.session.undo_count();
+    if (!viewport_interaction::begin_translate_gesture(
+            &state, *layout, ViewportTranslateAxis::X, translate_start) ||
+        !viewport_interaction::update_translate_gesture(
+            &state,
+            *layout,
+            ImVec2(translate_start.x, translate_start.y - 50.0f),
+            ViewportSnapModifiers{})) {
+        std::cerr << "Constrained translation no-op regression could not run.\n";
+        return false;
+    }
+    viewport_interaction::finish_transform_gesture(&state, true);
+    const auto constrained_click_world =
+        state.preview_skeleton->bone_world_transforms()[*arm_index];
+    if (marrow::editor::serialize_project(*state.session.project()) !=
+            constrained_click_before ||
+        state.session.undo_count() != constrained_click_undo_before ||
+        std::abs(constrained_click_world.world_x - arm_start.world_x) > 2e-3 ||
+        std::abs(constrained_click_world.world_y - arm_start.world_y) > 2e-3) {
+        std::cerr << "Orthogonal pointer motion snapped an axis-constrained translation.\n";
+        return false;
+    }
+    const ViewportWorldPoint raw_translate_target{
+        static_cast<double>(arm_start.world_x) + 13.2,
+        static_cast<double>(arm_start.world_y) - 6.4};
+    const ViewportWorldPoint snapped_translate_target{
+        std::round(raw_translate_target.x / 10.0) * 10.0,
+        std::round(raw_translate_target.y / 10.0) * 10.0};
+    const ImVec2 translate_pointer = screen_from_world(
+        *layout, raw_translate_target.x, raw_translate_target.y);
+    const std::string translate_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t translate_undo_before = state.session.undo_count();
+    const bool translate_dirty_before = state.session.dirty();
+    if (!viewport_interaction::begin_translate_gesture(
+            &state, *layout, ViewportTranslateAxis::Free, translate_start) ||
+        !viewport_interaction::update_translate_gesture(
+            &state, *layout, translate_pointer, ViewportSnapModifiers{})) {
+        std::cerr << "Configured translate snapping did not begin.\n";
+        return false;
+    }
+    auto arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    if (std::abs(arm_world.world_x - snapped_translate_target.x) > 2e-3 ||
+        std::abs(arm_world.world_y - snapped_translate_target.y) > 2e-3 ||
+        !viewport_interaction::update_translate_gesture(
+            &state,
+            *layout,
+            translate_pointer,
+            ViewportSnapModifiers{false, true})) {
+        std::cerr << "World snap was not applied before reflected-parent inversion.\n";
+        return false;
+    }
+    arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    if (std::abs(arm_world.world_x - raw_translate_target.x) > 2e-3 ||
+        std::abs(arm_world.world_y - raw_translate_target.y) > 2e-3) {
+        std::cerr << "Live Alt did not bypass configured translation snapping.\n";
+        return false;
+    }
+    viewport_interaction::finish_transform_gesture(&state, false);
+    if (marrow::editor::serialize_project(*state.session.project()) != translate_before ||
+        state.session.undo_count() != translate_undo_before ||
+        state.session.dirty() != translate_dirty_before) {
+        std::cerr << "Transient Alt translation changed project/history state.\n";
+        return false;
+    }
+
+    auto disable_world_transaction = state.session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "Disable configured world snapping",
+        "viewport-snap-settings",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!disable_world_transaction ||
+        !disable_world_transaction.project()->snap_settings.has_value()) {
+        return false;
+    }
+    disable_world_transaction.project()->snap_settings->world_grid_enabled = false;
+    if (!disable_world_transaction.commit()) {
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+    select_bone(&state, *arm_index, "Snap smoke", false);
+    layout = build_viewport_layout(state, canvas_origin, canvas_size);
+    if (!layout.has_value()) {
+        return false;
+    }
+    const auto temporary_start_world =
+        state.preview_skeleton->bone_world_transforms()[*arm_index];
+    const ImVec2 temporary_start = screen_from_world(
+        *layout, temporary_start_world.world_x, temporary_start_world.world_y);
+    const ViewportWorldPoint temporary_raw_target{
+        static_cast<double>(temporary_start_world.world_x) + 13.2,
+        static_cast<double>(temporary_start_world.world_y) - 6.4};
+    const ImVec2 temporary_pointer = screen_from_world(
+        *layout, temporary_raw_target.x, temporary_raw_target.y);
+    const std::string temporary_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t temporary_undo_before = state.session.undo_count();
+    const bool temporary_dirty_before = state.session.dirty();
+    if (!viewport_interaction::begin_translate_gesture(
+            &state, *layout, ViewportTranslateAxis::Free, temporary_start) ||
+        !viewport_interaction::update_translate_gesture(
+            &state,
+            *layout,
+            temporary_pointer,
+            ViewportSnapModifiers{true, false})) {
+        std::cerr << "Temporary command translation snapping did not begin.\n";
+        return false;
+    }
+    arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    if (std::abs(arm_world.world_x - std::round(temporary_raw_target.x / 10.0) * 10.0) >
+            2e-3 ||
+        std::abs(arm_world.world_y - std::round(temporary_raw_target.y / 10.0) * 10.0) >
+            2e-3 ||
+        !viewport_interaction::update_translate_gesture(
+            &state, *layout, temporary_pointer, ViewportSnapModifiers{})) {
+        std::cerr << "Command modifier did not enable disabled world snapping.\n";
+        return false;
+    }
+    arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    if (std::abs(arm_world.world_x - temporary_raw_target.x) > 2e-3 ||
+        std::abs(arm_world.world_y - temporary_raw_target.y) > 2e-3) {
+        std::cerr << "Live command release did not restore unsnapped translation.\n";
+        return false;
+    }
+    viewport_interaction::finish_transform_gesture(&state, false);
+    if (marrow::editor::serialize_project(*state.session.project()) != temporary_before ||
+        state.session.undo_count() != temporary_undo_before ||
+        state.session.dirty() != temporary_dirty_before) {
+        std::cerr << "Transient command translation changed project/history state.\n";
+        return false;
+    }
+
+    select_bone(&state, *root_index, "Snap smoke", false);
+    layout = build_viewport_layout(state, canvas_origin, canvas_size);
+    if (!layout.has_value()) {
+        return false;
+    }
+    const ImVec2 rotation_center = layout->bones[*root_index].screen_position;
+    const auto ring_point = [](const ImVec2& center, double degrees) {
+        const double radians = degrees * static_cast<double>(kPi) / 180.0;
+        return ImVec2(
+            center.x + static_cast<float>(58.0 * std::cos(radians)),
+            center.y - static_cast<float>(58.0 * std::sin(radians)));
+    };
+    const std::string rotation_before =
+        marrow::editor::serialize_project(*state.session.project());
+    if (!viewport_interaction::begin_rotate_gesture(
+            &state, *layout, ring_point(rotation_center, 0.0))) {
+        return false;
+    }
+    const auto* rotation_start = std::get_if<ViewportRotateGesturePayload>(
+        &state.viewport_transform_gesture->payload);
+    const double raw_rotation = rotation_start != nullptr
+        ? rotation_start->start_absolute_rotation + 22.0
+        : std::numeric_limits<double>::quiet_NaN();
+    const double snapped_rotation = std::round(raw_rotation / 15.0) * 15.0;
+    if (rotation_start == nullptr ||
+        !viewport_interaction::update_rotate_gesture(
+            &state, *layout, ring_point(rotation_center, 22.0), ViewportSnapModifiers{})) {
+        return false;
+    }
+    const auto current_rotation = [&]() {
+        const auto* payload = std::get_if<ViewportRotateGesturePayload>(
+            &state.viewport_transform_gesture->payload);
+        return payload != nullptr
+            ? payload->current_absolute_rotation
+            : std::numeric_limits<double>::quiet_NaN();
+    };
+    if (std::abs(current_rotation() - snapped_rotation) > 1e-4 ||
+        !viewport_interaction::update_rotate_gesture(
+            &state,
+            *layout,
+            ring_point(rotation_center, 22.0),
+            ViewportSnapModifiers{false, true}) ||
+        std::abs(current_rotation() - raw_rotation) > 1e-4 ||
+        !viewport_interaction::update_rotate_gesture(
+            &state, *layout, ring_point(rotation_center, 22.0), ViewportSnapModifiers{}) ||
+        std::abs(current_rotation() - snapped_rotation) > 1e-4) {
+        std::cerr << "Rotation did not snap raw absolute angles or sample Alt live.\n";
+        return false;
+    }
+    viewport_interaction::finish_transform_gesture(&state, true);
+    if (state.session.undo_count() != 1U ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) != rotation_before) {
+        std::cerr << "Snapped rotation did not commit as one undo item.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    auto off_grid_scale_transaction = state.session.begin_edit({
+        marrow::editor::EditKind::AddKeyframe,
+        "Stage off-grid scale for click regression",
+        "viewport-snap-scale-click",
+        false,
+        marrow::editor::EditImpact::Project |
+            marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!off_grid_scale_transaction) {
+        std::cerr << off_grid_scale_transaction.error()->format();
+        return false;
+    }
+    marrow::editor::upsert_transform_keyframe(
+        *off_grid_scale_transaction.project(),
+        *state.session.runtime_data(),
+        "idle",
+        "root",
+        marrow::editor::TransformTimelineChannel::Scale,
+        0.333,
+        marrow::editor::TransformKeyframePatch{
+            std::nullopt, 1.03, 1.0});
+    if (!off_grid_scale_transaction.refresh_runtime() ||
+        !off_grid_scale_transaction.commit()) {
+        std::cerr << "Viewport snap smoke could not stage an off-grid scale.\n";
+        return false;
+    }
+    sync_shell_from_editor_session(&state);
+    state.session.clear_history();
+
+    select_bone(&state, *root_index, "Snap smoke", false);
+    layout = build_viewport_layout(state, canvas_origin, canvas_size);
+    const auto scale_basis = layout.has_value()
+        ? viewport_interaction::scale_basis(*state.preview_skeleton, *root_index)
+        : std::nullopt;
+    if (!layout.has_value() || !scale_basis.has_value()) {
+        return false;
+    }
+    const ImVec2 scale_center = screen_from_world(
+        *layout, scale_basis->pivot_world.x, scale_basis->pivot_world.y);
+    const auto scale_point = [&](double projection) {
+        return ImVec2(
+            scale_center.x + scale_basis->positive_x_screen_direction.x *
+                static_cast<float>(projection),
+            scale_center.y + scale_basis->positive_x_screen_direction.y *
+                static_cast<float>(projection));
+    };
+    const ImVec2 scale_start = scale_point(74.0);
+    const ImVec2 signed_scale_pointer = scale_point(-11.84);
+    const std::string scale_click_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t scale_click_undo_before = state.session.undo_count();
+    if (!viewport_interaction::begin_scale_gesture(
+            &state, *layout, ViewportScaleHandle::X, scale_start) ||
+        !viewport_interaction::update_scale_gesture(
+            &state, *layout, scale_start, ViewportSnapModifiers{})) {
+        std::cerr << "Off-grid scale click regression could not run.\n";
+        return false;
+    }
+    viewport_interaction::finish_transform_gesture(&state, true);
+    if (marrow::editor::serialize_project(*state.session.project()) !=
+            scale_click_before ||
+        state.session.undo_count() != scale_click_undo_before) {
+        std::cerr << "Off-grid scale click materialized a snapped key or history.\n";
+        return false;
+    }
+
+    const std::string scale_before =
+        marrow::editor::serialize_project(*state.session.project());
+    if (!viewport_interaction::begin_scale_gesture(
+            &state, *layout, ViewportScaleHandle::X, scale_start)) {
+        return false;
+    }
+    const auto* scale_start_payload = std::get_if<ViewportScaleGesturePayload>(
+        &state.viewport_transform_gesture->payload);
+    const auto raw_scale = scale_start_payload != nullptr
+        ? viewport_interaction::scale_candidate(
+              *scale_start_payload, *layout, signed_scale_pointer)
+        : std::nullopt;
+    const double expected_signed_scale = raw_scale.has_value()
+        ? std::round(raw_scale->scale_x / 0.1) * 0.1
+        : std::numeric_limits<double>::quiet_NaN();
+    if (!raw_scale.has_value() ||
+        !viewport_interaction::update_scale_gesture(
+            &state, *layout, signed_scale_pointer, ViewportSnapModifiers{})) {
+        return false;
+    }
+    const auto current_scale_x = [&]() {
+        const auto* payload = std::get_if<ViewportScaleGesturePayload>(
+            &state.viewport_transform_gesture->payload);
+        return payload != nullptr
+            ? payload->current_absolute_scale_x
+            : std::numeric_limits<double>::quiet_NaN();
+    };
+    if (std::abs(current_scale_x() - expected_signed_scale) > 1e-6 ||
+        !viewport_interaction::update_scale_gesture(
+            &state,
+            *layout,
+            signed_scale_pointer,
+            ViewportSnapModifiers{false, true}) ||
+        std::abs(current_scale_x() - raw_scale->scale_x) > 1e-6 ||
+        !viewport_interaction::update_scale_gesture(
+            &state, *layout, signed_scale_pointer, ViewportSnapModifiers{}) ||
+        std::abs(current_scale_x() - expected_signed_scale) > 1e-6 ||
+        !viewport_interaction::update_scale_gesture(
+            &state, *layout, scale_center, ViewportSnapModifiers{}) ||
+        current_scale_x() != 0.0 || std::signbit(current_scale_x())) {
+        std::cerr << "Scale snap did not preserve sign, live Alt, or exact zero.\n";
+        return false;
+    }
+    viewport_interaction::finish_transform_gesture(&state, true);
+    if (state.session.undo_count() != 1U ||
+        !state.session.undo() ||
+        marrow::editor::serialize_project(*state.session.project()) != scale_before) {
+        std::cerr << "Snapped scale did not commit as one undo item.\n";
+        return false;
+    }
+
+    std::cout << "Project viewport snapping, modifiers, and history validated.\n";
+    return true;
+}
+
 bool validate_viewport_prepared_scene_renderer_smoke(
     const std::filesystem::path& project_path) {
     ShellState state;

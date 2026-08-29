@@ -22,6 +22,76 @@ bool check(bool condition, std::string_view message) {
     return condition;
 }
 
+bool snap_cases() {
+    const auto snapped = [](double value,
+                            double step,
+                            bool configured_enabled,
+                            bool temporarily_enabled,
+                            bool bypass) {
+        return kernel::snap_scalar({
+            value,
+            step,
+            {configured_enabled, temporarily_enabled, bypass}});
+    };
+
+    const auto disabled = snapped(12.4, 10.0, false, false, false);
+    const auto configured = snapped(17.6, 10.0, true, false, false);
+    const auto temporary = snapped(12.4, 10.0, false, true, false);
+    const auto bypassed = snapped(17.6, 10.0, true, true, true);
+    if (!check(
+            disabled.has_value() && near(*disabled, 12.4),
+            "disabled snap changed the scalar") ||
+        !check(
+            configured.has_value() && near(*configured, 20.0),
+            "configured snap did not quantize to the nearest grid line") ||
+        !check(
+            temporary.has_value() && near(*temporary, 10.0),
+            "temporary modifier did not enable snapping") ||
+        !check(
+            bypassed.has_value() && near(*bypassed, 17.6),
+            "Alt bypass did not win over configured and temporary enablement")) {
+        return false;
+    }
+
+    const auto positive_half = snapped(5.0, 10.0, true, false, false);
+    const auto negative_half = snapped(-5.0, 10.0, true, false, false);
+    const auto multi_turn = snapped(377.0, 15.0, true, false, false);
+    const auto exact_zero = snapped(-0.049, 0.1, true, false, false);
+    if (!check(
+            positive_half.has_value() && near(*positive_half, 10.0),
+            "positive half-step did not round away from zero") ||
+        !check(
+            negative_half.has_value() && near(*negative_half, -10.0),
+            "negative half-step did not round away from zero") ||
+        !check(
+            multi_turn.has_value() && near(*multi_turn, 375.0),
+            "multi-turn absolute angle was normalized before snapping") ||
+        !check(
+            exact_zero.has_value() && *exact_zero == 0.0 &&
+                !std::signbit(*exact_zero),
+            "snap did not canonicalize exact zero")) {
+        return false;
+    }
+
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return check(
+               !snapped(1.0, 0.0, true, false, false),
+               "snap accepted a zero step") &&
+        check(
+               !snapped(1.0, -1.0, false, false, false),
+               "disabled snap accepted a negative step") &&
+        check(
+               !snapped(infinity, 1.0, true, false, false),
+               "snap accepted a non-finite value") &&
+        check(
+               !snapped(1.0, nan, true, false, false),
+               "snap accepted a non-finite step") &&
+        check(
+               !snapped(1e308, 1e-308, true, false, false),
+               "snap accepted an overflowing quotient");
+}
+
 bool rotation_cases() {
     struct BasisCase {
         kernel::Matrix2 matrix;
@@ -175,9 +245,258 @@ bool scale_cases() {
     }
     mapping.start_scale_x = 0.0;
     mapping.start_scale_y = 0.0;
+    if (!check(
+            !kernel::map_scale(mapping, {74.0, 0.0}),
+            "uniform mapping accepted a zero-zero starting scale")) {
+        return false;
+    }
+
+    const kernel::SnapActivation enabled{true, false, false};
+    const auto snapped_x = kernel::snap_scale_candidate(
+        {-0.04, -3.0}, kernel::ScaleHandle::X, 0.1, enabled);
+    const auto snapped_signed_x = kernel::snap_scale_candidate(
+        {-0.16, -3.0}, kernel::ScaleHandle::X, 0.1, enabled);
+    const auto snapped_uniform = kernel::snap_scale_candidate(
+        {-0.26, 0.13}, kernel::ScaleHandle::Uniform, 0.1, enabled);
+    const auto snapped_uniform_y = kernel::snap_scale_candidate(
+        {0.0, -0.26}, kernel::ScaleHandle::Uniform, 0.1, enabled);
+    const auto snapped_uniform_zero = kernel::snap_scale_candidate(
+        {0.0, 0.0}, kernel::ScaleHandle::Uniform, 0.1, enabled);
     return check(
-        !kernel::map_scale(mapping, {74.0, 0.0}),
-        "uniform mapping accepted a zero-zero starting scale");
+               snapped_x.has_value() && snapped_x->scale_x == 0.0 &&
+                   !std::signbit(snapped_x->scale_x) &&
+                   near(snapped_x->scale_y, -3.0),
+               "axis scale snap did not permit canonical exact zero") &&
+        check(
+               snapped_signed_x.has_value() && near(snapped_signed_x->scale_x, -0.2) &&
+                   near(snapped_signed_x->scale_y, -3.0),
+               "axis scale snap did not preserve signed absolute scale") &&
+        check(
+               snapped_uniform.has_value() && near(snapped_uniform->scale_x, -0.3) &&
+                   near(snapped_uniform->scale_y, 0.15),
+               "uniform scale snap did not preserve the X-driven signed ratio") &&
+        check(
+               snapped_uniform_y.has_value() && snapped_uniform_y->scale_x == 0.0 &&
+                   near(snapped_uniform_y->scale_y, -0.3),
+               "uniform scale snap did not fall back to a nonzero Y driver") &&
+        check(
+               snapped_uniform_zero.has_value() &&
+                   snapped_uniform_zero->scale_x == 0.0 &&
+                   snapped_uniform_zero->scale_y == 0.0,
+               "uniform scale snap rejected the exact-zero result");
+}
+
+bool grid_cases() {
+    const auto near_grid = kernel::visible_grid_step(10.0, 2.0, 18.0);
+    const auto medium_grid = kernel::visible_grid_step(10.0, 1.0, 18.0);
+    const auto far_grid = kernel::visible_grid_step(10.0, 0.26, 18.0);
+    return check(
+               near_grid.has_value() && near(*near_grid, 10.0),
+               "visible grid skipped the base world step unnecessarily") &&
+        check(
+               medium_grid.has_value() && near(*medium_grid, 20.0),
+               "visible grid did not choose an integer multiple") &&
+        check(
+               far_grid.has_value() && near(*far_grid, 70.0),
+               "zoomed-out grid was not an integer multiple of the snap grid") &&
+        check(
+               !kernel::visible_grid_step(0.0, 1.0, 18.0),
+               "visible grid accepted a zero world step") &&
+        check(
+               !kernel::visible_grid_step(10.0, 0.0, 18.0),
+               "visible grid accepted zero pixels per unit");
+}
+
+bool ffd_snap_cases() {
+    const kernel::FfdSnapVertexIdentity farther_identity{
+        "z_slot", std::optional<std::string>{"skin_b"}, "mesh_b", 4U};
+    const kernel::FfdSnapVertexIdentity stable_identity{
+        "a_slot", std::optional<std::string>{"skin_a"}, "mesh_a", 7U};
+    const std::vector<kernel::FfdSnapVertexCandidate> boundary_candidates{
+        {farther_identity, {23.0, 7.0}, {108.0, 100.0}}};
+    const auto boundary = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, false, false},
+        {true, false, false},
+        boundary_candidates,
+        8.0);
+    if (!check(
+            boundary.has_value() &&
+                boundary->source == kernel::FfdSnapSource::MagneticVertex &&
+                near(boundary->target_world.x, 23.0) &&
+                near(boundary->target_world.y, 7.0) &&
+                boundary->magnetic_identity.has_value() &&
+                boundary->magnetic_identity->slot_name == "z_slot" &&
+                boundary->magnetic_identity->vertex_index == 4U,
+            "FFD magnetic snap did not accept the inclusive 8px boundary or beat grid") ) {
+        return false;
+    }
+
+    const std::vector<kernel::FfdSnapVertexCandidate> outside_candidates{
+        {farther_identity, {23.0, 7.0}, {108.001, 100.0}}};
+    const auto outside = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, false, false},
+        {true, false, false},
+        outside_candidates,
+        8.0);
+    if (!check(
+            outside.has_value() &&
+                outside->source == kernel::FfdSnapSource::WorldGrid &&
+                near(outside->target_world.x, 20.0) &&
+                near(outside->target_world.y, 10.0) &&
+                !outside->magnetic_identity.has_value(),
+            "FFD vertex outside 8px did not fall back to the world grid")) {
+        return false;
+    }
+
+    const std::vector<kernel::FfdSnapVertexCandidate> reversed_tie{
+        {farther_identity, {30.0, 3.0}, {95.0, 100.0}},
+        {stable_identity, {-12.0, 9.0}, {105.0, 100.0}}};
+    const auto tied = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {true, false, false},
+        reversed_tie,
+        8.0);
+    if (!check(
+            tied.has_value() &&
+                tied->source == kernel::FfdSnapSource::MagneticVertex &&
+                near(tied->target_world.x, -12.0) &&
+                tied->magnetic_identity.has_value() &&
+                tied->magnetic_identity->slot_name == "a_slot" &&
+                tied->magnetic_identity->vertex_index == 7U,
+            "FFD magnetic tie did not use stable attachment-and-vertex identity")) {
+        return false;
+    }
+
+    const kernel::FfdSnapVertexIdentity later_attachment{
+        "body", std::optional<std::string>{"warrior"}, "z_mesh", 1U};
+    const kernel::FfdSnapVertexIdentity earlier_attachment{
+        "body", std::optional<std::string>{"warrior"}, "a_mesh", 99U};
+    const auto attachment_tie = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {true, false, false},
+        {{later_attachment, {30.0, 3.0}, {95.0, 100.0}},
+         {earlier_attachment, {-12.0, 9.0}, {105.0, 100.0}}},
+        8.0);
+    if (!check(
+            attachment_tie.has_value() &&
+                attachment_tie->magnetic_identity.has_value() &&
+                attachment_tie->magnetic_identity->attachment_name == "a_mesh" &&
+                attachment_tie->magnetic_identity->vertex_index == 99U,
+            "FFD magnetic tie did not compare displayed attachment identity")) {
+        return false;
+    }
+
+    const kernel::FfdSnapVertexIdentity later_vertex{
+        "body", std::optional<std::string>{"warrior"}, "body_mesh", 9U};
+    const kernel::FfdSnapVertexIdentity earlier_vertex{
+        "body", std::optional<std::string>{"warrior"}, "body_mesh", 2U};
+    const auto vertex_tie = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {true, false, false},
+        {{later_vertex, {30.0, 3.0}, {95.0, 100.0}},
+         {earlier_vertex, {-12.0, 9.0}, {105.0, 100.0}}},
+        8.0);
+    if (!check(
+            vertex_tie.has_value() &&
+                vertex_tie->magnetic_identity.has_value() &&
+                vertex_tie->magnetic_identity->attachment_name == "body_mesh" &&
+                vertex_tie->magnetic_identity->vertex_index == 2U,
+            "FFD magnetic tie did not compare vertex identity")) {
+        return false;
+    }
+
+    const auto disabled = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, false, false},
+        {false, false, false},
+        boundary_candidates,
+        8.0);
+    const auto temporarily_enabled = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {false, true, false},
+        {false, true, false},
+        boundary_candidates,
+        8.0);
+    const auto bypassed = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, true, true},
+        {true, true, true},
+        boundary_candidates,
+        8.0);
+    if (!check(
+            disabled.has_value() && disabled->source == kernel::FfdSnapSource::None &&
+                near(disabled->target_world.x, 17.6) &&
+                near(disabled->target_world.y, 12.4),
+            "disabled FFD snapping changed the raw world target") ||
+        !check(
+            temporarily_enabled.has_value() &&
+                temporarily_enabled->source == kernel::FfdSnapSource::MagneticVertex,
+            "Cmd/Ctrl did not temporarily enable disabled FFD snapping") ||
+        !check(
+            bypassed.has_value() && bypassed->source == kernel::FfdSnapSource::None &&
+                near(bypassed->target_world.x, 17.6) &&
+                near(bypassed->target_world.y, 12.4),
+            "Alt did not bypass configured and temporary FFD snapping")) {
+        return false;
+    }
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<kernel::FfdSnapVertexCandidate> invalid_candidate{
+        {stable_identity, {nan, 1.0}, {100.0, 100.0}}};
+    const auto skipped_invalid = kernel::resolve_ffd_snap(
+        {17.6, 12.4},
+        {100.0, 100.0},
+        10.0,
+        {true, false, false},
+        {true, false, false},
+        invalid_candidate,
+        8.0);
+    return check(
+               skipped_invalid.has_value() &&
+                   skipped_invalid->source == kernel::FfdSnapSource::WorldGrid &&
+                   near(skipped_invalid->target_world.x, 20.0),
+               "invalid magnetic candidate did not fail closed to grid") &&
+        check(
+               !kernel::resolve_ffd_snap(
+                    {nan, 12.4},
+                    {100.0, 100.0},
+                    10.0,
+                    {true, false, false},
+                    {true, false, false},
+                    boundary_candidates,
+                    8.0),
+               "FFD snap accepted a non-finite raw target") &&
+        check(
+               !kernel::resolve_ffd_snap(
+                    {17.6, 12.4},
+                    {100.0, 100.0},
+                    10.0,
+                    {true, false, false},
+                    {true, false, false},
+                    boundary_candidates,
+                    -1.0),
+               "FFD snap accepted a negative screen-space radius");
 }
 
 bool ffd_cases() {
@@ -445,7 +764,8 @@ bool arbitration_and_completion_cases() {
 } // namespace
 
 int main() {
-    if (!rotation_cases() || !rotation_drag_cases() || !scale_cases() ||
+    if (!snap_cases() || !rotation_cases() || !rotation_drag_cases() || !scale_cases() ||
+        !grid_cases() || !ffd_snap_cases() ||
         !ffd_cases() || !arbitration_and_completion_cases()) {
         return 1;
     }

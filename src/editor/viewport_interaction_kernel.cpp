@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <tuple>
 
 namespace marrow::editor::viewport_interaction_kernel {
 namespace {
@@ -50,6 +51,31 @@ std::optional<Matrix2> inverse_matrix(Matrix2 matrix) {
 }
 
 } // namespace
+
+std::optional<double> snap_scalar(SnapScalarRequest request) {
+    if (!std::isfinite(request.value) || !std::isfinite(request.step) ||
+        request.step <= 0.0) {
+        return std::nullopt;
+    }
+    const bool enabled = !request.activation.bypass &&
+        (request.activation.configured_enabled ||
+         request.activation.temporarily_enabled);
+    if (!enabled) {
+        return request.value;
+    }
+    const double quotient = request.value / request.step;
+    if (!std::isfinite(quotient)) {
+        return std::nullopt;
+    }
+    double result = std::round(quotient) * request.step;
+    if (!std::isfinite(result)) {
+        return std::nullopt;
+    }
+    if (result == 0.0) {
+        result = 0.0;
+    }
+    return result;
+}
 
 std::optional<RotationBasis> make_rotation_basis(
     Point pivot,
@@ -256,6 +282,151 @@ std::optional<ScaleCandidate> map_scale(
         candidate.scale_y = 0.0;
     }
     return candidate;
+}
+
+std::optional<ScaleCandidate> snap_scale_candidate(
+    ScaleCandidate candidate,
+    ScaleHandle handle,
+    double step,
+    SnapActivation activation) {
+    if (!std::isfinite(candidate.scale_x) ||
+        !std::isfinite(candidate.scale_y)) {
+        return std::nullopt;
+    }
+    if (handle == ScaleHandle::X || handle == ScaleHandle::Y) {
+        double* component = handle == ScaleHandle::X
+            ? &candidate.scale_x
+            : &candidate.scale_y;
+        const auto snapped = snap_scalar({*component, step, activation});
+        if (!snapped.has_value()) {
+            return std::nullopt;
+        }
+        *component = *snapped;
+    } else {
+        const bool use_x = candidate.scale_x != 0.0;
+        const double driver = use_x ? candidate.scale_x : candidate.scale_y;
+        const auto snapped = snap_scalar({driver, step, activation});
+        if (!snapped.has_value()) {
+            return std::nullopt;
+        }
+        if (driver == 0.0 || *snapped == 0.0) {
+            candidate.scale_x = 0.0;
+            candidate.scale_y = 0.0;
+        } else {
+            const double ratio = *snapped / driver;
+            candidate.scale_x *= ratio;
+            candidate.scale_y *= ratio;
+        }
+    }
+    if (!std::isfinite(candidate.scale_x) ||
+        !std::isfinite(candidate.scale_y)) {
+        return std::nullopt;
+    }
+    if (candidate.scale_x == 0.0) {
+        candidate.scale_x = 0.0;
+    }
+    if (candidate.scale_y == 0.0) {
+        candidate.scale_y = 0.0;
+    }
+    return candidate;
+}
+
+std::optional<double> visible_grid_step(
+    double world_step,
+    double pixels_per_world_unit,
+    double minimum_spacing_pixels) {
+    if (!std::isfinite(world_step) || world_step <= 0.0 ||
+        !std::isfinite(pixels_per_world_unit) || pixels_per_world_unit <= 0.0 ||
+        !std::isfinite(minimum_spacing_pixels) || minimum_spacing_pixels <= 0.0) {
+        return std::nullopt;
+    }
+    const double base_spacing_pixels = world_step * pixels_per_world_unit;
+    if (!std::isfinite(base_spacing_pixels) || base_spacing_pixels <= 0.0) {
+        return std::nullopt;
+    }
+    const double multiple = std::max(
+        1.0, std::ceil(minimum_spacing_pixels / base_spacing_pixels));
+    const double result = world_step * multiple;
+    return std::isfinite(result) && result > 0.0
+        ? std::optional<double>(result)
+        : std::nullopt;
+}
+
+std::optional<FfdSnapResult> resolve_ffd_snap(
+    Point raw_target_world,
+    Point raw_target_screen,
+    double world_grid_step,
+    SnapActivation grid_activation,
+    SnapActivation vertex_activation,
+    const std::vector<FfdSnapVertexCandidate>& candidates,
+    double magnetic_radius_pixels) {
+    if (!finite(raw_target_world) || !finite(raw_target_screen) ||
+        !std::isfinite(world_grid_step) || world_grid_step <= 0.0 ||
+        !std::isfinite(magnetic_radius_pixels) || magnetic_radius_pixels < 0.0) {
+        return std::nullopt;
+    }
+    const double radius_squared =
+        magnetic_radius_pixels * magnetic_radius_pixels;
+    if (!std::isfinite(radius_squared)) {
+        return std::nullopt;
+    }
+
+    const bool vertex_enabled = !vertex_activation.bypass &&
+        (vertex_activation.configured_enabled ||
+         vertex_activation.temporarily_enabled);
+    if (vertex_enabled) {
+        const FfdSnapVertexCandidate* best = nullptr;
+        double best_distance_squared = radius_squared;
+        for (const FfdSnapVertexCandidate& candidate : candidates) {
+            if (!finite(candidate.world_position) ||
+                !finite(candidate.screen_position)) {
+                continue;
+            }
+            const double dx =
+                raw_target_screen.x - candidate.screen_position.x;
+            const double dy =
+                raw_target_screen.y - candidate.screen_position.y;
+            const double distance_squared = (dx * dx) + (dy * dy);
+            if (!std::isfinite(distance_squared) ||
+                distance_squared > radius_squared) {
+                continue;
+            }
+            const auto identity_key = [](const FfdSnapVertexIdentity& identity) {
+                return std::tie(
+                    identity.slot_name,
+                    identity.skin_name,
+                    identity.attachment_name,
+                    identity.vertex_index);
+            };
+            if (best == nullptr || distance_squared < best_distance_squared ||
+                (distance_squared == best_distance_squared &&
+                 identity_key(candidate.identity) < identity_key(best->identity))) {
+                best = &candidate;
+                best_distance_squared = distance_squared;
+            }
+        }
+        if (best != nullptr) {
+            return FfdSnapResult{
+                best->world_position,
+                FfdSnapSource::MagneticVertex,
+                best->identity};
+        }
+    }
+
+    const auto snapped_x = snap_scalar({
+        raw_target_world.x, world_grid_step, grid_activation});
+    const auto snapped_y = snap_scalar({
+        raw_target_world.y, world_grid_step, grid_activation});
+    if (!snapped_x.has_value() || !snapped_y.has_value()) {
+        return std::nullopt;
+    }
+    const bool grid_enabled = !grid_activation.bypass &&
+        (grid_activation.configured_enabled ||
+         grid_activation.temporarily_enabled);
+    return FfdSnapResult{
+        {*snapped_x, *snapped_y},
+        grid_enabled ? FfdSnapSource::WorldGrid : FfdSnapSource::None,
+        std::nullopt};
 }
 
 std::optional<std::size_t> nearest_ffd_vertex(

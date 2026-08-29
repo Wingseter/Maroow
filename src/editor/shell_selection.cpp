@@ -874,10 +874,25 @@ std::optional<PreviewAttachmentSelection> current_attachment_selection(
     }
 
     std::optional<std::size_t> source_skin_index = slot_state.attachment_skin_index;
-    state.load_result.skeleton_data->find_attachment_source(
-        slot_index,
-        slot_state.attachment_name,
-        &source_skin_index);
+    if (source_skin_index.has_value() &&
+        *source_skin_index < state.load_result.skeleton_data->skins().size() &&
+        state.load_result.skeleton_data->find_attachment(
+            *source_skin_index,
+            slot_index,
+            slot_state.attachment_name) != nullptr) {
+        return PreviewAttachmentSelection{
+            slot_index,
+            source_skin_index,
+            slot_state.attachment_name};
+    }
+
+    source_skin_index.reset();
+    if (state.load_result.skeleton_data->find_attachment_source(
+            slot_index,
+            slot_state.attachment_name,
+            &source_skin_index) == nullptr) {
+        return std::nullopt;
+    }
     return PreviewAttachmentSelection{
         slot_index,
         source_skin_index,

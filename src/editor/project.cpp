@@ -302,6 +302,107 @@ std::optional<LoadError> parse_runtime_assets(
     return std::nullopt;
 }
 
+std::optional<LoadError> parse_snap_settings(
+    const Document& document,
+    const Value& root,
+    std::optional<ProjectSnapSettings>* settings_out) {
+    const Value* snap = find_optional_member(root, "snap");
+    if (snap == nullptr) {
+        settings_out->reset();
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *snap, Value::Type::Object, "$.snap")) {
+        return error;
+    }
+
+    ProjectSnapSettings settings;
+    settings.preserved_source = *snap;
+    if (const auto error = read_optional_boolean(
+            document,
+            *snap,
+            "world_grid_enabled",
+            "$.snap",
+            &settings.world_grid_enabled)) {
+        return error;
+    }
+    if (const auto error = read_optional_boolean(
+            document,
+            *snap,
+            "local_angle_enabled",
+            "$.snap",
+            &settings.local_angle_enabled)) {
+        return error;
+    }
+    if (const auto error = read_optional_boolean(
+            document,
+            *snap,
+            "absolute_scale_enabled",
+            "$.snap",
+            &settings.absolute_scale_enabled)) {
+        return error;
+    }
+    if (const auto error = read_optional_boolean(
+            document,
+            *snap,
+            "magnetic_vertex_enabled",
+            "$.snap",
+            &settings.magnetic_vertex_enabled)) {
+        return error;
+    }
+    if (const auto error = read_optional_number(
+            document,
+            *snap,
+            "world_grid_step",
+            "$.snap",
+            &settings.world_grid_step)) {
+        return error;
+    }
+    if (const auto error = read_optional_number(
+            document,
+            *snap,
+            "local_angle_step_degrees",
+            "$.snap",
+            &settings.local_angle_step_degrees)) {
+        return error;
+    }
+    if (const auto error = read_optional_number(
+            document,
+            *snap,
+            "absolute_scale_step",
+            "$.snap",
+            &settings.absolute_scale_step)) {
+        return error;
+    }
+
+    const auto validate_step = [&](double step, std::string_view key)
+        -> std::optional<LoadError> {
+        if (std::isfinite(step) && step > 0.0) {
+            return std::nullopt;
+        }
+        const Value* member = find_optional_member(*snap, key);
+        return validation_error(
+            document,
+            member != nullptr ? member->location() : snap->location(),
+            "$.snap." + std::string(key),
+            "snap steps must be finite and greater than zero");
+    };
+    if (const auto error = validate_step(settings.world_grid_step, "world_grid_step")) {
+        return error;
+    }
+    if (const auto error = validate_step(
+            settings.local_angle_step_degrees, "local_angle_step_degrees")) {
+        return error;
+    }
+    if (const auto error = validate_step(
+            settings.absolute_scale_step, "absolute_scale_step")) {
+        return error;
+    }
+
+    *settings_out = std::move(settings);
+    return std::nullopt;
+}
+
 std::optional<LoadError> read_required_boolean(
     const Document& document,
     const Value& object,
@@ -4089,6 +4190,29 @@ Value build_project_value(const ProjectData& project) {
     editor_object["viewport"] = make_object_value(std::move(viewport_object));
     root["editor"] = make_object_value(std::move(editor_object));
 
+    if (project.snap_settings.has_value()) {
+        Value::Object snap_object = project.snap_settings->preserved_source.is_object()
+            ? project.snap_settings->preserved_source.as_object()
+            : Value::Object{};
+        snap_object["world_grid_enabled"] =
+            make_boolean_value(project.snap_settings->world_grid_enabled);
+        snap_object["local_angle_enabled"] =
+            make_boolean_value(project.snap_settings->local_angle_enabled);
+        snap_object["absolute_scale_enabled"] =
+            make_boolean_value(project.snap_settings->absolute_scale_enabled);
+        snap_object["magnetic_vertex_enabled"] =
+            make_boolean_value(project.snap_settings->magnetic_vertex_enabled);
+        snap_object["world_grid_step"] =
+            make_number_value(project.snap_settings->world_grid_step);
+        snap_object["local_angle_step_degrees"] =
+            make_number_value(project.snap_settings->local_angle_step_degrees);
+        snap_object["absolute_scale_step"] =
+            make_number_value(project.snap_settings->absolute_scale_step);
+        root["snap"] = make_object_value(std::move(snap_object));
+    } else {
+        root.erase("snap");
+    }
+
     if (!project.animation_edits.empty()) {
         root["animation_edits"] = build_animation_edits_value(project.animation_edits);
     } else {
@@ -4669,6 +4793,19 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
     if (project.editor_metadata.viewport.onion_skin.step <= 0) {
         error_out->message = "editor onion-skin step must be greater than zero";
         return false;
+    }
+    if (project.snap_settings.has_value()) {
+        const ProjectSnapSettings& settings = *project.snap_settings;
+        if (!std::isfinite(settings.world_grid_step) ||
+            settings.world_grid_step <= 0.0 ||
+            !std::isfinite(settings.local_angle_step_degrees) ||
+            settings.local_angle_step_degrees <= 0.0 ||
+            !std::isfinite(settings.absolute_scale_step) ||
+            settings.absolute_scale_step <= 0.0) {
+            error_out->message =
+                "project snap steps must be finite and greater than zero";
+            return false;
+        }
     }
 
     for (const auto& atlas_path : project.runtime_assets.atlas_paths) {
@@ -6299,6 +6436,11 @@ ProjectLoadResult load_project(const Document& document) {
         return result;
     }
     if (const auto error = parse_editor_metadata(document, document.root, &project.editor_metadata)) {
+        result.error = error;
+        return result;
+    }
+    if (const auto error = parse_snap_settings(
+            document, document.root, &project.snap_settings)) {
         result.error = error;
         return result;
     }

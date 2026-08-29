@@ -584,6 +584,7 @@ bool apply_animation_catalog_action(
     sync_shell_from_editor_session(state);
     if (state->selected_animation_name != previous_selection) {
         state->timeline_editor.selected_keys.clear();
+        state->timeline_editor.active_key.reset();
         state->timeline_editor.box_selection.reset();
     }
     state->selected_timeline_track_id.reset();

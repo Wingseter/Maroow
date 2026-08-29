@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -36,6 +37,33 @@ void auto_frame_skeleton(ShellState* state, ImVec2 canvas_size) {
     if (frame_viewport_camera_to_preview_pose(state)) {
         state->status_message = "Framed skeleton to viewport";
     }
+}
+
+std::optional<ImVec2> ffd_snap_guide_start(
+    const ViewportFfdGesture& gesture,
+    const ViewportLayout& layout) {
+    const auto pressed_mapping = std::find_if(
+        gesture.vertex_mappings.begin(),
+        gesture.vertex_mappings.end(),
+        [&](const ViewportFfdVertexMapping& mapping) {
+            return mapping.vertex_index == gesture.pressed_vertex_index;
+        });
+    if (pressed_mapping == gesture.vertex_mappings.end()) {
+        return std::nullopt;
+    }
+    const ViewportWorldPoint pointer_world = world_from_screen(
+        layout, gesture.pointer_screen);
+    const ViewportWorldPoint raw_target_world{
+        pressed_mapping->vertex_world_start.x +
+            pointer_world.x - gesture.pointer_world_start.x,
+        pressed_mapping->vertex_world_start.y +
+            pointer_world.y - gesture.pointer_world_start.y};
+    const ImVec2 result = screen_from_world(
+        layout, raw_target_world.x, raw_target_world.y);
+    if (!std::isfinite(result.x) || !std::isfinite(result.y)) {
+        return std::nullopt;
+    }
+    return result;
 }
 
 
@@ -255,6 +283,34 @@ void draw_ffd_vertices(
     const std::vector<std::size_t> box_vertices =
         viewport_ffd::box_preview_vertices(state, layout);
 
+    if (state.viewport_ffd_gesture.has_value() &&
+        state.viewport_ffd_gesture->snap_preview.has_value()) {
+        const auto& gesture = *state.viewport_ffd_gesture;
+        const auto& preview = *gesture.snap_preview;
+        const ImVec2 target = screen_from_world(
+            layout, preview.target_world.x, preview.target_world.y);
+        const auto guide_start = ffd_snap_guide_start(gesture, layout);
+        const ImU32 color = preview.source ==
+                marrow::editor::viewport_interaction_kernel::FfdSnapSource::MagneticVertex
+            ? IM_COL32(110, 231, 218, 245)
+            : IM_COL32(255, 207, 104, 245);
+        if (guide_start.has_value() &&
+            std::isfinite(target.x) && std::isfinite(target.y)) {
+            draw_list->AddLine(*guide_start, target, color, 1.5f);
+            draw_list->AddCircle(target, 8.0f, color, 24, 1.5f);
+            draw_list->AddLine(
+                ImVec2(target.x - 11.0f, target.y),
+                ImVec2(target.x + 11.0f, target.y),
+                color,
+                1.5f);
+            draw_list->AddLine(
+                ImVec2(target.x, target.y - 11.0f),
+                ImVec2(target.x, target.y + 11.0f),
+                color,
+                1.5f);
+        }
+    }
+
     if (state.viewport_ffd_box_selection.has_value() &&
         state.viewport_ffd_box_selection->dragged) {
         const auto& box = *state.viewport_ffd_box_selection;
@@ -312,6 +368,30 @@ std::optional<marrow::runtime::AttachmentVertex> bone_local_position_from_world(
     std::size_t bone_index,
     const ViewportWorldPoint& target) {
     return local_position_for_world_target(skeleton, bone_index, target);
+}
+
+std::optional<float> viewport_grid_spacing_pixels(
+    const ShellState& state,
+    const ViewportLayout& layout) {
+    const marrow::editor::ProjectSnapSettings defaults;
+    const auto project = state.session.project();
+    const auto& settings = project != nullptr && project->snap_settings.has_value()
+        ? *project->snap_settings
+        : defaults;
+    const auto world_step =
+        marrow::editor::viewport_interaction_kernel::visible_grid_step(
+            settings.world_grid_step,
+            static_cast<double>(layout.pixels_per_unit),
+            18.0);
+    if (!world_step.has_value()) {
+        return std::nullopt;
+    }
+    const double pixels =
+        *world_step * static_cast<double>(layout.pixels_per_unit);
+    return std::isfinite(pixels) && pixels > 0.0 &&
+            pixels <= static_cast<double>(std::numeric_limits<float>::max())
+        ? std::optional<float>(static_cast<float>(pixels))
+        : std::nullopt;
 }
 
 
@@ -515,22 +595,29 @@ void draw_viewport_fallback_scene(
         IM_COL32(56, 61, 69, 255),
         6.0f);
 
-    const float grid_spacing = std::max(18.0f, 40.0f * static_cast<float>(state.viewport.zoom));
-    for (float x = first_grid_line(layout.world_origin_screen.x, layout.canvas_origin.x, grid_spacing);
-         x < layout.canvas_end.x;
-         x += grid_spacing) {
-        draw_list->AddLine(
-            ImVec2(x, layout.canvas_origin.y),
-            ImVec2(x, layout.canvas_end.y),
-            IM_COL32(31, 35, 41, 255));
-    }
-    for (float y = first_grid_line(layout.world_origin_screen.y, layout.canvas_origin.y, grid_spacing);
-         y < layout.canvas_end.y;
-         y += grid_spacing) {
-        draw_list->AddLine(
-            ImVec2(layout.canvas_origin.x, y),
-            ImVec2(layout.canvas_end.x, y),
-            IM_COL32(31, 35, 41, 255));
+    if (const auto grid_spacing = viewport_grid_spacing_pixels(state, layout)) {
+        for (float x = first_grid_line(
+                 layout.world_origin_screen.x,
+                 layout.canvas_origin.x,
+                 *grid_spacing);
+             x < layout.canvas_end.x;
+             x += *grid_spacing) {
+            draw_list->AddLine(
+                ImVec2(x, layout.canvas_origin.y),
+                ImVec2(x, layout.canvas_end.y),
+                IM_COL32(31, 35, 41, 255));
+        }
+        for (float y = first_grid_line(
+                 layout.world_origin_screen.y,
+                 layout.canvas_origin.y,
+                 *grid_spacing);
+             y < layout.canvas_end.y;
+             y += *grid_spacing) {
+            draw_list->AddLine(
+                ImVec2(layout.canvas_origin.x, y),
+                ImVec2(layout.canvas_end.x, y),
+                IM_COL32(31, 35, 41, 255));
+        }
     }
 
     draw_list->AddLine(
@@ -1270,24 +1357,34 @@ void draw_viewport_window(ShellState* state) {
     if (state->viewport_transform_gesture.has_value() && layout.has_value() &&
         ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
         !ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        const ImGuiIO& io = ImGui::GetIO();
+        const ViewportSnapModifiers snap_modifiers{
+            hierarchy_command_modifier(
+                io.ConfigMacOSXBehaviors, io.KeyCtrl, io.KeySuper),
+            io.KeyAlt};
         if (std::holds_alternative<ViewportRotateGesturePayload>(
                 state->viewport_transform_gesture->payload)) {
             (void)update_rotate_gesture(
-                state, *layout, ImGui::GetIO().MousePos);
+                state, *layout, io.MousePos, snap_modifiers);
         } else if (std::holds_alternative<ViewportScaleGesturePayload>(
                        state->viewport_transform_gesture->payload)) {
             (void)update_scale_gesture(
-                state, *layout, ImGui::GetIO().MousePos);
+                state, *layout, io.MousePos, snap_modifiers);
         } else {
             (void)update_translate_gesture(
-                state, *layout, ImGui::GetIO().MousePos);
+                state, *layout, io.MousePos, snap_modifiers);
         }
     }
     if (state->viewport_ffd_gesture.has_value() && layout.has_value() &&
         ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
         !ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        const ImGuiIO& io = ImGui::GetIO();
+        const ViewportSnapModifiers snap_modifiers{
+            hierarchy_command_modifier(
+                io.ConfigMacOSXBehaviors, io.KeyCtrl, io.KeySuper),
+            io.KeyAlt};
         (void)viewport_ffd::update_gesture(
-            state, *layout, ImGui::GetIO().MousePos);
+            state, *layout, io.MousePos, snap_modifiers);
     }
     if (brush_enabled &&
         hovered &&
@@ -1513,6 +1610,123 @@ void draw_viewport_settings(ShellState* state) {
         state->load_result ? current_mesh_weight_paint_target(*state) : std::nullopt;
     const WeightPaintSelectionContext weight_selection =
         resolve_weight_paint_selection_context(*state);
+
+    if (ImGui::CollapsingHeader("Viewport Snapping##settings")) {
+        const auto snap = state->load_result.project->snap_settings.value_or(
+            marrow::editor::ProjectSnapSettings{});
+        bool world_enabled = snap.world_grid_enabled;
+        if (ImGui::Checkbox("World Grid##snap", &world_enabled)) {
+            apply_snap_setting_edit(
+                state,
+                std::string(world_enabled ? "Enabled" : "Disabled") +
+                    " world-grid snapping",
+                "viewport:snap:world-enabled",
+                [&](marrow::editor::ProjectSnapSettings* value) {
+                    value->world_grid_enabled = world_enabled;
+                });
+        }
+        double world_step = snap.world_grid_step;
+        constexpr double kMinimumWorldStep = 0.001;
+        constexpr double kMaximumWorldStep = 100000.0;
+        const bool world_step_changed = ImGui::DragScalar(
+            "World Step##snap",
+            ImGuiDataType_Double,
+            &world_step,
+            0.1f,
+            &kMinimumWorldStep,
+            &kMaximumWorldStep,
+            "%.3f",
+            ImGuiSliderFlags_AlwaysClamp);
+        apply_coalesced_snap_setting_edit(
+            state,
+            coalesced_edit_frame_from_last_item(world_step_changed),
+            "Updated world-grid snap step",
+            "viewport:snap:world-step",
+            [&](marrow::editor::ProjectSnapSettings* value) {
+                value->world_grid_step = world_step;
+            });
+
+        bool magnetic_vertex_enabled = snap.magnetic_vertex_enabled;
+        if (ImGui::Checkbox(
+                "Magnetic Vertices##snap", &magnetic_vertex_enabled)) {
+            apply_snap_setting_edit(
+                state,
+                std::string(magnetic_vertex_enabled ? "Enabled" : "Disabled") +
+                    " magnetic vertex snapping",
+                "viewport:snap:magnetic-vertex-enabled",
+                [&](marrow::editor::ProjectSnapSettings* value) {
+                    value->magnetic_vertex_enabled = magnetic_vertex_enabled;
+                });
+        }
+
+        bool angle_enabled = snap.local_angle_enabled;
+        if (ImGui::Checkbox("Local Angle##snap", &angle_enabled)) {
+            apply_snap_setting_edit(
+                state,
+                std::string(angle_enabled ? "Enabled" : "Disabled") +
+                    " local-angle snapping",
+                "viewport:snap:angle-enabled",
+                [&](marrow::editor::ProjectSnapSettings* value) {
+                    value->local_angle_enabled = angle_enabled;
+                });
+        }
+        double angle_step = snap.local_angle_step_degrees;
+        constexpr double kMinimumAngleStep = 0.1;
+        constexpr double kMaximumAngleStep = 360.0;
+        const bool angle_step_changed = ImGui::DragScalar(
+            "Angle Step (deg)##snap",
+            ImGuiDataType_Double,
+            &angle_step,
+            0.25f,
+            &kMinimumAngleStep,
+            &kMaximumAngleStep,
+            "%.2f",
+            ImGuiSliderFlags_AlwaysClamp);
+        apply_coalesced_snap_setting_edit(
+            state,
+            coalesced_edit_frame_from_last_item(angle_step_changed),
+            "Updated local-angle snap step",
+            "viewport:snap:angle-step",
+            [&](marrow::editor::ProjectSnapSettings* value) {
+                value->local_angle_step_degrees = angle_step;
+            });
+
+        bool scale_enabled = snap.absolute_scale_enabled;
+        if (ImGui::Checkbox("Absolute Scale##snap", &scale_enabled)) {
+            apply_snap_setting_edit(
+                state,
+                std::string(scale_enabled ? "Enabled" : "Disabled") +
+                    " absolute-scale snapping",
+                "viewport:snap:scale-enabled",
+                [&](marrow::editor::ProjectSnapSettings* value) {
+                    value->absolute_scale_enabled = scale_enabled;
+                });
+        }
+        double scale_step = snap.absolute_scale_step;
+        constexpr double kMinimumScaleStep = 0.001;
+        constexpr double kMaximumScaleStep = 10.0;
+        const bool scale_step_changed = ImGui::DragScalar(
+            "Scale Step##snap",
+            ImGuiDataType_Double,
+            &scale_step,
+            0.01f,
+            &kMinimumScaleStep,
+            &kMaximumScaleStep,
+            "%.3f",
+            ImGuiSliderFlags_AlwaysClamp);
+        apply_coalesced_snap_setting_edit(
+            state,
+            coalesced_edit_frame_from_last_item(scale_step_changed),
+            "Updated absolute-scale snap step",
+            "viewport:snap:scale-step",
+            [&](marrow::editor::ProjectSnapSettings* value) {
+                value->absolute_scale_step = scale_step;
+            });
+
+        ImGui::TextDisabled(
+            "During a drag, %s enables disabled snap modes; Alt bypasses them",
+            ImGui::GetIO().ConfigMacOSXBehaviors ? "Cmd" : "Ctrl");
+    }
 
     if (ImGui::CollapsingHeader("Onion Skin##settings")) {
         const auto& onion_skin = state->viewport.onion_skin;

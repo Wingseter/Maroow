@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace marrow::editor::viewport_interaction_kernel {
@@ -12,6 +13,7 @@ constexpr double kRotationPivotSuspendRadius = 2.0;
 constexpr double kScaleHandleRadius = 74.0;
 constexpr double kFfdVertexHitRadius = 6.0;
 constexpr double kFfdDragThreshold = 4.0;
+constexpr double kFfdMagneticSnapRadius = 8.0;
 
 struct Point {
     double x{0.0};
@@ -24,6 +26,20 @@ struct Matrix2 {
     double c{0.0};
     double d{1.0};
 };
+
+struct SnapActivation {
+    bool configured_enabled{false};
+    bool temporarily_enabled{false};
+    bool bypass{false};
+};
+
+struct SnapScalarRequest {
+    double value{0.0};
+    double step{1.0};
+    SnapActivation activation{};
+};
+
+std::optional<double> snap_scalar(SnapScalarRequest request);
 
 struct RotationBasis {
     Point pivot{};
@@ -99,6 +115,50 @@ struct ScaleCandidate {
 std::optional<ScaleCandidate> map_scale(
     const ScaleMapping& mapping,
     Point pointer_screen);
+std::optional<ScaleCandidate> snap_scale_candidate(
+    ScaleCandidate candidate,
+    ScaleHandle handle,
+    double step,
+    SnapActivation activation);
+
+std::optional<double> visible_grid_step(
+    double world_step,
+    double pixels_per_world_unit,
+    double minimum_spacing_pixels);
+
+struct FfdSnapVertexIdentity {
+    std::string slot_name;
+    std::optional<std::string> skin_name;
+    std::string attachment_name;
+    std::size_t vertex_index{0U};
+};
+
+struct FfdSnapVertexCandidate {
+    FfdSnapVertexIdentity identity;
+    Point world_position{};
+    Point screen_position{};
+};
+
+enum class FfdSnapSource : std::uint8_t {
+    None,
+    WorldGrid,
+    MagneticVertex,
+};
+
+struct FfdSnapResult {
+    Point target_world{};
+    FfdSnapSource source{FfdSnapSource::None};
+    std::optional<FfdSnapVertexIdentity> magnetic_identity;
+};
+
+std::optional<FfdSnapResult> resolve_ffd_snap(
+    Point raw_target_world,
+    Point raw_target_screen,
+    double world_grid_step,
+    SnapActivation grid_activation,
+    SnapActivation vertex_activation,
+    const std::vector<FfdSnapVertexCandidate>& candidates,
+    double magnetic_radius_pixels = kFfdMagneticSnapRadius);
 
 struct FfdInfluence {
     Matrix2 bone_world{};

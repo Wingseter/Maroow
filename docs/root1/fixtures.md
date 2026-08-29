@@ -90,6 +90,12 @@ python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/nu
   - `"stepped"`
 - The same `idle.bones.spine` track now extends the draft with `translate`, `scale`, and `shear` timelines so runtime stories can validate all bone transform channels against one canonical fixture.
 - Translate keys use the same `x`/`y` property names as setup-pose bone transforms, while scale and shear keys mirror the runtime `scaleX`/`scaleY` and `shearX`/`shearY` channels as animated pairs.
+- MAR-167 resolves the effective `idle` animation from the runtime asset plus
+  `player_idle.marrow` overlays into seven supported graph parent tracks and
+  fourteen scalar series: root Translate; spine Rotate, Translate, Scale, and
+  Shear; body Slot Color; and the valid overlaid arm_l Rotate track. Together
+  they cover Linear, Stepped, and Cubic outgoing easing. Inherit, Attachment,
+  FFD, Draw Order, and Event rows remain explicit graph exclusions.
 - The `body` slot now carries the MAR-017 presentation defaults:
   - `blend: "screen"` exercises a non-default slot blend mode in the renderer validation path.
   - `color: "ffcc99ff"` and `dark: "336699ff"` provide the setup-pose light/dark tint pair used by two-color tint validation.
@@ -176,6 +182,7 @@ python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/nu
   - the root `runtime` object points at the canonical `player_idle.mskl` and `player_idle.matl` files without embedding any exported runtime payload inline.
   - the root `editor` object keeps authoring-only metadata such as the project name, preview animation, preview skin set, export directory, free-form notes, and viewport framing.
   - `editor.viewport.onion_skin` persists the editor-only ghost-frame preview state: the on/off toggle, frame-vs-keyframe mode, frame-0 anchoring, before/after counts, and the sampling step.
+  - the optional root `snap` object carries independent world-grid, magnetic-vertex, local-angle, and absolute-scale enable flags plus the validated 10/15/0.1 default steps. The checked-in fixture keeps all four domains disabled. Project smoke separately proves absent-section compatibility, MAR-165-shaped objects that omit `magnetic_vertex_enabled` default it to false, unknown nested-field retention, save/reload, and runtime-export neutrality.
   - the root `timeline_edits` object now mirrors the `.mskl` animation layout for editor-authored overrides that have not been exported yet:
     - `bones` stores transform track edits by animation and bone name.
     - `deform` stores FFD track edits by animation, slot, and mesh attachment name using the same per-key `vertices` payload the runtime `.mskl` format consumes.

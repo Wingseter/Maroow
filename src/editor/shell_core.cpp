@@ -314,7 +314,8 @@ bool record_action_from_snapshots(
     EditActionKind kind,
     std::string label,
     std::string group,
-    bool allow_merge) {
+    bool allow_merge,
+    marrow::editor::EditImpact impacts) {
     const EditorHistorySnapshot after = capture_history_snapshot(*state, true);
     if (history_snapshots_equal(before, after)) {
         return false;
@@ -353,9 +354,7 @@ bool record_action_from_snapshots(
                 label,
                 group,
                 allow_merge,
-                marrow::editor::EditImpact::Project |
-                    marrow::editor::EditImpact::Runtime |
-                    marrow::editor::EditImpact::Preview},
+                impacts},
             state->session.runtime_revision() != before.runtime_revision);
     if (!commit_result) {
         state->error_message = commit_result.error->format();
@@ -400,7 +399,8 @@ bool finalize_coalesced_edit(ShellState* state, ImGuiID item_id) {
         pending.kind,
         std::move(pending.label),
         std::move(pending.group),
-        pending.allow_merge);
+        pending.allow_merge,
+        pending.impacts);
 }
 
 void finalize_orphaned_coalesced_edit(ShellState* state) {

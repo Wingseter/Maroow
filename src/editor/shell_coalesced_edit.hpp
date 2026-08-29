@@ -51,7 +51,18 @@ bool apply_coalesced_edit_frame(
             std::move(descriptor.label),
             std::move(descriptor.group),
             descriptor.allow_merge,
+            descriptor.policy == CoalescedEditPolicy::ProjectMetadataOnly
+                ? marrow::editor::EditImpact::Project
+                : marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview,
             capture_history_snapshot(*state)};
+    }
+
+    if (frame.changed &&
+        (!state->pending_edit_action.has_value() ||
+         state->pending_edit_action->item_id != frame.item_id)) {
+        return false;
     }
 
     if (frame.changed) {

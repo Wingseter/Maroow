@@ -20,6 +20,20 @@ namespace marrow::editor::timeline_model {
 constexpr double kKeyTimeEpsilon = 1e-6;
 constexpr double kNonEventKeySpacing = 0.001;
 
+enum class TimelineTrackKind : std::uint8_t {
+    Unknown,
+    Rotate,
+    Translate,
+    Scale,
+    Shear,
+    Inherit,
+    SlotAttachment,
+    SlotColor,
+    Deform,
+    DrawOrder,
+    Event,
+};
+
 struct TrackRow {
     std::string id;
     std::string label;
@@ -29,6 +43,7 @@ struct TrackRow {
     std::optional<std::size_t> slot_index;
     std::optional<marrow::editor::TransformTimelineChannel> transform_channel;
     std::optional<std::string> deform_attachment_name;
+    TimelineTrackKind kind{TimelineTrackKind::Unknown};
 };
 
 struct KeyRef {
@@ -62,8 +77,17 @@ KeyRef key_ref(const TrackRow& track, std::size_t key_index);
 std::optional<std::size_t> key_index(
     const TrackRow& track,
     const KeyRef& key);
+void apply_key_activation(
+    std::vector<KeyRef>* selection,
+    std::optional<KeyRef>* active_key,
+    const KeyRef& clicked_key,
+    bool additive);
 void reconcile_selection(
     std::vector<KeyRef>* selection,
+    const std::vector<TrackRow>& tracks);
+void reconcile_selection(
+    std::vector<KeyRef>* selection,
+    std::optional<KeyRef>* active_key,
     const std::vector<TrackRow>& tracks);
 const TrackRow* find_track(
     const std::vector<TrackRow>& tracks,

@@ -41,7 +41,8 @@ bool begin_gesture(
 bool update_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer);
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers = {});
 void finish_gesture(ShellState* state, bool commit);
 bool begin_box_selection(
     ShellState* state,

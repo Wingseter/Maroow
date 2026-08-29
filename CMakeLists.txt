@@ -327,6 +327,7 @@ target_include_directories(marrow_runtime
 
 add_library(marrow_timeline_model STATIC
     src/editor/timeline_model.cpp
+    src/editor/timeline_graph_model.cpp
 )
 
 target_include_directories(marrow_timeline_model
@@ -640,6 +641,20 @@ target_link_libraries(marrow_timeline_model_tests
         marrow_editor
 )
 
+add_executable(marrow_timeline_graph_model_tests
+    src/tests/timeline_graph_model_tests.cpp
+)
+
+target_include_directories(marrow_timeline_graph_model_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_timeline_graph_model_tests
+    PRIVATE
+        marrow_editor
+)
+
 add_executable(marrow_preference_tests
     src/tests/preference_store_tests.cpp
 )
@@ -841,6 +856,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_asset_watch.cpp
     src/editor/shell_derived_cache.cpp
     src/editor/timeline_controller.cpp
+    src/editor/shell_timeline_graph.cpp
     src/editor/shell_timeline.cpp
     src/editor/shell_constraints.cpp
     src/editor/shell_selection.cpp
@@ -857,6 +873,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_smoke_project.cpp
     src/editor/shell_smoke_viewport.cpp
     src/editor/shell_smoke_ffd.cpp
+    src/editor/shell_smoke_graph.cpp
     src/editor/shell_smoke_timeline.cpp
     src/editor/shell_smoke_frames.cpp
     src/editor/shell_smoke_parameters.cpp
@@ -1155,6 +1172,15 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.timeline_model PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;timeline;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.timeline_graph_model
+        COMMAND marrow_timeline_graph_model_tests
+    )
+    set_tests_properties(marrow.timeline_graph_model PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;timeline;graph;unit;noninteractive"
     )
 
     add_test(

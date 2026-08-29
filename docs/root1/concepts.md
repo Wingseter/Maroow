@@ -112,7 +112,11 @@ Task #28 keeps viewport and timeline calculations separate from shell input and
 session mutation. `viewport_interaction_kernel` and `timeline_model` are private,
 data-only targets with no ImGui, Sokol, or `ShellState` dependency. Their focused
 tests lock down coordinate/gesture math and timeline identity, collision, retime,
-snap, duration, and completion decisions.
+snap, duration, and completion decisions. MAR-165 adds scalar activation and
+quantization, deterministic signed/uniform scale snapping, and visible-grid
+integer-multiple selection to the UI-free viewport kernel. MAR-166 adds the
+inclusive 8px FFD magnetic resolver, magnetic-before-grid precedence, and the
+full stable `(slot, optional skin, displayed attachment, vertex)` tie order.
 
 The shell-private controllers own effective-track materialization, live runtime
 refresh, transactions, rollback, and zero-or-one history entry. The existing
@@ -120,6 +124,34 @@ ImGui files interpret input and draw the result. Normal timeline presentation
 uses the runtime-revision/identity keyed cache; add-key and live retime rebuild
 tracks directly after mutation so the current frame never reuses invalid row
 references.
+
+MAR-167 projects one focused continuous parent row from the effective runtime
+animation into a UI-free scalar graph. Bone Rotate, Translate, Scale, and Shear
+and Slot light RGBA are supported; FFD and discrete Inherit, Attachment, Draw
+Order, and Event rows are explicitly rejected. Every component point reuses the
+parent `TimelineKeyRef`, while `selected_keys`, `active_key`, parent-track focus,
+and the playhead remain common with the dopesheet. The parent key also owns one
+actual outgoing easing shared across its X/Y or RGBA components.
+
+Graph component visibility, active component, Fit state, time/value pan and
+zoom, hover, and the runtime-revision/animation/track keyed projection cache are
+transient shell state. They are duration-independent and are not serialized or
+included in history, dirty state, runtime export, C ABI, or Agent/MCP. Runtime
+revision rebuilds the effective projection without retaining runtime pointers;
+same-context undo/redo preserves a finite view, while successful project/source
+adoption resets the graph state. MAR-167 performs no graph authoring; point
+time/value dragging begins at MAR-168.
+
+Viewport snap settings are optional project metadata, not user preferences or
+runtime data. The controller reads them directly from the active
+`EditorSession`, while live Alt and platform Cmd/Ctrl state flows only through
+the current gesture update. Settings edits use project-only transactions;
+translate/rotate/scale and attachment-local FFD gestures keep their existing
+project/runtime/preview transaction and one-undo boundary. FFD candidate
+collection is shell-private: it snapshots finite vertices from positive-alpha
+displayed meshes, excludes selected active-scope members, and reprojects the
+snapshot through the current layout on every update so camera changes can add
+or remove on-canvas candidates without changing project state.
 
 ## Renderer handoff
 
@@ -191,6 +223,7 @@ It keeps:
 
 - References to runtime assets.
 - Authoring-only viewport and note state.
+- Optional viewport snap metadata; absent projects keep all domains default-off.
 - Unexported timeline, mesh-weight, constraint, and atlas-pack edits.
 - Optional `parameter_model` source data for parameters, groups, blend shapes, deformers, art paths, expressions, and lip-sync mappings.
 - Lossless unknown additive fields inside `parameter_model`; a completely empty model is omitted on save.

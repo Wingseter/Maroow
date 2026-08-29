@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "marrow-full-roadmap",
-  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, MAR-122–128 Maroow-native parameter-modeling checkpoint, MAR-154–155 duration checkpoints, MAR-156 versioned user-preference checkpoint, MAR-157 typed-selection checkpoint, MAR-158 selection-migration checkpoint, MAR-159 hierarchy-multi-selection checkpoint, MAR-160 viewport-multi-selection checkpoint, MAR-161 parent-space-rotation checkpoint, MAR-162 signed-local-scale checkpoint, Task #28 behavior-preserving refactor checkpoint, MAR-163 single-vertex-FFD checkpoint, and MAR-164 attachment-local multi-vertex-FFD checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-165–191 form the remaining strictly linear editing-P1 dependency chain beginning at MAR-165. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
+  "overview": "Implement the Marrow toolchain described in docs/root1/discription.md. The MAR-129–140 editor architecture checkpoint, MAR-141–153 editing-P0 checkpoint, MAR-122–128 Maroow-native parameter-modeling checkpoint, MAR-154–155 duration checkpoints, MAR-156 versioned user-preference checkpoint, MAR-157 typed-selection checkpoint, MAR-158 selection-migration checkpoint, MAR-159 hierarchy-multi-selection checkpoint, MAR-160 viewport-multi-selection checkpoint, MAR-161 parent-space-rotation checkpoint, MAR-162 signed-local-scale checkpoint, Task #28 behavior-preserving refactor checkpoint, MAR-163 single-vertex-FFD checkpoint, MAR-164 attachment-local multi-vertex-FFD checkpoint, MAR-165 shared project viewport transform-snapping checkpoint, MAR-166 grid/magnetic FFD vertex-snapping checkpoint, and MAR-167 synchronized scalar-graph checkpoint are complete. MAR-121 remains a tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-168–191 form the remaining strictly linear editing-P1 dependency chain beginning at MAR-168. Milestones are functional checkpoints closed by focused validation. Imported rigs and optional name-based project overlays remain the short-term source; native rig or mesh-topology authoring requires a later versioned canonical .marrow architecture decision.",
   "qualityGates": [
     "Treat docs/root1/discription.md as the feature and architecture source of truth unless the active story explicitly updates it.",
     "Keep each milestone small, vertical, and independently verifiable while preserving the documented dependency order: renderer/runtime validation before advanced editor work.",
@@ -3400,7 +3400,8 @@
       "dependsOn": [
         "MAR-164"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-20"
     },
     {
       "id": "MAR-166",
@@ -3416,7 +3417,8 @@
       "dependsOn": [
         "MAR-165"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-20"
     },
     {
       "id": "MAR-167",
@@ -3432,7 +3434,8 @@
       "dependsOn": [
         "MAR-166"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-08-20"
     },
     {
       "id": "MAR-168",

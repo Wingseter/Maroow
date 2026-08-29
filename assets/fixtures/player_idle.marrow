@@ -120,6 +120,15 @@
     ],
     "skeleton": "player_idle.mskl"
   },
+  "snap": {
+    "absolute_scale_enabled": false,
+    "absolute_scale_step": 0.1,
+    "local_angle_enabled": false,
+    "local_angle_step_degrees": 15,
+    "magnetic_vertex_enabled": false,
+    "world_grid_enabled": false,
+    "world_grid_step": 10
+  },
   "timeline_edits": {
     "animations": {
       "idle": {

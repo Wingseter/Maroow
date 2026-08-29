@@ -15,6 +15,7 @@
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
+#include "timeline_graph_model.hpp"
 #include "timeline_model.hpp"
 #include "viewport_interaction_kernel.hpp"
 #include "viewport_renderer.hpp"
@@ -70,6 +71,11 @@ struct ViewportCamera {
 struct ViewportWorldPoint {
     double x{0.0};
     double y{0.0};
+};
+
+struct ViewportSnapModifiers {
+    bool temporarily_enable{false};
+    bool bypass{false};
 };
 
 struct ViewportLayout {
@@ -364,6 +370,10 @@ struct PendingEditAction {
     std::string label;
     std::string group;
     bool allow_merge{false};
+    marrow::editor::EditImpact impacts{
+        marrow::editor::EditImpact::Project |
+        marrow::editor::EditImpact::Runtime |
+        marrow::editor::EditImpact::Preview};
     EditorHistorySnapshot before_snapshot;
 };
 
@@ -391,6 +401,7 @@ struct ViewportTranslateGesturePayload {
     ViewportTranslateAxis axis{ViewportTranslateAxis::Free};
     ViewportWorldPoint pointer_start{};
     ViewportWorldPoint bone_world_start{};
+    ViewportWorldPoint current_world_target{};
 };
 
 struct ViewportRotationBasis {
@@ -408,6 +419,7 @@ struct ViewportRotateGesturePayload {
     std::optional<double> previous_wrapped_angle;
     double accumulated_rotation{0.0};
     bool angular_reference_suspended{false};
+    bool has_pointer_movement{false};
     ImVec2 pointer_screen{};
     double current_absolute_rotation{0.0};
 };
@@ -439,6 +451,7 @@ struct ViewportScaleGesturePayload {
     double start_absolute_scale_x{1.0};
     double start_absolute_scale_y{1.0};
     double start_projection_pixels{0.0};
+    bool has_pointer_movement{false};
     ImVec2 pointer_screen{};
     double current_absolute_scale_x{1.0};
     double current_absolute_scale_y{1.0};
@@ -484,11 +497,19 @@ struct ViewportFfdVertexMapping {
     double inverse_d{1.0};
 };
 
+struct ViewportFfdSnapCandidate {
+    marrow::editor::viewport_interaction_kernel::FfdSnapVertexIdentity identity;
+    ViewportWorldPoint world_position{};
+};
+
 struct ViewportFfdGesture {
     ViewportFfdSelectionScope scope{};
     std::size_t pressed_vertex_index{0U};
     std::vector<std::size_t> vertex_indices;
     std::vector<ViewportFfdVertexMapping> vertex_mappings;
+    std::vector<ViewportFfdSnapCandidate> snap_candidates;
+    std::optional<marrow::editor::viewport_interaction_kernel::FfdSnapResult>
+        snap_preview;
     std::string animation_name;
     double time_seconds{0.0};
     std::vector<double> start_vertex_offsets;
@@ -538,6 +559,30 @@ struct TimelineRetimeGesture {
     marrow::editor::EditorSession::EditTransaction transaction;
 };
 
+enum class TimelineViewMode : std::uint8_t {
+    Dopesheet,
+    Graph,
+};
+
+struct TimelineGraphProjectionCache {
+    std::uint64_t runtime_revision{0U};
+    const marrow::runtime::SkeletonData* skeleton_identity{nullptr};
+    std::string animation_name;
+    std::string track_id;
+    timeline_graph_model::Projection projection;
+    std::uint64_t generation{0U};
+    bool valid{false};
+};
+
+struct TimelineGraphViewState {
+    timeline_graph_model::View view{};
+    std::array<bool, 4> component_visible{true, true, true, true};
+    std::optional<timeline_graph_model::Component> active_component;
+    std::string fitted_track_id;
+    std::string fitted_animation_name;
+    bool needs_fit{true};
+};
+
 struct ParameterSliderGesture {
     std::string parameter_id;
     bool changed{false};
@@ -557,6 +602,11 @@ struct TimelineEditorState {
     double view_start_seconds{0.0};
     double pixels_per_second{160.0};
     std::vector<TimelineKeyRef> selected_keys;
+    std::optional<TimelineKeyRef> active_key;
+    TimelineViewMode view_mode{TimelineViewMode::Dopesheet};
+    std::optional<TimelineViewMode> requested_view_mode;
+    TimelineGraphViewState graph_view{};
+    TimelineGraphProjectionCache graph_cache{};
     TimelineClipboard clipboard;
     std::optional<TimelineBoxSelection> box_selection;
     std::optional<TimelineRetimeGesture> retime_gesture;
@@ -746,7 +796,11 @@ bool record_action_from_snapshots(
     EditActionKind kind,
     std::string label,
     std::string group,
-    bool allow_merge);
+    bool allow_merge,
+    marrow::editor::EditImpact impacts =
+        marrow::editor::EditImpact::Project |
+        marrow::editor::EditImpact::Runtime |
+        marrow::editor::EditImpact::Preview);
 void cancel_authoring_gestures(ShellState* state, std::string_view reason);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);

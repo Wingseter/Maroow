@@ -346,25 +346,12 @@ void draw_timeline_lane(
                 hit_key_index = index;
             }
         }
-        state->timeline_playing = false;
-        focus_timeline_track(
-            state,
-            track,
-            hit_key_index.has_value() ? track.key_times[*hit_key_index] : clicked_time,
-            "Timeline",
-            true);
         const bool additive = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
         if (hit_key_index.has_value()) {
             const TimelineKeyRef hit = timeline_key_ref(track, *hit_key_index);
-            auto& selection = state->timeline_editor.selected_keys;
-            const auto existing = std::find(selection.begin(), selection.end(), hit);
-            if (additive) {
-                if (existing == selection.end()) selection.push_back(hit);
-                else selection.erase(existing);
-            } else if (existing == selection.end()) {
-                selection = {hit};
-            }
-            if (timeline_key_selected(*state, hit) && timeline_track_is_editable(track)) {
+            if (activate_timeline_key(
+                    state, track, *hit_key_index, additive, "Timeline", true) &&
+                timeline_key_selected(*state, hit) && timeline_track_is_editable(track)) {
                 begin_timeline_retime_gesture(
                     state,
                     ImGui::GetItemID(),
@@ -372,7 +359,12 @@ void draw_timeline_lane(
                     tracks);
             }
         } else {
-            if (!additive) state->timeline_editor.selected_keys.clear();
+            state->timeline_playing = false;
+            focus_timeline_track(state, track, clicked_time, "Timeline", true);
+            if (!additive) {
+                state->timeline_editor.selected_keys.clear();
+                state->timeline_editor.active_key.reset();
+            }
             state->timeline_editor.box_selection = TimelineBoxSelection{
                 track.id, clicked_time, clicked_time, additive};
         }
@@ -407,6 +399,7 @@ void draw_timeline_lane(
                 if (!timeline_key_selected(*state, key)) selection.push_back(key);
             }
             state->timeline_editor.box_selection.reset();
+            reconcile_timeline_key_selection(state, tracks);
         }
     }
 
@@ -1996,7 +1989,135 @@ void draw_mesh_deform_timeline_editor(
     ImGui::EndChild();
 }
 
-void draw_timeline_window(ShellState* state) {
+static void draw_dopesheet_body(
+    ShellState* state,
+    const std::vector<TimelineTrackRow>& tracks,
+    double duration_seconds) {
+    const TimelineTrackRow* toolbar_track = selected_timeline_track(*state, tracks);
+    const bool has_editable_track =
+        toolbar_track != nullptr && timeline_track_is_editable(*toolbar_track);
+    if (icon_button(
+            state->icons,
+            Icon::AddKey,
+            has_editable_track
+                ? "Add or replace a keyframe at the playhead"
+                : "Select an editable track (Inherit remains read-only)",
+            false,
+            !has_editable_track)) {
+        add_timeline_key_at_playhead(state, *toolbar_track);
+    }
+    ImGui::SameLine();
+    const bool has_selected_editable_key = std::any_of(
+        state->timeline_editor.selected_keys.begin(),
+        state->timeline_editor.selected_keys.end(),
+        [&](const TimelineKeyRef& key) {
+            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
+            return track != nullptr && timeline_track_is_editable(*track);
+        });
+    const bool has_remove_target = has_editable_track || has_selected_editable_key;
+    if (icon_button(
+            state->icons,
+            Icon::RemoveKey,
+            has_remove_target
+                ? "Remove selected keys, or an authored key exactly at the playhead"
+                : "Select an editable track (Inherit remains read-only)",
+            false,
+            !has_remove_target)) {
+        remove_selected_timeline_keys(state, tracks);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    const bool has_key_selection = has_selected_editable_key;
+    if (!has_key_selection) ImGui::BeginDisabled();
+    if (ImGui::SmallButton("Copy")) copy_selected_timeline_keys(state, tracks);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Cut")) cut_selected_timeline_keys(state, tracks);
+    if (!has_key_selection) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const bool paste_enabled = state->timeline_editor.clipboard.has_data &&
+        state->timeline_editor.clipboard.animation_name == state->selected_animation_name;
+    if (!paste_enabled) ImGui::BeginDisabled();
+    if (ImGui::SmallButton("Paste")) paste_timeline_clipboard(state, tracks);
+    if (!paste_enabled) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::Checkbox("Snap to Frames", &state->timeline_editor.snap_to_frames);
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::GetIO().WantTextInput &&
+        !state->timeline_editor.retime_gesture.has_value()) {
+        const bool command = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
+        if (command && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+            copy_selected_timeline_keys(state, tracks);
+        } else if (command && ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+            cut_selected_timeline_keys(state, tracks);
+        } else if (command && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
+            paste_timeline_clipboard(state, tracks);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
+                   ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
+            remove_selected_timeline_keys(state, tracks);
+        }
+    }
+
+    draw_timeline_ruler(state, duration_seconds);
+
+    if (tracks.empty()) {
+        ImGui::TextUnformatted("The selected animation does not contain keyed tracks.");
+        return;
+    }
+
+    const float table_height = std::clamp(
+        96.0f + static_cast<float>(tracks.size()) * 28.0f,
+        180.0f,
+        420.0f);
+    if (ImGui::BeginTable(
+            "timeline_tracks",
+            2,
+            ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY |
+                ImGuiTableFlags_SizingStretchProp,
+            ImVec2(0.0f, table_height))) {
+        ImGui::TableSetupColumn("Track", ImGuiTableColumnFlags_WidthFixed, 260.0f);
+        ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+
+        for (const TimelineTrackRow& track : tracks) {
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            const bool selected = timeline_track_matches_selection(*state, track);
+            const Icon track_icon = track_property_icon(track.id);
+            const std::string label =
+                track.label + "  (" + std::to_string(track.key_times.size()) + ")";
+            ImGui::PushID(track.id.c_str());
+            if (icon_selectable(state->icons, track_icon, label.c_str(), selected)) {
+                state->timeline_playing = false;
+                focus_timeline_track(
+                    state,
+                    track,
+                    state->timeline_time_seconds,
+                    "Timeline",
+                    true);
+            }
+            ImGui::PopID();
+
+            ImGui::TableSetColumnIndex(1);
+            draw_timeline_lane(state, track, tracks);
+        }
+
+        ImGui::EndTable();
+    }
+
+    update_timeline_retime_gesture(state, tracks);
+    draw_transform_timeline_editor(state, tracks);
+}
+
+void draw_timeline_window(
+    ShellState* state,
+    TimelineGraphRenderStats* graph_stats_out) {
+    if (graph_stats_out != nullptr) *graph_stats_out = TimelineGraphRenderStats{};
     ImGui::Begin(kTimelineWindowTitle);
     widgets::panel_head(state->icons, Icon::NodeAnim, "Timeline");
 
@@ -2215,77 +2336,6 @@ void draw_timeline_window(ShellState* state) {
             std::string(state->timeline_loop ? "Enabled" : "Disabled") + " timeline looping";
     }
 
-    // Separator between playback and keyframe clusters
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-
-    const TimelineTrackRow* toolbar_track = selected_timeline_track(*state, tracks);
-    const bool has_editable_track =
-        toolbar_track != nullptr && timeline_track_is_editable(*toolbar_track);
-    if (icon_button(
-            state->icons,
-            Icon::AddKey,
-            has_editable_track
-                ? "Add or replace a keyframe at the playhead"
-                : "Select an editable track (Inherit remains read-only)",
-            false,
-            !has_editable_track)) {
-        add_timeline_key_at_playhead(state, *toolbar_track);
-    }
-    ImGui::SameLine();
-    const bool has_selected_editable_key = std::any_of(
-        state->timeline_editor.selected_keys.begin(),
-        state->timeline_editor.selected_keys.end(),
-        [&](const TimelineKeyRef& key) {
-            const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
-            return track != nullptr && timeline_track_is_editable(*track);
-        });
-    const bool has_remove_target = has_editable_track || has_selected_editable_key;
-    if (icon_button(
-            state->icons,
-            Icon::RemoveKey,
-            has_remove_target
-                ? "Remove selected keys, or an authored key exactly at the playhead"
-                : "Select an editable track (Inherit remains read-only)",
-            false,
-            !has_remove_target)) {
-        remove_selected_timeline_keys(state, tracks);
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-    const bool has_key_selection = has_selected_editable_key;
-    if (!has_key_selection) ImGui::BeginDisabled();
-    if (ImGui::SmallButton("Copy")) copy_selected_timeline_keys(state, tracks);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Cut")) cut_selected_timeline_keys(state, tracks);
-    if (!has_key_selection) ImGui::EndDisabled();
-    ImGui::SameLine();
-    const bool paste_enabled = state->timeline_editor.clipboard.has_data &&
-        state->timeline_editor.clipboard.animation_name == state->selected_animation_name;
-    if (!paste_enabled) ImGui::BeginDisabled();
-    if (ImGui::SmallButton("Paste")) paste_timeline_clipboard(state, tracks);
-    if (!paste_enabled) ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::Checkbox("Snap to Frames", &state->timeline_editor.snap_to_frames);
-
-    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-        !ImGui::GetIO().WantTextInput &&
-        !state->timeline_editor.retime_gesture.has_value()) {
-        const bool command = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
-        if (command && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
-            copy_selected_timeline_keys(state, tracks);
-        } else if (command && ImGui::IsKeyPressed(ImGuiKey_X, false)) {
-            cut_selected_timeline_keys(state, tracks);
-        } else if (command && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
-            paste_timeline_clipboard(state, tracks);
-        } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
-                   ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
-            remove_selected_timeline_keys(state, tracks);
-        }
-    }
-
     double slider_time = state->timeline_time_seconds;
     const double minimum_time = 0.0;
     const double maximum_time = duration_seconds > 0.0 ? duration_seconds : 1.0;
@@ -2314,61 +2364,31 @@ void draw_timeline_window(ShellState* state) {
         state->preview_root_motion_total.x,
         state->preview_root_motion_total.y);
 
-    draw_timeline_ruler(state, duration_seconds);
-
-    if (tracks.empty()) {
-        ImGui::TextUnformatted("The selected animation does not contain keyed tracks.");
-        ImGui::End();
-        return;
-    }
-
-    const float table_height = std::clamp(
-        96.0f + static_cast<float>(tracks.size()) * 28.0f,
-        180.0f,
-        420.0f);
-    if (ImGui::BeginTable(
-            "timeline_tracks",
-            2,
-            ImGuiTableFlags_BordersInnerV |
-                ImGuiTableFlags_RowBg |
-                ImGuiTableFlags_Resizable |
-                ImGuiTableFlags_ScrollY |
-                ImGuiTableFlags_SizingStretchProp,
-            ImVec2(0.0f, table_height))) {
-        ImGui::TableSetupColumn("Track", ImGuiTableColumnFlags_WidthFixed, 260.0f);
-        ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableHeadersRow();
-
-        for (const TimelineTrackRow& track : tracks) {
-            ImGui::TableNextRow();
-
-            ImGui::TableSetColumnIndex(0);
-            const bool selected = timeline_track_matches_selection(*state, track);
-            const Icon track_icon = track_property_icon(track.id);
-            const std::string label =
-                track.label + "  (" + std::to_string(track.key_times.size()) + ")";
-            ImGui::PushID(track.id.c_str());
-            if (icon_selectable(state->icons, track_icon, label.c_str(), selected)) {
-                state->timeline_playing = false;
-                focus_timeline_track(
-                    state,
-                    track,
-                    state->timeline_time_seconds,
-                    "Timeline",
-                    true);
-            }
-            ImGui::PopID();
-
-            ImGui::TableSetColumnIndex(1);
-            draw_timeline_lane(state, track, tracks);
+    if (ImGui::BeginTabBar("timeline_views")) {
+        if (ImGui::BeginTabItem(
+                "Dopesheet",
+                nullptr,
+                state->timeline_editor.requested_view_mode == TimelineViewMode::Dopesheet
+                    ? ImGuiTabItemFlags_SetSelected
+                    : ImGuiTabItemFlags_None)) {
+            state->timeline_editor.view_mode = TimelineViewMode::Dopesheet;
+            draw_dopesheet_body(state, tracks, duration_seconds);
+            ImGui::EndTabItem();
         }
-
-        ImGui::EndTable();
+        if (ImGui::BeginTabItem(
+                "Graph",
+                nullptr,
+                state->timeline_editor.requested_view_mode == TimelineViewMode::Graph
+                    ? ImGuiTabItemFlags_SetSelected
+                    : ImGuiTabItemFlags_None)) {
+            state->timeline_editor.view_mode = TimelineViewMode::Graph;
+            const auto stats = draw_timeline_graph_body(state, tracks);
+            if (graph_stats_out != nullptr) *graph_stats_out = stats;
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        state->timeline_editor.requested_view_mode.reset();
     }
-
-    update_timeline_retime_gesture(state, tracks);
-
-    draw_transform_timeline_editor(state, tracks);
 
     ImGui::End();
 }

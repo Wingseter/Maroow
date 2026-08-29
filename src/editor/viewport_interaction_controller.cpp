@@ -726,13 +726,15 @@ bool begin_translate_gesture(
         ViewportTranslateGesturePayload{
             axis,
             pointer_world,
+            ViewportWorldPoint{world.world_x, world.world_y},
             ViewportWorldPoint{world.world_x, world.world_y}});
 }
 
 bool update_translate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer) {
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers) {
     if (state == nullptr || !state->viewport_transform_gesture.has_value() ||
         state->preview_skeleton == nullptr) {
         return false;
@@ -751,7 +753,13 @@ bool update_translate_gesture(
     }
     const double delta_x = pointer_world.x - translate->pointer_start.x;
     const double delta_y = pointer_world.y - translate->pointer_start.y;
-    if (!gesture.changed && std::abs(delta_x) <= 1e-6 && std::abs(delta_y) <= 1e-6) {
+    const bool applicable_x_moved =
+        translate->axis != ViewportTranslateAxis::Y &&
+        std::abs(delta_x) > 1e-6;
+    const bool applicable_y_moved =
+        translate->axis != ViewportTranslateAxis::X &&
+        std::abs(delta_y) > 1e-6;
+    if (!gesture.changed && !applicable_x_moved && !applicable_y_moved) {
         return true;
     }
     ViewportWorldPoint target = translate->bone_world_start;
@@ -760,6 +768,39 @@ bool update_translate_gesture(
     }
     if (translate->axis != ViewportTranslateAxis::X) {
         target.y += delta_y;
+    }
+    namespace kernel = marrow::editor::viewport_interaction_kernel;
+    const marrow::editor::ProjectSnapSettings default_settings;
+    const auto& snap_settings = gesture.transaction.project()->snap_settings.has_value()
+        ? *gesture.transaction.project()->snap_settings
+        : default_settings;
+    const kernel::SnapActivation activation{
+        snap_settings.world_grid_enabled,
+        modifiers.temporarily_enable,
+        modifiers.bypass};
+    if (translate->axis != ViewportTranslateAxis::Y) {
+        const auto snapped = kernel::snap_scalar({
+            target.x, snap_settings.world_grid_step, activation});
+        if (!snapped.has_value()) {
+            finish_transform_gesture(state, false);
+            state->error_message = "Bone move was cancelled after invalid snap math.";
+            return false;
+        }
+        target.x = *snapped;
+    }
+    if (translate->axis != ViewportTranslateAxis::X) {
+        const auto snapped = kernel::snap_scalar({
+            target.y, snap_settings.world_grid_step, activation});
+        if (!snapped.has_value()) {
+            finish_transform_gesture(state, false);
+            state->error_message = "Bone move was cancelled after invalid snap math.";
+            return false;
+        }
+        target.y = *snapped;
+    }
+    if (std::abs(target.x - translate->current_world_target.x) <= 1e-12 &&
+        std::abs(target.y - translate->current_world_target.y) <= 1e-12) {
+        return true;
     }
     const auto local = local_position_for_world_target(
         *state->preview_skeleton, gesture.bone_index, target);
@@ -788,6 +829,7 @@ bool update_translate_gesture(
         state->error_message = error;
         return false;
     }
+    translate->current_world_target = target;
     gesture.changed = true;
     sync_shell_from_editor_session(state);
     return true;
@@ -846,7 +888,8 @@ bool begin_rotate_gesture(
 bool update_rotate_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer) {
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers) {
     if (state == nullptr || !state->viewport_transform_gesture.has_value()) {
         return false;
     }
@@ -898,15 +941,37 @@ bool update_rotate_gesture(
             "Bone rotation was cancelled after a non-finite angle.";
         return false;
     }
-    if (update.result != kernel::RotationUpdateResult::Changed) {
+    if (update.result == kernel::RotationUpdateResult::Changed) {
+        rotate->has_pointer_movement = true;
+    }
+    if (!rotate->has_pointer_movement) {
         return true;
     }
     const double accumulated = update.accumulated_rotation;
-    const double candidate = rotate->start_absolute_rotation + accumulated;
-    if (!std::isfinite(accumulated) || !std::isfinite(candidate)) {
+    const double raw_candidate = rotate->start_absolute_rotation + accumulated;
+    if (!std::isfinite(accumulated) || !std::isfinite(raw_candidate)) {
         finish_transform_gesture(state, false);
         state->error_message = "Bone rotation was cancelled after a non-finite result.";
         return false;
+    }
+    const marrow::editor::ProjectSnapSettings default_settings;
+    const auto& snap_settings = gesture.transaction.project()->snap_settings.has_value()
+        ? *gesture.transaction.project()->snap_settings
+        : default_settings;
+    const auto snapped = kernel::snap_scalar({
+        raw_candidate,
+        snap_settings.local_angle_step_degrees,
+        {snap_settings.local_angle_enabled,
+         modifiers.temporarily_enable,
+         modifiers.bypass}});
+    if (!snapped.has_value()) {
+        finish_transform_gesture(state, false);
+        state->error_message = "Bone rotation was cancelled after invalid snap math.";
+        return false;
+    }
+    const double candidate = *snapped;
+    if (std::abs(candidate - rotate->current_absolute_rotation) <= 1e-12) {
+        return true;
     }
 
     marrow::editor::upsert_transform_keyframe(
@@ -996,7 +1061,8 @@ bool begin_scale_gesture(
 bool update_scale_gesture(
     ShellState* state,
     const ViewportLayout& layout,
-    const ImVec2& pointer) {
+    const ImVec2& pointer,
+    ViewportSnapModifiers modifiers) {
     if (state == nullptr || !state->viewport_transform_gesture.has_value()) {
         return false;
     }
@@ -1011,15 +1077,50 @@ bool update_scale_gesture(
         return false;
     }
     scale->pointer_screen = pointer;
-    const auto candidate =
+    const auto raw_candidate =
         scale_candidate(*scale, layout, pointer);
-    if (!candidate.has_value()) {
+    if (!raw_candidate.has_value()) {
         finish_transform_gesture(state, false);
         state->error_message =
             "Bone scale was cancelled after invalid local-axis math.";
         return false;
     }
     constexpr double kScaleChangeEpsilon = 1e-12;
+    if (std::abs(
+            raw_candidate->scale_x - scale->start_absolute_scale_x) >
+            kScaleChangeEpsilon ||
+        std::abs(
+            raw_candidate->scale_y - scale->start_absolute_scale_y) >
+            kScaleChangeEpsilon) {
+        scale->has_pointer_movement = true;
+    }
+    if (!scale->has_pointer_movement) {
+        return true;
+    }
+    namespace kernel = marrow::editor::viewport_interaction_kernel;
+    const marrow::editor::ProjectSnapSettings default_settings;
+    const auto& snap_settings = gesture.transaction.project()->snap_settings.has_value()
+        ? *gesture.transaction.project()->snap_settings
+        : default_settings;
+    const kernel::ScaleHandle kernel_handle =
+        scale->handle == ViewportScaleHandle::X
+        ? kernel::ScaleHandle::X
+        : scale->handle == ViewportScaleHandle::Y
+        ? kernel::ScaleHandle::Y
+        : kernel::ScaleHandle::Uniform;
+    const auto candidate = kernel::snap_scale_candidate(
+        {raw_candidate->scale_x, raw_candidate->scale_y},
+        kernel_handle,
+        snap_settings.absolute_scale_step,
+        {snap_settings.absolute_scale_enabled,
+         modifiers.temporarily_enable,
+         modifiers.bypass});
+    if (!candidate.has_value()) {
+        finish_transform_gesture(state, false);
+        state->error_message =
+            "Bone scale was cancelled after invalid snap math.";
+        return false;
+    }
     if (std::abs(
             candidate->scale_x - scale->current_absolute_scale_x) <=
             kScaleChangeEpsilon &&
