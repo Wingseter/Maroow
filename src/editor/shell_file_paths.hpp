@@ -11,12 +11,22 @@ namespace marrow::editor::shell {
 
 struct ShellState;
 
-/** @brief The four File-menu path workflows. */
+/**
+ * @brief The five File-menu path workflows.
+ *
+ * `Reload` is here because it shares the three properties that put `New` and
+ * `Open` here: it is a File-menu action, it replaces the session, and it must
+ * therefore land at end of frame. It carries no path of its own and never
+ * participates in `FilePathMode`, `FilePathRequest` or `commit_path_choice` --
+ * the only writer of `FilePathRequest::action` is `seed_action_request`, called
+ * only for `Open` and `SaveAs`.
+ */
 enum class FileAction {
     New,
     Open,
     Save,
     SaveAs,
+    Reload,
 };
 
 /** @brief What the shared chooser must be true of the path it returns. */
@@ -45,6 +55,7 @@ enum class FilePathTarget {
 /// `##` suffix included. The smoke finds both modals by these exact strings.
 constexpr char kFilePathModal[] = "Choose Path##file_path";
 constexpr char kNewProjectModal[] = "New Project##file_new";
+constexpr char kDirtyIntentModal[] = "Unsaved Changes##dirty_intent";
 
 /**
  * @brief A live request for the shared path chooser.
@@ -95,6 +106,45 @@ struct PendingFileApplication {
     std::filesystem::path path;
     std::filesystem::path skeleton_path;
     std::vector<std::filesystem::path> atlas_paths;
+};
+
+/** @brief Every intent that replaces or ends the session. */
+enum class SessionIntent {
+    New,
+    Open,
+    Reload,
+    /// Both the File>Quit item and a native OS close request. They are the same
+    /// intent from two origins; nothing downstream needs to tell them apart.
+    Quit,
+};
+
+/** @brief Whether the prompt is up, or a save it asked for is still in flight. */
+enum class DirtyIntentPhase {
+    Prompting,
+    AwaitingSave,
+};
+
+/** @brief The three answers. */
+enum class DirtyIntentResponse {
+    Save,
+    Discard,
+    Cancel,
+};
+
+/**
+ * @brief A live dirty-session intent.
+ *
+ * On `ShellState` for the same two reasons `FilePathRequest` is: a menu item
+ * cannot open a root-scope modal (`ImGui::OpenPopup` hashes against the menu
+ * popup's id stack), so the item must RECORD and a root-scope drawer must open
+ * on a later frame -- `opened` is that latch; and the machine's state has to be
+ * inspectable by a UI-free test, because six of this story's eight cases never
+ * render a frame.
+ */
+struct DirtyIntentRequest {
+    SessionIntent intent{SessionIntent::New};
+    DirtyIntentPhase phase{DirtyIntentPhase::Prompting};
+    bool opened{false};
 };
 
 /** @brief What `resolve_choice` made of a browse directory and a typed name. */
@@ -154,30 +204,77 @@ std::string validate_new_project_sources(
 bool apply_save_as(ShellState* state, const std::filesystem::path& chosen);
 
 /**
- * @brief Entry point for every File action.
+ * @brief Performs a File action. This function does NOT gate on dirtiness.
  *
- * MAR-182 inserts the dirty-session intent gate at the TOP of this function:
- * when `state->session.dirty()` and the action replaces the session
- * (New, Open), it records a pending intent and returns without reaching the
- * body below. Save and SaveAs never gate -- Save IS the resolution.
- *
- * MAR-181 performs NO dirty check anywhere, so a New over a dirty session
- * discards unsaved work silently. That is a real, stated gap that MAR-182
- * closes; a partial check here would be rework MAR-182 must undo.
+ * MAR-181's comment here said MAR-182 would insert the dirty-session gate at
+ * the TOP of this function. It does not, and doing so would be a defect: the
+ * intent's own resolution has to reach the body below, so the gate would need a
+ * bypass flag or a bypass parameter -- a condition keyed on WHO IS CALLING
+ * rather than on what the document is. The layers are split instead:
+ * `begin_session_intent` decides, `begin_file_action` performs. Every surface
+ * that can discard unsaved work calls the former; `Save` and `Save As` call this
+ * one directly, because Save IS the resolution and gating it would deadlock the
+ * machine.
  */
 void begin_file_action(ShellState* state, FileAction action);
 
 /**
- * @brief Applies a deferred New or Open at end of frame.
+ * @brief Applies a deferred New, Open or Reload at end of frame.
  * @return Whether a pending action ran to SUCCESS this frame.
  *
- * The return value is MAR-182's completion signal. `file_path_request` is
- * cleared on Cancel and on success alike, so "the modal was cancelled while an
- * intent was pending" is `!state->file_path_request.has_value() && !applied`.
+ * MAR-181's comment here claimed this bool was MAR-182's completion signal, and
+ * that a cancelled action was `!state->file_path_request.has_value() &&
+ * !applied`. That predicate is also true on every IDLE frame and on every frame
+ * after a SUCCESSFUL action, which clears the request too, so it cannot
+ * distinguish a cancel from either. MAR-182 does not use it: the intent's own
+ * `DirtyIntentPhase` is the signal. This bool keeps its original, narrower
+ * meaning -- "a pending action ran to success this frame" -- and its signature
+ * is unchanged.
  */
 bool apply_pending_file_action(ShellState* state);
 
-/** @brief Draws the New form and the shared chooser. Root scope only. */
+/**
+ * @brief THE gate. Every session-replacing or terminating surface calls this.
+ * @post Either the intent has been performed, or `dirty_intent` holds it.
+ *
+ * Reads `EditorSession::dirty()`, which is content-keyed -- it compares the live
+ * document against the bytes last written or read. It deliberately does not read
+ * `ShellState::project_dirty`, which is a display cache refreshed only where
+ * someone remembered to call `update_project_dirty_state` and assigned from a
+ * caller-supplied boolean in `adopt_session_project_into_shell`.
+ */
+void begin_session_intent(ShellState* state, SessionIntent intent);
+
+/**
+ * @brief Answers a live prompt.
+ *
+ * Returns void deliberately. `Save` has THREE outcomes -- completed, waiting on
+ * a destination, failed -- and no bool carries three. The state IS the signal,
+ * and every field of it is on `ShellState` where a UI-free test can read it.
+ */
+void resolve_dirty_intent(ShellState* state, DirtyIntentResponse response);
+
+/**
+ * @brief Re-evaluates an `AwaitingSave` intent. Called by the modal every frame.
+ *
+ * Exported so a UI-free test can drive the same evaluation the frame does: the
+ * transition out of `AwaitingSave` is the one MAR-182 state change that a
+ * headless case cannot otherwise observe.
+ */
+void tick_dirty_intent(ShellState* state);
+
+/**
+ * @brief Folds a host close-request into the intent machine.
+ * @return Whether the host's latch must be CLEARED, i.e. the exit is vetoed.
+ *
+ * Split out of `shell_main.cpp`'s loop on purpose. The loop itself is
+ * unreachable from any headless test -- `run_headless_smoke` returns before a
+ * window host is ever created -- so the decision lives in a pure function a
+ * smoke can call with `true` and `false` and assert both answers.
+ */
+bool absorb_close_request(ShellState* state, bool host_close_requested);
+
+/** @brief Draws the prompt, the New form and the shared chooser. Root scope only. */
 void draw_file_path_modals(ShellState* state);
 
 } // namespace marrow::editor::shell

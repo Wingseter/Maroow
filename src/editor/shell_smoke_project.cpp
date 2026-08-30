@@ -2304,8 +2304,7 @@ bool validate_mar181_file_menu_mouse_smoke(const std::filesystem::path& project_
     const auto render_frame = [&]() {
         io.DeltaTime = 1.0f / 60.0f;
         ImGui::NewFrame();
-        bool reload_requested = false;
-        (void)draw_menu_bar(&reload_requested, &state);
+        (void)draw_menu_bar(&state);
         ImGui::Render();
     };
 
@@ -2529,8 +2528,7 @@ bool validate_mar181_save_shortcut_smoke(const std::filesystem::path& project_pa
         io.DeltaTime = 1.0f / 60.0f;
         ImGui::NewFrame();
         handle_project_history_shortcuts(&state);
-        bool reload_requested = false;
-        (void)draw_menu_bar(&reload_requested, &state);
+        (void)draw_menu_bar(&state);
         ImGui::Render();
     };
 
@@ -2695,6 +2693,1170 @@ bool validate_mar181_frame_body_applied_pending(const ShellState& state) {
                  "consumed by the smoke's OWN frame body without moving the shell's "
                  "project path, so the duplicate-frame-body wiring is observed "
                  "rather than assumed.\n";
+    return true;
+}
+
+
+namespace {
+
+/**
+ * @brief Dirties the session through a real transaction, exactly as C10 does.
+ *
+ * It deliberately does NOT call `update_project_dirty_state`. MAR-182's gate
+ * reads `session.dirty()`, and inversion I2 -- gating on the shell-side
+ * `project_dirty` cache instead -- is only observable because the cache is left
+ * stale right here.
+ */
+bool dirty_the_session(ShellState* state, const char* note) {
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "MAR-182 note",
+        "mar182-note",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!transaction || transaction.project() == nullptr) return false;
+    transaction.project()->editor_metadata.notes += note;
+    if (!transaction.commit()) return false;
+    return state->session.dirty();
+}
+
+/** @brief Seeds a temp project copy and loads it into a fresh, clean ShellState. */
+bool load_seeded_project(
+    const ShellState& source_state,
+    const std::filesystem::path& directory,
+    std::filesystem::path* project_out,
+    ShellState* state_out) {
+    if (!seed_shell_project_copy(source_state, directory, project_out, nullptr)) {
+        return false;
+    }
+    state_out->project_path = *project_out;
+    if (!reload_project(state_out) || state_out->load_result.skeleton_data == nullptr) {
+        return false;
+    }
+    state_out->session.clear_history();
+    return true;
+}
+
+const char* intent_name(SessionIntent intent) {
+    switch (intent) {
+        case SessionIntent::New: return "New";
+        case SessionIntent::Open: return "Open";
+        case SessionIntent::Reload: return "Reload";
+        case SessionIntent::Quit: return "Quit";
+    }
+    return "?";
+}
+
+} // namespace
+
+/**
+ * @brief MAR-182 C12 -- the gate itself, over all four intents.
+ *
+ * The four intents land in four DIFFERENT observable fields, and the clean half
+ * asserts each intent's own field rather than a shared one. A gate that fires
+ * for only some of the four fails on that intent's specific row; a single-field
+ * assertion could not tell "unified" from "New happens to be gated".
+ */
+bool validate_mar182_intent_gate_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c12";
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+
+    const SessionIntent intents[] = {
+        SessionIntent::New,
+        SessionIntent::Open,
+        SessionIntent::Reload,
+        SessionIntent::Quit};
+
+    // --- Half 1: a DIRTY session arms the prompt and performs nothing. -------
+    for (const SessionIntent intent : intents) {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-182 C12 could not seed a project copy.\n";
+            cleanup();
+            return false;
+        }
+        if (!dirty_the_session(&state, " c12-dirty")) {
+            std::cerr << "MAR-182 C12 could not dirty the session.\n";
+            cleanup();
+            return false;
+        }
+        const SessionSnapshot before = capture_session_snapshot(state);
+
+        begin_session_intent(&state, intent);
+
+        if (!state.dirty_intent.has_value()) {
+            std::cerr << "MAR-182 C12 dirty/" << intent_name(intent)
+                      << ": a dirty session must ARM the prompt, not perform the "
+                         "intent. dirty_intent is empty.\n";
+            cleanup();
+            return false;
+        }
+        if (state.dirty_intent->intent != intent ||
+            state.dirty_intent->phase != DirtyIntentPhase::Prompting) {
+            std::cerr << "MAR-182 C12 dirty/" << intent_name(intent)
+                      << ": the armed intent must be this intent, Prompting.\n";
+            cleanup();
+            return false;
+        }
+        if (state.pending_file_application.has_value() ||
+            state.new_project_form.has_value() ||
+            state.file_path_request.has_value() || state.should_exit) {
+            std::cerr << "MAR-182 C12 dirty/" << intent_name(intent)
+                      << ": the intent was PERFORMED behind the prompt -- one of "
+                         "pending_file_application / new_project_form / "
+                         "file_path_request / should_exit moved.\n";
+            cleanup();
+            return false;
+        }
+        if (!(capture_session_snapshot(state) == before)) {
+            std::cerr << "MAR-182 C12 dirty/" << intent_name(intent)
+                      << ": arming the prompt must not touch the session.\n";
+            cleanup();
+            return false;
+        }
+        resolve_dirty_intent(&state, DirtyIntentResponse::Cancel);
+    }
+
+    // --- Half 2: a CLEAN session performs immediately, each in its OWN field.
+    for (const SessionIntent intent : intents) {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-182 C12 could not seed a clean project copy.\n";
+            cleanup();
+            return false;
+        }
+        if (state.session.dirty()) {
+            std::cerr << "MAR-182 C12 clean/" << intent_name(intent)
+                      << ": the seeded session must start clean.\n";
+            cleanup();
+            return false;
+        }
+
+        begin_session_intent(&state, intent);
+
+        if (state.dirty_intent.has_value()) {
+            std::cerr << "MAR-182 C12 clean/" << intent_name(intent)
+                      << ": a clean session must never raise the prompt.\n";
+            cleanup();
+            return false;
+        }
+        bool performed = false;
+        switch (intent) {
+            case SessionIntent::New:
+                performed = state.new_project_form.has_value();
+                break;
+            case SessionIntent::Open:
+                performed = state.file_path_request.has_value() &&
+                    state.file_path_request->action == FileAction::Open;
+                break;
+            case SessionIntent::Reload:
+                performed = state.pending_file_application.has_value() &&
+                    state.pending_file_application->action == FileAction::Reload;
+                break;
+            case SessionIntent::Quit:
+                performed = state.should_exit;
+                break;
+        }
+        if (!performed) {
+            std::cerr << "MAR-182 C12 clean/" << intent_name(intent)
+                      << ": a clean session must perform the intent immediately, "
+                         "and this intent's OWN field never moved.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    cleanup();
+    std::cout << "MAR-182 C12: on a dirty session each of New/Open/Reload/Quit arms "
+                 "the prompt and performs nothing; on a clean session each performs "
+                 "immediately into its own field.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-182 C13 -- Save completes the intent only after a real save.
+ *
+ * The reload is the assertion that matters: `validate_project_for_save` takes no
+ * base document, so a passing `save()` proves nothing about whether the bytes it
+ * wrote can be opened. Only `load_project` materializes them.
+ */
+bool validate_mar182_save_completes_intent_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c13";
+    std::filesystem::path project;
+    ShellState state;
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        return false;
+    };
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        return fail("MAR-182 C13 could not seed a project copy.\n");
+    }
+    if (!dirty_the_session(&state, " c13-dirty")) {
+        return fail("MAR-182 C13 could not dirty the session.\n");
+    }
+
+    begin_session_intent(&state, SessionIntent::Open);
+    if (!state.dirty_intent.has_value()) {
+        return fail("MAR-182 C13: a dirty Open must arm the prompt.\n");
+    }
+    resolve_dirty_intent(&state, DirtyIntentResponse::Save);
+
+    if (state.session.dirty()) {
+        return fail(
+            "MAR-182 C13: Save must leave the session clean before the intent "
+            "proceeds.\n");
+    }
+    if (state.dirty_intent.has_value()) {
+        return fail("MAR-182 C13: a completed Save must clear the intent.\n");
+    }
+    if (!state.file_path_request.has_value() ||
+        state.file_path_request->action != FileAction::Open) {
+        return fail(
+            "MAR-182 C13: after the save landed the Open intent must have been "
+            "PERFORMED -- the chooser is not up with action == Open.\n");
+    }
+    const marrow::editor::ProjectLoadResult reloaded =
+        marrow::editor::load_project(project);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        return fail(
+            "MAR-182 C13: the saved project must RELOAD from disk. A passing "
+            "save() proves nothing -- validate_project_for_save takes no base "
+            "document.\n");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    std::cout << "MAR-182 C13: Save writes atomically, the session goes clean, the "
+                 "Open intent is then performed, and the written project reloads "
+                 "through load_project.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-182 C14 -- a failed Save never falls through to the intent.
+ *
+ * `should_exit` is a single bool that the fall-through defect sets; there is no
+ * way to write that bug and leave it false. The destination is compared byte for
+ * byte AND reloaded, so an atomicity regression is caught too.
+ */
+bool validate_mar182_failed_save_holds_intent_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c14";
+    std::filesystem::path project;
+    ShellState state;
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        return false;
+    };
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        return fail("MAR-182 C14 could not seed a project copy.\n");
+    }
+    if (!dirty_the_session(&state, " c14-dirty")) {
+        return fail("MAR-182 C14 could not dirty the session.\n");
+    }
+
+    std::string before_bytes;
+    std::string file_error;
+    if (!read_text_file(project, &before_bytes, &file_error)) {
+        return fail("MAR-182 C14: " + file_error + "\n");
+    }
+
+    begin_session_intent(&state, SessionIntent::Quit);
+    {
+        // HAZARD: this seam is process-global and shared with the preference
+        // writer. Nothing inside this scope may save preferences.
+        const ScopedRenameCallback rename_failure(
+            [](const std::filesystem::path&, const std::filesystem::path&) {
+                return std::make_error_code(std::errc::permission_denied);
+            });
+        resolve_dirty_intent(&state, DirtyIntentResponse::Save);
+
+        if (state.should_exit) {
+            return fail(
+                "MAR-182 C14: a FAILED save fell through to the Quit intent -- "
+                "should_exit is true with the project unwritten.\n");
+        }
+        if (!state.dirty_intent.has_value() ||
+            state.dirty_intent->intent != SessionIntent::Quit ||
+            state.dirty_intent->phase != DirtyIntentPhase::Prompting) {
+            return fail(
+                "MAR-182 C14: a failed save must KEEP the intent and re-raise the "
+                "prompt as Quit/Prompting.\n");
+        }
+        if (!state.session.dirty()) {
+            return fail(
+                "MAR-182 C14: a failed save must leave the session dirty.\n");
+        }
+        if (state.error_message.empty()) {
+            return fail("MAR-182 C14: a failed save must report an error.\n");
+        }
+    }
+
+    std::string after_bytes;
+    if (!read_text_file(project, &after_bytes, &file_error)) {
+        return fail("MAR-182 C14: " + file_error + "\n");
+    }
+    if (after_bytes != before_bytes) {
+        return fail(
+            "MAR-182 C14: a failed save must leave the destination byte-identical.\n");
+    }
+    if (!marrow::editor::load_project(project)) {
+        return fail(
+            "MAR-182 C14: the untouched destination must still reload.\n");
+    }
+
+    // --- The seam is released; the same answer now completes the intent. -----
+    resolve_dirty_intent(&state, DirtyIntentResponse::Save);
+    if (!state.should_exit) {
+        return fail(
+            "MAR-182 C14: once the save succeeds the held Quit intent must "
+            "proceed.\n");
+    }
+    if (state.dirty_intent.has_value() || state.session.dirty()) {
+        return fail(
+            "MAR-182 C14: the completed save must clear the intent and the dirty "
+            "flag.\n");
+    }
+    if (!marrow::editor::load_project(project)) {
+        return fail("MAR-182 C14: the successfully saved project must reload.\n");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    std::cout << "MAR-182 C14: an injected rename failure keeps the Quit intent "
+                 "Prompting with the file byte-identical and should_exit false; "
+                 "releasing the seam and answering Save again exits.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-182 C15 -- the save path can be cancelled, and can also COMPLETE
+ *        over a destination that already exists.
+ *
+ * `AwaitingSave` is a distinct enum value that no "Save always resolves"
+ * implementation ever produces. Asserting the PHASE, not just the outcome, is
+ * what makes the middle state observable.
+ *
+ * Half B guards a real deadlock. `resolve_dirty_intent(Save)` with no
+ * destination recurses into Save As, so the prompt's Save button reaches the
+ * shared chooser -- and there the overwhelmingly common case is writing over a
+ * file that already exists. MAR-181's design §3.2 said `Choose` is disabled
+ * whenever the diagnostic is non-empty, which would disable it EXACTLY then and
+ * leave `AwaitingSave` with no exit. Its §3.4 rule 5 is what shipped:
+ * `FilePathChoice::acceptable` gates `Choose`, and an existing Save target is
+ * accepted WITH the diagnostic. Asserting the pair simultaneously is the only
+ * thing that catches a "fix" toward §3.2.
+ */
+bool validate_mar182_save_path_cancel_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c15";
+    std::filesystem::path project;
+    ShellState state;
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        return false;
+    };
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        return fail("MAR-182 C15 could not seed a project copy.\n");
+    }
+    if (!dirty_the_session(&state, " c15-dirty")) {
+        return fail("MAR-182 C15 could not dirty the session.\n");
+    }
+
+    std::string before_bytes;
+    std::string file_error;
+    if (!read_text_file(project, &before_bytes, &file_error)) {
+        return fail("MAR-182 C15: " + file_error + "\n");
+    }
+
+    // The documented `begin_file_action` guard branch: an empty project_path
+    // makes Save recurse into Save As. This is that branch, not a hack.
+    state.project_path.clear();
+
+    begin_session_intent(&state, SessionIntent::Reload);
+    resolve_dirty_intent(&state, DirtyIntentResponse::Save);
+
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->phase != DirtyIntentPhase::AwaitingSave) {
+        return fail(
+            "MAR-182 C15: a Save with no destination must park the intent in "
+            "AwaitingSave while the chooser is up.\n");
+    }
+    if (!state.file_path_request.has_value() ||
+        state.file_path_request->action != FileAction::SaveAs) {
+        return fail(
+            "MAR-182 C15: the Save As chooser must be raised for the missing "
+            "destination.\n");
+    }
+
+    // The chooser's Cancel clears exactly this, and nothing else.
+    state.file_path_request.reset();
+    tick_dirty_intent(&state);
+
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->phase != DirtyIntentPhase::Prompting ||
+        state.dirty_intent->intent != SessionIntent::Reload) {
+        return fail(
+            "MAR-182 C15: a cancelled save destination must return the SAME intent "
+            "to Prompting.\n");
+    }
+    if (!state.session.dirty() || state.pending_file_application.has_value()) {
+        return fail(
+            "MAR-182 C15: a cancelled save destination must perform nothing and "
+            "leave the session dirty.\n");
+    }
+    std::string after_bytes;
+    if (!read_text_file(project, &after_bytes, &file_error)) {
+        return fail("MAR-182 C15: " + file_error + "\n");
+    }
+    if (after_bytes != before_bytes) {
+        return fail("MAR-182 C15: a cancelled save must write nothing.\n");
+    }
+
+    const SessionSnapshot before = capture_session_snapshot(state);
+    resolve_dirty_intent(&state, DirtyIntentResponse::Cancel);
+    if (state.dirty_intent.has_value()) {
+        return fail("MAR-182 C15: Cancel must clear the intent.\n");
+    }
+    if (!(capture_session_snapshot(state) == before)) {
+        return fail("MAR-182 C15: Cancel must not touch the session.\n");
+    }
+
+    // --- Half B: the same path COMPLETES over an existing destination. ------
+    // The session is still dirty and project_path is still empty, so this
+    // re-enters AwaitingSave exactly as half A did.
+    begin_session_intent(&state, SessionIntent::Reload);
+    resolve_dirty_intent(&state, DirtyIntentResponse::Save);
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->phase != DirtyIntentPhase::AwaitingSave ||
+        !state.file_path_request.has_value()) {
+        return fail(
+            "MAR-182 C15 half B could not re-enter AwaitingSave.\n");
+    }
+
+    // The destination ALREADY EXISTS -- the common case for the prompt's Save.
+    const FilePathChoice choice = resolve_choice(
+        project.parent_path(),
+        project.filename().string(),
+        FilePathMode::SaveTarget,
+        ".marrow");
+    if (!choice.acceptable) {
+        return fail(
+            "MAR-182 C15 half B: a Save target that already exists must be "
+            "ACCEPTED. It is rejected, so `Choose` is disabled exactly in the "
+            "common case, and an AwaitingSave intent raised from the prompt has "
+            "NO EXIT -- the prompt becomes unresolvable. `Choose` is gated on "
+            "FilePathChoice::acceptable and must never be gated on the "
+            "diagnostic being empty.\n");
+    }
+    if (choice.diagnostic != "Replaces the existing file.") {
+        return fail(
+            "MAR-182 C15 half B: an accepted overwrite must still CARRY its "
+            "diagnostic. Acceptance and the diagnostic are two separate outputs; "
+            "collapsing them is what breaks the save path.\n");
+    }
+
+    // `commit_path_choice`'s Save As branch, UI-free: apply, then clear the
+    // request exactly as a successful commit does.
+    if (!apply_save_as(&state, choice.path)) {
+        return fail(
+            "MAR-182 C15 half B: the overwrite must succeed.\n");
+    }
+    state.file_path_request.reset();
+    tick_dirty_intent(&state);
+
+    if (state.dirty_intent.has_value()) {
+        return fail(
+            "MAR-182 C15 half B: a committed save must complete the intent and "
+            "clear it.\n");
+    }
+    if (state.session.dirty()) {
+        return fail(
+            "MAR-182 C15 half B: the committed save must leave the session "
+            "clean.\n");
+    }
+    if (!state.pending_file_application.has_value() ||
+        state.pending_file_application->action != FileAction::Reload) {
+        return fail(
+            "MAR-182 C15 half B: the held Reload intent must be PERFORMED once "
+            "the save lands.\n");
+    }
+    if (!marrow::editor::load_project(project)) {
+        return fail(
+            "MAR-182 C15 half B: the OVERWRITTEN project must reload from disk. "
+            "A passing save() proves nothing -- validate_project_for_save takes "
+            "no base document.\n");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    std::cout << "MAR-182 C15: a Save with no destination parks the intent in "
+                 "AwaitingSave, a cancelled chooser returns it to Prompting with "
+                 "nothing written, Cancel clears it cleanly, and a commit over an "
+                 "EXISTING destination -- accepted with \"Replaces the existing "
+                 "file.\" -- completes the intent and reloads.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-182 C16 -- Discard performs the intent without persisting anything.
+ *
+ * Two independent comparisons. The byte compare catches a Discard that secretly
+ * saves; the post-reload document compare catches a Discard that secretly keeps
+ * the edit. One assertion alone would catch only one of the two defects.
+ */
+bool validate_mar182_discard_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c16";
+    std::filesystem::path project;
+    ShellState state;
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        return false;
+    };
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        return fail("MAR-182 C16 could not seed a project copy.\n");
+    }
+    const char* kNote = " c16-unsaved-note";
+    if (!dirty_the_session(&state, kNote)) {
+        return fail("MAR-182 C16 could not dirty the session.\n");
+    }
+
+    std::string before_bytes;
+    std::string file_error;
+    if (!read_text_file(project, &before_bytes, &file_error)) {
+        return fail("MAR-182 C16: " + file_error + "\n");
+    }
+
+    begin_session_intent(&state, SessionIntent::Reload);
+    resolve_dirty_intent(&state, DirtyIntentResponse::Discard);
+
+    if (!state.pending_file_application.has_value() ||
+        state.pending_file_application->action != FileAction::Reload) {
+        return fail(
+            "MAR-182 C16: Discard must PERFORM the Reload intent -- the deferred "
+            "action is not armed.\n");
+    }
+    if (!state.session.dirty()) {
+        return fail(
+            "MAR-182 C16: Discard must not save; the session stays dirty until the "
+            "replacement lands.\n");
+    }
+    std::string after_bytes;
+    if (!read_text_file(project, &after_bytes, &file_error)) {
+        return fail("MAR-182 C16: " + file_error + "\n");
+    }
+    if (after_bytes != before_bytes) {
+        return fail(
+            "MAR-182 C16: Discard secretly SAVED -- the destination bytes moved.\n");
+    }
+
+    if (!apply_pending_file_action(&state)) {
+        return fail("MAR-182 C16: the deferred Reload must run to success.\n");
+    }
+    if (state.session.dirty()) {
+        return fail("MAR-182 C16: the reloaded session must be clean.\n");
+    }
+    if (state.session.project() == nullptr) {
+        return fail("MAR-182 C16: the reloaded session must hold a project.\n");
+    }
+    if (state.session.project()->editor_metadata.notes.find(kNote) !=
+        std::string::npos) {
+        return fail(
+            "MAR-182 C16: Discard secretly KEPT the edit -- the unsaved note "
+            "survived the reload.\n");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    std::cout << "MAR-182 C16: Discard arms the Reload without writing a byte and "
+                 "without clearing the session, and the reload then drops the "
+                 "unsaved edit.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-182 C17 -- Cancel is a no-op, and repeats do not stack.
+ *
+ * Each clause reads a DIFFERENT field -- `intent`, `phase`, `should_exit`, the
+ * snapshot -- so replace, ignore and stack are three distinguishable outcomes
+ * rather than one.
+ */
+bool validate_mar182_cancel_and_repeat_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c17";
+    std::filesystem::path project;
+    ShellState state;
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+        return false;
+    };
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        return fail("MAR-182 C17 could not seed a project copy.\n");
+    }
+    if (!dirty_the_session(&state, " c17-dirty")) {
+        return fail("MAR-182 C17 could not dirty the session.\n");
+    }
+    const SessionSnapshot before = capture_session_snapshot(state);
+
+    begin_session_intent(&state, SessionIntent::New);
+    begin_session_intent(&state, SessionIntent::New);
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->intent != SessionIntent::New ||
+        state.dirty_intent->phase != DirtyIntentPhase::Prompting) {
+        return fail(
+            "MAR-182 C17: repeating an intent must leave ONE intent, still New, "
+            "still Prompting.\n");
+    }
+
+    begin_session_intent(&state, SessionIntent::Quit);
+    if (state.dirty_intent->intent != SessionIntent::Quit) {
+        return fail(
+            "MAR-182 C17: a second intent must REPLACE the first (last wish wins), "
+            "not stack behind it.\n");
+    }
+
+    resolve_dirty_intent(&state, DirtyIntentResponse::Cancel);
+    if (state.dirty_intent.has_value()) {
+        return fail("MAR-182 C17: Cancel must clear the intent.\n");
+    }
+    if (state.should_exit || state.pending_file_application.has_value() ||
+        state.new_project_form.has_value() || state.file_path_request.has_value()) {
+        return fail("MAR-182 C17: Cancel must perform nothing.\n");
+    }
+    if (!(capture_session_snapshot(state) == before)) {
+        return fail(
+            "MAR-182 C17: Cancel must leave the session bit-identical.\n");
+    }
+
+    // AC3: the intent is re-expressible, not retained.
+    begin_session_intent(&state, SessionIntent::New);
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->intent != SessionIntent::New) {
+        return fail(
+            "MAR-182 C17: after a Cancel the same intent must arm cleanly again.\n");
+    }
+
+    // While a save is in flight, a new intent is IGNORED.
+    state.project_path.clear();
+    resolve_dirty_intent(&state, DirtyIntentResponse::Save);
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->phase != DirtyIntentPhase::AwaitingSave) {
+        return fail("MAR-182 C17 needs an AwaitingSave intent to test the drop.\n");
+    }
+    begin_session_intent(&state, SessionIntent::Quit);
+    if (state.dirty_intent->phase != DirtyIntentPhase::AwaitingSave ||
+        state.dirty_intent->intent != SessionIntent::New) {
+        return fail(
+            "MAR-182 C17: a new intent raised while a save is in flight must be "
+            "IGNORED -- the AwaitingSave intent must survive unchanged.\n");
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    std::cout << "MAR-182 C17: repeats collapse to one intent, a later intent "
+                 "replaces an earlier one, Cancel is bit-identical and "
+                 "re-expressible, and an intent raised during AwaitingSave is "
+                 "dropped.\n";
+    return true;
+}
+
+
+/**
+ * @brief MAR-182 C18 -- a native OS close request folds into the machine.
+ *
+ * The RETURN VALUE is the veto: a design that forgot to veto returns false on a
+ * dirty project, which is one `if` here. The post-confirmation pass-through
+ * clause catches the opposite deadlock, where a confirmed exit is vetoed
+ * forever and the editor can never close.
+ *
+ * `shell_main.cpp`'s loop is unreachable from any headless test --
+ * `run_headless_smoke` returns before a window host exists -- so the DECISION
+ * lives in this pure function and only two lines of glue remain uncovered.
+ */
+bool validate_mar182_close_request_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar182_c18";
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        cleanup();
+        return false;
+    };
+
+    // --- A CLEAN session exits straight through, with no veto. --------------
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            return fail("MAR-182 C18 could not seed a clean project copy.\n");
+        }
+        if (absorb_close_request(&state, true)) {
+            return fail(
+                "MAR-182 C18: a CLEAN session must not veto the close -- there is "
+                "nothing to lose, so the latch must stand.\n");
+        }
+        if (!state.should_exit) {
+            return fail(
+                "MAR-182 C18: a clean close request must set should_exit.\n");
+        }
+    }
+
+    // --- A DIRTY session vetoes, and says so through the return value. ------
+    std::filesystem::path project;
+    ShellState state;
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        return fail("MAR-182 C18 could not seed a project copy.\n");
+    }
+    if (!dirty_the_session(&state, " c18-dirty")) {
+        return fail("MAR-182 C18 could not dirty the session.\n");
+    }
+
+    if (!absorb_close_request(&state, true)) {
+        return fail(
+            "MAR-182 C18: a DIRTY session must VETO the close -- the return value "
+            "is what tells the loop to clear the host's latch, and without it the "
+            "prompt cannot block the exit.\n");
+    }
+    if (state.should_exit) {
+        return fail(
+            "MAR-182 C18: a vetoed close must not set should_exit.\n");
+    }
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->intent != SessionIntent::Quit) {
+        return fail(
+            "MAR-182 C18: a vetoed close must arm a Quit intent.\n");
+    }
+
+    // A second request while the prompt is up still vetoes, and does not stack.
+    if (!absorb_close_request(&state, true)) {
+        return fail(
+            "MAR-182 C18: a repeated close request must keep vetoing while the "
+            "prompt is up.\n");
+    }
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->intent != SessionIntent::Quit) {
+        return fail(
+            "MAR-182 C18: a repeated close request must leave ONE Quit intent.\n");
+    }
+
+    // Confirming the exit, and then passing through it.
+    resolve_dirty_intent(&state, DirtyIntentResponse::Discard);
+    if (!state.should_exit) {
+        return fail(
+            "MAR-182 C18: Discard on a Quit intent must set should_exit.\n");
+    }
+    if (absorb_close_request(&state, true)) {
+        return fail(
+            "MAR-182 C18: a close request AFTER a confirmed exit must pass "
+            "through, not veto -- vetoing here deadlocks the main loop and the "
+            "editor can never close.\n");
+    }
+    // Discard does not save, so the session is STILL DIRTY while the shutdown
+    // runs. An absorber that omits the confirmed-exit short-circuit therefore
+    // re-enters the gate and arms a fresh prompt on the way out. The return
+    // value alone cannot see this -- it is false either way, because
+    // `!should_exit` is already false -- so the arming is what must be asserted.
+    if (state.dirty_intent.has_value()) {
+        return fail(
+            "MAR-182 C18: a close request after a confirmed exit must arm "
+            "NOTHING. The absorber re-entered the gate during shutdown and "
+            "raised a prompt behind a window that is already closing.\n");
+    }
+    if (!state.should_exit) {
+        return fail(
+            "MAR-182 C18: a confirmed exit must stay confirmed.\n");
+    }
+
+    // --- No request is not a request. ---------------------------------------
+    {
+        std::filesystem::path idle_project;
+        ShellState idle;
+        if (!load_seeded_project(source_state, root, &idle_project, &idle)) {
+            return fail("MAR-182 C18 could not seed the idle project copy.\n");
+        }
+        if (!dirty_the_session(&idle, " c18-idle")) {
+            return fail("MAR-182 C18 could not dirty the idle session.\n");
+        }
+        if (absorb_close_request(&idle, false)) {
+            return fail(
+                "MAR-182 C18: absorbing a NON-request must never veto.\n");
+        }
+        if (idle.dirty_intent.has_value() || idle.should_exit) {
+            return fail(
+                "MAR-182 C18: absorbing a non-request must arm nothing.\n");
+        }
+    }
+
+    cleanup();
+    std::cout << "MAR-182 C18: a clean close passes through and exits, a dirty one "
+                 "vetoes and arms a Quit intent, repeats do not stack, and a close "
+                 "after a confirmed exit passes through.\n";
+    return true;
+}
+
+
+/**
+ * @brief MAR-182 C19 -- the prompt exists, a real mouse reaches it, and the
+ *        menu is actually wired to the gate.
+ *
+ * C12-C18 all drive the seams directly and would pass with every File menu item
+ * unwired -- MAR-181's own I8 measured exactly that. This is the ONLY case that
+ * observes the wiring, and the only one that observes the modal exists at root
+ * scope at all. A widget that is not emitted cannot own an id equal to
+ * `window->GetID(label)`, so a label never hovered at any scanned position is a
+ * FAILURE, never a skip.
+ */
+bool validate_mar182_dirty_prompt_mouse_smoke(const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) || state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-182 C19 could not load " << project_path << ".\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool macos_behaviors_before = io.ConfigMacOSXBehaviors;
+    io.ConfigMacOSXBehaviors = false;
+
+    // The frame body in miniature: the menu bar reaches draw_file_path_modals,
+    // and the deferred rail runs at end of frame.
+    const auto render_frame = [&]() {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        handle_project_history_shortcuts(&state);
+        draw_menu_bar(&state);
+        ImGui::Render();
+        (void)apply_pending_file_action(&state);
+    };
+
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        io.ConfigMacOSXBehaviors = macos_behaviors_before;
+        return false;
+    };
+
+    const auto sweep = [&](std::vector<MenuProbe>& probes,
+                           const char* window_title,
+                           const char* case_label) -> bool {
+        ImGuiWindow* window = ImGui::FindWindowByName(window_title);
+        if (window == nullptr) {
+            std::cerr << "MAR-182 C19 " << case_label << ": \"" << window_title
+                      << "\" was never submitted.\n";
+            return false;
+        }
+        for (MenuProbe& probe : probes) {
+            probe.id = probe_id(*window, probe);
+            probe.found = false;
+        }
+        // An AlwaysAutoResize window is submitted at a stub size on its first
+        // frame and only reaches its content size on the next one.
+        for (int settle = 0; settle < 3; ++settle) {
+            render_frame();
+        }
+        window = ImGui::FindWindowByName(window_title);
+        if (window == nullptr) {
+            std::cerr << "MAR-182 C19 " << case_label << ": lost \"" << window_title
+                      << "\" while it settled.\n";
+            return false;
+        }
+        const ImRect bounds = window->Rect();
+        bool remaining = true;
+        for (float y = bounds.Min.y + 2.0f; y <= bounds.Max.y - 2.0f && remaining;
+             y += 4.0f) {
+            for (float x = bounds.Min.x + 4.0f; x <= bounds.Max.x - 2.0f && remaining;
+                 x += 12.0f) {
+                io.AddMousePosEvent(x, y);
+                render_frame();
+                const ImGuiContext* context = ImGui::GetCurrentContext();
+                const ImGuiID hovered = context != nullptr ? context->HoveredId : 0U;
+                if (hovered == 0U) continue;
+                remaining = false;
+                for (MenuProbe& probe : probes) {
+                    if (!probe.found && probe.id == hovered) {
+                        probe.found = true;
+                        probe.position = ImVec2(x, y);
+                    }
+                    if (!probe.found) remaining = true;
+                }
+            }
+        }
+        bool complete = true;
+        for (const MenuProbe& probe : probes) {
+            if (!probe.found) {
+                std::cerr << "MAR-182 C19 " << case_label << ": \"" << window_title
+                          << "\" never emitted a widget with the id of \""
+                          << probe.label
+                          << "\". A real mouse swept every position in the window "
+                             "and HoveredId never equalled window->GetID(\""
+                          << probe.label << "\"), so the widget is absent.\n";
+                complete = false;
+            }
+        }
+        return complete;
+    };
+
+    const auto click_position = [&](ImVec2 position) {
+        io.AddMousePosEvent(position.x, position.y);
+        render_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_frame();
+    };
+
+    const auto dirty_it = [&](const char* note) {
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "MAR-182 C19 note",
+            "mar182-c19",
+            false,
+            marrow::editor::EditImpact::Project});
+        if (!transaction || transaction.project() == nullptr) return false;
+        transaction.project()->editor_metadata.notes += note;
+        if (!transaction.commit()) return false;
+        return state.session.dirty();
+    };
+
+    render_frame();
+    render_frame();
+
+    if (!dirty_it(" c19-a")) {
+        return fail("MAR-182 C19 could not dirty the project.\n");
+    }
+
+    // --- Phase 0: MEASURE the two harness facts this case depends on. -------
+    begin_session_intent(&state, SessionIntent::Reload);
+    render_frame();
+    const ImGuiWindow* stub = ImGui::FindWindowByName(kDirtyIntentModal);
+    if (stub != nullptr) {
+        const ImRect rect = stub->Rect();
+        std::cout << "MAR-182 C19 measured: kDirtyIntentModal's Rect() one frame "
+                     "after opening is (" << rect.Min.x << "," << rect.Min.y
+                  << ")-(" << rect.Max.x << "," << rect.Max.y << "), "
+                  << rect.GetWidth() << "x" << rect.GetHeight() << " px.\n";
+    }
+    io.AddKeyEvent(ImGuiKey_Escape, true);
+    render_frame();
+    io.AddKeyEvent(ImGuiKey_Escape, false);
+    render_frame();
+    render_frame();
+    const ImGuiWindow* after_escape = ImGui::FindWindowByName(kDirtyIntentModal);
+    const bool escape_closes = after_escape == nullptr || !after_escape->Active;
+    std::cout << "MAR-182 C19 measured: Escape "
+              << (escape_closes ? "DOES" : "does NOT")
+              << " close a p_open == nullptr modal under this harness.\n";
+
+    /** @brief Closes the front popup by a route that is NOT one of its buttons. */
+    const auto close_externally = [&]() {
+        if (escape_closes) {
+            io.AddKeyEvent(ImGuiKey_Escape, true);
+            render_frame();
+            io.AddKeyEvent(ImGuiKey_Escape, false);
+        } else {
+            ImGui::ClosePopupToLevel(0, true);
+        }
+        render_frame();
+        render_frame();
+    };
+
+    state.dirty_intent.reset();
+    render_frame();
+    render_frame();
+
+    // --- Phase 1: the menu reaches the gate, and the prompt is real. --------
+    std::vector<MenuProbe> bar_probes{{"File", ProbeIdKind::MenuBarMenu}};
+    if (!sweep(bar_probes, "##MainMenuBar", "phase 1 (menu bar)")) {
+        return fail("");
+    }
+    click_position(bar_probes[0].position);
+
+    const ImGuiContext* context = ImGui::GetCurrentContext();
+    if (context == nullptr || context->OpenPopupStack.Size == 0) {
+        return fail(
+            "MAR-182 C19 phase 1: clicking \"File\" opened no popup, so the menu "
+            "is undrivable under this harness.\n");
+    }
+    const ImGuiWindow* menu_window =
+        context->OpenPopupStack[context->OpenPopupStack.Size - 1].Window;
+    if (menu_window == nullptr) {
+        return fail("MAR-182 C19 phase 1: the File menu popup has no window yet.\n");
+    }
+    const std::string menu_window_name = menu_window->Name;
+    std::cout << "MAR-182 C19 measured: the open File menu popup's ImGui window "
+                 "name is \"" << menu_window_name << "\".\n";
+
+    std::vector<MenuProbe> menu_probes{{"Reload Project", ProbeIdKind::MenuItem}};
+    if (!sweep(menu_probes, menu_window_name.c_str(), "phase 1 (File menu)")) {
+        return fail("");
+    }
+    click_position(menu_probes[0].position);
+
+    const ImGuiWindow* prompt = ImGui::FindWindowByName(kDirtyIntentModal);
+    if (prompt == nullptr || !prompt->Active) {
+        return fail(
+            "MAR-182 C19 phase 1: a real click on \"Reload Project\" over a DIRTY "
+            "session did not open \"" + std::string(kDirtyIntentModal) +
+            "\". Either the menu item is not wired to begin_session_intent, or "
+            "the prompt is not drawn at root scope -- ImGui::OpenPopup inside "
+            "BeginMenu hashes against the MENU window's id stack and cannot open "
+            "a root-level modal.\n");
+    }
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->intent != SessionIntent::Reload) {
+        return fail(
+            "MAR-182 C19 phase 1: the click must arm a Reload intent through the "
+            "gate.\n");
+    }
+    if (state.pending_file_application.has_value() || state.session.dirty() == false) {
+        return fail(
+            "MAR-182 C19 phase 1: the reload must NOT have been performed behind "
+            "the prompt.\n");
+    }
+
+    std::vector<MenuProbe> prompt_probes{
+        {"Save", ProbeIdKind::Direct},
+        {"Discard", ProbeIdKind::Direct},
+        {"Cancel", ProbeIdKind::Direct}};
+    if (!sweep(prompt_probes, kDirtyIntentModal, "phase 1 (prompt)")) {
+        return fail("");
+    }
+
+    // --- Phase 2: Cancel closes it and touches nothing. ---------------------
+    const SessionSnapshot before = capture_session_snapshot(state);
+    click_position(prompt_probes[2].position);
+    // CloseCurrentPopup runs inside the frame the window was already submitted
+    // in, so `Active` only falls on the following NewFrame.
+    render_frame();
+    render_frame();
+    const ImGuiWindow* prompt_after = ImGui::FindWindowByName(kDirtyIntentModal);
+    if (prompt_after != nullptr && prompt_after->Active) {
+        return fail("MAR-182 C19 phase 2: Cancel did not close the prompt.\n");
+    }
+    if (state.dirty_intent.has_value()) {
+        return fail("MAR-182 C19 phase 2: Cancel must clear the intent.\n");
+    }
+    if (!(capture_session_snapshot(state) == before)) {
+        return fail(
+            "MAR-182 C19 phase 2: cancelling the prompt must not touch the "
+            "session.\n");
+    }
+
+    // --- Phase 3: an EXTERNAL close of the prompt is a Cancel (AC5). --------
+    begin_session_intent(&state, SessionIntent::Reload);
+    render_frame();
+    render_frame();
+    const ImGuiWindow* reraised = ImGui::FindWindowByName(kDirtyIntentModal);
+    if (reraised == nullptr || !reraised->Active) {
+        return fail(
+            "MAR-182 C19 phase 3: the prompt must be re-raisable after a "
+            "Cancel.\n");
+    }
+    close_externally();
+    if (state.dirty_intent.has_value()) {
+        return fail(
+            "MAR-182 C19 phase 3: a prompt closed by any route other than its own "
+            "buttons must be treated as a Cancel and clear the intent. It is "
+            "still set, so an AwaitingSave intent could never resolve and the "
+            "prompt would never reopen.\n");
+    }
+
+    // --- Phase 4: the QUIT item is wired to the gate too. -------------------
+    // Every other phase drives Reload Project, so an unwired Quit item is
+    // invisible to them. MEASURED: inversion I9 -- reverting Quit to MAR-181's
+    // "report upward and let the frame body handle it" -- left C12-C18 AND every
+    // other phase of C19 green. This phase is the only observer of that item,
+    // and it is why the story's headline gate is not trusted on faith.
+    std::vector<MenuProbe> quit_bar_probes{{"File", ProbeIdKind::MenuBarMenu}};
+    if (!sweep(quit_bar_probes, "##MainMenuBar", "phase 4 (menu bar)")) {
+        return fail("");
+    }
+    click_position(quit_bar_probes[0].position);
+    const ImGuiContext* quit_context = ImGui::GetCurrentContext();
+    if (quit_context == nullptr || quit_context->OpenPopupStack.Size == 0) {
+        return fail("MAR-182 C19 phase 4: clicking \"File\" opened no popup.\n");
+    }
+    const ImGuiWindow* quit_menu_window =
+        quit_context->OpenPopupStack[quit_context->OpenPopupStack.Size - 1].Window;
+    if (quit_menu_window == nullptr) {
+        return fail("MAR-182 C19 phase 4: the File menu popup has no window.\n");
+    }
+    const std::string quit_menu_name = quit_menu_window->Name;
+    std::vector<MenuProbe> quit_probes{{"Quit", ProbeIdKind::MenuItem}};
+    if (!sweep(quit_probes, quit_menu_name.c_str(), "phase 4 (File menu)")) {
+        return fail("");
+    }
+    click_position(quit_probes[0].position);
+
+    if (state.should_exit) {
+        return fail(
+            "MAR-182 C19 phase 4: File > Quit over a DIRTY session must NOT exit. "
+            "should_exit is set, so the unsaved work would be destroyed without a "
+            "prompt.\n");
+    }
+    if (!state.dirty_intent.has_value() ||
+        state.dirty_intent->intent != SessionIntent::Quit) {
+        return fail(
+            "MAR-182 C19 phase 4: the Quit menu item must arm a Quit intent "
+            "through begin_session_intent. It did not, so Quit is handled "
+            "somewhere this smoke's frame body does not run -- which is exactly "
+            "how MAR-181 shipped it, and is invisible to every other case.\n");
+    }
+    const ImGuiWindow* quit_prompt = ImGui::FindWindowByName(kDirtyIntentModal);
+    if (quit_prompt == nullptr || !quit_prompt->Active) {
+        return fail(
+            "MAR-182 C19 phase 4: the Quit intent must raise the prompt.\n");
+    }
+    close_externally();
+    if (state.dirty_intent.has_value()) {
+        return fail("MAR-182 C19 phase 4: the closed Quit prompt must clear.\n");
+    }
+
+    // --- Phase 5: the same rule for the chooser (the C15 precondition). -----
+    begin_file_action(&state, FileAction::SaveAs);
+    render_frame();
+    render_frame();
+    const ImGuiWindow* chooser = ImGui::FindWindowByName(kFilePathModal);
+    if (chooser == nullptr || !chooser->Active) {
+        return fail("MAR-182 C19 phase 5 needs the chooser open.\n");
+    }
+    close_externally();
+    if (state.file_path_request.has_value()) {
+        return fail(
+            "MAR-182 C19 phase 5: a chooser closed externally must clear "
+            "file_path_request. A stale request makes tick_dirty_intent read \"a "
+            "destination is being chosen\" forever, which hangs an AwaitingSave "
+            "intent.\n");
+    }
+
+    render_frame();
+    io.ConfigMacOSXBehaviors = macos_behaviors_before;
+    std::cout << "MAR-182 C19: a real mouse reaches File > Reload Project, a dirty "
+                 "click raises \"" << kDirtyIntentModal
+              << "\" at root scope with Save/Discard/Cancel all present, Cancel "
+                 "closes it bit-identically, and an external close of either the "
+                 "prompt or the chooser clears its request.\n";
     return true;
 }
 
@@ -2973,6 +4135,30 @@ bool validate_shell_foundation_smoke(
         return false;
     }
     if (!validate_mar181_file_menu_mouse_smoke(options.project_path)) {
+        return false;
+    }
+    if (!validate_mar182_intent_gate_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_save_completes_intent_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_failed_save_holds_intent_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_save_path_cancel_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_discard_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_cancel_and_repeat_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_close_request_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar182_dirty_prompt_mouse_smoke(options.project_path)) {
         return false;
     }
     // C11 arms here and is asserted after render_headless_smoke_frames.

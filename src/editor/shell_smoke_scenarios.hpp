@@ -23,6 +23,15 @@ bool validate_mar181_file_menu_mouse_smoke(const std::filesystem::path& project_
 bool validate_mar181_save_shortcut_smoke(const std::filesystem::path& project_path);
 bool validate_mar181_arm_deferred_action_for_frame_body(ShellState* state);
 bool validate_mar181_frame_body_applied_pending(const ShellState& state);
+bool validate_mar182_intent_gate_smoke(const ShellState& source_state);
+bool validate_mar182_save_completes_intent_smoke(const ShellState& source_state);
+bool validate_mar182_failed_save_holds_intent_smoke(const ShellState& source_state);
+bool validate_mar182_save_path_cancel_smoke(const ShellState& source_state);
+bool validate_mar182_discard_smoke(const ShellState& source_state);
+bool validate_mar182_cancel_and_repeat_smoke(const ShellState& source_state);
+bool validate_mar182_close_request_smoke(const ShellState& source_state);
+bool validate_mar182_dirty_prompt_mouse_smoke(
+    const std::filesystem::path& project_path);
 bool validate_animation_catalog_smoke(const std::filesystem::path& project_path);
 bool validate_animation_duration_shell_smoke(
     const std::filesystem::path& project_path);

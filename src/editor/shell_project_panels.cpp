@@ -616,7 +616,7 @@ bool apply_animation_catalog_action(
 // Secondary toolbar tier (below the menu bar): global actions on the left,
 // the ModeStrip centered, drawn as a viewport side bar so the dockspace
 // shrinks to fit beneath it.
-void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
+void draw_shell_toolbar(ShellState* state) {
     namespace t = marrow::editor::shell::theme;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     const float h = ImGui::GetFrameHeight() + 8.0f;
@@ -642,7 +642,7 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
             }
             if (icon_button(state->icons, Icon::Reload, "Reload project",
                             false, !project_loaded || gesture_active)) {
-                *reload_requested = true;
+                begin_session_intent(state, SessionIntent::Reload);
             }
             ImGui::TextDisabled("|");
             if (icon_button(state->icons, Icon::Undo, "Undo (Ctrl+Z)", false,
@@ -699,15 +699,15 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
     ImGui::PopStyleColor();
 }
 
-ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
+void draw_menu_bar(ShellState* state) {
     if (!ImGui::BeginMainMenuBar()) {
         // The modals must still be drawn when the menu bar is clipped, or an
-        // open interaction would vanish for as long as it stays clipped.
+        // open interaction would vanish for as long as it stays clipped. This is
+        // the SECOND of this function's two mutually exclusive calls to
+        // draw_file_path_modals -- exactly one of them runs per frame.
         draw_file_path_modals(state);
-        return ProjectMenuAction::None;
+        return;
     }
-
-    ProjectMenuAction action = ProjectMenuAction::None;
 
     if (g_font_semibold) ImGui::PushFont(g_font_semibold);
     ImGui::TextColored(marrow::editor::shell::theme::kPrimary, "marrow");
@@ -715,16 +715,17 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
     ImGui::TextDisabled("·");
 
     if (ImGui::BeginMenu("File")) {
-        // Every item calls begin_file_action and nothing else -- one entry point
-        // is what makes MAR-182's dirty-intent gate a pure addition. There is
-        // deliberately NO dirty check here (design section 6, property 4).
+        // Every item that can DISCARD unsaved work -- New, Open, Reload, Quit --
+        // goes through begin_session_intent, which is the only function that
+        // consults dirtiness. Save and Save As call begin_file_action directly:
+        // Save IS the resolution, so gating it would deadlock the machine.
         const bool gesture_active = authoring_gesture_active(*state);
         const bool project_loaded = state->load_result.project != nullptr;
         if (ImGui::MenuItem("New Project...", nullptr, false, !gesture_active)) {
-            begin_file_action(state, FileAction::New);
+            begin_session_intent(state, SessionIntent::New);
         }
         if (ImGui::MenuItem("Open Project...", nullptr, false, !gesture_active)) {
-            begin_file_action(state, FileAction::Open);
+            begin_session_intent(state, SessionIntent::Open);
         }
         ImGui::Separator();
         if (ImGui::MenuItem(
@@ -737,11 +738,15 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Reload Project", nullptr, false, !gesture_active)) {
-            *reload_requested = true;
+            begin_session_intent(state, SessionIntent::Reload);
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Quit")) {
-            action = ProjectMenuAction::QuitRequested;
+            // The gate lives HERE, not in the frame body. Quit's old handling
+            // sat in shell_main.cpp, whose hand-maintained twin discards the
+            // return value entirely, so any gate placed there was invisible to
+            // every test.
+            begin_session_intent(state, SessionIntent::Quit);
         }
         ImGui::EndMenu();
     }
@@ -919,14 +924,16 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
 
     ImGui::EndMainMenuBar();
 
-    draw_shell_toolbar(reload_requested, state);
-    // Root scope: BeginViewportSideBar/End have already balanced. One call site,
-    // reached by BOTH frame bodies through their existing draw_menu_bar call.
+    draw_shell_toolbar(state);
+    // Root scope: BeginViewportSideBar/End have already balanced. This and the
+    // clipped-menu-bar early return above are the function's only two calls, and
+    // they are mutually exclusive -- so the modals are drawn exactly once per
+    // frame, and BOTH frame bodies reach them through their existing
+    // draw_menu_bar call without any frame-body edit.
     draw_file_path_modals(state);
-    return action;
 }
 
-void draw_project_window(bool* reload_requested, ShellState* state) {
+void draw_project_window(ShellState* state) {
     ImGui::Begin(kProjectWindowTitle);
     widgets::panel_head(state->icons, Icon::NodeAnim, "Project",
                         state->project_dirty ? "UNSAVED" : nullptr);
@@ -938,7 +945,7 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
             "Reload project",
             false,
             gesture_active)) {
-        *reload_requested = true;
+        begin_session_intent(state, SessionIntent::Reload);
     }
     ImGui::SameLine();
     if (icon_button(state->icons, Icon::Save, "Save project", false, gesture_active)) {

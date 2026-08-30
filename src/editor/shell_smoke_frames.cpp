@@ -61,12 +61,11 @@ bool render_headless_smoke_frames(
         sync_shell_from_editor_session_if_revised(&shell_state);
         handle_project_history_shortcuts(&shell_state);
 
-        bool reload_requested = false;
-        (void)draw_menu_bar(&reload_requested, &shell_state);
+        (void)draw_menu_bar(&shell_state);
         const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
         const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
         ensure_default_dock_layout(&shell_state, dockspace_id, main_viewport);
-        draw_project_window(&reload_requested, &shell_state);
+        draw_project_window(&shell_state);
         draw_runtime_window(shell_state);
         draw_constraints_window(&shell_state);
         draw_timeline_window(&shell_state);
@@ -122,10 +121,6 @@ bool render_headless_smoke_frames(
         }
         ImGui::Render();
 
-        if (reload_requested && !reload_project(&shell_state)) {
-            std::cerr << shell_state.error_message;
-            return false;
-        }
         // MAR-181: the twin of src/editor/shell_main.cpp's call. Without this
         // the smoke would never run a deferred New or Open at all.
         (void)apply_pending_file_action(&shell_state);

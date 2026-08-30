@@ -860,6 +860,13 @@ struct ShellState {
     std::optional<FilePathRequest> file_path_request;
     std::optional<NewProjectForm> new_project_form;
     std::optional<PendingFileApplication> pending_file_application;
+    // MAR-182: the live Save/Discard/Cancel prompt, and the one condition that
+    // ends the main loop.
+    std::optional<DirtyIntentRequest> dirty_intent;
+    /// Set only by `perform_session_intent(Quit)`. The main loop's ONLY exit
+    /// condition, so no path can terminate the editor without passing the
+    /// dirty-session gate.
+    bool should_exit{false};
     std::string status_message;
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;

@@ -195,12 +195,22 @@ void draw_path_chooser_modal(ShellState* state) {
     if (!state->file_path_request.has_value()) {
         return;
     }
-    if (!state->file_path_request->opened) {
+    const bool was_open = state->file_path_request->opened;
+    if (!was_open) {
         ImGui::OpenPopup(kFilePathModal);
         state->file_path_request->opened = true;
     }
     if (!ImGui::BeginPopupModal(
             kFilePathModal, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (was_open) {
+            // It was open last frame and ImGui has closed it by some route other
+            // than Choose or Cancel -- Escape being the obvious one. An external
+            // close of a chooser IS a cancel, and Cancel and success already
+            // clear this request identically. Leaving it set would strand the
+            // optional: `tick_dirty_intent` reads it as "a destination is still
+            // being chosen", so an AwaitingSave intent would never resolve.
+            state->file_path_request.reset();
+        }
         return;
     }
 
@@ -626,7 +636,142 @@ void begin_file_action(ShellState* state, FileAction action) {
             (void)save_project_file(state, true);
             return;
         }
+        case FileAction::Reload: {
+            state->new_project_form.reset();
+            state->file_path_request.reset();
+            // The path stays EMPTY: `reload_project` reads state->project_path
+            // itself, and copying it here would create a second source of truth
+            // for the same fact.
+            PendingFileApplication pending;
+            pending.action = FileAction::Reload;
+            state->pending_file_application = std::move(pending);
+            return;
+        }
     }
+}
+
+namespace {
+
+/**
+ * @brief Performs an intent that has cleared the gate.
+ *
+ * Called from EXACTLY two places -- `begin_session_intent`'s clean-session
+ * branch and `tick_dirty_intent`'s `!session.dirty()` branch. Neither is
+ * reachable from a failure, which is the structural reason a failed save can
+ * never fall through to a discard, a replacement or a shutdown.
+ */
+void perform_session_intent(ShellState* state, SessionIntent intent) {
+    switch (intent) {
+        case SessionIntent::New:
+            begin_file_action(state, FileAction::New);
+            return;
+        case SessionIntent::Open:
+            begin_file_action(state, FileAction::Open);
+            return;
+        case SessionIntent::Reload:
+            begin_file_action(state, FileAction::Reload);
+            return;
+        case SessionIntent::Quit:
+            state->should_exit = true;
+            return;
+    }
+}
+
+} // namespace
+
+void begin_session_intent(ShellState* state, SessionIntent intent) {
+    if (state == nullptr) {
+        return;
+    }
+    if (state->dirty_intent.has_value()) {
+        if (state->dirty_intent->phase == DirtyIntentPhase::AwaitingSave) {
+            // A save is in flight and must land. The intent is re-expressible;
+            // the surfaces are all still there.
+            return;
+        }
+        // Last wish wins: the prompt is already up, so retarget it rather than
+        // stacking a queue the user cannot see.
+        state->dirty_intent->intent = intent;
+        return;
+    }
+    if (!state->session.dirty()) {
+        perform_session_intent(state, intent);
+        return;
+    }
+    state->dirty_intent = DirtyIntentRequest{intent, DirtyIntentPhase::Prompting, false};
+}
+
+void tick_dirty_intent(ShellState* state) {
+    if (state == nullptr || !state->dirty_intent.has_value() ||
+        state->dirty_intent->phase != DirtyIntentPhase::AwaitingSave) {
+        return;
+    }
+
+    if (!state->session.dirty()) {
+        // (1) Content-keyed: the bytes on disk now match memory, which is exactly
+        // the precondition for letting the intent proceed. Keying on
+        // `save_project_file`'s return instead would be unavailable through the
+        // deferred Save As branch, and wrong on the immediate one -- it also
+        // returns false, without saving, while an authoring gesture is live.
+        const SessionIntent intent = state->dirty_intent->intent;
+        state->dirty_intent.reset();
+        perform_session_intent(state, intent);
+        return;
+    }
+    if (state->file_path_request.has_value()) {
+        // (2) A destination is still being chosen. Depends on the optional being
+        // truthful, which is why `draw_path_chooser_modal` clears it on an
+        // external close.
+        return;
+    }
+    // (3) The save failed or its destination was cancelled. The intent survives,
+    // the prompt comes back, and `perform_session_intent` was never reached.
+    state->dirty_intent->phase = DirtyIntentPhase::Prompting;
+    state->dirty_intent->opened = false;
+}
+
+void resolve_dirty_intent(ShellState* state, DirtyIntentResponse response) {
+    if (state == nullptr || !state->dirty_intent.has_value()) {
+        return;
+    }
+
+    switch (response) {
+        case DirtyIntentResponse::Cancel:
+            // Cancel is the response that does nothing, by definition. The
+            // session, selection, preview, history and project_dirty are all
+            // untouched, and the intent is re-expressible rather than retained.
+            state->dirty_intent.reset();
+            return;
+        case DirtyIntentResponse::Discard: {
+            // Discard declines to SAVE; it does not clear, revert or overwrite
+            // anything. For New/Open/Reload the unsaved work survives right up
+            // until the atomic replacement lands.
+            const SessionIntent intent = state->dirty_intent->intent;
+            state->dirty_intent.reset();
+            perform_session_intent(state, intent);
+            return;
+        }
+        case DirtyIntentResponse::Save:
+            state->dirty_intent->phase = DirtyIntentPhase::AwaitingSave;
+            begin_file_action(state, FileAction::Save);
+            // The same evaluation the frame runs: an immediate save has already
+            // landed or failed by now, and only a Save As leaves a chooser up.
+            tick_dirty_intent(state);
+            return;
+    }
+}
+
+bool absorb_close_request(ShellState* state, bool host_close_requested) {
+    if (state == nullptr || !host_close_requested) {
+        return false;
+    }
+    if (state->should_exit) {
+        // A confirmed exit passes through. Vetoing here would deadlock the loop:
+        // the machine has already said yes and nothing would ever say it again.
+        return false;
+    }
+    begin_session_intent(state, SessionIntent::Quit);
+    return !state->should_exit;
 }
 
 bool apply_pending_file_action(ShellState* state) {
@@ -635,6 +780,13 @@ bool apply_pending_file_action(ShellState* state) {
     }
     const PendingFileApplication pending = *state->pending_file_application;
     state->pending_file_application.reset();
+
+    if (pending.action == FileAction::Reload) {
+        // `reload_project` carries its own previous-animation/timeline capture
+        // and its own adoption call, so Reload returns here rather than sharing
+        // the New/Open preamble below.
+        return reload_project(state);
+    }
 
     const bool is_open = pending.action == FileAction::Open;
     // A New project has no "previous" animation: the pick then falls through to
@@ -707,8 +859,90 @@ bool apply_pending_file_action(ShellState* state) {
     return true;
 }
 
+namespace {
+
+/**
+ * @brief Draws the Save / Discard / Cancel prompt.
+ * @return Whether the prompt owns this frame, i.e. nothing else may draw.
+ *
+ * Returns false in `AwaitingSave` on purpose: the chooser the save raised must
+ * still be drawn underneath, and it is the caller that draws it.
+ */
+bool draw_dirty_intent_modal(ShellState* state) {
+    // Evaluate FIRST, so an AwaitingSave intent that last frame's chooser
+    // resolved is seen before anything is drawn this frame.
+    tick_dirty_intent(state);
+    if (!state->dirty_intent.has_value() ||
+        state->dirty_intent->phase != DirtyIntentPhase::Prompting) {
+        return false;
+    }
+
+    const bool was_open = state->dirty_intent->opened;
+    if (!was_open) {
+        ImGui::OpenPopup(kDirtyIntentModal);
+        state->dirty_intent->opened = true;
+    }
+    if (!ImGui::BeginPopupModal(
+            kDirtyIntentModal, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (was_open) {
+            // Closed by a route other than the three buttons. A closed prompt is
+            // a Cancel -- the same rule the chooser follows.
+            state->dirty_intent.reset();
+        }
+        return false;
+    }
+
+    const char* consequence = "";
+    switch (state->dirty_intent->intent) {
+        case SessionIntent::New:
+            consequence = "Creating a new project will discard them.";
+            break;
+        case SessionIntent::Open:
+            consequence = "Opening another project will discard them.";
+            break;
+        case SessionIntent::Reload:
+            consequence = "Reloading will discard them.";
+            break;
+        case SessionIntent::Quit:
+            consequence = "Quitting will discard them.";
+            break;
+    }
+
+    ImGui::TextUnformatted("This project has unsaved changes.");
+    ImGui::TextColored(th::kFaint, "%s", state->project_path.string().c_str());
+    ImGui::TextUnformatted(consequence);
+    ImGui::Separator();
+
+    bool resolved = false;
+    if (ImGui::Button("Save")) {
+        resolve_dirty_intent(state, DirtyIntentResponse::Save);
+        resolved = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard")) {
+        resolve_dirty_intent(state, DirtyIntentResponse::Discard);
+        resolved = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        resolve_dirty_intent(state, DirtyIntentResponse::Cancel);
+        resolved = true;
+    }
+    if (resolved) {
+        // `state->dirty_intent` may already be gone here; nothing below reads it.
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    return true;
+}
+
+} // namespace
+
 void draw_file_path_modals(ShellState* state) {
     if (state == nullptr) {
+        return;
+    }
+    if (draw_dirty_intent_modal(state)) {
         return;
     }
     if (state->new_project_form.has_value()) {

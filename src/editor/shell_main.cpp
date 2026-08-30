@@ -555,11 +555,7 @@ ShellFrameOutcome render_shell_frame(
     }
     handle_project_history_shortcuts(shell_state);
 
-    bool reload_requested = false;
-    if (draw_menu_bar(&reload_requested, shell_state) ==
-        ProjectMenuAction::QuitRequested) {
-        window_host->request_close();
-    }
+    draw_menu_bar(shell_state);
     const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
     const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
     ensure_default_dock_layout(shell_state, dockspace_id, main_viewport);
@@ -583,7 +579,7 @@ ShellFrameOutcome render_shell_frame(
                 t::u32(wash));
         }
     }
-    draw_project_window(&reload_requested, shell_state);
+    draw_project_window(shell_state);
     draw_runtime_window(*shell_state);
     draw_constraints_window(shell_state);
     draw_timeline_window(shell_state);
@@ -608,9 +604,6 @@ ShellFrameOutcome render_shell_frame(
     finalize_orphaned_viewport_ffd_gesture(shell_state);
     finalize_orphaned_coalesced_edit(shell_state);
 
-    if (reload_requested) {
-        reload_project(shell_state);
-    }
     // MAR-181: New and Open replace the session, so they land here at end of
     // frame exactly as Reload does. THIS EDIT HAS A TWIN in
     // src/editor/shell_smoke_frames.cpp -- the two frame bodies are
@@ -781,7 +774,10 @@ int main(int argc, char** argv) {
     int consecutive_skipped_frames = 0;
     bool surface_starved = false;
     std::uint64_t previous_frame_ticks = SDL_GetTicksNS();
-    while (!window_host->should_close()) {
+    // MAR-182: should_exit is the loop's ONLY exit condition, so nothing can end
+    // the process without passing the dirty-session gate. The three breaks below
+    // (frame error, surface starvation, --auto-close) stay unconditional.
+    while (!shell_state.should_exit) {
         window_host->poll_events([&](const SDL_Event& event) {
             const auto pointer_event = translate_sdl_pointer_event(event);
             if (pointer_event.has_value()) {
@@ -792,6 +788,12 @@ int main(int argc, char** argv) {
                 cancel_authoring_gestures(&shell_state, "window focus lost");
             }
         });
+        // A native close (the window button, Cmd+Q, SDL_EVENT_QUIT) is an
+        // ordinary Quit intent. When the gate holds it, the host's latch must be
+        // cleared or the request would fire again every frame.
+        if (absorb_close_request(&shell_state, window_host->should_close())) {
+            window_host->cancel_close_request();
+        }
 
         marrow::editor::AgentCommandContext agent_context{
             shell_state.session,

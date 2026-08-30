@@ -46,6 +46,7 @@
 - Atomic project save, cross-directory Save As rebasing, history rebasing, session `create`/`close`, and failure-safe runtime-source adoption (S1-S10): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Shell hot-reload failure coherence and save-failure preservation (C2, C3): `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Core File path workflows -- New/Open/Save/Save As through the dependency-free ImGui path modal, path-resolution rules, failed-Open and failed-Save-As shell preservation, `Ctrl+S` under the text-input guard, the mouse-driven File menu, and the deferred-action wiring of the smoke's own frame body (C4-C11): `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Unified dirty-session intent: the Save/Discard/Cancel machine in front of New/Open/Reload/Quit/OS-close, save failure, save-path cancellation, repeated requests, modal close, and the mouse-driven prompt including the File > Quit item (C12-C19): `MARROW_CONFIG_HOME=/tmp/mar182-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
@@ -170,6 +171,7 @@
 - Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, the constraint rename/delete lifecycle, the eleven IK/physics constraint parameter widgets located by a real mouse through `HoveredId` with per-drag undo granularity and a Ctrl+click clamp, MAR-178's Rename.../Delete... buttons and their modals driven end to end by that same mouse (see **Headless Frame Smoke Notes** before writing another such scenario), and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
+- MAR-182 window-close veto (MANUAL, not reachable from any headless test): `shell_main.cpp`'s two lines of loop glue -- the `absorb_close_request` call and the `cancel_close_request()` it guards -- run only in the real main loop, which `run_headless_smoke` returns before ever reaching. On an interactive host, dirty a project, click the window's close button, and confirm the `Unsaved Changes` prompt appears and that `Cancel` leaves the window open. Omitting the call makes the editor unclosable rather than silently lossy, because `ShellState::should_exit` is the loop's only exit condition.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
 - MAR-119 E2E export round-trip: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin`
 - MAR-119 E2E exported runtime smoke: `./build/marrow_fixture_smoke /tmp/marrow_e2e_export.mskl /tmp/player_idle.matl`
@@ -278,6 +280,167 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-182 Unified Dirty-Session Intent Validation Results
+
+Validated 2026-08-30. MAR-182 puts one Save / Discard / Cancel state machine in
+front of every path that can destroy unsaved work. The story title says "unify",
+which implies several inconsistent checks existed. **Zero existed.** `grep -rn
+"dirty" src/editor/shell_file_paths.cpp` at `d743569` returned one call *after* a
+successful save and one two-line comment; `grep -rn "unsaved" src/editor` found
+two status strings and a chip label and no control flow. The work is
+**construction**, not reconciliation, and five unguarded paths were closed at
+once: New, Open, Reload (**three** surfaces, not one), Quit, and the native OS
+close -- which could not be vetoed at all, because `SdlWindowHost`'s latch had no
+runtime clearer.
+
+The gate reads **`EditorSession::dirty()`**, which is content-keyed
+(`serialize_project(*load.project) != saved_serialized_project`). It deliberately
+does **not** read `ShellState::project_dirty`: that is a display cache assigned
+from a caller-supplied boolean at `shell_core.cpp:572`, and two of its ~40
+refresh points exist only in `shell_main.cpp`, so a gate keyed on it would mean
+something different in the smoke than in the shipped shell. MAR-182 neither reads
+nor writes it. No format, ABI or protocol change -- `git diff --stat` over
+`include/marrow/c/`, `src/c/`, `include/marrow/runtime/`, `project.cpp`,
+`session.cpp`, `atomic_file_write.cpp` and `format-spec.md` is **empty**. The
+registry is unchanged at **64**, proved by an empty diff over
+`agent_dispatch.cpp`, `agent_handlers_*.cpp`, `agent_dispatch_smoke.cpp` and
+`tools/`.
+
+### What was measured before any code was written
+
+| Claim | Measured |
+|---|---|
+| Registry and its split | **64** rows, **39** edit / **12** inspection / **10** management / **3** validation. **10** `!= 64U` guards, **1** `std::array<OperationExpectation, 64>`, **2** python assertions -- all unmoved afterwards |
+| Zero dirty checks exist (design §1.1) | Confirmed. One `update_project_dirty_state` after a *successful* save, and one comment. No gate anywhere |
+| Five discard paths | All confirmed at the stated sites, including **three** Reload surfaces (menu, toolbar icon, Project-panel icon) all writing one `bool*` consumed in **both** duplicate frame bodies |
+| The OS close cannot be vetoed | Confirmed: `close_requested_` is written at `:82` (poll), `:109` (`request_close`) and `:174` (`shutdown`), and cleared **only** in `initialize()` at `:68`. No runtime clearer existed |
+| Hot-reload is not a discard path | Confirmed at `session.cpp:2001-2009`: adoption replaces the four *runtime* fields and calls `update_dirty()`; the authored `ProjectData` and both history stacks survive |
+| No agent operation replaces a session | Confirmed: no `open`/`create`/`reload`/`close`/`new` row in the 64-row registry. `agent.terminate` ends an *agent* session |
+| `saved_project_snapshot` is write-only | **4** lines -- 1 declaration, 3 writes, **0 reads** -- before and after |
+| `EditorWindowHost` implementors | Exactly **one** (`sdl_window_host.cpp:34`), so deleting `request_close()` is compiler-enforced |
+| `resolve_choice`'s acceptance rule (design §4.5) | `Choose` is gated on `FilePathChoice::acceptable` **alone** (`shell_file_paths.cpp:269`), and a Save target that already exists is **accepted** with `diagnostic = "Replaces the existing file."`. Confirmed before any code and **not touched** by MAR-182 — `resolve_choice` does not appear in this story's diff |
+
+### Results
+
+| Case | Assertion | Result |
+|---|---|---|
+| C12 | The gate over all four intents. Dirty: each arms `dirty_intent` and moves **none** of `pending_file_application` / `new_project_form` / `file_path_request` / `should_exit`, snapshot bit-identical. Clean: each performs immediately into its **own** field | PASS |
+| C13 | Save completes the intent only after a real save: session clean, intent cleared, chooser up with `action == Open`, and the written file **reloads through `load_project`** -- a passing `save()` proves nothing, because `validate_project_for_save` takes no base document | PASS |
+| C14 | A failed save never falls through. Under an injected `permission_denied` rename: `should_exit == false`, intent still `Quit`/`Prompting`, session dirty, `error_message` non-empty, destination **byte-identical** and still loadable. Seam released, Save again → exits and the file reloads | PASS |
+| C15 | Save-path cancellation **and** completion over an existing destination. **Half A**: empty `project_path` (the documented guard branch) → `phase == AwaitingSave` + a `SaveAs` request; clear it, tick → back to `Prompting` with the **same** intent, nothing written; Cancel → bit-identical. **Half B**: re-enter `AwaitingSave`, assert the existing destination is `acceptable == true` **and** carries `"Replaces the existing file."` *simultaneously*, commit it, tick → the held `Reload` intent is performed, the session goes clean, and the **overwritten** file reloads | PASS |
+| C16 | Discard performs without persisting. `pending_file_application->action == Reload`, session **still dirty**, file **byte-identical**; then the reload succeeds, goes clean, and the unsaved note is **gone**. Two independent comparisons | PASS |
+| C17 | Cancel and repeats. Two `New` → one intent; `Quit` replaces it; Cancel is bit-identical and re-expressible; an intent raised during `AwaitingSave` is **ignored** | PASS |
+| C18 | `absorb_close_request` in both polarities. Clean → `false` + `should_exit`; dirty → **`true`** (the veto) + no exit + a `Quit` intent; repeat still vetoes; Discard → exits; a call after that → `false` **and arms nothing** | PASS |
+| C19 | The prompt by a **real mouse**: File > Reload Project on a dirty session raises `Unsaved Changes##dirty_intent` at root scope with `Save`/`Discard`/`Cancel` all found by `HoveredId`; Cancel is bit-identical; an external close of the prompt clears the intent; **File > Quit arms a `Quit` intent rather than exiting**; an external close of the chooser clears `file_path_request` | PASS |
+
+Two harness facts the plan required be **measured, not assumed**:
+
+- **Escape does NOT close a `p_open == nullptr` modal under this harness.** C19
+  prints this every run and picks its close route from it, so phases 3-5 use
+  `ImGui::ClosePopupToLevel(0, true)` from `imgui_internal.h`. The first reading
+  said the opposite and was an **artifact**: `FindWindowByName` returned `nullptr`
+  for a modal that did not yet exist, which the probe scored as "closed". The
+  measurement only became meaningful once the modal was drawn -- a reminder that
+  a probe over an absent object measures nothing.
+- **The `AlwaysAutoResize` first-frame stub rect** for `kDirtyIntentModal` is
+  `(60,60)-(76,97)`, **16x37 px** -- the same 16x37 stub MAR-181 measured for the
+  chooser at `(452,259)-(468,296)`, at a different origin. Confirmed rather than
+  inherited. A sweep that captured bounds immediately would scan a sliver and
+  report every button absent; C19 renders three settle frames and re-reads.
+
+The File menu popup's ImGui window name re-measured as `File###Menu_00`,
+unchanged from MAR-181.
+
+### Inversions -- actual outcomes, not predictions
+
+| # | Inversion | Predicted | **Measured** |
+|---|---|---|---|
+| I1 | `begin_session_intent` performs regardless of `session.dirty()` | C12 | **C12, C13, C14, C15, C17**: `a dirty session must ARM the prompt, not perform the intent. dirty_intent is empty.` Broader than predicted -- every case that depends on the prompt arming |
+| I2 | Gate on `state->project_dirty` instead of `session.dirty()` | C12 **and C16** | **C12, C13, C14, C15, C17 -- and C16 PASSES.** The prediction was wrong (see D3). The stale cache does open the gate exactly as §1.3 argues, but C16 cannot see it: with the gate open the Reload is performed immediately, `resolve_dirty_intent(Discard)` becomes a no-op, and all four of C16's assertions still hold |
+| I3 | `Save` performs the intent before checking dirtiness | C13, C14 | **C13, C14, C15, C17.** C14 is the sharp one: `a FAILED save fell through to the Quit intent -- should_exit is true with the project unwritten.` |
+| I4 | Completion keyed on `save_project_file`'s return, not `!session.dirty()` | C15 | **C15, C17**: `a Save with no destination must park the intent in AwaitingSave while the chooser is up.` The Save As branch has no return to read |
+| I5 | `Discard` saves first | C16 | **C16 alone**, on the byte compare: `Discard must not save; the session stays dirty until the replacement lands.` Exact |
+| I6 | `Cancel` disturbs the session | C17 | **C15, C17**: `Cancel must leave the session bit-identical.` C15 asserts the same property |
+| I7 | `begin_session_intent` stacks instead of replaces | C17 | **C17 alone**: `a second intent must REPLACE the first (last wish wins), not stack behind it.` Exact |
+| I8 | `absorb_close_request` returns `false` on a dirty project | C18 | **C18 alone**: `a DIRTY session must VETO the close -- the return value is what tells the loop to clear the host's latch` |
+| I8b | Veto even after a confirmed exit | C18 | **DID NOT BITE as first written.** The clause never changes the return value -- `!should_exit` is already `false` on that path -- so the return-value assertion could not see it. What removal actually breaks is different: Discard leaves the session **dirty**, so the absorber re-enters the gate and **arms a fresh prompt during shutdown**. C18 was strengthened to assert that a post-exit call arms nothing, and now fails: `the absorber re-entered the gate during shutdown and raised a prompt behind a window that is already closing.` |
+| I9 | Leave the menu's `Quit` unwired from the gate | C19 | **DID NOT BITE as first written** -- the fifth consecutive story with a specified inversion that could not fail. C19 clicked only `Reload Project`, so an unwired `Quit` was invisible to it, and C12-C18 pass by construction. **C19 phase 4 was added** to probe the `Quit` item itself. Re-run under I9, C19 fails alone: `the Quit menu item must arm a Quit intent through begin_session_intent. It did not, so Quit is handled somewhere this smoke's frame body does not run.` |
+| I10 | Skip the stale-request fix | C15, C19 | **C19 phase 5 alone; C15 PASSES** (see D4). C15 simulates the chooser's Cancel by resetting the optional directly, so it never drives the ImGui close path the fix lives on |
+| I11 | Draw the prompt outside `draw_file_path_modals` | C19 | **C19 alone**, at phase 1: the prompt never opens, which is the duplicate-frame-body hazard caught at the layer that owns it |
+| I12 | Reject an existing Save target, i.e. MAR-181 design §3.2's rule | C15 half B | **C15 half B** (and MAR-181 **C8**, a pre-existing net that fires first and had to be bypassed to observe C15 directly): `a Save target that already exists must be ACCEPTED. It is rejected, so \`Choose\` is disabled exactly in the common case, and an AwaitingSave intent raised from the prompt has NO EXIT.` C12-C14 pass — they never reach the chooser over an existing file |
+
+### Corrections the design made to its governing documents (5)
+
+Recorded here as well as in the design's §12, because they are corrections to
+documents MAR-183 and later will also read.
+
+| # | Where | Correction |
+|---|---|---|
+| A | `shell_file_paths.hpp:158-166` | Said MAR-182 would put the gate at the **top of `begin_file_action`**. Doing so forces the intent's own resolution to re-enter with the gate suppressed — a bypass flag, i.e. the provenance-keyed shape this arc has twice been bitten by. The gate went in `begin_session_intent`; `begin_file_action` stays the gate-free performer. **The comment was rewritten** |
+| B | `shell_file_paths.hpp:170-177` | Claimed `apply_pending_file_action`'s bool was MAR-182's completion signal and that a cancel was `!file_path_request.has_value() && !applied`. That predicate is also true on every **idle** frame and after every **successful** action. MAR-182 does not use it; the intent's own `phase` is the signal. **The comment was corrected** and the function's signature and semantics are unchanged |
+| C | The commissioning brief's reading of MAR-181's I2 | Treated `session.dirty()=true project_dirty=false` (`AGENTS.md:360`) as the two dirty notions "legitimately diverging". It is the **inversion's failure message** — what C4 prints when the code is deliberately broken. In the as-built tree they agree on every shipped path: one is the truth, the other a display cache of it. The choice of `session.dirty()` is unchanged but the reason is stronger |
+| D | The brief's count of `saved_project_snapshot` writes | Said four; there are **three** writes plus one declaration, four lines total, zero reads |
+| E | MAR-181 design §3.2 vs its own §3.4 rule 5 | §3.2's "`Choose` is disabled whenever the diagnostic is non-empty" contradicts §3.4's "an existing Save target is accepted *and* carries a diagnostic". **§3.4 is what shipped**, and MAR-182 depends on it: the prompt's Save reaches the same chooser over an existing file in the common case, so §3.2's rule would leave `AwaitingSave` with no exit. Now guarded by C15 half B and inversion I12 |
+
+### Document errors found during implementation (6)
+
+Every story in this arc has found errors in its own governing documents (175
+three, 176 seven, 177 six, 178 six, 179 six, 180 seven, 181 four plus a later
+fifth). These six are separate from the five above: they are errors in **MAR-182's
+own** design and plan, found while executing them. Items D1, D3, D4 and D5 were
+reported mid-implementation and the governing documents have since been revised
+to match; they are recorded here as measured.
+
+| # | Where | Error | Resolution |
+|---|---|---|---|
+| D1 | Design §1.5, §4.4 and plan Task 0 step 8 | All three assert `draw_file_path_modals` has **exactly one** call site (`shell_project_panels.cpp:924`). There are **two**: `:706` and `:925`. The plan makes this a **stop condition** -- "if there are two call sites, the modal draws twice -- stop" | The hazard does not exist. The two are **mutually exclusive branches of `draw_menu_bar`**: `:706` is the early return taken when `BeginMainMenuBar()` is clipped, `:925` the normal path. Exactly one runs per frame, and the modals are in fact drawn *more* reliably than the design assumed -- they survive a clipped menu bar. §4.4's conclusion holds unchanged. The in-code comment at `:924` also claimed "One call site" and has been rewritten. **The design has since been revised to match, and adds that the two branches must not be collapsed into one** — the early return is what keeps an open modal alive while the menu bar is clipped, so the prompt inherits that survival for free |
+| D2 | Design §1.1's quoted grep | Shows **2** hits for `grep -rn "dirty" src/editor/shell_file_paths.cpp`. The actual output is **3** -- the comment spans `:695-696`, and only `:696` was quoted | Cosmetic. The substantive claim -- one call after a successful save, no gate anywhere -- is exactly right |
+| D3 | Design §9 and plan Task 2, inversion I2 | Both name **C16** as I2's interesting detector, "because it dirties through a transaction without calling `update_project_dirty_state`, so the cache is stale and the gate opens". The premise is true; the conclusion is not | **Measured: C16 passes under I2.** With the gate open the Reload is performed at `begin_session_intent`, so `Discard` no-ops and C16's four assertions all still hold. C12 (and C13/C14/C15/C17) catch I2. The §1.3 argument stands; the case attribution was wrong |
+| D4 | Design §9 and plan Task 4, inversion I10 | Predict **C15** fails without the stale-request fix | **Measured: C15 passes.** C15 clears `file_path_request` directly to simulate the chooser's Cancel, so it never exercises the ImGui close path the fix is on. Only C19 phase 5 observes it -- which is the plan's own lesson about UI-free helpers being unable to see a widget |
+| D5 | Design §9/§11 R2 and plan Task 4, inversion I9 | Specify C19 as the observer of menu wiring, and predict it fails when `Quit` is unwired | **Measured: it did not bite.** C19 as specified clicks only `Reload Project`. Per the plan's own rule -- strengthen the case, never weaken the gate -- **C19 phase 4** was added, probing the `Quit` item by mouse and asserting a dirty click arms a `Quit` intent instead of exiting. It now fails alone under I9 |
+| D6 | Design §1.3 | Says `ShellState::project_dirty` has "exactly **three** readers", then lists **four** sites (`:656`, `:932`, `:1024`, `:1037`) | Four read sites, all display-only. The argument -- that every one of them is display and none is control flow -- is unaffected |
+
+### Not independently covered
+
+**Which half each detector catches** (design R1), including the row where the
+detector is none:
+
+| Frame-body / loop line | Detector | Which half it catches |
+|---|---|---|
+| `apply_pending_file_action` in the **smoke's** body | MAR-181 C11 | smoke half only |
+| `apply_pending_file_action` in **`shell_main.cpp`** | **none** | *(pre-existing gap, neither created nor closed here)* |
+| `absorb_close_request` / `cancel_close_request` in the loop | **none** | manual check only; C18 covers the **decision**, not the call |
+| the prompt itself | C19 | both bodies, via `draw_menu_bar`'s single reachable path |
+
+- **Row 2 is inherited, not introduced.** C11 catches deleting the *smoke's*
+  `apply_pending_file_action` and is blind to deleting the *interactive* one --
+  the exact inverse of the inversion it was built for. Closing it means unifying
+  the two hand-maintained frame bodies, which is out of scope. MAR-182 adds **no
+  line** to either frame body: its only frame-body edits are Task 1's deletions,
+  and a deletion cannot create that divergence.
+- **Row 3 is the one surface this story genuinely leaves untested.** The
+  `absorb_close_request` call and the `cancel_close_request()` it guards live in
+  the real main loop, and `run_headless_smoke` returns before a window host is
+  ever created. C18 covers the decision in both polarities; that it is *called*
+  is covered only by the manual check. Three mitigations, stated rather than
+  hidden: (a) `ShellState::should_exit` is the loop's **only** exit condition, so
+  omitting the call makes the editor unclosable -- a loud failure, not a silent
+  data-loss one; (b) `EditorWindowHost::request_close()` is **deleted**, and with
+  one implementor that deletion is compiler-enforced, so the old bypass cannot be
+  reached by accident; (c) a manual interactive check is recorded in the
+  verification list above.
+- **`--auto-close` bypasses the prompt by design.** Smokes end on frame count,
+  not on `should_exit`, so a dirty smoke exits without asking. Any other choice
+  hangs CI.
+- **The `AwaitingSave` window is real.** Between answering `Save` and committing
+  the chooser, a close request is ignored per the transition table rather than
+  queued. That is deliberate -- a save in flight must land -- but it will read as
+  a dropped click to someone.
+- **The New form keeps the stale-`opened` hole the chooser just lost.** It
+  self-heals on the next `begin_file_action(New)`, because `new_project_form` is
+  reassigned wholesale, and nothing in this machine reads it. Fixing it is
+  unrelated scope; it is recorded, not closed.
 
 ## MAR-181 Core File Path Workflows Validation Results
 
