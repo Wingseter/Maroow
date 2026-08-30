@@ -56,6 +56,34 @@ async def test(parameter_only=False):
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
+    # MAR-179. The tool COUNT is unchanged -- 64 before, 64 after -- so the two
+    # assertions above cannot see this story at all. What was missing was four
+    # PROPERTIES on one existing tool.
+    #
+    # This has to be asserted against the schema object itself. MarrowClient
+    # .send_command writes the JSON straight to the agent socket and never
+    # consults inputSchema, so a wire-level call carrying `softness` succeeds
+    # even when the schema does not declare it. A sequence test alone would
+    # therefore pass with editing.py untouched -- the exact "test that cannot
+    # fail" shape this suite exists to avoid. The wire sequence further down
+    # proves the C++ side; this proves the schema an MCP client is handed.
+    mcp_by_name = {tool.name: tool for tool in mcp_tools}
+    ik_properties = mcp_by_name["edit_ik_constraint"].inputSchema["properties"]
+    for required_property in ("softness", "compress", "stretch", "merge"):
+        assert required_property in ik_properties, (
+            f"edit_ik_constraint's MCP schema is missing '{required_property}'. "
+            "The C++ handler reads it, so an MCP client that never sees the "
+            "property cannot reach the behaviour."
+        )
+    assert ik_properties["softness"] == {"type": ["number", "null"]}
+    assert ik_properties["compress"] == {"type": ["boolean", "null"]}
+    assert ik_properties["stretch"] == {"type": ["boolean", "null"]}
+    # `merge` is a fourth, older parity gap: the C++ handler has always read
+    # bool_arg(args, "merge") and the path/transform/physics schemas all declare
+    # it; the IK schema never has.
+    assert ik_properties["merge"] == {"type": "boolean"}
+    assert mcp_by_name["edit_ik_constraint"].inputSchema["required"] == ["name"]
+
     registry_by_name = {row["name"]: row for row in registry_rows}
     assert registry_by_name["parameters.list"] == {
         "name": "parameters.list",
@@ -1782,6 +1810,89 @@ async def test(parameter_only=False):
     print(
         "  MAR-178: constraint.rename/delete round-tripped through dry run, live, "
         f"read-back, undo and export; a refused rename reports '{rejected_live['message']}'."
+    )
+
+    # MAR-179: the three IK fields the handler never read, end to end over the
+    # socket. The read-back channel for parameter values is the operation's own
+    # dry run -- constraints.list reports only identity for every family.
+    ik_before = require_ok(
+        "edit_ik_constraint read-back before MAR-179",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    for key in ("softness", "compress", "stretch", "bend_positive", "bones", "target"):
+        assert key in ik_before, (
+            f"edit_ik_constraint's dry run does not report '{key}': {ik_before}"
+        )
+
+    ik_dry = require_ok(
+        "edit_ik_constraint MAR-179 dry run",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "softness": 9.25,
+            "compress": True,
+            "stretch": True,
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    assert ik_dry["softness"] == 9.25
+    assert ik_dry["compress"] is True
+    assert ik_dry["stretch"] is True
+
+    ik_live = require_ok(
+        "edit_ik_constraint MAR-179 live",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "softness": 9.25,
+            "compress": True,
+            "stretch": True,
+        }),
+    )["scene_delta"]
+    ik_dry_as_live = dict(ik_dry)
+    ik_dry_as_live["dry_run"] = False
+    assert ik_live == ik_dry_as_live, (
+        f"the live scene_delta differs from the dry run by more than 'dry_run': "
+        f"{ik_live} vs {ik_dry_as_live}"
+    )
+
+    ik_after = require_ok(
+        "edit_ik_constraint read-back after the live edit",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    assert ik_after["softness"] == 9.25
+    assert ik_after["compress"] is True
+    assert ik_after["stretch"] is True
+
+    negative_softness = require_rejected(
+        "edit_ik_constraint rejects a negative softness",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "softness": -1,
+        }),
+    )
+    assert negative_softness["message"] == "ik constraint softness must be non-negative."
+
+    require_ok("undo edit_ik_constraint MAR-179", await client.send_command("undo"))
+    ik_undone = require_ok(
+        "edit_ik_constraint read-back after the undo",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    assert ik_undone == ik_before, (
+        f"undo did not restore the original IK parameters: {ik_undone} vs {ik_before}"
+    )
+    print(
+        "  MAR-179: edit_ik_constraint carries softness/compress/stretch through "
+        "dry run, live, read-back and undo; the live scene_delta matches the dry "
+        f"run apart from 'dry_run'; a negative softness reports "
+        f"'{negative_softness['message']}'."
     )
 
     require_ok("agent.permissions.describe", await client.send_command("agent.permissions.describe"))

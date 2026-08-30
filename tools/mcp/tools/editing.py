@@ -862,7 +862,14 @@ def get_tools() -> list[types.Tool]:
                     "target": {"type": ["string", "null"]},
                     "mix": {"type": ["number", "null"]},
                     "bend_positive": {"type": ["boolean", "null"]},
+                    "softness": {"type": ["number", "null"]},
+                    "compress": {"type": ["boolean", "null"]},
+                    "stretch": {"type": ["boolean", "null"]},
                     "bone_names": {"type": "array", "items": {"type": "string"}},
+                    # The C++ handler has always read bool_arg(args, "merge"),
+                    # and the path/transform/physics schemas below all declare
+                    # it -- only this one never did.
+                    "merge": {"type": "boolean"},
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["name"]

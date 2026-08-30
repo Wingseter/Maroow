@@ -41,6 +41,7 @@
 - Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
 - Timeline scalar-graph projection/geometry/view/drag-math tests: `./build/marrow_timeline_graph_model_tests`
 - Editor project authoring smoke including `offset_keyframe_scalars`: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
@@ -162,7 +163,7 @@
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
-- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, the constraint rename/delete lifecycle, the eleven IK/physics constraint parameter widgets located by a real mouse through `HoveredId` with per-drag undo granularity and a Ctrl+click clamp, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
@@ -227,6 +228,176 @@ required by MAR-210.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
 
+## MAR-179 Complete Constraint Parameter Widgets Validation Results
+
+Validated 2026-08-30. The model layer already carried every field end to end —
+`IkConstraintEdit` and `PhysicsConstraintEdit` hold them, `project.cpp` parses
+and serializes them, `skeleton_parse.cpp` reads them, the runtime consumes them,
+and `player_idle.marrow` already stores all eleven. Even the agent's own
+materializer copied `softness`/`compress`/`stretch` — values it then offered no
+way to change. **MAR-179 is surface-only: no model, format or runtime change.**
+`.mskl` v1, `.mbin` v2, the `.marrow` schema and C ABI v1 are untouched, with an
+empty `git diff --name-only` over `skeleton_parse.cpp`, `binary.cpp`,
+`include/marrow/**.h` and `CMakeLists.txt`, so `docs/root1/format-spec.md` is
+byte-identical.
+
+**The measured gap, confirmed against the tree before any code was written.**
+GUI: IK had Bones/Target/Mix/Bend Positive and was missing softness, compress,
+stretch; physics had Inertia/Damping/Strength/Mix/Gravity/Wind and was missing
+step, x, y, rotate, scale_x, shear_x, limit, mass_inverse. Path and transform
+were already complete and MAR-179 adds no widget to either. Agent: physics, path
+and transform were complete through their `…Traits` specializations;
+`edit_ik_constraint` is the one hand-written handler and parsed four arguments,
+echoed a **three-key** dry run, and returned **no** `scene_delta` at all on the
+live path. MCP: `edit_ik_constraint` was missing the three fields **and
+`merge`** — a fourth, older parity gap, since the C++ handler has always read
+`bool_arg(args, "merge")` and the other three schemas all declare it.
+
+**The clamp hazard, and the two deliberate exceptions.** All ten pre-existing
+constraint sliders were called with six arguments and no flags, so Ctrl+clicking
+IK Mix and typing `5` set `mix = 5.0`; the runtime parse then rejected it and
+`apply_coalesced_edit_frame` rolled the drag back with a status line. Nothing
+corrupted, but the gesture aborted. The governing rule, stated once: **a
+constraint widget's `[min,max]` IS the loader's bound, and only then may it carry
+`ImGuiSliderFlags_AlwaysClamp`.** Seven sliders whose range already equalled the
+loader's `[0,1]` gained the flag — IK Mix, path Position/Rotate Mix/Translate
+Mix, and the four transform mixes through their one shared `update_mix` lambda —
+as did the new physics Inertia and Mix. Two exceptions are deliberate and are
+recorded here so a reader can see they were chosen, not overlooked:
+
+- **Physics `Damping` and `Strength` were RE-FORMED, not clamped.** Their slider
+  ceilings (10 and 50) were *narrower* than the loader's `>= 0`, so adding the
+  flag would have refused values the format accepts and existing projects may
+  already carry. They became `DragScalar [0, DBL_MAX]` magnitudes instead.
+- **Path `Spacing` was left alone entirely.** Its `[0,1]` range is also narrower
+  than the loader's `>= 0`, but its *correct* range depends on `spacing_mode` — a
+  percentage in Percent mode, a distance in Length mode. Widening it without
+  settling that is worse than a recorded, deliberate narrowness. It stays a known
+  leftover for whatever story revisits path authoring.
+
+Two widget forms carry all eleven: `SliderScalar [0,1] + AlwaysClamp` for a
+bounded mix, and `DragScalar [lo, DBL_MAX] + AlwaysClamp` for a non-negative
+magnitude. `DBL_MAX` is not an invented ceiling — with `p_min = 0` it makes
+`AlwaysClamp` enforce exactly `>= 0`, which is exactly the loader's bound, and
+`DragScalar` uses the range only for clamping. `step`'s minimum, `1e-4`, is
+**derived from its `%.4f` format** as the smallest distinctly displayable
+positive, not fitted.
+
+| Area | Evidence | Result |
+| --- | --- | --- |
+| AC1 — the three IK widgets | `Softness` (Form B, lo = 0, speed 0.5, `%.2f`), `Compress` and `Stretch` checkboxes. All three located in a rendered frame by aiming a real mouse at the panel and matching `ImGuiContext::HoveredId` against `window->GetID(label)` | PASS |
+| AC2 — the eight physics widgets | `Step`, `X##physics`, `Y##physics`, `Rotate##physics`, `Scale X##physics`, `Shear X##physics`, `Limit`, `Mass Inverse`, all Form B, all located the same way. The panel now runs in **struct order** — step, x, y, rotate, scaleX, shearX, limit, inertia, damping, strength, massInverse, gravity, wind, mix — matching `PhysicsConstraintData`, the serialized `.marrow` JSON and `PhysicsConstraintTraits::preview`, so a field added to one is visibly missing from the others. The only relocation is `Mix##physics`, fourth to last | PASS |
+| AC3 — transactions, preview, round trip | Every scalar goes through the unchanged `apply_constraint_project_drag` → `apply_coalesced_edit_frame`, `allow_merge = false`, group `constraint:<kind>:<name>`, impact `Project\|Runtime\|Preview` so the viewport updates while the mouse is down. **Two successive** Softness drags and one Step drag each produced exactly one history entry and did not merge into the previous one; one drag alone could not have observed the merge flag, because there is no earlier entry in the group to merge into. Undo restored `serialize_project()` byte-for-byte | PASS |
+| AC4 — IK agent parity | `edit_ik_constraint` keeps its hand-written body and borrows only the template's *shape*: merge first, then branch. Both branches now return the same nine keys (`dry_run, name, bones, target, mix, bend_positive, softness, compress, stretch`), and the live `scene_delta` is byte-identical to the dry run apart from `"dry_run"` — the invariant the other three families already held. The old three-key expectation was replaced, which *is* the assertion that the fields are exposed. `Compress`/`Stretch` dispatch `edit_ik_constraint` exactly as `Bend Positive` does, so **AC1 physically cannot ship without AC4** | PASS |
+| AC4 — MCP | Four properties added to one existing tool: `softness`/`compress`/`stretch` plus `merge`. Asserted against the schema object itself, because `MarrowClient.send_command` writes JSON straight to the agent socket and never consults `inputSchema` — a wire-level call carrying `softness` succeeds with `editing.py` untouched, so a sequence test alone would have been a test that cannot fail | PASS |
+| AC5 — boundary, rollback, save/reload, equivalence | Model layer S1–S4 plus shell C1–C5, agent and MCP. Boundaries `step = 1e-4`, `x`/`rotate`/`scale_x`/`limit`/`mass_inverse` `= 0`, `softness = 12.5`, `shear_x = 0.75`, `y = 2.5` all survive **save → LOAD → materialize**, asserted on the runtime struct, never on `ProjectData` | PASS |
+| Refusal at all three layers | `step ∈ {0, -1}` and `mass_inverse = -1`: the runtime parse fails carrying `physics step must be greater than zero` / `physics massInverse must be non-negative`; `save_project` fails with `physics constraint edit numeric values must stay within their valid ranges` and **leaves no file behind**; and, for a hand-patched `.marrow`, the project parse — the layer that decides whether a file OPENS — refuses with `physics constraint edit step must be greater than zero` / `physics constraint edit massInverse must be non-negative`. The L2 leg was added after inversion 6 proved the first two cases could not see it | PASS |
+| The `softness` asymmetry, asserted BOTH ways | The agent rejects a negative softness; the format accepts one at all three layers and the runtime reads it as zero (`std::max(0.0f, softness)` behind a `> 0` guard). So a `.marrow` carrying `softness = -3` still saves, still **opens**, materializes as `-3`, and survives a second round trip — while `edit_ik_constraint` reports `ik constraint softness must be non-negative.` and changes nothing. The guard is a SURFACE guard; tightening `project.cpp` would make existing projects unopenable, which MAR-179 refuses | PASS |
+| Registry unchanged at 64, proved BY DIFF | No `kOperationSpecs` row added. `awk` over `agent_dispatch.cpp` → **64**, split **edit 39 / inspection 12 / management 10 / validation 3**, identical before and after. `git diff -U0 \| grep -E '^[+-].*\b(62\|63\|64\|65)\b'` over the code and config returns exactly **two** lines — the new scenario's guard message and one comment — plus, in prose, this section and the one `editing-gap-analysis.md` sentence, both of which quote 64 and still quote 64. No other count site appears, so `AGENTS.md`'s `t = 0.62` and "62 lines", the theme's `(51, 56, 64)` and `rgb(54,57,64)`, and `test_client.py`'s mesh coordinates and 62nd-operation ordinal are all untouched. Code guards went 10 → 11 (the one new scenario), every literal still `64`, `std::array<OperationExpectation, 64>` and both `== 64` python assertions unmoved | PASS |
+| Carried in from MAR-178: the catalog buttons are real (C6) | MAR-178 asserted `Rename...`/`Delete...` by calling `request_/confirm_/cancel_constraint_*` directly, so its tests would have passed with `draw_constraint_catalog_buttons()` deleted. The deferral was re-homed here and **closed**: both buttons are now located by a real mouse through `HoveredId` (C1) and clicked, and their modals' own `Delete` and `Cancel` buttons are clicked in turn — the whole round trip is mouse-driven and no `confirm_*` helper is called in C6 at all. The delete leg applies through the modal's real button as exactly one history entry and undoes byte-for-byte; the rename leg cancels and changes nothing. Rename's leg stops at Cancel deliberately: the modal seeds its `InputText` with the source name and the primitive refuses a same-name rename, so a pure-mouse rename would have to type — and the rename itself is already covered UI-free by MAR-178. Locating `Delete...` also forced a third sweep column, because it sits on a `SameLine()` to the right of `Rename...` and no left-edge column reaches it | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, C ABI v1 unchanged; `git diff --name-only \| grep -E 'skeleton_parse\.cpp\|binary\.cpp\|include/marrow/.*\.h$\|CMakeLists\.txt'` → **no output**. No `.marrow` field, no fixture change, no new agent operation. The agent wire is additive: three new optional arguments, and `edit_ik_constraint`'s `scene_delta` grows from three keys to nine and gains a live payload | PASS |
+
+**The real-mouse decision, and why a UI-free helper was the wrong tool here.**
+MAR-178 asserted its modals through the UI-free helpers the buttons call, which
+was right for MAR-178 — its interesting behaviour lived in
+`apply_constraint_catalog_edit()`. It is wrong for MAR-179, whose entire
+deliverable *is* "the widget is on the screen". A headless test that sets
+`edit.softness = 12.5` directly proves the model already worked before this story
+started; it is precisely the test that cannot fail, and it would keep passing
+after the widget was deleted. `validate_constraint_parameter_shell_smoke()`
+therefore renders real frames and sweeps a real mouse down the Constraints
+window, comparing `ImGuiContext::HoveredId` against `window->GetID(label)` —
+production already reads the context this way (`shell_core.cpp` uses
+`GetActiveID()` and `ActiveIdIsAlive`). **A label not found is a failure, never a
+skip.** `Mix`, `Bend Positive` and `Inertia` shipped before MAR-179 and are kept
+as **positive controls**, so C1 cannot degrade into a case that can only ever
+fail: if the id seed were wrong or the sweep never reached the rows, the controls
+would go missing too and say so by name. The same mechanism is what let MAR-178's
+`Rename...`/`Delete...` deferral be closed here rather than deferred again to the
+platform stories — sixteen widgets are swept in total.
+
+**Document errors found (six), all in MAR-179's own governing documents.**
+
+- **`.mbin` v2 stores every number as float32, and both documents say the
+  opposite.** Design §6.1-S4 asks for the eleven fields to "agree" between the
+  `.mskl` and `.mbin` exports, and §8 records `.mbin` v2 as an unchanged "generic
+  document encoder". The encoder is generic, but `binary.cpp`'s `append_float32`
+  narrows *every* JSON number, so the two exports cannot agree to double
+  precision and never could: authored `step = 1e-4` was measured as
+  `0.0001` vs `9.9999997473787516e-05`. S4 asserts agreement **after the same
+  narrowing**. This also supplies a reason for `kMinPhysicsStep` neither document
+  states: `1e-4` survives float32 as a strictly positive number, so an exported
+  `.mbin` authored at the widget's minimum still satisfies the loader's
+  `step > 0`. A smaller minimum could round to `0.0f` and make the **binary**
+  export unopenable while the `.mskl` stayed fine.
+- **Inversion 6 as specified cannot bite.** The plan asks for
+  `project.cpp`'s `edit.step <= 0.0` → `< 0.0` and predicts S2's first case
+  fails. But S2 as designed asserts `build_project_runtime` (L1) and
+  `save_project` (L3); the inverted line is L2, which runs only on
+  `load_project`, and nothing in S2 reloaded a bad file. The inversion was run
+  and **S2 still passed**. The fix was to strengthen the test rather than weaken
+  the gate: S2 now also patches the saved JSON and reopens it, and the inversion
+  then fails with the L1 message surfacing where the L2 one belongs.
+- **Inversion 3 as specified could not bite against the case as first written.**
+  It requires a *second* drag in the same group; a single drag produces one entry
+  whether `allow_merge` is true or false. C2 was rewritten to two successive
+  drags before the inversion was run.
+- **The plan's Task 4 table lists seven `SliderScalar` call sites for
+  path/transform; there are four.** The four transform mixes share one local
+  `update_mix` lambda, so `:1621`/`:1628`/`:1635`/`:1642` are its *invocation*
+  lines, not `SliderScalar` calls. Seven widgets, four edits.
+- **`Mix##physics` is at `:1904`, not `:1903`.** Cosmetic; recorded because the
+  plan's Task 0 step 9 asks for the line to be confirmed.
+- **The plan's checklist MCP command is wrong.**
+  `test_client.py --parameter-only assets/fixtures/parameter_face_basic.marrow`
+  exits 2 with `unrecognized arguments`; `--parameter-only` takes no positional.
+  The correct run is `--parameter-only` against a shell already serving that
+  fixture, and it passes.
+
+**Two harness findings worth recording, because a naive version of either
+produces a silently wrong test.**
+
+- **On macOS, `io.AddKeyEvent(ImGuiMod_Ctrl, true)` does not press Ctrl.**
+  `ConfigMacOSXBehaviors` is on by default and `AddKeyAnalogEvent` swaps
+  Cmd and Ctrl at the event layer, so the flag raises `io.KeySuper`; then
+  `AddMouseButtonEvent` converts the left press into a **right** click. Measured
+  directly: `keyctrl=0 super=1 mdown=0 mdown1=1 active=0`. C5 clears
+  `ConfigMacOSXBehaviors` for the gesture and restores it, and asserts
+  `TempInputId` before typing so a future regression reports "Ctrl+click did not
+  turn Inertia into a text input" rather than a bare wrong value.
+- **Two presses at the same pixel are a double click, and a double-clicked
+  `DragScalar` becomes a text input instead of dragging.** C2's second Softness
+  drag left the widget active as a temp input with the value unchanged at 20. The
+  scenario now advances the simulated clock past `io.MouseDoubleClickTime`
+  between gestures.
+
+**Not covered, deliberately.** `constraints.list` is not widened: it reports only
+`type`/`name`/`bones`/`target`/`slot`/`source` for **all four** families, so
+widening it is a change to an inspection payload the dispatch smoke pins
+byte-exactly, it benefits all four families equally, and it is not what this
+story asks for. The read-back channel for parameter values is
+`edit_*_constraint` with `dry_run: true`, which is what `test_client.py` uses.
+The IK 1/2-bone radios are unchanged. `edit_ik_constraint` was **not** converted
+to `handle_constraint_edit<IkConstraintTraits>`, and inversion 10 is the
+measurement behind that decision rather than an assertion of taste.
+
+Current validation:
+
+- Task 0 measured every claim before any code. Registry **64** with split 39/12/10/3; 10 code guards + 10 messages + 2 python assertions + 1 array size, all at 64; no `Softness`/`Compress`/`Stretch`/`Step`/`Limit`/`Mass Inverse` anywhere in `shell_constraints.cpp`; `softness` present in `agent_handlers_constraints.cpp` **only** in the materializer; `softness` a plain read with no range check in `skeleton_parse.cpp`, `project.cpp` and `validate_project_for_save`; `build_project_runtime(*project_ptr, …)` still at `project.cpp:7495` inside `load_project`, so a reload is a full materialization; the fixture's originals recorded (ik `softness 0, compress false, stretch false`; physics `step 0.0166666667, x 1, y 1, rotate 1, scaleX 0.35, shearX 0, limit 30, massInverse 1`); `Mix##physics` asserted by nothing
+- **Task 0 step 5, the assumption C1 rests on, confirmed both statically and empirically.** `widgets::seg_toggle` has a balanced `PushID`/`PopID`, there is no `BeginTabBar`/`BeginTabItem` anywhere in `shell_constraints.cpp`, and the four `BeginChild` constraint lists are all closed with `EndChild` **before** the parameter widgets — so every parameter widget is emitted at plain window scope and `window->GetID(label)` is its id. Then measured: a sweep seeded that way found `Mix` and `Bend Positive` while reporting `Softness`, `Compress` and `Stretch` absent, on the tree *before* the widgets existed
+- `cmake -S . -B build && cmake --build build -j` -> built with **zero** new warnings; `cmake --build build --target marrow_constraint_warning_check` -> passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting the MAR-179 model-layer line for S1–S4; `--create` -> passed; `--export-runtime` + `--export-binary` -> passed, and `./build/marrow_inspect --compare` on that pair -> `matches`
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` over **408** `[ OK ]` cases (up from 404) against the exact **64**-operation registry, with `edit_ik_constraint invalid target rollback` still passing **unchanged**
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> `Headless editor shell smoke rendered 2 frame(s).`, including the new `validate_constraint_parameter_shell_smoke` scenario: *"a real mouse found all 16 widgets by HoveredId (three of them positive controls that shipped before MAR-179, two of them MAR-178's catalog buttons), two successive Softness drags and a Step drag each coalesced into exactly one history entry without merging into the previous one, the Compress and Stretch checkboxes reached edit_ik_constraint and survived undo/redo, Ctrl+click-typing 5 into Inertia committed the clamped 1.0, and a real click on Delete.../Rename... opened their modals whose own Delete and Cancel buttons were then clicked too -- the round trip MAR-178's UI-free tests could not make."*; `--project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> passed
+- **C5 took its real form, not the fallback.** Design §6.2 allowed substituting a project-layer assertion if the Ctrl+click text path could not be driven headlessly. It could be, once the macOS modifier swap above was accounted for, so the claim stands at full strength: *the widget clamps*, not merely *an unclamped value would be rejected*
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` with `tools/mcp/venv/bin/python tools/mcp/test_client.py` -> `mcp test_client: PASSED` with **64/64** exact C++/Python name parity unchanged, a schema-level assertion on all four new `edit_ik_constraint` properties, and a dry-run -> live -> read-back -> undo -> read-back sequence reporting *"the live scene_delta matches the dry run apart from 'dry_run'; a negative softness reports 'ik constraint softness must be non-negative.'"*; `--parameter-only` against a shell serving `parameter_face_basic.marrow` -> `mcp parameter test_client: PASSED`; `python -m py_compile` over all four MCP files -> clean
+- **Twelve inversions run, each failing the case it should, each restored.** 1 `Softness` widget deleted -> `C1 (IK): the panel never emitted a widget with the id of "Softness"`. 2 `Step` deleted -> the same message for `Step` under `C1 (physics)`, proving C1 is not IK-specific. 3 `allow_merge = true` on Softness -> `C2: Softness drag 2 must coalesce into EXACTLY one history entry and must NOT merge into the previous drag; undo_count 0 -> 1, expected 2`. 4 the Step drag never reaches `finalize_coalesced_edit` -> `C3: a multi-frame Step drag must coalesce into EXACTLY one history entry; undo_count 0 -> 0`. 5 `kClamp` removed from Inertia -> `C5: Ctrl+click-typing 5 into Inertia must commit the CLAMPED 1.0, not 0.85` — the rolled-back value, distinguishable from both 5.0 and 1.0. 6 `project.cpp`'s `edit.step <= 0.0` -> `< 0.0` (**as specified, does not bite** — see the document errors; after S2 gained its L2 leg) -> `S2 (L2, "step": 0.0): expected the project parse to carry "physics constraint edit step must be greater than zero", measured "…player_idle.mskl:1:1: $.physics[0].step: physics step must be greater than zero"`, i.e. the deeper layer catching what L2 should have. 7 a `softness < 0` check added to `project.cpp` -> `S3: a `.marrow` carrying softness = -3 must still OPEN. It no longer does, which is exactly the backward compatibility break MAR-179 refuses to take`. 8 `softness` removed from `ik_constraint_preview` -> three `scene_delta wire shape changed` failures naming the missing key in both payloads. 9 the `merged.softness < 0.0` guard removed -> `edit_ik_constraint negative softness: expected ok=false` and the read-back shows the project carrying `"softness":-1`. 10 the template's **pre-transaction** `validate_bone_names` added to the IK handler -> `edit_ik_constraint invalid target rollback: commit-time failure prefix changed`, which is the measurement behind the decision not to convert IK to the traits template: the check returns before the transaction, so the `"Failed to apply IK constraint edit: "` prefix never appears and the suite's only constraint commit-time rollback case is deleted. 11 `merge` removed from `editing.py` -> `AssertionError: edit_ik_constraint's MCP schema is missing 'merge'` while `assert len(mcp_names) == 64` still passed, proving the check is about the property and not the tool count. **12, for the carried-in MAR-178 coverage**: `draw_constraint_catalog_buttons()`'s body deleted outright -> `C1 (IK): "Constraints" never emitted a widget with the id of "Rename..."` and the same for `"Delete..."` — and, decisively, **MAR-178's own lifecycle scenario still printed its full success line in that same run**, which is precisely the gap the re-homed deferral names
+- `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 22`; no target added, no `CMakeLists.txt` change (the new scenario lives in the already-listed `shell_smoke_constraints.cpp`)
+- `./build/marrow_unit_tests`, `./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl`, `./build/marrow_c_smoke`, `./build/marrow_parameter_project_smoke` -> passed; all four constraint `.mskl` fixtures still parse
+- **Pre-existing failure, not a MAR-179 regression**: `./build/marrow_project_smoke assets/fixtures/atlas_pack_smoke/atlas_pack_project.marrow --export-runtime …` (recorded above as a Current Validation command) exits 1 with `Viewport validation expected the fixture debug overlay toggles to be enabled.` That fixture carries no `viewport` block. It fails identically with MAR-179's `editor_project_smoke.cpp` changes stashed, and MAR-179's diff to that file is purely additive and touches nothing in `validate_viewport_settings`
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after it; the new scenario installs `ScopedPreferenceIsolation("constraint-parameters")` as its first statement and refuses to run if it cannot; no scratch file was left in the shared scratchpad
+- **Carried, unrelated to MAR-179**, folded in to avoid a concurrent edit in files this story already touches: `validate_project_for_save(const ProjectData&, ProjectSaveError*)` is at `project.cpp:5503`, not `:5502` (corrected in this file and in the MAR-178 design); this file's self-referential citation of where its own protected `62` literals live was re-measured; `editor_project_smoke.cpp`'s gate-2 message said "a rename of a name absent from the family" when the strengthened test rejects on a **collision**; and the MAR-178 plan's save→reload checklist line was narrowed to match §10.5's actual carve-out rather than adding reloads to satisfy a broader reading. MAR-178's own `404 [ OK ]` figure is left as measured at MAR-178; this story's build produces **408** and that is what is recorded above
+
 ## MAR-178 Constraint Rename and Delete Surfaces Validation Results
 
 Validated 2026-08-30. MAR-177 built `rename_constraint()` and
@@ -269,7 +440,7 @@ selections after **every** undo in the editor; that inversion is gated below.
 | Confirmation begins no transaction | Shell case 1 requests a delete, cancels, and asserts `undo_count()` and `serialize_project()` are unchanged, then that a confirm after a cancel refuses the abandoned request. Proved by inversion: making cancel fall through to confirm fails with *"cancelling the delete confirmation must begin no transaction; undo_count 0 -> 1."* Restored | PASS |
 | Both surfaces reject identically | These operations are **single-target** — `(family, name)` names exactly one constraint — so the batch skip-vs-reject asymmetry does not apply and both surfaces reject with the same message from the same primitive. The GUI's only differences are presentational: it pre-disables Apply on a name it can already see is taken, and keeps the modal open on a rejection | PASS |
 | The dry run runs the live preflight | It copies the project and runs the **same** primitive, and one `catalog_delta()` builder produces both payloads. The agent smoke asserts the dry-run and live `scene_delta` are byte-identical apart from `"dry_run"`, and that a rejection's `message` is byte-identical between them. Proved by inversion: substituting a hand-written `constraint_exists`-style check fails with *"a hand-written dry-run check drifts from the primitive's message; measured dry='Constraint is not renameable.' live='ik constraint rename target 'editor_arm_reach' must differ from its source'"*. Restored | PASS |
-| Save → reload survival; a successful save is never the assertion (§10.5) | `validate_project_for_save(const ProjectData&, ProjectSaveError*)` (`project.cpp:5502`) takes **no base document** and so structurally cannot resolve a skin reference against a skeleton — a passing `save()` proves nothing about the unopenable-project failure. `load_project(path)` → `load_project(Document)` → `build_project_runtime()` (`project.cpp:7495`) is what re-materializes and calls `load_skeleton_data`, verified as a Task 0 hard stop. **Every** delete branch therefore ends in a reload: project scenario A saves and `load_project()`s after its delete; B1/B2/B3 each do the same; shell case 8 does `save_project_file()` → `reload_project()` and asserts the reload succeeded with zero transform constraints and no `skins.cape` transform indices; F1/F2 re-parse the export through `load_skeleton_document()` + `load_skeleton_data()`. Shell case 5's four-family deletes assert on the rebuilt runtime, which §10.5 explicitly allows as the same code the reload runs. Demonstrated empirically: a `.marrow` carrying every required member and a valid atlas — i.e. one every save-side check accepts — that references a root-only-renamed skeleton fails to open with `$.skins.cape.transform[0]: skin references unknown transform constraint 'cape_pull'` | PASS |
+| Save → reload survival; a successful save is never the assertion (§10.5) | `validate_project_for_save(const ProjectData&, ProjectSaveError*)` (`project.cpp:5503`) takes **no base document** and so structurally cannot resolve a skin reference against a skeleton — a passing `save()` proves nothing about the unopenable-project failure. `load_project(path)` → `load_project(Document)` → `build_project_runtime()` (`project.cpp:7495`) is what re-materializes and calls `load_skeleton_data`, verified as a Task 0 hard stop. **Every** delete branch therefore ends in a reload: project scenario A saves and `load_project()`s after its delete; B1/B2/B3 each do the same; shell case 8 does `save_project_file()` → `reload_project()` and asserts the reload succeeded with zero transform constraints and no `skins.cape` transform indices; F1/F2 re-parse the export through `load_skeleton_document()` + `load_skeleton_data()`. Shell case 5's four-family deletes assert on the rebuilt runtime, which §10.5 explicitly allows as the same code the reload runs. Demonstrated empirically: a `.marrow` carrying every required member and a valid atlas — i.e. one every save-side check accepts — that references a root-only-renamed skeleton fails to open with `$.skins.cape.transform[0]: skin references unknown transform constraint 'cape_pull'` | PASS |
 | Export, over the command path | After a command-path rename `cape_pull → cape_drag`, the exported `.mskl` names `cape_pull` **0** times and `cape_drag` exactly **2** (root `transform[0].name` and `skins.cape.transform[0]`), and the reloaded skin `cape` resolves one transform-constraint index pointing at `cape_drag`. After a command-path delete, the export carries **no** root `transform` key and **no** `skins.cape.transform` key, reloads with zero transform constraints, and `skins.cape` still holds `cape_target`. The `2` was re-counted from the export, not carried from MAR-177's spec | PASS |
 | No last-constraint gate | A family may legitimately be empty — which is why an emptied family array erases its key. Shell case 5 renames **and** deletes one constraint in each of IK, path, transform and physics from `player_idle`, driving each family to empty, and asserts the other three families' constraints survive each time | PASS |
 | `unique_constraint_name()` is not on the rename path | It is the **create** path's allocator. A collision is refused, never auto-suffixed, because quietly giving the user a different name than they typed is worse than declining. The rename modal seeds with the current name and previews the collision instead | PASS |
@@ -281,10 +452,14 @@ selections after **every** undo in the editor; that inversion is gated below.
 Errors found in this story's own governing documents, all corrected here:
 
 - **The design's §8.6 claim that "a blind `62` → `64` substitution is safe" is
-  false.** `AGENTS.md:1005` contains `t = 0.62`, a timeline time in an MAR-170
-  checkpoint, and `AGENTS.md:659` contains "62 lines", a line count — both match
-  a `\b62\b` grep and both would be corrupted. The claim is true only of the
-  three narrow patterns the counting patch actually matches (`!= 62U`,
+  false.** This file contains `t = 0.62`, a timeline time in the MAR-170
+  shell-smoke checkpoint (`AGENTS.md:1303` as of MAR-179), and "62 lines", a
+  line count in the MAR-175 compatibility row (`:957` as of MAR-179) — both match
+  a `\b62\b` grep and both would be corrupted. Both line numbers are
+  self-referential and shift whenever this file grows, so they are anchored to
+  the sections that own them above; re-measure rather than trust them. The claim
+  is true only of the three narrow patterns the counting patch actually matches
+  (`!= 62U`,
   `exact 62-operation registry`, `== 62`), which is what shipped; the general
   statement is wrong and the protected-literal list should carry these two.
 - **Task 0's prose grep omits `docs/root1/discription.md`.** It has two `62`
@@ -324,8 +499,18 @@ shell levels. Also, the ImGui modals are exercised through the same
 UI-free helpers the buttons call (`request_/confirm_/cancel_constraint_*`), not
 through synthesized mouse events, so the widget wiring itself — button placement,
 `BeginDisabled` state, keyboard focus — is asserted by construction and by the
-headless frame render, not by a click. MAR-192 through MAR-210 remain the
-qualification authority.
+headless frame render, not by a click. A construction-based assertion cannot
+observe a *missing* widget: these tests would have passed unchanged had
+`draw_constraint_catalog_buttons()` been deleted outright. **That deferral was
+re-homed from the MAR-192–MAR-210 qualification backlog to MAR-179 and is now
+CLOSED there** — MAR-179 stands up a real-mouse frame smoke in the same file and
+the same panel for exactly the same reason, so covering these two buttons cost
+two probe entries and one case. `Rename...` and `Delete...` are now located by a
+real mouse through `HoveredId`, clicked, and their modals' own `Delete` and
+`Cancel` buttons clicked in turn. Demonstrated: with
+`draw_constraint_catalog_buttons()`'s body deleted, **this MAR-178 scenario still
+prints its full success line** while MAR-179's C1 fails naming both buttons.
+MAR-192 through MAR-210 remain the qualification authority for everything else.
 
 Current validation:
 

@@ -38,6 +38,8 @@ bool validate_preview_playback_speed_shell_smoke(
     const std::filesystem::path& project_path);
 bool validate_constraint_lifecycle_shell_smoke(
     const std::filesystem::path& project_path);
+bool validate_constraint_parameter_shell_smoke(
+    const std::filesystem::path& project_path);
 bool validate_timeline_p0_authoring_smoke(
     const std::filesystem::path& project_path);
 bool validate_derived_cache_smoke(ShellState* state);

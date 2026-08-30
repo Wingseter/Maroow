@@ -2809,16 +2809,95 @@ int main(int argc, char** argv) {
         "edit_ik_constraint after failed commit",
         "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
         "\"dry_run\":true}}");
+    // MAR-179: the rollback read-back now echoes the whole merged edit, the way
+    // the other three families always have. The old three-key payload was the
+    // visible half of the gap -- the handler short-circuited before merging, so
+    // it could only report what it had parsed.
     expect_exact_scene_delta(
         harness,
         "edit_ik_constraint failed commit rollback",
         ik_after_failed_commit,
-        R"json({"dry_run":true,"name":"editor_arm_reach","mix":0.75})json");
+        R"json({
+          "dry_run":true,"name":"editor_arm_reach",
+          "bones":["ik_upper","ik_lower"],"target":"ik_target","mix":0.75,
+          "bend_positive":true,"softness":0,"compress":false,"stretch":false
+        })json");
 
     harness.invoke(
         "edit_ik_constraint",
         "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
         "\"mix\":0.5}}");
+
+    // MAR-179: the three runtime-backed IK fields the handler never read. The
+    // dry run and the live delta must be identical apart from "dry_run" --
+    // AGENTS.md records that invariant for the other three constraint families,
+    // and edit_ik_constraint was the one that did not hold it (it returned no
+    // scene_delta at all on the live path).
+    const DispatchObservation ik_parameters_dry_run = harness.invoke(
+        "edit_ik_constraint softness/compress/stretch dry-run",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"softness\":12.5,\"compress\":true,\"stretch\":true,\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_ik_constraint softness/compress/stretch dry-run",
+        ik_parameters_dry_run,
+        R"json({
+          "dry_run":true,"name":"editor_arm_reach",
+          "bones":["ik_upper","ik_lower"],"target":"ik_target","mix":0.5,
+          "bend_positive":true,"softness":12.5,"compress":true,"stretch":true
+        })json");
+
+    // The surface guard of design 5.3. The format itself accepts a negative
+    // softness at all three layers and the runtime reads it as zero, so this
+    // rejection lives here and NOT in project.cpp -- tightening the loader
+    // would make an existing `.marrow` unopenable.
+    const DispatchObservation ik_negative_softness = harness.invoke(
+        "edit_ik_constraint negative softness",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"softness\":-1}}",
+        false,
+        "invalid_request");
+    harness.expect(
+        string_member(&ik_negative_softness.root, "message") ==
+            std::optional<std::string_view>(
+                "ik constraint softness must be non-negative."),
+        "edit_ik_constraint negative softness",
+        "the surface guard message changed");
+    const DispatchObservation ik_softness_unchanged = harness.invoke(
+        "edit_ik_constraint after negative softness",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_ik_constraint after negative softness",
+        ik_softness_unchanged,
+        R"json({
+          "dry_run":true,"name":"editor_arm_reach",
+          "bones":["ik_upper","ik_lower"],"target":"ik_target","mix":0.5,
+          "bend_positive":true,"softness":0,"compress":false,"stretch":false
+        })json");
+
+    const DispatchObservation ik_parameters_live = harness.invoke(
+        "edit_ik_constraint softness/compress/stretch live",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"softness\":12.5,\"compress\":true,\"stretch\":true}}");
+    {
+        std::string dry_run_as_live = compact_scene_delta(ik_parameters_dry_run);
+        constexpr std::string_view kDryRunTrue = "\"dry_run\":true";
+        constexpr std::string_view kDryRunFalse = "\"dry_run\":false";
+        const auto flag_position = dry_run_as_live.find(kDryRunTrue);
+        if (flag_position != std::string::npos) {
+            dry_run_as_live.replace(
+                flag_position, kDryRunTrue.size(), kDryRunFalse);
+        }
+        harness.expect(
+            flag_position != std::string::npos &&
+                compact_scene_delta(ik_parameters_live) == dry_run_as_live,
+            "edit_ik_constraint dry-run and live payload parity",
+            "the live scene_delta differs from the dry run by more than "
+            "\"dry_run\": " +
+                compact_scene_delta(ik_parameters_live));
+    }
 
     const DispatchObservation path_constraint_live = harness.invoke(
         "edit_path_constraint",

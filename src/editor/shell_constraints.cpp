@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <array>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -975,7 +976,25 @@ void draw_constraints_window(ShellState* state) {
     const std::vector<std::string> path_slots = path_slot_names(skeleton);
     constexpr double kZero = 0.0;
     constexpr double kOne = 1.0;
-    constexpr double kTen = 10.0;
+    // MAR-179. THE RULE, stated once: a constraint widget's [min,max] IS the
+    // loader's bound, and only then may it clamp. Where a widget's range was
+    // NARROWER than the loader's, clamping would refuse a value the format
+    // accepts, so the widget is re-formed to the loader's bound instead of
+    // gaining the flag (physics Damping/Strength). Where the correct range is
+    // not knowable from the field alone, neither is applied (path Spacing,
+    // whose range depends on spacing_mode).
+    //
+    // kUnbounded is not an invented ceiling: with p_min = 0 and p_max = DBL_MAX,
+    // AlwaysClamp enforces exactly ">= 0", which is exactly the loader's bound.
+    // DragScalar uses the range only for clamping; the rate comes from v_speed.
+    constexpr double kUnbounded = std::numeric_limits<double>::max();
+    // The loader requires step > 0 (skeleton_parse.cpp, "physics step must be
+    // greater than zero"). The display format is "%.4f", so 1e-4 is the
+    // smallest value the widget can show distinctly AND is strictly positive.
+    // The bound is derived from the format, not chosen: any smaller minimum
+    // would display as 0.0000 while storing something else.
+    constexpr double kMinPhysicsStep = 1e-4;
+    constexpr ImGuiSliderFlags kClamp = ImGuiSliderFlags_AlwaysClamp;
 
     const auto constraint_group = [&](ConstraintKind kind, std::string_view name) {
         return std::string("constraint:") + constraint_kind_label(kind) + ":" +
@@ -1163,7 +1182,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_mix,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     mix_changed,
@@ -1179,6 +1199,37 @@ void draw_constraints_window(ShellState* state) {
                         }
                     });
 
+                // MAR-179. Softness is unvalidated at ALL THREE loader layers
+                // and the runtime reads a negative as zero, so the widget must
+                // not invent a ceiling the format does not have. It enforces
+                // non-negativity only, which narrows nothing: to the runtime a
+                // negative softness and zero are already the same value.
+                double edited_softness = display_edit.softness;
+                const bool softness_changed = ImGui::DragScalar(
+                    "Softness",
+                    ImGuiDataType_Double,
+                    &edited_softness,
+                    0.5f,
+                    &kZero,
+                    &kUnbounded,
+                    "%.2f",
+                    kClamp);
+                apply_constraint_project_drag(
+                    state,
+                    softness_changed,
+                    EditActionKind::EditProperty,
+                    "Updated IK softness on " + selected_name,
+                    constraint_group(ConstraintKind::Ik, selected_name),
+                    false,
+                    "IK constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_ik_constraint_edit_index(state, selected_name)) {
+                            project->ik_constraint_edits[*edit_index].softness =
+                                edited_softness;
+                        }
+                    });
+
                 bool bend_positive = display_edit.bend_positive;
                 if (ImGui::Checkbox("Bend Positive", &bend_positive)) {
                     namespace json = marrow::runtime::json;
@@ -1187,6 +1238,35 @@ void draw_constraints_window(ShellState* state) {
                     json::Value::Object args_obj;
                     args_obj.emplace("name", json::Value(selected_name, {}));
                     args_obj.emplace("bend_positive", json::Value(bend_positive, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    dispatch_agent_command(state, json::Value(std::move(cmd_obj), {}));
+                }
+
+                // MAR-179. Instantaneous toggles dispatch; dragged scalars
+                // coalesce. That split is inherited from Bend Positive, not
+                // invented here -- and it is why the GUI gap and the agent gap
+                // are ONE story: these two checkboxes cannot work until
+                // edit_ik_constraint reads `compress` and `stretch`.
+                bool compress = display_edit.compress;
+                if (ImGui::Checkbox("Compress", &compress)) {
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("compress", json::Value(compress, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    dispatch_agent_command(state, json::Value(std::move(cmd_obj), {}));
+                }
+
+                bool stretch = display_edit.stretch;
+                if (ImGui::Checkbox("Stretch", &stretch)) {
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("stretch", json::Value(stretch, {}));
                     cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
                     dispatch_agent_command(state, json::Value(std::move(cmd_obj), {}));
                 }
@@ -1333,7 +1413,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_position,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     position_changed,
@@ -1349,6 +1430,13 @@ void draw_constraints_window(ShellState* state) {
                         }
                     });
 
+                // MAR-179 deliberately leaves Spacing ALONE. Its [0,1] range is
+                // NARROWER than the loader's ">= 0" and its correct range is
+                // spacing_mode-dependent -- a percentage in Percent mode, a
+                // distance in Length mode. Clamping it here would refuse values
+                // the format accepts; widening it without settling the
+                // mode-dependent range would be worse than a recorded,
+                // deliberate narrowness.
                 double edited_spacing = display_edit.spacing;
                 const bool spacing_changed = ImGui::SliderScalar(
                     "Spacing",
@@ -1403,7 +1491,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_rotate_mix,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     rotate_mix_changed,
@@ -1427,7 +1516,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_translate_mix,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     translate_mix_changed,
@@ -1601,7 +1691,8 @@ void draw_constraints_window(ShellState* state) {
                         &edited_value,
                         &kZero,
                         &kOne,
-                        "%.2f");
+                        "%.2f",
+                        kClamp);
                     apply_constraint_project_drag(
                         state,
                         changed,
@@ -1848,19 +1939,27 @@ void draw_constraints_window(ShellState* state) {
                     }
                 }
 
-                auto update_positive_value = [&](const char* label,
-                                                 double value,
-                                                 auto setter,
-                                                 double max_value,
-                                                 std::string status) {
+                // MAR-179. Form B -- a non-negative magnitude, for a field the
+                // loader bounds only BELOW. `lo` is the loader's bound and the
+                // ceiling is DBL_MAX, so AlwaysClamp enforces exactly what the
+                // format accepts and nothing narrower.
+                const auto update_magnitude = [&](const char* label,
+                                                  double value,
+                                                  auto setter,
+                                                  double lo,
+                                                  float speed,
+                                                  const char* format,
+                                                  std::string status) {
                     double edited_value = value;
-                    const bool changed = ImGui::SliderScalar(
+                    const bool changed = ImGui::DragScalar(
                         label,
                         ImGuiDataType_Double,
                         &edited_value,
-                        &kZero,
-                        &max_value,
-                        "%.2f");
+                        speed,
+                        &lo,
+                        &kUnbounded,
+                        format,
+                        kClamp);
                     apply_constraint_project_drag(
                         state,
                         changed,
@@ -1876,38 +1975,154 @@ void draw_constraints_window(ShellState* state) {
                             }
                         });
                 };
-                update_positive_value(
+                // MAR-179. Form A -- a bounded mix, for a field the loader
+                // bounds on both sides at exactly [0, 1].
+                const auto update_mix = [&](const char* label,
+                                            double value,
+                                            auto setter,
+                                            std::string status) {
+                    double edited_value = value;
+                    const bool changed = ImGui::SliderScalar(
+                        label,
+                        ImGuiDataType_Double,
+                        &edited_value,
+                        &kZero,
+                        &kOne,
+                        "%.2f",
+                        kClamp);
+                    apply_constraint_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        constraint_group(ConstraintKind::Physics, selected_name),
+                        false,
+                        "Physics constraint edit failed",
+                        [&]() {
+                            if (const auto edit_index =
+                                    ensure_physics_constraint_edit_index(state, selected_name)) {
+                                setter(&project->physics_constraint_edits[*edit_index], edited_value);
+                            }
+                        });
+                };
+
+                // MAR-179. The panel adopts the struct order, so that the
+                // panel, PhysicsConstraintData, the serialized `.marrow` JSON
+                // and PhysicsConstraintTraits::preview all enumerate the same
+                // fields in the same sequence -- a future field added to one is
+                // then visibly missing from the others. The only relocation is
+                // Mix##physics, from fourth to last.
+                update_magnitude(
+                    "Step",
+                    display_edit.step,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->step = value;
+                    },
+                    kMinPhysicsStep,
+                    0.0005f,
+                    "%.4f",
+                    "Updated physics step on " + selected_name);
+                update_magnitude(
+                    "X##physics",
+                    display_edit.x,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->x = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics x on " + selected_name);
+                update_magnitude(
+                    "Y##physics",
+                    display_edit.y,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->y = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics y on " + selected_name);
+                update_magnitude(
+                    "Rotate##physics",
+                    display_edit.rotate,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->rotate = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics rotate on " + selected_name);
+                update_magnitude(
+                    "Scale X##physics",
+                    display_edit.scale_x,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->scale_x = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics scale X on " + selected_name);
+                update_magnitude(
+                    "Shear X##physics",
+                    display_edit.shear_x,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->shear_x = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics shear X on " + selected_name);
+                update_magnitude(
+                    "Limit",
+                    display_edit.limit,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->limit = value;
+                    },
+                    kZero,
+                    1.0f,
+                    "%.2f",
+                    "Updated physics limit on " + selected_name);
+                update_mix(
                     "Inertia",
                     display_edit.inertia,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
                         edit->inertia = value;
                     },
-                    kOne,
                     "Updated physics inertia on " + selected_name);
-                update_positive_value(
+                // Damping and Strength are RE-FORMED, not clamped in place.
+                // Their old slider ceilings (10 and 50) were NARROWER than the
+                // loader's ">= 0", so adding the flag would have refused values
+                // the format accepts and existing projects may already carry.
+                update_magnitude(
                     "Damping",
                     display_edit.damping,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
                         edit->damping = value;
                     },
-                    kTen,
+                    kZero,
+                    0.05f,
+                    "%.2f",
                     "Updated physics damping on " + selected_name);
-                update_positive_value(
+                update_magnitude(
                     "Strength",
                     display_edit.strength,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
                         edit->strength = value;
                     },
-                    50.0,
+                    kZero,
+                    0.1f,
+                    "%.2f",
                     "Updated physics strength on " + selected_name);
-                update_positive_value(
-                    "Mix##physics",
-                    display_edit.mix,
+                update_magnitude(
+                    "Mass Inverse",
+                    display_edit.mass_inverse,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
-                        edit->mix = value;
+                        edit->mass_inverse = value;
                     },
-                    kOne,
-                    "Updated physics mix on " + selected_name);
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics mass inverse on " + selected_name);
 
                 const auto update_force = [&](const char* label,
                                               float value,
@@ -1965,6 +2180,13 @@ void draw_constraints_window(ShellState* state) {
                         edit->wind.y = value;
                     },
                     "Updated physics wind Y on " + selected_name);
+                update_mix(
+                    "Mix##physics",
+                    display_edit.mix,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->mix = value;
+                    },
+                    "Updated physics mix on " + selected_name);
             }
 
         }

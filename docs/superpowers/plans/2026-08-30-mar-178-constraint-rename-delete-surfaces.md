@@ -945,8 +945,12 @@ Set `MAR-178` `status: "done"` and `completedAt: "2026-08-30"` in
 
 ### Save → reload, the unopenable-project gate (AC6)
 
-- [ ] Every delete branch in the project smoke ends with `session.save()` then
-      `load_project()`, and asserts the **reload** succeeded
+- [ ] Every delete branch in the project smoke that can reach the FILE ends with
+      `session.save()` then `load_project()`, and asserts the **reload** succeeded.
+      Per design §10.5's carve-out, a branch that can only reach the runtime
+      asserts on `build_project_runtime()` succeeding instead — that is the same
+      code the reload runs (`Impl::commit()` and `load_project()` both call it),
+      so do NOT add reloads to those branches to satisfy a broader reading
 - [ ] The shell smoke deletes, `save_project_file()`, `reload_project()`, and
       asserts the reload succeeded with no transform constraints and no
       `skins.cape` transform indices

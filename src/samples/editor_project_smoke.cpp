@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -11585,8 +11586,8 @@ bool validate_mar178_scenario_c(
                 &selection,
                 mar178_descriptor("Renamed IK constraint"));
         if (rejected.ok || rejected.message.empty()) {
-            std::cerr << "MAR-178 C: a rename of a name absent from the family must be "
-                         "rejected with a message.\n";
+            std::cerr << "MAR-178 C: a rename onto a name already used in the family "
+                         "must be rejected with a message.\n";
             return false;
         }
         if (rejected.selection_changed || selection.items() != before ||
@@ -12388,6 +12389,448 @@ bool validate_mar178_scenario_g() {
     return true;
 }
 
+// --- MAR-179: the eleven parameter fields, at the model layer ---------------
+//
+// These cases exist because the widget stories above them can author a value,
+// and a value is only real once it has survived save -> LOAD -> materialize.
+// `validate_project_for_save` has no base document and structurally cannot see
+// cross-references, so a passing save() proves nothing on its own; every
+// assertion below reads the MATERIALIZED runtime struct after a reload.
+
+const marrow::editor::IkConstraintEdit* mar179_find_ik(
+    const marrow::editor::ProjectData& project, std::string_view name) {
+    for (const auto& edit : project.ik_constraint_edits) {
+        if (edit.name == name) return &edit;
+    }
+    return nullptr;
+}
+
+const marrow::editor::PhysicsConstraintEdit* mar179_find_physics(
+    const marrow::editor::ProjectData& project, std::string_view name) {
+    for (const auto& edit : project.physics_constraint_edits) {
+        if (edit.name == name) return &edit;
+    }
+    return nullptr;
+}
+
+const marrow::runtime::IkConstraintData* mar179_runtime_ik(
+    const marrow::runtime::SkeletonData& skeleton, std::string_view name) {
+    for (const auto& constraint : skeleton.ik_constraints()) {
+        if (constraint.name == name) return &constraint;
+    }
+    return nullptr;
+}
+
+const marrow::runtime::PhysicsConstraintData* mar179_runtime_physics(
+    const marrow::runtime::SkeletonData& skeleton, std::string_view name) {
+    for (const auto& constraint : skeleton.physics_constraints()) {
+        if (constraint.name == name) return &constraint;
+    }
+    return nullptr;
+}
+
+/** @brief Rewrites the project so it can be saved and reopened anywhere. */
+marrow::editor::ProjectData mar179_relocated(
+    const marrow::editor::ProjectData& source,
+    const std::filesystem::path& project_path) {
+    marrow::editor::ProjectData project = source;
+    project.source_path = project_path;
+    project.runtime_assets.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/player_idle.mskl");
+    project.runtime_assets.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    return project;
+}
+
+bool mar179_near(double actual, double expected, const char* what) {
+    if (std::abs(actual - expected) <= 1e-9) return true;
+    std::cerr << "MAR-179 model: " << what << " materialized as " << actual
+              << ", expected " << expected << ".\n";
+    return false;
+}
+
+bool validate_mar179_constraint_parameters(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    const auto project_path =
+        std::filesystem::temp_directory_path() / "marrow_mar179_parameters.marrow";
+    std::error_code ignored;
+
+    // --- S1: boundary round trip through save -> LOAD -> materialize. -------
+    marrow::editor::ProjectData authored =
+        mar179_relocated(*project_result.project, project_path);
+    {
+        auto* ik = const_cast<marrow::editor::IkConstraintEdit*>(
+            mar179_find_ik(authored, "editor_arm_reach"));
+        auto* physics = const_cast<marrow::editor::PhysicsConstraintEdit*>(
+            mar179_find_physics(authored, "editor_ribbon_secondary"));
+        if (ik == nullptr || physics == nullptr) {
+            std::cerr << "MAR-179 S1 requires the fixture's editor_arm_reach and "
+                         "editor_ribbon_secondary constraint edits.\n";
+            return false;
+        }
+        // Every value here is a boundary the widgets can now reach: the lower
+        // bound of each Form-B drag, plus the smallest distinctly displayable
+        // physics step (1e-4, derived from the "%.4f" format).
+        ik->softness = 12.5;
+        ik->compress = true;
+        ik->stretch = true;
+        physics->step = 1e-4;
+        physics->x = 0.0;
+        physics->y = 2.5;
+        physics->rotate = 0.0;
+        physics->scale_x = 0.0;
+        physics->shear_x = 0.75;
+        physics->limit = 0.0;
+        physics->mass_inverse = 0.0;
+    }
+
+    std::filesystem::remove(project_path, ignored);
+    const auto saved = marrow::editor::save_project(authored, project_path);
+    if (!saved) {
+        std::cerr << "MAR-179 S1: the boundary values did not save: "
+                  << saved.error->message << '\n';
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(project_path);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-179 S1: the saved project could NOT be reopened: "
+                  << (reloaded.error.has_value() ? reloaded.error->format()
+                                                 : std::string("(no error)"))
+                  << '\n';
+        return false;
+    }
+    {
+        const auto* ik = mar179_runtime_ik(*reloaded.skeleton_data, "editor_arm_reach");
+        const auto* physics =
+            mar179_runtime_physics(*reloaded.skeleton_data, "editor_ribbon_secondary");
+        if (ik == nullptr || physics == nullptr) {
+            std::cerr << "MAR-179 S1: the reloaded runtime lost a constraint.\n";
+            return false;
+        }
+        if (!mar179_near(ik->softness, 12.5, "ik softness") ||
+            !mar179_near(physics->step, 1e-4, "physics step") ||
+            !mar179_near(physics->x, 0.0, "physics x") ||
+            !mar179_near(physics->y, 2.5, "physics y") ||
+            !mar179_near(physics->rotate, 0.0, "physics rotate") ||
+            !mar179_near(physics->scale_x, 0.0, "physics scaleX") ||
+            !mar179_near(physics->shear_x, 0.75, "physics shearX") ||
+            !mar179_near(physics->limit, 0.0, "physics limit") ||
+            !mar179_near(physics->mass_inverse, 0.0, "physics massInverse")) {
+            return false;
+        }
+        if (!ik->compress || !ik->stretch) {
+            std::cerr << "MAR-179 S1: compress/stretch did not survive the reload.\n";
+            return false;
+        }
+    }
+
+    // --- S2: what the loader refuses, per layer. ---------------------------
+    struct InvalidCase {
+        const char* label;
+        double step;
+        double mass_inverse;
+        const char* runtime_message;
+    };
+    static constexpr std::array<InvalidCase, 3> kInvalid{{
+        {"step = 0", 0.0, 0.0, "physics step must be greater than zero"},
+        {"step = -1", -1.0, 0.0, "physics step must be greater than zero"},
+        {"massInverse = -1", 1.0 / 60.0, -1.0, "physics massInverse must be non-negative"},
+    }};
+    for (const InvalidCase& invalid : kInvalid) {
+        marrow::editor::ProjectData broken = authored;
+        auto* physics = const_cast<marrow::editor::PhysicsConstraintEdit*>(
+            mar179_find_physics(broken, "editor_ribbon_secondary"));
+        if (physics == nullptr) return false;
+        physics->step = invalid.step;
+        physics->mass_inverse = invalid.mass_inverse;
+
+        const auto runtime_result = marrow::editor::build_project_runtime(
+            broken, *project_result.base_skeleton_document);
+        if (runtime_result) {
+            std::cerr << "MAR-179 S2 (" << invalid.label
+                      << "): build_project_runtime accepted a value the loader must "
+                         "refuse.\n";
+            return false;
+        }
+        const std::string runtime_error = runtime_result.error->format();
+        if (runtime_error.find(invalid.runtime_message) == std::string::npos) {
+            std::cerr << "MAR-179 S2 (" << invalid.label
+                      << "): expected the runtime parse to carry \""
+                      << invalid.runtime_message << "\", measured \"" << runtime_error
+                      << "\".\n";
+            return false;
+        }
+
+        const auto broken_path = std::filesystem::temp_directory_path() /
+            "marrow_mar179_invalid.marrow";
+        std::filesystem::remove(broken_path, ignored);
+        const auto broken_saved = marrow::editor::save_project(broken, broken_path);
+        if (broken_saved) {
+            std::cerr << "MAR-179 S2 (" << invalid.label
+                      << "): save_project accepted an out-of-range physics value.\n";
+            return false;
+        }
+        if (broken_saved.error->message.find(
+                "physics constraint edit numeric values must stay within their "
+                "valid ranges") == std::string::npos) {
+            std::cerr << "MAR-179 S2 (" << invalid.label
+                      << "): the save refusal message changed to \""
+                      << broken_saved.error->message << "\".\n";
+            return false;
+        }
+        if (std::filesystem::exists(broken_path)) {
+            std::cerr << "MAR-179 S2 (" << invalid.label
+                      << "): a refused save must leave no file behind.\n";
+            return false;
+        }
+        // The good project on disk is untouched by the refused save.
+        const auto still_good = marrow::editor::load_project(project_path);
+        if (!still_good || still_good.skeleton_data == nullptr) {
+            std::cerr << "MAR-179 S2 (" << invalid.label
+                      << "): the previously saved project stopped loading.\n";
+            return false;
+        }
+    }
+
+    // L2, the layer that decides whether a FILE OPENS, and the only one the
+    // three cases above cannot reach: save_project refuses to write the bad
+    // value, and build_project_runtime is L1. A hand-edited or older `.marrow`
+    // can still carry one, so the project parse is asserted directly by
+    // patching the saved JSON and reopening it.
+    {
+        static constexpr std::array<std::pair<const char*, const char*>, 3> kL2Cases{{
+            {R"("step": 0.0)", "physics constraint edit step must be greater than zero"},
+            {R"("step": -1.0)", "physics constraint edit step must be greater than zero"},
+            {R"("massInverse": -1.0)", "physics constraint edit massInverse must be non-negative"},
+        }};
+        std::ifstream good_stream(project_path);
+        const std::string good_text(
+            (std::istreambuf_iterator<char>(good_stream)),
+            std::istreambuf_iterator<char>());
+        good_stream.close();
+        for (const auto& [replacement, expected] : kL2Cases) {
+            const std::string key = std::string(replacement).substr(
+                0, std::string(replacement).find(':') + 1);
+            const auto key_position = good_text.find(key);
+            if (key_position == std::string::npos) {
+                std::cerr << "MAR-179 S2 (L2): the saved project does not contain "
+                          << key << ".\n";
+                return false;
+            }
+            const auto value_end = good_text.find_first_of(",\n}", key_position);
+            std::string patched = good_text;
+            patched.replace(
+                key_position, value_end - key_position, replacement);
+
+            const auto patched_path = std::filesystem::temp_directory_path() /
+                "marrow_mar179_l2.marrow";
+            std::filesystem::remove(patched_path, ignored);
+            std::ofstream out(patched_path);
+            out << patched;
+            out.close();
+
+            const auto opened = marrow::editor::load_project(patched_path);
+            if (opened) {
+                std::cerr << "MAR-179 S2 (L2, " << replacement
+                          << "): load_project OPENED a `.marrow` the project parse "
+                             "must refuse. A file carrying this value would become "
+                             "loadable, and the value would reach the runtime.\n";
+                std::filesystem::remove(patched_path, ignored);
+                return false;
+            }
+            const std::string message = opened.error->format();
+            if (message.find(expected) == std::string::npos) {
+                std::cerr << "MAR-179 S2 (L2, " << replacement
+                          << "): expected the project parse to carry \"" << expected
+                          << "\", measured \"" << message << "\".\n";
+                std::filesystem::remove(patched_path, ignored);
+                return false;
+            }
+            std::filesystem::remove(patched_path, ignored);
+        }
+    }
+
+    // --- S3: the softness asymmetry, asserted BOTH ways. -------------------
+    //
+    // The agent rejects a negative softness (a surface guard); the format
+    // accepts one at all three layers and the runtime reads it as zero. This
+    // case is the compatibility half: it must be SEEN to pass, because the
+    // moment anyone "fixes" the missing validation in project.cpp, an existing
+    // `.marrow` carrying a negative softness stops opening.
+    {
+        const auto negative_path = std::filesystem::temp_directory_path() /
+            "marrow_mar179_negative_softness.marrow";
+        marrow::editor::ProjectData negative = mar179_relocated(authored, negative_path);
+        auto* ik = const_cast<marrow::editor::IkConstraintEdit*>(
+            mar179_find_ik(negative, "editor_arm_reach"));
+        if (ik == nullptr) return false;
+        ik->softness = -3.0;
+
+        std::filesystem::remove(negative_path, ignored);
+        const auto negative_saved =
+            marrow::editor::save_project(negative, negative_path);
+        if (!negative_saved) {
+            std::cerr << "MAR-179 S3: a negative softness must still SAVE; the save "
+                         "refused with \"" << negative_saved.error->message << "\".\n";
+            return false;
+        }
+        const auto negative_reloaded = marrow::editor::load_project(negative_path);
+        if (!negative_reloaded || negative_reloaded.skeleton_data == nullptr) {
+            std::cerr << "MAR-179 S3: a `.marrow` carrying softness = -3 must still "
+                         "OPEN. It no longer does, which is exactly the backward "
+                         "compatibility break MAR-179 refuses to take: "
+                      << (negative_reloaded.error.has_value()
+                              ? negative_reloaded.error->format()
+                              : std::string("(no error)"))
+                      << '\n';
+            return false;
+        }
+        const auto* materialized =
+            mar179_runtime_ik(*negative_reloaded.skeleton_data, "editor_arm_reach");
+        if (materialized == nullptr ||
+            !mar179_near(materialized->softness, -3.0, "negative ik softness")) {
+            std::cerr << "MAR-179 S3: the materialized softness is not the authored "
+                         "-3.0, so a layer silently clamped or rejected it.\n";
+            return false;
+        }
+        // And it survives a second full round trip from the reloaded document.
+        const auto again_path = std::filesystem::temp_directory_path() /
+            "marrow_mar179_negative_softness_again.marrow";
+        std::filesystem::remove(again_path, ignored);
+        marrow::editor::ProjectData again =
+            mar179_relocated(*negative_reloaded.project, again_path);
+        const auto again_saved = marrow::editor::save_project(again, again_path);
+        const auto again_reloaded = again_saved
+            ? marrow::editor::load_project(again_path)
+            : marrow::editor::ProjectLoadResult{};
+        const auto* again_materialized = again_reloaded.skeleton_data != nullptr
+            ? mar179_runtime_ik(*again_reloaded.skeleton_data, "editor_arm_reach")
+            : nullptr;
+        if (!again_saved || again_materialized == nullptr ||
+            !mar179_near(again_materialized->softness, -3.0, "re-saved ik softness")) {
+            std::cerr << "MAR-179 S3: softness = -3 did not survive a second "
+                         "save/reload cycle.\n";
+            return false;
+        }
+        std::filesystem::remove(negative_path, ignored);
+        std::filesystem::remove(again_path, ignored);
+    }
+
+    // --- S4: JSON and binary exports agree on all eleven fields. -----------
+    //
+    // `binary.cpp` is a generic JSON document encoder with no constraint-specific
+    // path at all, so this assertion exists to keep that true, not because a
+    // change is expected.
+    //
+    // MEASURED, and it corrects the design: the `.mbin` v2 encoder narrows EVERY
+    // JSON number to float32 (`binary.cpp`, append_float32), so the two exports
+    // cannot agree to double precision and never could. Authoring step = 1e-4
+    // and comparing exactly reports 0.0001 vs 9.9999997473787516e-05. The
+    // correct assertion is agreement AFTER the same narrowing -- which is also
+    // the reason the "%.4f"-derived minimum is a safe floor: 1e-4 survives
+    // float32 as a strictly positive number, so an exported `.mbin` authored at
+    // the widget's minimum still satisfies the loader's "step > 0". A smaller
+    // minimum could round to 0.0f and make the BINARY export unopenable while
+    // the `.mskl` stayed fine.
+    {
+        const auto as_float32 = [](double value) {
+            return static_cast<double>(static_cast<float>(value));
+        };
+        const auto export_json = std::filesystem::temp_directory_path() /
+            "marrow_mar179_export.mskl";
+        const auto export_binary = std::filesystem::temp_directory_path() /
+            "marrow_mar179_export.mbin";
+        std::filesystem::remove(export_json, ignored);
+        std::filesystem::remove(export_binary, ignored);
+
+        marrow::editor::ProjectExportOptions export_options;
+        export_options.skeleton_output_path = export_json;
+        export_options.binary_output_path = export_binary;
+        const auto exported = marrow::editor::export_runtime_assets(
+            authored, *project_result.base_skeleton_document, export_options);
+        if (!exported) {
+            std::cerr << "MAR-179 S4: the export failed: " << exported.error->format()
+                      << '\n';
+            return false;
+        }
+        const auto json_runtime = marrow::runtime::load_skeleton_data(export_json);
+        const auto binary_runtime = marrow::runtime::load_skeleton_data(export_binary);
+        if (!json_runtime || !binary_runtime) {
+            std::cerr << "MAR-179 S4: an exported skeleton did not parse back.\n";
+            return false;
+        }
+        const auto* json_ik =
+            mar179_runtime_ik(*json_runtime.skeleton_data, "editor_arm_reach");
+        const auto* binary_ik =
+            mar179_runtime_ik(*binary_runtime.skeleton_data, "editor_arm_reach");
+        const auto* json_physics = mar179_runtime_physics(
+            *json_runtime.skeleton_data, "editor_ribbon_secondary");
+        const auto* binary_physics = mar179_runtime_physics(
+            *binary_runtime.skeleton_data, "editor_ribbon_secondary");
+        if (json_ik == nullptr || binary_ik == nullptr || json_physics == nullptr ||
+            binary_physics == nullptr) {
+            std::cerr << "MAR-179 S4: an export lost a constraint.\n";
+            return false;
+        }
+        if (as_float32(json_ik->softness) != binary_ik->softness ||
+            json_ik->compress != binary_ik->compress ||
+            json_ik->stretch != binary_ik->stretch ||
+            as_float32(json_physics->step) != binary_physics->step ||
+            as_float32(json_physics->x) != binary_physics->x ||
+            as_float32(json_physics->y) != binary_physics->y ||
+            as_float32(json_physics->rotate) != binary_physics->rotate ||
+            as_float32(json_physics->scale_x) != binary_physics->scale_x ||
+            as_float32(json_physics->shear_x) != binary_physics->shear_x ||
+            as_float32(json_physics->limit) != binary_physics->limit ||
+            as_float32(json_physics->mass_inverse) != binary_physics->mass_inverse) {
+            std::cerr << std::setprecision(17)
+                      << "MAR-179 S4: the `.mskl` and `.mbin` exports disagree on a "
+                         "constraint parameter after float32 narrowing. step "
+                      << json_physics->step << " -> " << binary_physics->step
+                      << ", softness " << json_ik->softness << " -> "
+                      << binary_ik->softness << ", massInverse "
+                      << json_physics->mass_inverse << " -> "
+                      << binary_physics->mass_inverse << ".\n";
+            return false;
+        }
+        if (!mar179_near(binary_ik->softness, 12.5, "exported ik softness") ||
+            !mar179_near(binary_physics->step, as_float32(1e-4),
+                         "exported physics step") ||
+            !mar179_near(binary_physics->mass_inverse, 0.0,
+                         "exported physics massInverse")) {
+            return false;
+        }
+        // The load above already proves it, but state it: the widget's minimum
+        // step is still strictly positive after the float32 narrowing, so the
+        // `.mbin` authored at that minimum satisfies "physics step > 0".
+        if (!(binary_physics->step > 0.0)) {
+            std::cerr << "MAR-179 S4: the exported binary step is not strictly "
+                         "positive after float32 narrowing, so the widget minimum "
+                         "would author an unopenable `.mbin`.\n";
+            return false;
+        }
+        std::filesystem::remove(export_json, ignored);
+        std::filesystem::remove(export_binary, ignored);
+    }
+
+    std::filesystem::remove(project_path, ignored);
+    std::cout << "MAR-179 model layer: the eleven runtime-backed IK and physics "
+                 "fields round-trip through save -> LOAD -> materialize at their "
+                 "boundaries (step = 1e-4, limit/massInverse/x/rotate/scaleX = 0); "
+                 "a zero, negative or negative-mass value is refused at ALL THREE "
+                 "layers -- the runtime parse, save_project (which leaves no file "
+                 "behind) and, for a hand-patched file, the project parse that "
+                 "decides whether a `.marrow` OPENS; a "
+                 "`.marrow` carrying softness = -3 still opens, materializes as "
+                 "-3 and survives a second round trip, because the negative-softness "
+                 "guard is a SURFACE guard and tightening the loader would make "
+                 "existing projects unopenable; and the `.mskl` and `.mbin` exports "
+                 "agree on all eleven AFTER the float32 narrowing `.mbin` v2 applies "
+                 "to every number (binary.cpp append_float32), with the widget's "
+                 "minimum step still strictly positive on the binary side.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -12502,6 +12945,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar178_scenario_g()) {
+            return 1;
+        }
+        if (!validate_mar179_constraint_parameters(result)) {
             return 1;
         }
     }

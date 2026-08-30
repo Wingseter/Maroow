@@ -1153,7 +1153,7 @@ That single fact is why this story's tests are shaped the way they are. The
 failure mode MAR-177 named — a delete that leaves a dangling
 `skins[*].<family>` reference — is invisible at save time, because
 `validate_project_for_save()` has no base document and cannot resolve a name
-against a skeleton (`project.cpp:5502` onward). It becomes visible only when
+against a skeleton (`project.cpp:5503` onward). It becomes visible only when
 something re-materializes and re-parses, and the reload is exactly that.
 
 So a test that asserts `save_project()` returned `ok` proves nothing about this
