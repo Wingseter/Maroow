@@ -860,12 +860,36 @@ struct ShellState {
     std::optional<FilePathRequest> file_path_request;
     std::optional<NewProjectForm> new_project_form;
     std::optional<PendingFileApplication> pending_file_application;
+    /**
+     * MAR-183: the path a New session was created at, awaiting its FIRST
+     * successful save.
+     *
+     * Set ONLY by `apply_pending_file_action`'s create branch, and consumed
+     * ONLY by the `save_project_file` that writes this exact path. No property
+     * of the DOCUMENT distinguishes "created" from "opened" -- a New project
+     * over an existing target is legal, and its first save must still record --
+     * so the discriminator is explicit, single-purpose, and readable by a
+     * UI-free test.
+     *
+     * It holds a path rather than a bool on purpose: comparing it against the
+     * path actually written means a Save As that moves the session elsewhere
+     * cannot accidentally consume the arm.
+     */
+    std::optional<std::filesystem::path> pending_recent_on_first_save;
     // MAR-182: the live Save/Discard/Cancel prompt, and the one condition that
     // ends the main loop.
     std::optional<DirtyIntentRequest> dirty_intent;
-    /// Set only by `perform_session_intent(Quit)`. The main loop's ONLY exit
-    /// condition, so no path can terminate the editor without passing the
-    /// dirty-session gate.
+    /// Set only by `perform_session_intent(Quit)`. The main loop's only NORMAL
+    /// exit condition, so no ordinary path can terminate the editor without
+    /// passing the dirty-session gate.
+    ///
+    /// Not the only exit *full stop*, and the loop says so itself
+    /// (`shell_main.cpp`, above `while (!shell_state.should_exit)`): three
+    /// unconditional `break`s bypass it deliberately -- a frame error, surface
+    /// starvation after 1000 consecutive unacquired drawables, and the
+    /// `--auto-close` frame budget. None is an ordinary user action and none
+    /// should consult the gate, but the absolute phrasing this comment used to
+    /// carry was wrong and a reader should not take it at face value.
     bool should_exit{false};
     std::string status_message;
     std::string error_message;

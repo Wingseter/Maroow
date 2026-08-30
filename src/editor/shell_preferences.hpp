@@ -19,6 +19,12 @@ namespace marrow::editor::shell {
  * mid-way through hand-editing is preserved until they explicitly change the
  * default. This function does not reference EditorSession, ProjectData, or the
  * runtime, which is what makes "never rewrites existing curves" structural.
+ *
+ * MAR-183: the recent-project list is normalized -- canonicalized, de-duplicated
+ * and capped -- IN MEMORY as part of this load, and is never written back by it.
+ * Entries whose files are missing are KEPT: pruning on load would imply writing
+ * on load, and would destroy a bookmark to a project on a volume that merely
+ * happens to be unmounted right now.
  */
 void load_shell_preferences(ShellState* state);
 

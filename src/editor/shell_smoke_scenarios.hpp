@@ -32,6 +32,13 @@ bool validate_mar182_cancel_and_repeat_smoke(const ShellState& source_state);
 bool validate_mar182_close_request_smoke(const ShellState& source_state);
 bool validate_mar182_dirty_prompt_mouse_smoke(
     const std::filesystem::path& project_path);
+bool validate_mar183_shell_list_algebra_smoke(const ShellState& source_state);
+bool validate_mar183_recent_gate_smoke(const ShellState& source_state);
+bool validate_mar183_recording_policy_smoke(const ShellState& source_state);
+bool validate_mar183_missing_entries_smoke(const ShellState& source_state);
+bool validate_mar183_non_interference_smoke(const ShellState& source_state);
+bool validate_mar183_recent_menu_mouse_smoke(
+    const std::filesystem::path& project_path);
 bool validate_animation_catalog_smoke(const std::filesystem::path& project_path);
 bool validate_animation_duration_shell_smoke(
     const std::filesystem::path& project_path);

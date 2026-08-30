@@ -28,6 +28,8 @@
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
 #include "shell_smoke_scenarios.hpp"
+#include "shell_preferences.hpp"
+#include "shell_recent_projects.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
@@ -39,6 +41,7 @@
 #include "marrow/editor/module.hpp"
 #include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/recent_projects.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/animation_state.hpp"
 #include "marrow/runtime/profiler.hpp"
@@ -2750,6 +2753,1801 @@ const char* intent_name(SessionIntent intent) {
 } // namespace
 
 /**
+ * @brief MAR-183 C23 -- missing entries, and the guarantee that LOADING NEVER WRITES.
+ *
+ * This is the case that pins design 2.5's central decision: nothing prunes a
+ * recent entry automatically. Not on load, not on display, not on click. A
+ * project on an unmounted external volume or a sleeping network share must
+ * survive a launch on which the user did nothing -- and because pruning on load
+ * would imply WRITING on load, an auto-prune would delete the entry from disk
+ * too, irreversibly, over a transient unmount.
+ *
+ * The settings file is hand-written here because nothing else can produce a file
+ * naming a project that does not exist: every recording site runs only after a
+ * successful open or save.
+ */
+bool validate_mar183_missing_entries_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar183_c23";
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+    const auto canonical = [](const std::filesystem::path& path) {
+        return marrow::editor::canonical_recent_path(path);
+    };
+
+    std::error_code directory_error;
+    std::filesystem::remove_all(root, directory_error);
+    directory_error.clear();
+    std::filesystem::create_directories(root, directory_error);
+    if (directory_error) {
+        std::cerr << "MAR-183 C23 could not create its scratch directory.\n";
+        return false;
+    }
+
+    // --- The main body: a hand-written file naming one present, one missing. -
+    {
+        const ScopedPreferenceIsolation isolation("mar183-c23");
+        const std::filesystem::path settings = isolation.settings_path();
+
+        std::filesystem::path present;
+        if (!seed_shell_project_copy(source_state, root / "present", &present, nullptr)) {
+            std::cerr << "MAR-183 C23 could not seed a present project.\n";
+            cleanup();
+            return false;
+        }
+        const std::filesystem::path gone = root / "gone.marrow";
+        if (std::filesystem::exists(gone)) {
+            std::cerr << "MAR-183 C23 requires gone.marrow to NOT exist.\n";
+            cleanup();
+            return false;
+        }
+        // A relative spelling of `present`, so normalization has something to
+        // collapse, plus an empty entry the STORE already skips.
+        const std::filesystem::path relative_present =
+            std::filesystem::relative(present, std::filesystem::current_path());
+
+        const auto escape = [](const std::filesystem::path& path) {
+            std::string out;
+            for (const char character : path.string()) {
+                if (character == '\\' || character == '"') out.push_back('\\');
+                out.push_back(character);
+            }
+            return out;
+        };
+        const std::string seeded =
+            std::string("{\n  \"version\": 1,\n  \"default_curve\": \"ease\",\n") +
+            "  \"payload\": \"keep\",\n  \"recent_projects\": [\n    \"" +
+            escape(present) + "\",\n    \"" + escape(gone) + "\",\n    \"" +
+            escape(relative_present) + "\",\n    \"\"\n  ]\n}\n";
+        std::string file_error;
+        if (!write_text_file(settings, seeded, &file_error)) {
+            std::cerr << "MAR-183 C23: " << file_error << '\n';
+            cleanup();
+            return false;
+        }
+
+        std::string bytes_before;
+        if (!read_text_file(settings, &bytes_before, &file_error)) {
+            std::cerr << "MAR-183 C23: " << file_error << '\n';
+            cleanup();
+            return false;
+        }
+
+        ShellState state;
+        load_shell_preferences(&state);
+
+        // (1) BYTE-IDENTITY ACROSS LOAD. (I11)
+        std::string bytes_after;
+        if (!read_text_file(settings, &bytes_after, &file_error) ||
+            bytes_after != bytes_before) {
+            std::cerr << "MAR-183 C23 assertion 1: LOADING MUST NEVER WRITE. The "
+                         "settings file changed across load_shell_preferences, so a "
+                         "hand-edited file is being rewritten under the user and an "
+                         "entry on an unmounted volume would be destroyed.\n";
+            cleanup();
+            return false;
+        }
+
+        // (2) The MISSING entry survives. (I5)
+        const std::vector<std::filesystem::path>& list =
+            state.preferences.recent_projects;
+        if (std::find(list.begin(), list.end(), canonical(gone)) == list.end()) {
+            std::cerr << "MAR-183 C23 assertion 2: a recent entry whose file does "
+                         "NOT exist must survive the load. Pruning it would delete "
+                         "the user's bookmark over a transient unmount.\n";
+            cleanup();
+            return false;
+        }
+
+        // (3) Normalization ran IN MEMORY.
+        if (list.size() != 2U) {
+            std::cerr << "MAR-183 C23 assertion 3: the two spellings of the present "
+                         "project must collapse and the empty entry must be gone, "
+                         "leaving 2 entries; measured " << list.size() << ".\n";
+            cleanup();
+            return false;
+        }
+        if (list[0] != canonical(present) || list[1] != canonical(gone)) {
+            std::cerr << "MAR-183 C23 assertion 3: normalization must keep the FIRST "
+                         "occurrence at its position, leaving [present, gone].\n";
+            cleanup();
+            return false;
+        }
+        if (!list[0].is_absolute() || !list[1].is_absolute()) {
+            std::cerr << "MAR-183 C23 assertion 3: every loaded entry must be "
+                         "absolute -- ShellState::project_path defaults to a "
+                         "RELATIVE path, so this is load-bearing.\n";
+            cleanup();
+            return false;
+        }
+
+        // (4) default_curve and the status.
+        if (state.preferences.default_curve != marrow::editor::CurvePreset::Ease) {
+            std::cerr << "MAR-183 C23 assertion 4: default_curve must survive.\n";
+            cleanup();
+            return false;
+        }
+        std::cout << "  MAR-183 C23 measured: a settings file carrying one empty "
+                     "recent entry loads with status "
+                  << (state.preference_status ==
+                              marrow::editor::PreferenceLoadStatus::LoadedWithDefaults
+                          ? "LoadedWithDefaults"
+                          : "Loaded")
+                  << " (the store counts a skipped entry as a defaulted field).\n";
+        if (state.preference_status !=
+            marrow::editor::PreferenceLoadStatus::LoadedWithDefaults) {
+            std::cerr << "MAR-183 C23 assertion 4: an empty entry is skipped by the "
+                         "store and marks the load as LoadedWithDefaults.\n";
+            cleanup();
+            return false;
+        }
+
+        // (5) Existence per entry.
+        if (!marrow::editor::recent_project_exists(list[0]) ||
+            marrow::editor::recent_project_exists(list[1])) {
+            std::cerr << "MAR-183 C23 assertion 5: recent_project_exists must be "
+                         "true for the present entry and false for the missing one.\n";
+            cleanup();
+            return false;
+        }
+
+        // (6) forget_recent_project removes exactly it, and persists.
+        forget_recent_project(&state, list[1]);
+        if (state.preferences.recent_projects.size() != 1U ||
+            state.preferences.recent_projects.front() != canonical(present)) {
+            std::cerr << "MAR-183 C23 assertion 6: Remove must drop exactly the "
+                         "named entry.\n";
+            cleanup();
+            return false;
+        }
+        {
+            const marrow::editor::PreferenceStore store;
+            const auto reloaded = store.load();
+            if (reloaded.preferences.recent_projects !=
+                state.preferences.recent_projects) {
+                std::cerr << "MAR-183 C23 assertion 6: the rewritten file must "
+                             "reload element-wise equal.\n";
+                cleanup();
+                return false;
+            }
+            if (reloaded.preferences.default_curve !=
+                marrow::editor::CurvePreset::Ease) {
+                std::cerr << "MAR-183 C23 assertion 6: a recent-list write must "
+                             "preserve default_curve.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // (7) Clear Missing removes exactly the missing, and is a no-op twice. (I12)
+        {
+            std::filesystem::path present_two;
+            if (!seed_shell_project_copy(
+                    source_state, root / "present2", &present_two, nullptr)) {
+                std::cerr << "MAR-183 C23 could not seed a second present project.\n";
+                cleanup();
+                return false;
+            }
+            const std::filesystem::path gone_two = root / "gone2.marrow";
+            state.preferences.recent_projects = {
+                canonical(present), canonical(gone), canonical(present_two),
+                canonical(gone_two)};
+            (void)persist_recent_projects(&state, true);
+
+            forget_missing_recent_projects(&state);
+            const std::vector<std::filesystem::path> expected = {
+                canonical(present), canonical(present_two)};
+            if (state.preferences.recent_projects != expected) {
+                std::cerr << "MAR-183 C23 assertion 7: Clear Missing must remove "
+                             "exactly the missing entries and preserve the present "
+                             "pair's relative order.\n";
+                cleanup();
+                return false;
+            }
+
+            std::string bytes_one;
+            if (!read_text_file(settings, &bytes_one, &file_error)) {
+                std::cerr << "MAR-183 C23: " << file_error << '\n';
+                cleanup();
+                return false;
+            }
+            std::error_code time_error;
+            const auto mtime_one =
+                std::filesystem::last_write_time(settings, time_error);
+
+            forget_missing_recent_projects(&state);
+
+            std::string bytes_two;
+            if (!read_text_file(settings, &bytes_two, &file_error) ||
+                bytes_two != bytes_one) {
+                std::cerr << "MAR-183 C23 assertion 7: a SECOND Clear Missing over "
+                             "an all-present list changes nothing and must not "
+                             "rewrite the settings file.\n";
+                cleanup();
+                return false;
+            }
+            const auto mtime_two =
+                std::filesystem::last_write_time(settings, time_error);
+            if (mtime_two != mtime_one) {
+                std::cerr << "MAR-183 C23 assertion 7: the no-op skip must leave the "
+                             "settings file's mtime untouched -- rewriting identical "
+                             "bytes is still a write.\n";
+                cleanup();
+                return false;
+            }
+        }
+    }
+
+    // (8) An ABSENT settings file stays absent across a load. (I11, first run) -
+    {
+        const ScopedPreferenceIsolation isolation("mar183-c23-firstrun");
+        const std::filesystem::path settings = isolation.settings_path();
+        if (std::filesystem::exists(settings)) {
+            std::cerr << "MAR-183 C23 assertion 8: a fresh isolation must start "
+                         "with no settings file.\n";
+            cleanup();
+            return false;
+        }
+        ShellState state;
+        load_shell_preferences(&state);
+        if (!state.preferences.recent_projects.empty()) {
+            std::cerr << "MAR-183 C23 assertion 8: a first run must load an empty "
+                         "recent list.\n";
+            cleanup();
+            return false;
+        }
+        if (state.preference_status !=
+            marrow::editor::PreferenceLoadStatus::FirstRun) {
+            std::cerr << "MAR-183 C23 assertion 8: a first run must report "
+                         "FirstRun.\n";
+            cleanup();
+            return false;
+        }
+        if (std::filesystem::exists(settings)) {
+            std::cerr << "MAR-183 C23 assertion 8: LOADING MUST NEVER WRITE -- a "
+                         "first run created " << settings.string()
+                      << ". Normalizing on load must stay in memory.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    cleanup();
+    return true;
+}
+
+/**
+ * @brief MAR-183 C21 -- the recording policy, one phase per row of design 2.4.
+ *
+ * AC2 names three recording events and four non-events, and the hard part is the
+ * pair that a content-keyed rule cannot separate: the first save of a New
+ * session records, and an ordinary Save does not. No property of the DOCUMENT
+ * distinguishes them, so the discriminator is an explicit arm --
+ * `ShellState::pending_recent_on_first_save` -- and both of its polarities are
+ * asserted here.
+ *
+ * Phase 6 is the sharp one. The naive shape of that inversion ("open A, then
+ * Ctrl+S") CANNOT bite: A is already at the head, `promote` returns false and
+ * the no-op skip suppresses the write, so dropping the arm entirely would still
+ * leave the list correct. It must use the STARTUP path -- `reload_project`,
+ * which records nothing -- against an ABSENT settings file.
+ */
+bool validate_mar183_recording_policy_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar183_c21";
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+    const auto canonical = [](const std::filesystem::path& path) {
+        return marrow::editor::canonical_recent_path(path);
+    };
+
+    // --- Phases 1-5 and 7 share one isolation and one accumulating list. -----
+    {
+        const ScopedPreferenceIsolation isolation("mar183-c21");
+        const std::filesystem::path settings = isolation.settings_path();
+
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C21 could not seed a project copy.\n";
+            cleanup();
+            return false;
+        }
+        load_shell_preferences(&state);
+        if (!state.preferences.recent_projects.empty()) {
+            std::cerr << "MAR-183 C21: a fresh isolation must start with an EMPTY "
+                         "recent list.\n";
+            cleanup();
+            return false;
+        }
+
+        // --- Phase 1: a successful Open records. ----------------------------
+        {
+            PendingFileApplication pending;
+            pending.action = FileAction::Open;
+            pending.path = project;
+            state.pending_file_application = pending;
+            if (!apply_pending_file_action(&state)) {
+                std::cerr << "MAR-183 C21 phase 1: the Open must succeed: "
+                          << state.error_message << '\n';
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects.size() != 1U ||
+                state.preferences.recent_projects.front() != canonical(project)) {
+                std::cerr << "MAR-183 C21 phase 1: a successful Open must record the "
+                             "canonical path at the head. size="
+                          << state.preferences.recent_projects.size() << ".\n";
+                cleanup();
+                return false;
+            }
+            if (!std::filesystem::exists(settings)) {
+                std::cerr << "MAR-183 C21 phase 1: recording must PERSIST -- the "
+                             "settings file does not exist at "
+                          << settings.string() << ".\n";
+                cleanup();
+                return false;
+            }
+            const marrow::editor::PreferenceStore store;
+            if (store.load().preferences.recent_projects !=
+                state.preferences.recent_projects) {
+                std::cerr << "MAR-183 C21 phase 1: the persisted list must reload "
+                             "element-wise equal to the in-memory one.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // --- Phase 2: a FAILED Open records nothing and preserves order. (I4)
+        {
+            std::string project_text;
+            std::string file_error;
+            if (!read_text_file(project, &project_text, &file_error)) {
+                std::cerr << "MAR-183 C21 phase 2: " << file_error << '\n';
+                cleanup();
+                return false;
+            }
+            const std::size_t position = project_text.find(".mskl");
+            if (position == std::string::npos) {
+                std::cerr << "MAR-183 C21 phase 2 could not find a skeleton "
+                             "reference to break.\n";
+                cleanup();
+                return false;
+            }
+            // Break the STEM, keeping valid JSON: the case is an unresolvable
+            // cross-reference, exactly as MAR-181 C7 builds it, not a syntax error.
+            const std::size_t stem_start = project_text.rfind('"', position) + 1U;
+            project_text.replace(
+                stem_start, position + 5U - stem_start, "does_not_exist.mskl");
+            const std::filesystem::path broken = root / "mar183-broken.marrow";
+            if (!write_text_file(broken, project_text, &file_error)) {
+                std::cerr << "MAR-183 C21 phase 2: " << file_error << '\n';
+                cleanup();
+                return false;
+            }
+            if (!marrow::runtime::json::load_document(broken).document.has_value()) {
+                std::cerr << "MAR-183 C21 phase 2 requires the broken project to be "
+                             "VALID JSON -- otherwise the Open fails for the wrong "
+                             "reason and the case proves nothing.\n";
+                cleanup();
+                return false;
+            }
+
+            const std::vector<std::filesystem::path> before =
+                state.preferences.recent_projects;
+            PendingFileApplication pending;
+            pending.action = FileAction::Open;
+            pending.path = broken;
+            state.pending_file_application = pending;
+            if (apply_pending_file_action(&state)) {
+                std::cerr << "MAR-183 C21 phase 2: opening a project whose skeleton "
+                             "is missing must FAIL.\n";
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects != before) {
+                std::cerr << "MAR-183 C21 phase 2: a FAILED Open must record nothing "
+                             "and leave the order unchanged. The head is now '"
+                          << (state.preferences.recent_projects.empty()
+                                  ? std::string("<empty>")
+                                  : state.preferences.recent_projects.front().string())
+                          << "'.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // --- Phase 3: a successful Save As records the NEW path. ------------
+        const std::filesystem::path save_as_target = root / "mar183-saved-as.marrow";
+        {
+            const std::filesystem::path previous_head =
+                state.preferences.recent_projects.front();
+            if (!apply_save_as(&state, save_as_target)) {
+                std::cerr << "MAR-183 C21 phase 3: the Save As must succeed: "
+                          << state.error_message << '\n';
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects.size() != 2U ||
+                state.preferences.recent_projects.front() !=
+                    canonical(save_as_target)) {
+                std::cerr << "MAR-183 C21 phase 3: Save As must record the NEW path "
+                             "at the head, not the old one. Head is '"
+                          << state.preferences.recent_projects.front().string()
+                          << "'.\n";
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects[1] != previous_head) {
+                std::cerr << "MAR-183 C21 phase 3: the previous head must slide to "
+                             "index 1.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // --- Phase 4: a FAILED Save As records nothing, and writes nothing
+        //     INSIDE the rename seam. The seam is process-global and shared
+        //     with the project writer, so a settings write landing inside it
+        //     would be injected with a failure it never asked for.
+        {
+            const std::vector<std::filesystem::path> before =
+                state.preferences.recent_projects;
+            std::string settings_before;
+            std::string file_error;
+            if (!read_text_file(settings, &settings_before, &file_error)) {
+                std::cerr << "MAR-183 C21 phase 4: " << file_error << '\n';
+                cleanup();
+                return false;
+            }
+            const std::filesystem::path failed_target =
+                root / "mar183-failed-save-as.marrow";
+            {
+                const ScopedRenameCallback rename_failure(
+                    [](const std::filesystem::path&, const std::filesystem::path&) {
+                        return std::make_error_code(std::errc::permission_denied);
+                    });
+                if (apply_save_as(&state, failed_target)) {
+                    std::cerr << "MAR-183 C21 phase 4: an injected rename failure "
+                                 "must fail the Save As.\n";
+                    cleanup();
+                    return false;
+                }
+            }
+            if (state.preferences.recent_projects != before) {
+                std::cerr << "MAR-183 C21 phase 4: a FAILED Save As must record "
+                             "nothing.\n";
+                cleanup();
+                return false;
+            }
+            std::string settings_after;
+            if (!read_text_file(settings, &settings_after, &file_error) ||
+                settings_after != settings_before) {
+                std::cerr << "MAR-183 C21 phase 4: a failed Save As must leave the "
+                             "settings file BYTE-IDENTICAL -- no settings write may "
+                             "occur inside the rename seam's scope.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // --- Phase 4b: a SUCCESSFUL Save As whose SETTINGS write FAILS must
+        //     still report that failure. The rename seam is process-global and
+        //     shared with the project writer, so a blanket failure (phase 4)
+        //     fails the project save first and never reaches the settings
+        //     write. This callback therefore fails ONLY the settings
+        //     destination and performs the real rename for everything else.
+        {
+            const std::filesystem::path reported_target =
+                root / "mar183-settings-write-reported.marrow";
+            state.error_message.clear();
+            {
+                const ScopedRenameCallback settings_only_failure(
+                    [](const std::filesystem::path& source,
+                       const std::filesystem::path& destination) -> std::error_code {
+                        if (destination.filename() == "editor-settings.json") {
+                            return std::make_error_code(std::errc::permission_denied);
+                        }
+                        std::error_code rename_error;
+                        std::filesystem::rename(source, destination, rename_error);
+                        return rename_error;
+                    });
+                if (!apply_save_as(&state, reported_target)) {
+                    std::cerr << "MAR-183 C21 phase 4b: the PROJECT save must still "
+                                 "succeed -- only the settings destination is failed: "
+                              << state.error_message << '\n';
+                    cleanup();
+                    return false;
+                }
+            }
+            if (state.error_message.empty()) {
+                std::cerr << "MAR-183 C21 phase 4b: a failed settings write on the "
+                             "Save As path must be REPORTED. Design 10.7 grants this "
+                             "failure exactly ONE report -- 'reported once and then "
+                             "forgotten' -- and clearing error_message AFTER "
+                             "record_recent_project rather than before it swallows "
+                             "that one report, so the failure is reported zero "
+                             "times.\n";
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects.empty() ||
+                state.preferences.recent_projects.front() !=
+                    canonical(reported_target)) {
+                std::cerr << "MAR-183 C21 phase 4b: the failed settings write must "
+                             "KEEP the in-memory record at the head.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // --- Phase 5: New records NOTHING; its FIRST save records. ----------
+        {
+            const std::filesystem::path fresh = root / "mar183-new";
+            std::filesystem::path fresh_skeleton;
+            std::vector<std::filesystem::path> fresh_atlases;
+            if (!seed_shell_asset_copy(
+                    source_state, fresh, &fresh_skeleton, &fresh_atlases)) {
+                std::cerr << "MAR-183 C21 phase 5 could not seed a fresh rig.\n";
+                cleanup();
+                return false;
+            }
+            const std::filesystem::path target = fresh / "mar183-new.marrow";
+            const std::vector<std::filesystem::path> before =
+                state.preferences.recent_projects;
+
+            PendingFileApplication pending;
+            pending.action = FileAction::New;
+            pending.path = target;
+            pending.skeleton_path = fresh_skeleton;
+            pending.atlas_paths = fresh_atlases;
+            state.pending_file_application = pending;
+            if (!apply_pending_file_action(&state)) {
+                std::cerr << "MAR-183 C21 phase 5: New must succeed: "
+                          << state.error_message << '\n';
+                cleanup();
+                return false;
+            }
+            if (std::filesystem::exists(target)) {
+                std::cerr << "MAR-183 C21 phase 5: New must still write nothing.\n";
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects != before) {
+                std::cerr << "MAR-183 C21 phase 5: New must record NOTHING -- there "
+                             "is no file on disk yet to record.\n";
+                cleanup();
+                return false;
+            }
+            if (!state.pending_recent_on_first_save.has_value() ||
+                *state.pending_recent_on_first_save != target) {
+                std::cerr << "MAR-183 C21 phase 5: New must ARM the first-save "
+                             "recorder with its own target.\n";
+                cleanup();
+                return false;
+            }
+
+            if (!save_project_file(&state, true)) {
+                std::cerr << "MAR-183 C21 phase 5: the first save of a New session "
+                             "must succeed: " << state.error_message << '\n';
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects.front() != canonical(target)) {
+                std::cerr << "MAR-183 C21 phase 5: the FIRST save of a New session "
+                             "must record its path at the head. Head is '"
+                          << state.preferences.recent_projects.front().string()
+                          << "'.\n";
+                cleanup();
+                return false;
+            }
+            if (state.pending_recent_on_first_save.has_value()) {
+                std::cerr << "MAR-183 C21 phase 5: the arm must be CONSUMED by the "
+                             "save that used it, so a second save records nothing.\n";
+                cleanup();
+                return false;
+            }
+        }
+
+        // --- Phase 7: Reload records nothing. -------------------------------
+        {
+            const std::vector<std::filesystem::path> before =
+                state.preferences.recent_projects;
+            if (!reload_project(&state)) {
+                std::cerr << "MAR-183 C21 phase 7: the reload must succeed: "
+                          << state.error_message << '\n';
+                cleanup();
+                return false;
+            }
+            if (state.preferences.recent_projects != before) {
+                std::cerr << "MAR-183 C21 phase 7: Reload must record nothing.\n";
+                cleanup();
+                return false;
+            }
+        }
+    }
+
+    // --- Phase 6: a STARTUP project's ordinary Save records nothing. (I1) ----
+    // Its own isolation, its own ShellState, and an ABSENT settings file. This
+    // is the ONLY shape in which dropping the arm is observable: the startup
+    // path is `reload_project`, which records nothing, so the list is empty
+    // before the save and the head is NOT the saved path.
+    {
+        const ScopedPreferenceIsolation isolation("mar183-c21-startup");
+        const std::filesystem::path settings = isolation.settings_path();
+
+        std::filesystem::path project;
+        ShellState state;
+        const std::filesystem::path startup_root = root / "startup";
+        if (!seed_shell_project_copy(
+                source_state, startup_root, &project, nullptr)) {
+            std::cerr << "MAR-183 C21 phase 6 could not seed a startup project.\n";
+            cleanup();
+            return false;
+        }
+        // Exactly what `--project X` does: assign the path and reload_project.
+        state.project_path = project;
+        if (!reload_project(&state)) {
+            std::cerr << "MAR-183 C21 phase 6 could not load the startup project: "
+                      << state.error_message << '\n';
+            cleanup();
+            return false;
+        }
+        state.session.clear_history();
+        load_shell_preferences(&state);
+
+        if (!state.preferences.recent_projects.empty()) {
+            std::cerr << "MAR-183 C21 phase 6: the startup path must record NOTHING, "
+                         "but the list already holds "
+                      << state.preferences.recent_projects.size() << " entr(y/ies).\n";
+            cleanup();
+            return false;
+        }
+        if (std::filesystem::exists(settings)) {
+            std::cerr << "MAR-183 C21 phase 6: loading must not create the settings "
+                         "file.\n";
+            cleanup();
+            return false;
+        }
+        if (!dirty_the_session(&state, " c21-startup")) {
+            std::cerr << "MAR-183 C21 phase 6 could not dirty the session.\n";
+            cleanup();
+            return false;
+        }
+
+        if (!save_project_file(&state, true)) {
+            std::cerr << "MAR-183 C21 phase 6: the ordinary save must succeed: "
+                      << state.error_message << '\n';
+            cleanup();
+            return false;
+        }
+
+        if (!state.preferences.recent_projects.empty()) {
+            std::cerr << "MAR-183 C21 phase 6: an ORDINARY Save must record nothing. "
+                         "The list now holds '"
+                      << state.preferences.recent_projects.front().string()
+                      << "'. Only Open, Save As, and the FIRST save of a New session "
+                         "record (AC2), and this session was created by neither.\n";
+            cleanup();
+            return false;
+        }
+        if (std::filesystem::exists(settings)) {
+            std::cerr << "MAR-183 C21 phase 6: an ordinary Save must not write the "
+                         "settings file at all -- it still must not exist at "
+                      << settings.string() << ".\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    cleanup();
+    return true;
+}
+
+/**
+ * @brief MAR-183 C25 -- a real mouse through the real `Open Recent` submenu.
+ *
+ * The other five MAR-183 cases drive UI-free seams, and every one of them would
+ * still pass with the entire menu deleted. This case is the one that cannot:
+ * it sweeps a real ImGui window for the id of each label and fails when a label
+ * is never hovered. That is MAR-181 C9's mechanism and MAR-182 C19's, verbatim.
+ *
+ * Phase 0 MEASURES the two harness facts the rest of the case depends on, and
+ * PRINTS both every run. MAR-182's first Escape-closes-modal reading was an
+ * artifact of `FindWindowByName` returning null for a modal that did not exist
+ * yet; guessing M3 here is how inversion I10 becomes one that cannot bite.
+ */
+bool validate_mar183_recent_menu_mouse_smoke(const std::filesystem::path& project_path) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar183_c25";
+    std::error_code directory_error;
+    std::filesystem::remove_all(root, directory_error);
+    directory_error.clear();
+    std::filesystem::create_directories(root, directory_error);
+    if (directory_error) {
+        std::cerr << "MAR-183 C25 could not create its scratch directory.\n";
+        return false;
+    }
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+
+    const ScopedPreferenceIsolation isolation("mar183-c25");
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) || state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-183 C25 could not load " << project_path << ".\n";
+        cleanup();
+        return false;
+    }
+    state.session.clear_history();
+    load_shell_preferences(&state);
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool macos_behaviors_before = io.ConfigMacOSXBehaviors;
+    io.ConfigMacOSXBehaviors = false;
+
+    const auto render_frame = [&]() {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        handle_project_history_shortcuts(&state);
+        draw_menu_bar(&state);
+        ImGui::Render();
+        (void)apply_pending_file_action(&state);
+    };
+
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        io.ConfigMacOSXBehaviors = macos_behaviors_before;
+        cleanup();
+        return false;
+    };
+
+    // Sweeps `window_title` for every probe. Returns whether ALL were found.
+    // `report_missing` is false only for the deliberate absence measurements.
+    const auto sweep = [&](std::vector<MenuProbe>& probes,
+                           const char* window_title,
+                           const char* case_label,
+                           bool report_missing) -> bool {
+        ImGuiWindow* window = ImGui::FindWindowByName(window_title);
+        if (window == nullptr) {
+            if (report_missing) {
+                std::cerr << "MAR-183 C25 " << case_label << ": \"" << window_title
+                          << "\" was never submitted.\n";
+            }
+            return false;
+        }
+        for (MenuProbe& probe : probes) {
+            probe.id = probe_id(*window, probe);
+            probe.found = false;
+        }
+        for (int settle = 0; settle < 3; ++settle) {
+            render_frame();
+        }
+        window = ImGui::FindWindowByName(window_title);
+        if (window == nullptr) {
+            if (report_missing) {
+                std::cerr << "MAR-183 C25 " << case_label << ": lost \""
+                          << window_title << "\" while it settled.\n";
+            }
+            return false;
+        }
+        const ImRect bounds = window->Rect();
+        for (float y = bounds.Min.y + 2.0f; y <= bounds.Max.y - 2.0f; y += 4.0f) {
+            for (float x = bounds.Min.x + 4.0f; x <= bounds.Max.x - 2.0f; x += 12.0f) {
+                io.AddMousePosEvent(x, y);
+                render_frame();
+                const ImGuiContext* context = ImGui::GetCurrentContext();
+                const ImGuiID hovered = context != nullptr ? context->HoveredId : 0U;
+                if (hovered == 0U) continue;
+                for (MenuProbe& probe : probes) {
+                    if (!probe.found && probe.id == hovered) {
+                        probe.found = true;
+                        probe.position = ImVec2(x, y);
+                    }
+                }
+            }
+        }
+        bool complete = true;
+        for (const MenuProbe& probe : probes) {
+            if (!probe.found) {
+                if (report_missing) {
+                    std::cerr << "MAR-183 C25 " << case_label << ": \"" << window_title
+                              << "\" never emitted a widget with the id of \""
+                              << probe.label
+                              << "\". A real mouse swept every position in the window "
+                                 "and HoveredId never equalled that id, so the widget "
+                                 "is absent or unreachable.\n";
+                }
+                complete = false;
+            }
+        }
+        return complete;
+    };
+
+    const auto click_position = [&](ImVec2 position) {
+        io.AddMousePosEvent(position.x, position.y);
+        render_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_frame();
+    };
+
+    const auto close_all_menus = [&]() {
+        if (ImGui::GetCurrentContext() != nullptr) {
+            ImGui::ClosePopupsExceptModals();
+        }
+        io.AddMousePosEvent(-100.0f, -100.0f);
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+    };
+
+    // Opens File, then Open Recent, leaving the submenu popup up.
+    // @return the submenu popup's ImGui window name, or empty on failure.
+    const auto open_recent_submenu = [&](const char* case_label) -> std::string {
+        close_all_menus();
+        std::vector<MenuProbe> bar_probes{{"File", ProbeIdKind::MenuBarMenu}};
+        if (!sweep(bar_probes, "##MainMenuBar", case_label, true)) return {};
+        click_position(bar_probes[0].position);
+
+        std::vector<MenuProbe> file_probes{{kRecentMenu, ProbeIdKind::Direct}};
+        if (!sweep(file_probes, "File###Menu_00", case_label, true)) return {};
+        // A BeginMenu inside a popup opens on HOVER; the click is harmless and
+        // makes the open deterministic under this harness.
+        click_position(file_probes[0].position);
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+
+        const ImGuiContext* context = ImGui::GetCurrentContext();
+        if (context == nullptr || context->OpenPopupStack.Size == 0) return {};
+        const ImGuiWindow* popup =
+            context->OpenPopupStack[context->OpenPopupStack.Size - 1].Window;
+        if (popup == nullptr) return {};
+        return popup->Name;
+    };
+
+    render_frame();
+    render_frame();
+
+    // --- Seed three entries: two present, one missing. ----------------------
+    const std::filesystem::path present_one = root / "alpha.marrow";
+    const std::filesystem::path present_two = root / "beta.marrow";
+    const std::filesystem::path missing_one = root / "gone.marrow";
+    {
+        std::string file_error;
+        if (!write_text_file(present_one, "{}\n", &file_error) ||
+            !write_text_file(present_two, "{}\n", &file_error)) {
+            return fail("MAR-183 C25 could not seed the present entries.\n");
+        }
+    }
+    // Oldest first, so the rendered order is [missing, beta, alpha].
+    record_recent_project(&state, present_one);
+    record_recent_project(&state, present_two);
+    record_recent_project(&state, missing_one);
+    if (state.preferences.recent_projects.size() != 3U) {
+        return fail("MAR-183 C25 requires exactly three seeded entries.\n");
+    }
+    const std::vector<std::filesystem::path> seeded =
+        state.preferences.recent_projects;
+    // MenuProbe holds a `const char*`, so the label strings must outlive every
+    // sweep that uses them.
+    std::vector<std::string> labels;
+    labels.reserve(seeded.size());
+    for (const std::filesystem::path& entry : seeded) {
+        labels.push_back(recent_menu_label(entry));
+    }
+    const std::string missing_label =
+        recent_menu_label(marrow::editor::canonical_recent_path(missing_one));
+
+    // --- Phase 0 / M2: the submenu opens, and its window name. --------------
+    const std::string submenu_name = open_recent_submenu("phase 0");
+    if (submenu_name.empty()) {
+        return fail(
+            "MAR-183 C25 M2: File > Open Recent did not open a child popup under "
+            "this harness. The submenu is undrivable by a real mouse here, and "
+            "design 2.6's shape must be revisited before any more of this case is "
+            "written.\n");
+    }
+    std::cout << "MAR-183 C25 measured: the open \"Open Recent\" submenu popup's "
+                 "ImGui window name is \"" << submenu_name << "\".\n";
+
+    // --- Phase 0 / M3: is a DISABLED MenuItem reachable by HoveredId? -------
+    bool disabled_hoverable = false;
+    {
+        std::vector<MenuProbe> probe{{missing_label.c_str(), ProbeIdKind::MenuItem}};
+        disabled_hoverable = sweep(probe, submenu_name.c_str(), "M3", false);
+    }
+    std::cout << "MAR-183 C25 measured: a DISABLED MenuItem "
+              << (disabled_hoverable ? "IS" : "is NOT")
+              << " reachable by HoveredId under this harness.\n";
+
+    // --- 1 + 2: the submenu is wired, and every seeded entry is emitted. ----
+    // (I9) Deleting the draw_recent_projects_menu call makes phase 0 fail
+    // outright, because "Open Recent" is then never submitted in the File menu.
+    {
+        std::vector<MenuProbe> entry_probes;
+        for (const std::string& label : labels) {
+            if (label == missing_label && !disabled_hoverable) continue;
+            entry_probes.push_back({label.c_str(), ProbeIdKind::MenuItem});
+        }
+        if (!sweep(entry_probes, submenu_name.c_str(), "entries", true)) {
+            return fail(
+                "MAR-183 C25 assertion 2: every ENABLED seeded entry must be "
+                "emitted in the submenu.\n");
+        }
+    }
+
+    // --- 4: the missing entry is not actionable. ---------------------------
+    {
+        std::vector<MenuProbe> probe{{missing_label.c_str(), ProbeIdKind::MenuItem}};
+        const bool found = sweep(probe, submenu_name.c_str(), "missing", false);
+        if (found != disabled_hoverable) {
+            return fail(
+                "MAR-183 C25 assertion 4: the missing entry's reachability "
+                "disagreed with the M3 measurement taken moments earlier.\n");
+        }
+        const std::filesystem::path path_before = state.project_path;
+        // The three checks below are all VACUOUS on this clean session, and they
+        // are kept only as cheap corroboration. A clickable missing entry runs
+        // `open_recent_project` -> `begin_session_intent`, which on a CLEAN
+        // session skips the prompt entirely (no `dirty_intent`), arms via
+        // `arm_open`, and has that arm consumed by the very
+        // `apply_pending_file_action` at the tail of the same `render_frame`,
+        // which RESETS `pending_file_application` at its head and returns from
+        // the failed `session.open` BEFORE it assigns `project_path`.
+        // What actually survives that route is the failure REPORT: a status of
+        // "Project load failed" and a non-empty `error_message`. Those are the
+        // load-bearing assertions here, and they are snapshot rather than
+        // assumed empty.
+        const std::string error_before = state.error_message;
+        const std::string status_before = state.status_message;
+        if (found) {
+            std::cout << "MAR-183 C25 assertion 4 branch: disabled items ARE "
+                         "hoverable, so a click at the missing entry's own position "
+                         "is asserted to do nothing.\n";
+            click_position(probe[0].position);
+            for (int settle = 0; settle < 3; ++settle) render_frame();
+        } else {
+            std::cout << "MAR-183 C25 assertion 4 branch: disabled items are NOT "
+                         "hoverable, so the missing entry's ABSENCE from the sweep "
+                         "is the assertion, and the two present entries were "
+                         "found.\n";
+        }
+        if (state.error_message != error_before ||
+            state.status_message != status_before) {
+            return fail(
+                "MAR-183 C25 assertion 4: a missing recent entry must NOT be "
+                "actionable, but the click CHANGED the shell's messages -- status "
+                "'" + status_before + "' -> '" + state.status_message +
+                "', error '" + error_before + "' -> '" + state.error_message +
+                "'. Dropping the `present` argument from the entry's MenuItem "
+                "makes a dead path clickable: the open is attempted and fails, "
+                "which is the only trace that survives apply_pending_file_action.\n");
+        }
+        if (state.dirty_intent.has_value() ||
+            state.pending_file_application.has_value() ||
+            state.project_path != path_before) {
+            return fail(
+                "MAR-183 C25 assertion 4: a missing recent entry must NOT be "
+                "actionable -- it armed an intent, a pending action, or moved the "
+                "shell's project path.\n");
+        }
+    }
+
+    // --- 3: a click over a DIRTY session raises the prompt, carrying the path.
+    {
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "MAR-183 C25 note",
+            "mar183-c25",
+            false,
+            marrow::editor::EditImpact::Project});
+        if (!transaction || transaction.project() == nullptr) {
+            return fail("MAR-183 C25 could not begin the dirtying edit.\n");
+        }
+        transaction.project()->editor_metadata.notes += " c25-dirty";
+        if (!transaction.commit() || !state.session.dirty()) {
+            return fail("MAR-183 C25 could not dirty the session.\n");
+        }
+
+        const std::string target_label = recent_menu_label(seeded[1]);
+        const std::string submenu = open_recent_submenu("dirty click");
+        if (submenu.empty()) {
+            return fail("MAR-183 C25 assertion 3 could not reopen the submenu.\n");
+        }
+        std::vector<MenuProbe> probe{{target_label.c_str(), ProbeIdKind::MenuItem}};
+        if (!sweep(probe, submenu.c_str(), "dirty click", true)) {
+            return fail(
+                "MAR-183 C25 assertion 3: the entry to click was not reachable.\n");
+        }
+        click_position(probe[0].position);
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+
+        if (!state.dirty_intent.has_value()) {
+            return fail(
+                "MAR-183 C25 assertion 3: clicking a recent entry over UNSAVED work "
+                "must raise the Save/Discard/Cancel prompt. No intent was armed, so "
+                "the Recent surface bypassed MAR-182's gate.\n");
+        }
+        if (state.dirty_intent->intent != SessionIntent::Open ||
+            state.dirty_intent->path != seeded[1]) {
+            return fail(
+                "MAR-183 C25 assertion 3: the armed intent must be an Open carrying "
+                "the clicked entry's path.\n");
+        }
+        if (state.pending_file_application.has_value()) {
+            return fail(
+                "MAR-183 C25 assertion 3: the open was PERFORMED behind the prompt.\n");
+        }
+        const ImGuiWindow* modal = ImGui::FindWindowByName(kDirtyIntentModal);
+        if (modal == nullptr || !modal->Active) {
+            return fail(
+                "MAR-183 C25 assertion 3: the dirty-intent modal must be Active "
+                "after a recent click over unsaved work.\n");
+        }
+        resolve_dirty_intent(&state, DirtyIntentResponse::Cancel);
+        state.pending_file_application.reset();
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+    }
+
+    // --- 5: Remove reaches the MISSING entry. (I10) ------------------------
+    {
+        const std::string submenu = open_recent_submenu("remove");
+        if (submenu.empty()) {
+            return fail("MAR-183 C25 assertion 5 could not reopen the submenu.\n");
+        }
+        std::vector<MenuProbe> remove_probe{{kRecentRemoveMenu, ProbeIdKind::Direct}};
+        if (!sweep(remove_probe, submenu.c_str(), "remove menu", true)) {
+            return fail(
+                "MAR-183 C25 assertion 5: the Remove submenu must be emitted.\n");
+        }
+        click_position(remove_probe[0].position);
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+
+        const ImGuiContext* context = ImGui::GetCurrentContext();
+        if (context == nullptr || context->OpenPopupStack.Size == 0) {
+            return fail(
+                "MAR-183 C25 assertion 5: the Remove submenu did not open.\n");
+        }
+        const ImGuiWindow* remove_popup =
+            context->OpenPopupStack[context->OpenPopupStack.Size - 1].Window;
+        if (remove_popup == nullptr) {
+            return fail("MAR-183 C25 assertion 5: the Remove popup has no window.\n");
+        }
+        const std::string remove_name = remove_popup->Name;
+        std::cout << "MAR-183 C25 measured: the open \"Remove\" submenu popup's "
+                     "ImGui window name is \"" << remove_name << "\".\n";
+
+        std::vector<MenuProbe> probe{{missing_label.c_str(), ProbeIdKind::MenuItem}};
+        if (!sweep(probe, remove_name.c_str(), "remove missing", true)) {
+            return fail(
+                "MAR-183 C25 assertion 5: the MISSING entry must be reachable "
+                "inside Remove. Its own row is disabled and cannot be clicked, so a "
+                "Remove that is also disabled for it would leave the user no way to "
+                "delete a dead bookmark at all.\n");
+        }
+        click_position(probe[0].position);
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+
+        const std::vector<std::filesystem::path>& list =
+            state.preferences.recent_projects;
+        if (std::find(list.begin(), list.end(),
+                      marrow::editor::canonical_recent_path(missing_one)) !=
+            list.end()) {
+            return fail(
+                "MAR-183 C25 assertion 5: clicking Remove on the missing entry must "
+                "delete exactly it.\n");
+        }
+        if (list.size() != 2U) {
+            return fail(
+                "MAR-183 C25 assertion 5: Remove must delete exactly one entry.\n");
+        }
+        const marrow::editor::PreferenceStore store;
+        if (store.load().preferences.recent_projects != list) {
+            return fail(
+                "MAR-183 C25 assertion 5: the removal must reach the settings "
+                "file.\n");
+        }
+    }
+
+    // --- 6: Clear Missing removes only the missing. ------------------------
+    {
+        record_recent_project(&state, root / "gone-again.marrow");
+        if (state.preferences.recent_projects.size() != 3U) {
+            return fail("MAR-183 C25 assertion 6 needs three entries again.\n");
+        }
+        const std::string submenu = open_recent_submenu("clear missing");
+        if (submenu.empty()) {
+            return fail("MAR-183 C25 assertion 6 could not reopen the submenu.\n");
+        }
+        std::vector<MenuProbe> probe{{kRecentClearMissing, ProbeIdKind::MenuItem}};
+        if (!sweep(probe, submenu.c_str(), "clear missing", true)) {
+            return fail(
+                "MAR-183 C25 assertion 6: Clear Missing must be emitted and enabled "
+                "while at least one entry is missing.\n");
+        }
+        click_position(probe[0].position);
+        for (int settle = 0; settle < 3; ++settle) render_frame();
+
+        const std::vector<std::filesystem::path> expected = {
+            marrow::editor::canonical_recent_path(present_two),
+            marrow::editor::canonical_recent_path(present_one)};
+        if (state.preferences.recent_projects != expected) {
+            return fail(
+                "MAR-183 C25 assertion 6: Clear Missing must remove every missing "
+                "entry and keep every present one, in order.\n");
+        }
+    }
+
+    // --- 7: the EMPTY list case. -------------------------------------------
+    {
+        state.preferences.recent_projects.clear();
+        (void)persist_recent_projects(&state, true);
+        close_all_menus();
+        std::vector<MenuProbe> bar_probes{{"File", ProbeIdKind::MenuBarMenu}};
+        if (!sweep(bar_probes, "##MainMenuBar", "empty", true)) {
+            return fail("MAR-183 C25 assertion 7 could not reach the File menu.\n");
+        }
+        click_position(bar_probes[0].position);
+        std::vector<MenuProbe> file_probes{{kRecentMenu, ProbeIdKind::Direct}};
+        const bool emitted = sweep(file_probes, "File###Menu_00", "empty", false);
+        std::cout << "MAR-183 C25 measured: with an EMPTY list, \"Open Recent\" "
+                  << (emitted ? "IS still hoverable" : "is NOT hoverable")
+                  << " -- BeginMenu(label, enabled=false).\n";
+        if (emitted) {
+            click_position(file_probes[0].position);
+            for (int settle = 0; settle < 3; ++settle) render_frame();
+            const ImGuiContext* context = ImGui::GetCurrentContext();
+            const ImGuiWindow* popup =
+                (context != nullptr && context->OpenPopupStack.Size > 0)
+                    ? context->OpenPopupStack[context->OpenPopupStack.Size - 1].Window
+                    : nullptr;
+            if (popup != nullptr &&
+                std::string(popup->Name).rfind(kRecentMenu, 0) == 0) {
+                return fail(
+                    "MAR-183 C25 assertion 7: a DISABLED Open Recent must not open a "
+                    "child popup.\n");
+            }
+        }
+        close_all_menus();
+    }
+
+    io.ConfigMacOSXBehaviors = macos_behaviors_before;
+    cleanup();
+    return true;
+}
+
+/**
+ * @brief MAR-183 C24 -- non-interference, the no-op skip, and write failure.
+ *
+ * AC5's other half: recording a recent project is a PREFERENCE write and must
+ * never touch the document. It opens no transaction, enters no undo history and
+ * changes no revision, and the proof is a four-value comparison across the call
+ * rather than an argument about which functions it happens to call.
+ *
+ * The rename seam it installs in assertion 3 is PROCESS-GLOBAL and shared with
+ * the project writer (`atomic_file_write.hpp`), so the scope is RAII and no
+ * project save happens inside it.
+ */
+bool validate_mar183_non_interference_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar183_c24";
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+    const ScopedPreferenceIsolation isolation("mar183-c24");
+    const std::filesystem::path settings = isolation.settings_path();
+
+    std::filesystem::path project;
+    ShellState state;
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        std::cerr << "MAR-183 C24 could not seed a project copy.\n";
+        cleanup();
+        return false;
+    }
+
+    // Seed a settings file carrying BOTH a non-default curve and an unknown
+    // additive field, so assertion 4 can prove the write preserved each.
+    {
+        std::string file_error;
+        const std::string seeded =
+            "{\n  \"version\": 1,\n  \"default_curve\": \"ease_in\",\n"
+            "  \"payload\": \"keep\",\n  \"recent_projects\": []\n}\n";
+        if (!write_text_file(settings, seeded, &file_error)) {
+            std::cerr << "MAR-183 C24: " << file_error << '\n';
+            cleanup();
+            return false;
+        }
+    }
+    load_shell_preferences(&state);
+    if (state.preferences.default_curve != marrow::editor::CurvePreset::EaseIn) {
+        std::cerr << "MAR-183 C24 requires the seeded curve to load.\n";
+        cleanup();
+        return false;
+    }
+
+    // --- 1: a record does not dirty the project or touch history. (I8) ------
+    {
+        if (state.session.dirty()) {
+            std::cerr << "MAR-183 C24 assertion 1 requires a CLEAN session.\n";
+            cleanup();
+            return false;
+        }
+        const bool dirty_before = state.session.dirty();
+        const bool can_undo_before = state.session.can_undo();
+        const bool can_redo_before = state.session.can_redo();
+        const std::string serialized_before =
+            marrow::editor::serialize_project(*state.load_result.project);
+
+        record_recent_project(&state, root / "c24-unrelated.marrow");
+
+        if (state.session.dirty() != dirty_before ||
+            state.session.can_undo() != can_undo_before ||
+            state.session.can_redo() != can_redo_before) {
+            std::cerr << "MAR-183 C24 assertion 1: recording a recent project must "
+                         "not touch the session. dirty "
+                      << dirty_before << "->" << state.session.dirty()
+                      << ", can_undo " << can_undo_before << "->"
+                      << state.session.can_undo() << ", can_redo "
+                      << can_redo_before << "->" << state.session.can_redo()
+                      << ". A preference write that opens a transaction would put "
+                         "a settings change into the project's undo history.\n";
+            cleanup();
+            return false;
+        }
+        if (marrow::editor::serialize_project(*state.load_result.project) !=
+            serialized_before) {
+            std::cerr << "MAR-183 C24 assertion 1: recording must leave the project "
+                         "document byte-identical.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- 2: re-recording the head writes NOTHING. (I12) ---------------------
+    const std::filesystem::path head = root / "c24-head.marrow";
+    {
+        record_recent_project(&state, head);
+        std::string bytes_before;
+        std::string file_error;
+        if (!read_text_file(settings, &bytes_before, &file_error)) {
+            std::cerr << "MAR-183 C24: " << file_error << '\n';
+            cleanup();
+            return false;
+        }
+        std::error_code time_error;
+        const auto mtime_before =
+            std::filesystem::last_write_time(settings, time_error);
+
+        record_recent_project(&state, head);
+
+        std::string bytes_after;
+        if (!read_text_file(settings, &bytes_after, &file_error) ||
+            bytes_after != bytes_before) {
+            std::cerr << "MAR-183 C24 assertion 2: re-recording the CURRENT HEAD "
+                         "changes nothing and must not rewrite the settings file.\n";
+            cleanup();
+            return false;
+        }
+        const auto mtime_after =
+            std::filesystem::last_write_time(settings, time_error);
+        if (mtime_after != mtime_before) {
+            std::cerr << "MAR-183 C24 assertion 2: the no-op skip must leave the "
+                         "settings file's mtime untouched.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- 3: a write failure preserves. --------------------------------------
+    {
+        std::string bytes_before;
+        std::string file_error;
+        if (!read_text_file(settings, &bytes_before, &file_error)) {
+            std::cerr << "MAR-183 C24: " << file_error << '\n';
+            cleanup();
+            return false;
+        }
+        const std::filesystem::path blocked = root / "c24-blocked.marrow";
+        state.error_message.clear();
+        {
+            // RAII, and NO project save inside: the seam is process-global and
+            // shared with the project writer.
+            const ScopedRenameCallback rename_failure(
+                [](const std::filesystem::path&, const std::filesystem::path&) {
+                    return std::make_error_code(std::errc::permission_denied);
+                });
+            record_recent_project(&state, blocked);
+        }
+        if (state.error_message.empty()) {
+            std::cerr << "MAR-183 C24 assertion 3: a failed settings write must "
+                         "report an error.\n";
+            cleanup();
+            return false;
+        }
+        if (state.preferences.recent_projects.empty() ||
+            state.preferences.recent_projects.front() !=
+                marrow::editor::canonical_recent_path(blocked)) {
+            std::cerr << "MAR-183 C24 assertion 3: a failed write KEEPS the "
+                         "in-memory change, matching set_shell_default_curve's "
+                         "shipped behaviour.\n";
+            cleanup();
+            return false;
+        }
+        std::string bytes_after;
+        if (!read_text_file(settings, &bytes_after, &file_error) ||
+            bytes_after != bytes_before) {
+            std::cerr << "MAR-183 C24 assertion 3: a failed write must leave the "
+                         "settings file BYTE-IDENTICAL.\n";
+            cleanup();
+            return false;
+        }
+
+        // After the scope closes, a re-record succeeds and reaches the file.
+        const std::filesystem::path retry = root / "c24-retry.marrow";
+        state.error_message.clear();
+        record_recent_project(&state, retry);
+        if (!state.error_message.empty()) {
+            std::cerr << "MAR-183 C24 assertion 3: the retry after releasing the "
+                         "seam must succeed: " << state.error_message << '\n';
+            cleanup();
+            return false;
+        }
+        const marrow::editor::PreferenceStore store;
+        const auto reloaded = store.load();
+        if (reloaded.preferences.recent_projects !=
+            state.preferences.recent_projects) {
+            std::cerr << "MAR-183 C24 assertion 3: the retry must reach the settings "
+                         "file.\n";
+            cleanup();
+            return false;
+        }
+
+        // --- 4: everything else in the file survived. -----------------------
+        if (reloaded.preferences.default_curve !=
+            marrow::editor::CurvePreset::EaseIn) {
+            std::cerr << "MAR-183 C24 assertion 4: a recent-list write must preserve "
+                         "default_curve. Constructing a fresh EditorPreferences "
+                         "instead of mutating the loaded one resets it to Linear.\n";
+            cleanup();
+            return false;
+        }
+        std::string final_bytes;
+        if (!read_text_file(settings, &final_bytes, &file_error) ||
+            final_bytes.find("\"payload\"") == std::string::npos ||
+            final_bytes.find("keep") == std::string::npos) {
+            std::cerr << "MAR-183 C24 assertion 4: the unknown additive field "
+                         "\"payload\" must survive a recent-list write -- that is "
+                         "the preserved_root guarantee.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    cleanup();
+    return true;
+}
+
+/**
+ * @brief MAR-183 C20 -- the list algebra as the SHELL drives it.
+ *
+ * `marrow_preference_tests` covers the algebra pure, with no `ShellState` and no
+ * store. This case covers the binding: that a relative `ShellState::project_path`
+ * -- which is what the shipped default IS (`shell_state.hpp`'s
+ * `assets/fixtures/player_idle.marrow`) -- reaches the settings file as an
+ * absolute canonical path, and that what the shell wrote reloads equal through a
+ * real `PreferenceStore`.
+ */
+bool validate_mar183_shell_list_algebra_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar183_c20";
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+    const ScopedPreferenceIsolation isolation("mar183-c20");
+
+    std::filesystem::path project;
+    ShellState state;
+    if (!load_seeded_project(source_state, root, &project, &state)) {
+        std::cerr << "MAR-183 C20 could not seed a project copy.\n";
+        cleanup();
+        return false;
+    }
+    load_shell_preferences(&state);
+
+    // (1) A RELATIVE path records as an ABSOLUTE canonical one.
+    const std::filesystem::path relative = "assets/fixtures/player_idle.marrow";
+    if (relative.is_absolute()) {
+        std::cerr << "MAR-183 C20: the fixture path must be relative for this case "
+                     "to mean anything.\n";
+        cleanup();
+        return false;
+    }
+    record_recent_project(&state, relative);
+    if (state.preferences.recent_projects.size() != 1U ||
+        !state.preferences.recent_projects.front().is_absolute()) {
+        std::cerr << "MAR-183 C20: a relative path must be stored ABSOLUTE -- "
+                     "otherwise the list is relative to whichever directory the "
+                     "editor happened to be launched from.\n";
+        cleanup();
+        return false;
+    }
+    if (state.preferences.recent_projects.front() !=
+        marrow::editor::canonical_recent_path(relative)) {
+        std::cerr << "MAR-183 C20: the stored form must be the canonical one.\n";
+        cleanup();
+        return false;
+    }
+
+    // (2) Re-recording the same file under its ABSOLUTE spelling promotes
+    //     without duplicating.
+    record_recent_project(&state, std::filesystem::absolute(relative));
+    if (state.preferences.recent_projects.size() != 1U) {
+        std::cerr << "MAR-183 C20: two spellings of one file must not produce two "
+                     "entries; size is "
+                  << state.preferences.recent_projects.size() << ".\n";
+        cleanup();
+        return false;
+    }
+
+    // (3) Twelve records leave exactly the bound, newest first.
+    std::vector<std::filesystem::path> recorded;
+    for (int index = 1; index <= 12; ++index) {
+        const std::filesystem::path entry =
+            root / ("c20-" + std::to_string(index) + ".marrow");
+        recorded.push_back(marrow::editor::canonical_recent_path(entry));
+        record_recent_project(&state, entry);
+    }
+    if (state.preferences.recent_projects.size() !=
+        marrow::editor::kRecentProjectLimit) {
+        std::cerr << "MAR-183 C20: twelve records must leave exactly "
+                  << marrow::editor::kRecentProjectLimit << " entries; measured "
+                  << state.preferences.recent_projects.size() << ".\n";
+        cleanup();
+        return false;
+    }
+    if (state.preferences.recent_projects.front() != recorded.back()) {
+        std::cerr << "MAR-183 C20: the newest record must be at the head.\n";
+        cleanup();
+        return false;
+    }
+
+    // (4) What the shell wrote reloads equal through a real store.
+    {
+        const marrow::editor::PreferenceStore store;
+        const auto reloaded = store.load();
+        if (reloaded.preferences.recent_projects !=
+            state.preferences.recent_projects) {
+            std::cerr << "MAR-183 C20: the settings file must reload element-wise "
+                         "equal to what the shell holds.\n";
+            cleanup();
+            return false;
+        }
+        std::vector<std::filesystem::path> copy =
+            reloaded.preferences.recent_projects;
+        if (marrow::editor::normalize_recent_paths(&copy)) {
+            std::cerr << "MAR-183 C20: a list the shell wrote must already be "
+                         "normalized -- normalizing it again changed it.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    cleanup();
+    return true;
+}
+
+/**
+ * @brief MAR-183 C22 -- a Recent entry is a targeted Open, and the gate holds.
+ *
+ * MAR-182 built one gate in front of every session replacement, and MAR-183 adds
+ * exactly one new origin to it. The whole risk of that addition is that the new
+ * origin either bypasses the gate or loses its destination on the way through,
+ * so this case asserts the DESTINATION at every step, never merely that
+ * "something was performed".
+ *
+ * Phase 2 is the regression guard rather than a new-feature check: every
+ * existing caller passes no path, and the empty-path branch is what keeps
+ * `File > Open Project...` raising a chooser instead of arming an Open of "".
+ */
+bool validate_mar183_recent_gate_smoke(const ShellState& source_state) {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar183_c22";
+    const ScopedPreferenceIsolation isolation("mar183-c22");
+    const auto cleanup = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    };
+
+    // --- Phase 1: a CLEAN session performs the targeted Open immediately. ----
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C22 could not seed a project copy.\n";
+            cleanup();
+            return false;
+        }
+        const std::filesystem::path target = project;
+
+        begin_session_intent(&state, SessionIntent::Open, target);
+
+        if (!state.pending_file_application.has_value()) {
+            std::cerr << "MAR-183 C22 phase 1: a clean session must arm the targeted "
+                         "Open immediately. pending_file_application is empty.\n";
+            cleanup();
+            return false;
+        }
+        if (state.pending_file_application->action != FileAction::Open ||
+            state.pending_file_application->path != target) {
+            std::cerr << "MAR-183 C22 phase 1: the armed action must be Open of '"
+                      << target.string() << "', measured path '"
+                      << state.pending_file_application->path.string() << "'.\n";
+            cleanup();
+            return false;
+        }
+        if (state.dirty_intent.has_value() || state.file_path_request.has_value()) {
+            std::cerr << "MAR-183 C22 phase 1: a clean targeted Open must raise "
+                         "neither the prompt nor the chooser.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- Phase 2: a PATHLESS Open still raises the chooser. ------------------
+    // The regression guard. Dropping the empty-path branch would arm an Open of
+    // an empty path here and silently break every File > Open Project... click.
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C22 could not seed a project copy for phase 2.\n";
+            cleanup();
+            return false;
+        }
+
+        begin_session_intent(&state, SessionIntent::Open);
+
+        if (!state.file_path_request.has_value() ||
+            state.file_path_request->action != FileAction::Open) {
+            std::cerr << "MAR-183 C22 phase 2: an UNTARGETED Open must raise the "
+                         "chooser -- file_path_request is empty or not an Open.\n";
+            cleanup();
+            return false;
+        }
+        if (state.pending_file_application.has_value()) {
+            std::cerr << "MAR-183 C22 phase 2: an untargeted Open must arm nothing, "
+                         "but pending_file_application holds '"
+                      << state.pending_file_application->path.string() << "'.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- Phase 3: a DIRTY session arms the prompt, carrying the path. --------
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C22 could not seed a project copy for phase 3.\n";
+            cleanup();
+            return false;
+        }
+        if (!dirty_the_session(&state, " c22-dirty")) {
+            std::cerr << "MAR-183 C22 could not dirty the session.\n";
+            cleanup();
+            return false;
+        }
+        const std::filesystem::path target = project;
+        const std::filesystem::path path_before = state.project_path;
+        const SessionSnapshot before = capture_session_snapshot(state);
+
+        begin_session_intent(&state, SessionIntent::Open, target);
+
+        if (!state.dirty_intent.has_value() ||
+            state.dirty_intent->intent != SessionIntent::Open ||
+            state.dirty_intent->phase != DirtyIntentPhase::Prompting) {
+            std::cerr << "MAR-183 C22 phase 3: a dirty session must ARM an Open "
+                         "intent in the Prompting phase.\n";
+            cleanup();
+            return false;
+        }
+        if (state.dirty_intent->path != target) {
+            std::cerr << "MAR-183 C22 phase 3: the armed intent must carry the "
+                         "destination '" << target.string() << "', measured '"
+                      << state.dirty_intent->path.string() << "'.\n";
+            cleanup();
+            return false;
+        }
+        if (state.pending_file_application.has_value() ||
+            state.file_path_request.has_value()) {
+            std::cerr << "MAR-183 C22 phase 3: the Open was PERFORMED behind the "
+                         "prompt -- a Recent entry bypassed the gate.\n";
+            cleanup();
+            return false;
+        }
+        if (state.project_path != path_before ||
+            !(capture_session_snapshot(state) == before)) {
+            std::cerr << "MAR-183 C22 phase 3: arming must leave the session and "
+                         "project_path bit-identical.\n";
+            cleanup();
+            return false;
+        }
+
+        // --- Phase 4: Discard performs THAT destination. ---------------------
+        resolve_dirty_intent(&state, DirtyIntentResponse::Discard);
+        if (!state.pending_file_application.has_value() ||
+            state.pending_file_application->action != FileAction::Open ||
+            state.pending_file_application->path != target) {
+            std::cerr << "MAR-183 C22 phase 4: Discard must perform the Open of '"
+                      << target.string() << "'.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- Phase 5: "last wish wins" retargets the DESTINATION too. (I2) ------
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C22 could not seed a project copy for phase 5.\n";
+            cleanup();
+            return false;
+        }
+        if (!dirty_the_session(&state, " c22-retarget")) {
+            std::cerr << "MAR-183 C22 could not dirty the session for phase 5.\n";
+            cleanup();
+            return false;
+        }
+        const std::filesystem::path target_a = project;
+        const std::filesystem::path target_b =
+            project.parent_path() / "mar183-c22-other.marrow";
+
+        begin_session_intent(&state, SessionIntent::Open, target_a);
+        begin_session_intent(&state, SessionIntent::Open, target_b);
+
+        if (!state.dirty_intent.has_value() || state.dirty_intent->path != target_b) {
+            std::cerr << "MAR-183 C22 phase 5: the LAST wish must win the "
+                         "destination as well as the intent. Expected '"
+                      << target_b.string() << "', measured '"
+                      << (state.dirty_intent.has_value()
+                              ? state.dirty_intent->path.string()
+                              : std::string("<no intent>"))
+                      << "'.\n";
+            cleanup();
+            return false;
+        }
+        resolve_dirty_intent(&state, DirtyIntentResponse::Discard);
+        if (!state.pending_file_application.has_value() ||
+            state.pending_file_application->path != target_b) {
+            std::cerr << "MAR-183 C22 phase 5: Discard after a retarget must open "
+                         "the SECOND entry, measured '"
+                      << (state.pending_file_application.has_value()
+                              ? state.pending_file_application->path.string()
+                              : std::string("<nothing armed>"))
+                      << "'.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- Phase 6: Cancel leaves everything. ---------------------------------
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C22 could not seed a project copy for phase 6.\n";
+            cleanup();
+            return false;
+        }
+        if (!dirty_the_session(&state, " c22-cancel")) {
+            std::cerr << "MAR-183 C22 could not dirty the session for phase 6.\n";
+            cleanup();
+            return false;
+        }
+        const SessionSnapshot before = capture_session_snapshot(state);
+
+        begin_session_intent(&state, SessionIntent::Open, project);
+        resolve_dirty_intent(&state, DirtyIntentResponse::Cancel);
+
+        if (state.dirty_intent.has_value() ||
+            state.pending_file_application.has_value() ||
+            !(capture_session_snapshot(state) == before)) {
+            std::cerr << "MAR-183 C22 phase 6: Cancel must leave the intent, the "
+                         "arm and the session untouched.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    // --- Phase 7: retargeting to a PATHLESS intent CLEARS the path. ---------
+    // The other half of I2. Assigning the path only when it is non-empty leaves
+    // a stale Open destination on a Reload, and `begin_file_action`'s Reload
+    // case deliberately arms an EMPTY path because `reload_project` reads
+    // `state->project_path` itself.
+    {
+        std::filesystem::path project;
+        ShellState state;
+        if (!load_seeded_project(source_state, root, &project, &state)) {
+            std::cerr << "MAR-183 C22 could not seed a project copy for phase 7.\n";
+            cleanup();
+            return false;
+        }
+        if (!dirty_the_session(&state, " c22-clear")) {
+            std::cerr << "MAR-183 C22 could not dirty the session for phase 7.\n";
+            cleanup();
+            return false;
+        }
+
+        begin_session_intent(&state, SessionIntent::Open, project);
+        begin_session_intent(&state, SessionIntent::Reload);
+
+        if (!state.dirty_intent.has_value() ||
+            state.dirty_intent->intent != SessionIntent::Reload) {
+            std::cerr << "MAR-183 C22 phase 7: the retargeted intent must be "
+                         "Reload.\n";
+            cleanup();
+            return false;
+        }
+        if (!state.dirty_intent->path.empty()) {
+            std::cerr << "MAR-183 C22 phase 7: retargeting to a PATHLESS intent "
+                         "must CLEAR the destination, but it still holds '"
+                      << state.dirty_intent->path.string()
+                      << "'. A conditional assignment leaves a stale Open target "
+                         "on a Reload.\n";
+            cleanup();
+            return false;
+        }
+        resolve_dirty_intent(&state, DirtyIntentResponse::Discard);
+        if (!state.pending_file_application.has_value() ||
+            state.pending_file_application->action != FileAction::Reload) {
+            std::cerr << "MAR-183 C22 phase 7: Discard must perform a Reload.\n";
+            cleanup();
+            return false;
+        }
+        if (!state.pending_file_application->path.empty()) {
+            std::cerr << "MAR-183 C22 phase 7: a Reload arms an EMPTY path -- "
+                         "reload_project reads project_path itself -- but the arm "
+                         "carries '"
+                      << state.pending_file_application->path.string() << "'.\n";
+            cleanup();
+            return false;
+        }
+    }
+
+    cleanup();
+    return true;
+}
+
+/**
  * @brief MAR-182 C12 -- the gate itself, over all four intents.
  *
  * The four intents land in four DIFFERENT observable fields, and the clean half
@@ -4159,6 +5957,24 @@ bool validate_shell_foundation_smoke(
         return false;
     }
     if (!validate_mar182_dirty_prompt_mouse_smoke(options.project_path)) {
+        return false;
+    }
+    if (!validate_mar183_shell_list_algebra_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar183_recent_gate_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar183_recording_policy_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar183_missing_entries_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar183_non_interference_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar183_recent_menu_mouse_smoke(options.project_path)) {
         return false;
     }
     // C11 arms here and is asserted after render_headless_smoke_frames.

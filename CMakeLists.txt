@@ -500,6 +500,7 @@ add_library(marrow_editor STATIC
     src/editor/module.cpp
     src/editor/selection.cpp
     src/editor/preferences.cpp
+    src/editor/recent_projects.cpp
     src/editor/atomic_file_write.cpp
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
@@ -877,6 +878,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_core.cpp
     src/editor/shell_file_paths.cpp
     src/editor/shell_preferences.cpp
+    src/editor/shell_recent_projects.cpp
     src/editor/shell_preview.cpp
     src/editor/shell_asset_watch.cpp
     src/editor/shell_derived_cache.cpp

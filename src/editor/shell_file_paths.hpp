@@ -143,6 +143,17 @@ enum class DirtyIntentResponse {
  */
 struct DirtyIntentRequest {
     SessionIntent intent{SessionIntent::New};
+    /**
+     * The destination, non-empty ONLY for a targeted Open -- which today means
+     * exactly one origin, a Recent-projects entry. Empty means "raise the
+     * chooser", which is every other origin of every intent.
+     *
+     * It lives beside `intent` rather than replacing it because a Recent open IS
+     * an Open: `SessionIntent` gains no value, for the same reason Quit covers
+     * both the menu item and an OS close request. Nothing downstream needs to
+     * tell the two origins apart -- only where to land.
+     */
+    std::filesystem::path path;
     DirtyIntentPhase phase{DirtyIntentPhase::Prompting};
     bool opened{false};
 };
@@ -242,8 +253,18 @@ bool apply_pending_file_action(ShellState* state);
  * `ShellState::project_dirty`, which is a display cache refreshed only where
  * someone remembered to call `update_project_dirty_state` and assigned from a
  * caller-supplied boolean in `adopt_session_project_into_shell`.
+ *
+ * @param path An optional destination, honoured ONLY for `SessionIntent::Open`.
+ *             A Recent-projects entry is the one origin that supplies it;
+ *             every other caller passes none and gets the chooser. When the
+ *             prompt is already up, a second call retargets BOTH fields, so an
+ *             intent that carries no path clears any destination the previous
+ *             one left behind.
  */
-void begin_session_intent(ShellState* state, SessionIntent intent);
+void begin_session_intent(
+    ShellState* state,
+    SessionIntent intent,
+    const std::filesystem::path& path = {});
 
 /**
  * @brief Answers a live prompt.

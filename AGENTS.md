@@ -33,7 +33,7 @@
 - Vendored dependency/hash/patch verification: `cmake --build build --target marrow_verify_third_party`
 - SDL/Sokol window seam unit tests: `./build/marrow_windowing_tests`
 - SDL pen/pressure unit tests: `./build/marrow_pen_input_tests`
-- Cross-platform preference path, atomic-write, fixed curve-preset constant, preset-token, and shell preference-session tests: `./build/marrow_preference_tests`
+- Cross-platform preference path, atomic-write, fixed curve-preset constant, preset-token, shell preference-session, and recent-project list-algebra tests (canonicalization, MRU ordering, de-duplication, eviction at the bound, `normalize` idempotence, and the measured macOS case boundary): `./build/marrow_preference_tests`
 - Agent loopback/partial-I/O/repeated-lifecycle transport tests: `./build/marrow_agent_socket_tests`
 - Sokol ImGui setup/frame/shutdown lifecycle probe: `./build/marrow_sokol_imgui_runtime_probe`
 - Typed transient entity selection model: `./build/marrow_selection_tests`
@@ -47,6 +47,11 @@
 - Shell hot-reload failure coherence and save-failure preservation (C2, C3): `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Core File path workflows -- New/Open/Save/Save As through the dependency-free ImGui path modal, path-resolution rules, failed-Open and failed-Save-As shell preservation, `Ctrl+S` under the text-input guard, the mouse-driven File menu, and the deferred-action wiring of the smoke's own frame body (C4-C11): `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Unified dirty-session intent: the Save/Discard/Cancel machine in front of New/Open/Reload/Quit/OS-close, save failure, save-path cancellation, repeated requests, modal close, and the mouse-driven prompt including the File > Quit item (C12-C19): `MARROW_CONFIG_HOME=/tmp/mar182-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Recent projects: canonicalization, MRU ordering, de-duplication, eviction at the
+  bound, missing-entry visibility, Remove/Clear Missing, the dirty-gated Recent
+  open, failed-action preservation, and the Save As path's report of a failed
+  settings write (C20-C25):
+  `MARROW_CONFIG_HOME=/tmp/mar183-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
@@ -171,7 +176,7 @@
 - Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, the constraint rename/delete lifecycle, the eleven IK/physics constraint parameter widgets located by a real mouse through `HoveredId` with per-drag undo granularity and a Ctrl+click clamp, MAR-178's Rename.../Delete... buttons and their modals driven end to end by that same mouse (see **Headless Frame Smoke Notes** before writing another such scenario), and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
-- MAR-182 window-close veto (MANUAL, not reachable from any headless test): `shell_main.cpp`'s two lines of loop glue -- the `absorb_close_request` call and the `cancel_close_request()` it guards -- run only in the real main loop, which `run_headless_smoke` returns before ever reaching. On an interactive host, dirty a project, click the window's close button, and confirm the `Unsaved Changes` prompt appears and that `Cancel` leaves the window open. Omitting the call makes the editor unclosable rather than silently lossy, because `ShellState::should_exit` is the loop's only exit condition.
+- MAR-182 window-close veto (MANUAL, not reachable from any headless test): `shell_main.cpp`'s two lines of loop glue -- the `absorb_close_request` call and the `cancel_close_request()` it guards -- run only in the real main loop, which `run_headless_smoke` returns before ever reaching. On an interactive host, dirty a project, click the window's close button, and confirm the `Unsaved Changes` prompt appears and that `Cancel` leaves the window open. Omitting the call breaks the **window close button, Cmd+Q and `SDL_EVENT_QUIT`** and nothing else: `File > Quit` still reaches `begin_session_intent` and still sets `ShellState::should_exit`, so the editor stays closable from the menu. A loud failure rather than a silent data-loss one, but a narrower one than an earlier revision of this line claimed when it said the editor would be *unclosable*.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
 - MAR-119 E2E export round-trip: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow --export-runtime /tmp/marrow_e2e_export.mskl --export-binary /tmp/marrow_e2e_export.mbin`
 - MAR-119 E2E exported runtime smoke: `./build/marrow_fixture_smoke /tmp/marrow_e2e_export.mskl /tmp/player_idle.matl`
@@ -281,6 +286,275 @@ required by MAR-210.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
 
+## MAR-183 Persist and Manage Recent Projects Validation Results
+
+Validated 2026-08-30. MAR-183 closes the project-I/O arc with a bounded,
+canonical, de-duplicated recent-project list and the surface that drives it. The
+story's premise was checked before any code: **the storage layer already existed
+and was finished.** `EditorPreferences::recent_projects` has shipped inside
+settings **version 1** since MAR-156, with a parse carrying field-local
+fallbacks (`preferences.cpp:269-295`), a serializer (`:315-323`), and thorough
+unit coverage. What was missing was any *feature*: zero readers, zero writers,
+no menu, no ordering rule. So this story adds **no storage, no parse, no
+serialize, and no version bump** -- `kEditorSettingsVersion` stays **1**, proved
+by an empty `git diff` over `preferences.cpp`. Bumping it would have made every
+settings file this editor ever wrote unreadable, to describe a field version 1
+already describes correctly.
+
+No `.marrow` schema change; `.mskl` v1, `.mbin` v2 and C ABI v1 untouched --
+`git diff --stat` over `include/marrow/c/`, `src/c/`, `include/marrow/runtime/`,
+`project.cpp`, `session.cpp`, `atomic_file_write.cpp` and `preferences.cpp` is
+**empty**. The registry is unchanged at **64**, proved by an empty diff over
+`agent_dispatch.cpp`, `agent_handlers_*.cpp`, `agent_dispatch_smoke.cpp` and
+`tools/`. Neither hand-maintained frame body was edited: `git diff --stat` over
+`shell_main.cpp` and `shell_smoke_frames.cpp` is **empty**.
+
+**Two decisions are recorded here because they are the ones a later reader will
+be tempted to "fix".**
+
+1. **Nothing prunes a recent entry automatically. Not on load, not on display,
+   not on click.** Existence is read per entry, per frame, while the submenu is
+   open, so a remounted volume re-enables its entry with no cache to invalidate.
+   Pruning on load would imply *writing* on load, which would irreversibly
+   delete a user's bookmark over a transient unmount. **Loading therefore never
+   writes** -- a settings file the user is mid-way through hand-editing survives
+   a launch untouched, and an oversized on-disk list is truncated in memory and
+   left oversized on disk until the next real mutation.
+2. **Identity is bytewise equality of `weakly_canonical` output, with no case
+   folding of our own** -- the rule `resolve_choice` already ships. The macOS
+   consequence is **not** the one the design stated, and it was measured rather
+   than assumed; see D2 below.
+
+### What was measured before any code was written
+
+| Claim | Measured |
+|---|---|
+| `ctest -N` total | **22** |
+| Registry and its split | **64** rows, **39** edit / **12** inspection / **10** management / **3** validation. **10** `!= 64U` guards, **1** `std::array<OperationExpectation, 64>`, **2** python assertions -- all unmoved afterwards |
+| `kEditorSettingsVersion` | **1**, `include/marrow/editor/preferences.hpp:12`. Confirmed in writing before Task 1 that it stays 1 |
+| A recent-projects *feature* exists anywhere | **No.** Outside `preferences.cpp` and `preference_store_tests.cpp`, `recent_projects` appears in exactly **three** places, all inert: two comments (`shell_preferences.cpp:96`, `shell_preferences.hpp:28`) and the struct field. Zero readers, zero writers |
+| `marrow_preference_tests` links | `marrow_editor` **only**; no `shell_*.cpp` is in `marrow_editor`. Unchanged by this story |
+| `marrow_preference_tests` cases | **11** before, **12** after |
+| **M4** -- `weakly_canonical` on a **missing** path (macOS) | `weakly_canonical(/…/T/mar183-does-not-exist/x.marrow)` → `'/private/var/folders/…/T/mar183-does-not-exist/x.marrow'`, `ec=0`, `absolute=1`. **The primary branch runs; design §2.3's fallback chain is never exercised on this host.** Printed by the P-case every run |
+| **M4** -- `weakly_canonical` on a relative existing path | `assets/fixtures/player_idle.marrow` → `'/Users/…/Maroow/assets/fixtures/player_idle.marrow'`. Load-bearing: `ShellState::project_path` defaults to exactly that relative path |
+| **M1** -- a `BeginMenu` inside a popup uses `window->GetID(label)` | **Confirmed at runtime.** `kRecentMenu` is found with `ProbeIdKind::Direct`, not `MenuItem` |
+| **M2** -- the nested submenu's ImGui window name, and whether a mouse can open it | **`"Open Recent###Menu_01"`**, and the nested Remove popup is **`"Remove###Menu_02"`**. A click opens both. Printed by C25 every run |
+| **M3** -- is a **disabled** `MenuItem` reachable by `HoveredId`? | **YES, it IS reachable.** This selected C25 assertion 4's shape: the missing entry's label is found by the sweep and a click at its own position is asserted to do nothing. Printed every run |
+| Empty-list `BeginMenu` behaviour | With an empty list, `Open Recent` **is still hoverable** but opens **no** child popup. Printed by C25 every run |
+| **M5** -- `~/Library/Application Support/Marrow` | **ABSENT** before, and **ABSENT** after the entire verification run |
+
+### Results
+
+| Case | Assertion | Result |
+|---|---|---|
+| P-case | `marrow_preference_tests` "recent project list algebra and isolated round trip": canonicalization, dedup across spellings, MRU ordering, promotion without duplication, eviction at the bound **checked after every promotion**, both polarities of every changed-bool, `normalize` idempotence, missing paths surviving `normalize`, `drop_missing_recent_paths`, the macOS case boundary, and an isolated store round trip | PASS (12 cases) |
+| C20 | The algebra as the **shell** drives it: a relative `project_path` records **absolute**; two spellings collapse; 12 records leave exactly `kRecentProjectLimit` with the newest at the head; what the shell wrote reloads element-wise equal and is already normalized | PASS |
+| C21 | The recording policy, all seven rows of design §2.4: Open records; a **failed** Open records nothing and preserves order; Save As records the **new** path; a failed Save As records nothing and leaves the settings file byte-identical **with no write inside the rename seam**; a **successful** Save As whose **settings** write fails still REPORTS it (phase 4b, added by the review pass, with a selective rename callback that fails only `editor-settings.json` so the project write can succeed); New records nothing but **arms**, and its first save records and **consumes** the arm; a **startup** project's ordinary Save records nothing and leaves the settings file **absent**; Reload records nothing | PASS |
+| C22 | The gate. Clean + targeted → `pending_file_application` holds `{Open, path}`. Clean + **pathless** → the chooser (the regression guard). Dirty → `dirty_intent = {Open, path, Prompting}`, nothing performed, session snapshot bit-identical. Discard performs **that** destination. Retarget A→B then Discard performs **B**. Cancel leaves everything. Retarget to a **pathless** intent **clears** the path | PASS |
+| C23 | Missing entries and load semantics: the settings file is **byte-identical** across load; a missing entry **survives**; normalization ran in memory (two spellings collapsed, empty dropped, both absolute); `default_curve` survived and the status is `LoadedWithDefaults`; `recent_project_exists` is true/false correctly; Remove drops exactly one and reloads equal; Clear Missing removes exactly the missing and a second call rewrites **nothing** (bytes **and** mtime); an **absent** settings file stays absent across a load | PASS |
+| C24 | Non-interference and write failure: a record leaves `dirty()`, `can_undo()`, `can_redo()` and `serialize_project()` all identical; re-recording the head leaves bytes **and** mtime unchanged; under an RAII-scoped rename failure the write fails, reports, **keeps** the in-memory change and leaves the file byte-identical, and the retry after the scope closes succeeds; `default_curve` and the unknown additive field `"payload"` both survive | PASS |
+| C25 | A **real mouse** through the real menu: `File` → `Open Recent` opens a child popup; every enabled seeded entry's label is emitted; the missing entry is present but **not actionable** -- the click over it changes neither `error_message` nor `status_message`, which is the only trace a clickable dead entry would leave (see the review-pass inversion below); a click over a **dirty** session raises `kDirtyIntentModal` and arms an `Open` intent **carrying that path**; `Remove > <missing entry>` removes exactly it and reaches the settings file; `Clear Missing` removes only the missing; an empty list opens no child popup | PASS |
+
+All 13 test binaries pass. `ctest` **22/22**, `-L runtime` 4/4, `-L editor`
+12/12, `marrow.renderer_link_boundary` 1/1. `marrow_agent_dispatch_smoke` prints
+**408** `[ OK ]` cases against 64 operations. `tools/mcp/test_client.py`
+**PASSED**, and `py_compile` over the four MCP modules is clean.
+`marrow_verify_third_party` and `marrow_constraint_warning_check` both build.
+
+### The four non-bypass greps (design §4.3)
+
+| # | Grep | Required | Measured |
+|---|---|---|---|
+| P1 | `session.open\|session.create\|session.reload` in `shell_recent_projects.cpp` | 0 lines | **0** |
+| P2 | `pending_file_application\|begin_file_action` in `shell_recent_projects.cpp` | 0 lines | **0** — the load-bearing one |
+| P3 | `pending_file_application *=` over `src/editor/` | no new file appears | Exactly `shell_file_paths.cpp` (3, one of them the new `arm_open`) and the smoke's deliberate arms. **`shell_recent_projects.cpp` does not appear** |
+| P4 | `begin_session_intent` over `src/editor/` | no caller anywhere else | `shell_project_panels.cpp` (New/Open/Reload/Quit + two Reload icons), `shell_file_paths.cpp` (`absorb_close_request`), `shell_recent_projects.cpp` (**one** call), and the smokes |
+
+P2 is the structural proof: with both names absent from the recent module, the
+only route from a Recent click to a session replacement is `begin_session_intent`,
+whose first act is to consult `session.dirty()`.
+
+### Inversions -- actual outcomes, not predictions
+
+Twelve were specified. **Ten bit as specified. Two could not bite as written and
+the CASES were strengthened, never the gates.** Two more bit, but in a
+*different* case than the documents predicted.
+
+| # | Inversion | Outcome |
+|---|---|---|
+| **I1** | Drop the arm; record on every successful save | **BIT — C21 phase 6.** `"an ORDINARY Save must record nothing. The list now holds '/…/marrow_mar183_c21/startup/mar180_shell.marrow'. Only Open, Save As, and the FIRST save of a New session record (AC2), and this session was created by neither."` The planner's warning held: the naive shape (open A, then Ctrl+S) **cannot** bite, because A is already the head, `promote` returns false and the no-op skip suppresses the write. The case uses the **startup** path (`reload_project`, which records nothing) against an **absent** settings file, and asserts both the empty list and the absent file |
+| **I1b** | Record at `create` instead of at the first save | **BIT — C21 phase 5.** `"New must record NOTHING -- there is no file on disk yet to record."` |
+| **I2a** | Retarget `intent` but not `path` in "last wish wins" | **BIT — C22 phase 5.** `"the LAST wish must win the destination as well as the intent. Expected '/…/mar183-c22-other.marrow', measured '/…/mar180_shell.marrow'."` |
+| **I2b** | Assign `path` only when non-empty | **BIT — C22 phase 7.** `"retargeting to a PATHLESS intent must CLEAR the destination, but it still holds '/…/mar180_shell.marrow'. A conditional assignment leaves a stale Open target on a Reload."` |
+| **I3** | `open_recent_project` calls `session.open` directly | **BIT — C25 assertion 3.** `"clicking a recent entry over UNSAVED work must raise the Save/Discard/Cancel prompt. No intent was armed, so the Recent surface bypassed MAR-182's gate."` |
+| **I4** | Promote on a **failed** open | **BIT — C21 phase 2.** `"a FAILED Open must record nothing and leave the order unchanged. The head is now '/…/mar183-broken.marrow'."` |
+| **I5** | Prune missing entries on load | **BIT — C23 assertion 2.** `"a recent entry whose file does NOT exist must survive the load. Pruning it would delete the user's bookmark over a transient unmount."` |
+| **I6** | `canonical_recent_path` returns the path unchanged | **BIT — P-case** (`"two spellings of one file must collapse to exactly one entry, got 2"`) **and C20** (`"a relative path must be stored ABSOLUTE -- otherwise the list is relative to whichever directory the editor happened to be launched from."`) |
+| **I6b** | `normalize` keeps the **last** duplicate | **DID NOT BITE as written.** The fixture's duplicate pair was adjacent and at the front, where keep-first and keep-last land on the same index. **The case was strengthened**: the pair is now deliberately **non-adjacent**, with two unrelated entries between the spellings, and index 0 is asserted rather than mere presence. It now fails with `"dedup must keep the FIRST occurrence AT ITS ORIGINAL INDEX 0"` and `"the entries that separated the duplicate pair must keep their positions behind the survivor"` |
+| **I7a** | Truncate **before** inserting | **BIT — P-case.** `"twelve promotions must leave exactly kRecentProjectLimit entries, got 11"` |
+| **I7b** | Cap comparison off by one (`> limit + 1`) | **DID NOT BITE as written.** Sampling only the final size after 12 promotions tests the one parity where the bug is invisible: the list sits at 11 on odd promotions and corrects on even ones. **The case was strengthened**: the bound is now asserted as an **invariant after every promotion**. It now fails with `"the list must NEVER exceed kRecentProjectLimit -- after promotion 11 it held 11"` |
+| **I8** | Route a record through `session.begin_edit` | **BIT, but not where predicted.** The documents name C24 assertion 1. Its first detectors are two **shipped MAR-181 guards** that run earlier: C4 (`"the explicit Save must clear the dirty flag."`) and then C5 (`"a successful Save As must land clean."`). C24 assertion 1 asserts the same property directly (a four-value comparison across the record call) but is not the first to fire; the property is over-determined by existing coverage |
+| **I9** | Never emit the `Open Recent` submenu | **BIT — C25 phase 0.** `"\"File###Menu_00\" never emitted a widget with the id of \"Open Recent\". A real mouse swept every position in the window and HoveredId never equalled that id, so the widget is absent or unreachable."` |
+| **I10** | Disable the `Remove` items for missing entries | **BIT — C25 assertion 5.** `"clicking Remove on the missing entry must delete exactly it."` Because M3 measured disabled items as **hoverable**, the sweep still finds the label and the assertion catches the **effect** rather than the presence -- the stronger form |
+| **I11** | Write the settings file during `load_shell_preferences` | **BIT, but not where predicted.** The documents name C23 assertions 1 and 8. **Four** detectors fire, three of them earlier: two shipped MAR-170 guards (`"A load-only preference session must create no settings file."`, then `"Loading a malformed settings file repaired it or changed a keyframe."`), then **C21 phase 6** (`"loading must not create the settings file."`), and only then C23 |
+| **I12** | Drop the no-op skip in `persist_recent_projects` | **BIT — C23 assertion 7.** `"the no-op skip must leave the settings file's mtime untouched -- rewriting identical bytes is still a write."` |
+| — | Iterate the **live** vector instead of a copy | **DID NOT REPRODUCE.** Neither a crash nor a skipped entry appeared under C25's click sequence. **The copy was kept anyway**: mutating the vector being iterated is genuine undefined behaviour, and this harness's particular click ordering not tripping it is not a guarantee |
+| — | `apply_save_as` records `project_path` instead of `chosen` | **BIT — C21 phase 3.** `"Save As must record the NEW path at the head, not the old one."` |
+| — | Drop the empty-path branch (always `arm_open`) | **BIT — C22 phase 2**, `"an UNTARGETED Open must raise the chooser -- file_path_request is empty or not an Open."` MAR-181 **C9 step 4** fires first on the rail; C22 phase 2 was confirmed to bite independently by temporarily hoisting it ahead of C9 |
+| — | `persist_recent_projects` builds a fresh `EditorPreferences` | **BIT — C23 assertion 6**, `"a recent-list write must preserve default_curve."` |
+| — | `persist_recent_projects` returns true on a failed save | **BIT — C24 assertion 3**, `"a failed settings write must report an error."` |
+| — | `normalize_recent_paths` non-idempotent | **BIT — P-case**, five assertions including `"dedup must keep the FIRST occurrence AT ITS ORIGINAL INDEX 0"` |
+| **R1** | Drop the `present` argument from the recent entry's `MenuItem` (`shell_recent_projects.cpp:110-111`), making a **missing** entry clickable | **BIT — C25 assertion 4, but only after the review pass repaired it.** As originally written the assertion could **not** bite: it clicked the missing entry on a **clean** session and then read `dirty_intent`, `pending_file_application` and `project_path`, all three of which are vacuous there — the clean session arms immediately via `arm_open`, the arm is consumed by the `apply_pending_file_action` at the tail of the same `render_frame` (which **resets** the optional at its head), and the failed `session.open` returns **before** `project_path = pending.path`. What survives is the failure **report**, so the assertion now snapshots `error_message`/`status_message` across the click. It fails with `"MAR-183 C25 assertion 4: a missing recent entry must NOT be actionable, but the click CHANGED the shell's messages -- status '' -> 'Project load failed', error '' -> '/private/var/folders/…/T/marrow_mar183_c25/gone.marrow:1:1: failed to open file'. Dropping the `present` argument from the entry's MenuItem makes a dead path clickable: the open is attempted and fails, which is the only trace that survives apply_pending_file_action."` **No other case catches it** -- established by reading each driver, not by assertion. **Five** things outside the app call `draw_menu_bar`: `shell_smoke_project.cpp:2310` (MAR-181 C9), `:2534` (MAR-181 C10), `:3520` (C25), `:5347` (MAR-182 C19), and `shell_smoke_frames.cpp:64`. C9, C10 and C19 each construct a bare `ShellState` and name `preferences`, `load_shell_preferences` and `recent_projects` **nowhere**, so the list is empty, `BeginMenu(kRecentMenu, !entries.empty())` is disabled and the entry loop never runs -- and C10 never opens the File menu at all. The frames driver fails as a detector twice over: its `load_shell_preferences` runs inside `ScopedPreferenceIsolation("smoke")` against a fresh temp config home that nothing records into, and its mouse events target the viewport, timeline and graph, never the File menu. It is also **not** a separate binary -- `CMakeLists.txt:876`/`:906` compile it into `marrow_editor_shell` itself -- and it runs in the final `&&` chain **after** C25, so under R1 the run has already returned 1 before it starts. Confirmed by running the mutation against the whole suite: exactly one test fails, `marrow.editor_shell_smoke` |
+| **R2** | Move `apply_save_as`'s `state->error_message.clear()` back **after** `record_recent_project` (its position at `25bf694`) | **BIT — C21 phase 4b**, added by the same pass, `"MAR-183 C21 phase 4b: a failed settings write on the Save As path must be REPORTED. Design 10.7 grants this failure exactly ONE report -- 'reported once and then forgotten' -- and clearing error_message AFTER record_recent_project rather than before it swallows that one report, so the failure is reported zero times."` The other two record sites already ordered it correctly (`shell_core.cpp:684` clears before recording; the Open branch never clears afterwards), so only Save As was affected |
+
+### Document errors found during implementation (6)
+
+Every story in this arc has found errors in its own governing documents (175
+three, 176 seven, 177 six, 178 six, 179 six, 180 seven, 181 four plus a later
+fifth, 182 six).
+
+| # | Where | Error | Resolution |
+|---|---|---|---|
+| D1 | Design §1.2 and plan §0.3 | Both assert that `grep -rniE "recent\|mru\|last_?opened\|project_history"` over `src/` returns hits in **"exactly two files"**, and the plan makes a non-empty result a **stop condition** | The grep returns hits in **ten** files. Every extra hit is a false positive: `handle_project_history_shortcuts` is the **undo/redo + Ctrl+S** handler ("project history" = the undo history, not a project list), `recent(%.2f, %.2f)` is preview root-motion prose, and the `recent_projects` mentions in `shell_preferences.*` are comments about *preserving* the field. The substantive claim -- that no recent-projects **feature** exists -- was re-verified directly and **holds**: zero readers, zero writers |
+| D2 | Design §2.2 and §10.1 | State the macOS consequence as unconditional: *"opening `/x/A.marrow` and then `/x/a.marrow` … produces two entries"* | **Measured, and it is only half true -- in the half that matters, backwards.** `weakly_canonical` resolves its longest **existing** prefix through the filesystem, so on macOS both spellings of a file that **exists** canonicalize to the on-disk spelling and **collapse into one entry**. Only when the file is **missing** do the lexical remainders survive and leave two. Both branches are now asserted and printed by the P-case every run, so the behaviour cannot drift silently |
+| D3 | Plan §1.4 | Requires `grep -nE "session\|ShellState\|PreferenceStore\|imgui\|ProjectData"` over the new module to return **0 lines** | Unsatisfiable as written: the header **documents** the split it enforces, so three doc-comment lines match. The substantive check was run instead -- the complete `#include` list is `<cstddef> <filesystem> <vector> <algorithm> <system_error> <utility>` plus the module's own header, and **no non-comment line** matches. `test_editor_session_isolation` still passes |
+| D4 | Plan §1.5 | Predicts inversion **I7a** ("`resize` before `insert`") fails with *"`front()` is `p11`, not `p12`"* | The predicted symptom does not follow from the mutation. Truncate-before-insert leaves the newest entry at the head and the **size** wrong: the actual failure is `"twelve promotions must leave exactly kRecentProjectLimit entries, got 11"` |
+| D5 | The plan's task list | Design §7.2 and §5 both require **C20**, but **no task in the plan implements it**. Tasks 1-6 cover the P-case, C21, C22, C23, C24 and C25 only | C20 was written and added to the rail. It is falsifiable: under I6 it fails with `"a relative path must be stored ABSOLUTE …"` |
+| D6 | Design §6 / plan §3.5, §4.4, §6.2 | Attribute **I8** to C24 assertion 1 and **I11** to C23 assertions 1 and 8 | Both bite, but each has earlier detectors among **shipped** guards -- I8 in MAR-181 C4 then C5, I11 in two MAR-170 guards then MAR-183's own C21 phase 6. The named assertions are real and correct; they are simply not the first to fire. Recorded rather than "fixed", because over-determination here is a strength |
+
+### Methodology hazards worth recording -- the comparison itself can lie
+
+**This section generalises past MAR-183.** Sixteen stories in this chain have
+scrutinised the *code under test* while treating the **comparison mechanics** as
+trustworthy. An inversion result is not a claim about code; it is a claim about a
+**comparison** -- "this case, built from this source, produced this message." Any
+link in that chain can break without the code being wrong, and when one does the
+result is a confident, false, and completely plausible-looking claim. Three
+distinct instances were found here, two of them near-misses caught only by luck.
+**H4 was added later**, by the review pass that read this section. It is H3's
+sibling, not a restatement of it. **H3 is historical**: a recovery or rewrite
+silently thinned a case that *was* once falsifiable, so its remedy is to re-run
+every inversion after any recovery. **H4 is authorial**: the assertion was
+**never** falsifiable and no recovery was involved, so its remedy is to trace
+which writes actually survive to the assertion point. Both rest on the same
+principle -- a passing case is no evidence that it detects anything.
+
+**H1 -- a `cp` restore that does not rebuild.** Restoring an inverted source file
+with `cp` can leave the restored file and its stale object sharing the **same
+second** in their mtimes, in which case `make` does **not** rebuild and the next
+run silently exercises the *inverted* binary. This bit once:
+`marrow_preference_tests` reported two failures against a pristine source tree,
+and C23 assertion 3 failed for the same reason. Every "the inversion bit" claim
+across this whole chain rests on the restore actually rebuilding.
+*Rule: `touch` after every restore, and run final verification against a
+from-scratch `rm -rf build`.*
+
+**H2 -- a hand-sliced reference line.** Comparing a measured message against a
+recorded one with `sed -n '3p'` pulled the **wrong line** out of the reference
+file and printed `DIFFERS` for a message that was in fact byte-identical. Caught
+only because the diff output was visibly nonsense; had the off-by-one landed on a
+*similar* line it would have passed unnoticed in either direction.
+*Rule: compare with `cmp`/`diff` against a whole recorded string. Never
+hand-slice line numbers out of a reference file, and never eyeball a
+byte-identity claim.*
+
+**H3 -- a recovered case can be thinner than the one the inversion was run
+against.** After test code was lost and rebuilt, the recovered cases **passed**
+-- but passing is not evidence, because *a thinned case passes too.* The property
+destroyed by the loss was **falsifiability**, and falsifiability is invisible to a
+passing run. Confirming C20/C24/C25 green after recovery proved nothing about
+whether they still detect anything.
+*Rule: after any recovery, restoration or rewrite of test code, **re-demonstrate
+falsifiability** -- re-run the inversions against the recovered tree. Do not
+substitute a green run for it.*
+
+**H4 -- an assertion can be VACUOUS at the point it runs.** C25 assertion 4 read
+three pieces of state after clicking a disabled entry (`dirty_intent`,
+`pending_file_application`, `project_path`) and **none of them could have been
+set on that click**, on a clean session, no matter what the menu did: the arm is
+created and consumed inside the same `render_frame`, and the failed open returns
+before it assigns the path. The case passed, the inversion table listed it, and
+the property it named -- AC4's "visible but *disabled*" half -- had **no failing
+detector anywhere**. Its author reasoned about what *should* be observable
+instead of tracing what actually survives the frame.
+*Rule: an assertion earns its place by FAILING under the mutation it names. Run
+that mutation. Reading state that a passing run leaves at its default is not
+evidence -- trace which writes survive to the assertion point, and assert on
+those. The reusable shape to watch for, which H3 has nothing to say about: state
+ARMED and CONSUMED inside a single `render_frame`, leaving every later reader at
+a default it would have held anyway.*
+
+**What was actually done here.** Every inversion restore in this story is followed
+by `touch`. The final verification ran against a from-scratch rebuild. Two
+inversion results (I7b, I6b) were re-run after H1 was found, and the three
+headline inversions (I1, I2a, I2b) were re-verified against the clean build with
+identical messages. After H3, **every** inversion originally run against the three
+rebuilt cases (C20, C24, C25) was re-run against the committed tree: I6 -> C20;
+I9, I10, I3 and the live-vector variant -> C25; the failed-save, fresh-preferences
+and transaction variants -> C24. Five reproduced byte-identically (verified with
+`cmp`, per H2), one reproduced its first detector with the second stated as
+unchanged-by-inference only, and the live-vector variant **again did not
+reproduce** -- reported as a second non-reproduction rather than converted into a
+convenient bite. C21/C22/C23 were never exposed to H3: they were restored from a
+byte-exact file copy rather than rewritten.
+
+### Not independently covered
+
+- **`shell_main.cpp`'s frame body is still reachable from no test.** Unchanged
+  by this story, which adds **no line** to either hand-maintained frame body:
+  the menu draws inside `draw_menu_bar`, which both bodies already call, and the
+  deferral rides `apply_pending_file_action`, which MAR-181 C11 already pins on
+  the **smoke** side only. Carried forward from MAR-182.
+- **macOS case duplicates**, in the corrected form measured in D2: two
+  case-variant spellings of a **missing** file remain two entries.
+- **A New project created over an existing file, then saved, is recorded** --
+  the arm is keyed on the create, not on the file's prior absence. C21 phase 5
+  asserts both polarities of the arm for exactly this reason.
+- **Up to `kRecentProjectLimit` `stat` calls per frame** while the submenu is
+  open, and a `stat` on a dead network mount can block one.
+- **An oversized on-disk list stays oversized** until the next real mutation,
+  because loading never writes.
+- **Orphan `*.tmp.*` files** beside `editor-settings.json` after a crash
+  mid-write. `fsync` remains a non-goal, inherited from MAR-180 §3.2.
+- **A settings write failure is reported once and then forgotten.** The
+  in-memory list keeps the change, so the session behaves as if it persisted and
+  the next launch disagrees. Identical to `set_shell_default_curve`'s shipped
+  behaviour, and deliberately not diverged from it.
+- **`commit_path_choice` has ZERO end-to-end coverage** (`shell_file_paths.cpp`,
+  single call site inside the chooser modal). No smoke anywhere in `src/editor/`
+  clicks `"Choose"`. **Pre-existing from MAR-181**, and MAR-183 does **not**
+  close it: C25 clicks `Open Recent` entries, `Remove` and `Clear Missing`, and
+  C22 phase 2 asserts only that the chooser is *raised*. Carried here from the
+  MAR-182 review, which raised its consequence: MAR-182 made this the only exit
+  from `AwaitingSave`. It is partly self-mitigated -- `tick_dirty_intent` tests
+  `!session.dirty()` **before** `file_path_request`, so a stale request cannot
+  deadlock; only a `commit_path_choice` that stopped calling `apply_save_as`
+  would hang the prompt, and nothing would observe it. **MAR-183 adds a new
+  consequence to BOTH of that call site's action branches, not just one**: the
+  SaveAs branch calls `apply_save_as`, which now writes the settings file on
+  success, and the **Open** branch calls `arm_open` (`commit_path_choice:189-192`),
+  whose deferred `apply_pending_file_action:868` records -- and therefore writes
+  -- on a successful open. Each branch now has a preference write behind a click
+  no end-to-end test reaches. Both *destinations* are covered UI-free --
+  `apply_save_as` by MAR-181 C5/C6/C7 and by C21 phases 3, 4 and 4b (a **failed**
+  Save As writes nothing inside the rename seam, and a **successful** one whose
+  settings write fails still reports it), and the armed Open by C21 phases 1-2
+  and by C22 -- it is the *click that reaches them* that is untested. Closing
+  this needs a smoke that drives `Choose` end to end -- its own piece of work,
+  deliberately not attempted here.
+- **A native close during a live authoring gesture re-raises the prompt.**
+  `absorb_close_request` is **not** gated on `authoring_gesture_active`, though
+  the File-menu items are, so an OS close mid-gesture raises the prompt and
+  `Save` then returns false at `save_project_file`'s gesture guard, re-raising
+  it. There is no fall-through and the status bar explains ("Finish the active
+  edit before saving"), so this is a **UX wrinkle, not a correctness problem**.
+  Recorded from the MAR-182 review; the gating is deliberately **left
+  unchanged** -- that is a design decision for a later story, not a drive-by.
+- **A persisted "last used directory"** for the chooser is **deliberately
+  deferred**, not forgotten. `shell_file_paths.cpp` names it as MAR-183's
+  territory, but it is in none of MAR-183's six acceptance criteria and is a
+  different preference with a different lifetime and failure mode.
+
 ## MAR-182 Unified Dirty-Session Intent Validation Results
 
 Validated 2026-08-30. MAR-182 puts one Save / Discard / Cancel state machine in
@@ -364,7 +638,7 @@ unchanged from MAR-181.
 | I6 | `Cancel` disturbs the session | C17 | **C15, C17**: `Cancel must leave the session bit-identical.` C15 asserts the same property |
 | I7 | `begin_session_intent` stacks instead of replaces | C17 | **C17 alone**: `a second intent must REPLACE the first (last wish wins), not stack behind it.` Exact |
 | I8 | `absorb_close_request` returns `false` on a dirty project | C18 | **C18 alone**: `a DIRTY session must VETO the close -- the return value is what tells the loop to clear the host's latch` |
-| I8b | Veto even after a confirmed exit | C18 | **DID NOT BITE as first written.** The clause never changes the return value -- `!should_exit` is already `false` on that path -- so the return-value assertion could not see it. What removal actually breaks is different: Discard leaves the session **dirty**, so the absorber re-enters the gate and **arms a fresh prompt during shutdown**. C18 was strengthened to assert that a post-exit call arms nothing, and now fails: `the absorber re-entered the gate during shutdown and raised a prompt behind a window that is already closing.` |
+| I8b | Veto even after a confirmed exit | C18 | **DID NOT BITE as first written.** The clause never changes the return value -- `!should_exit` is already `false` on that path -- so the return-value assertion could not see it. What removal actually breaks is different: Discard leaves the session **dirty**, so the absorber re-enters the gate and **arms a fresh prompt during shutdown**. C18 was strengthened to assert that a post-exit call arms nothing, and now fails: `the absorber re-entered the gate during shutdown and raised a prompt behind a window that is already closing.` **That message describes the pure function's CONTRACT, not an observed shell behaviour.** In the shipping loop the clause is unreachable: `while (!should_exit)` ends the iteration before `absorb_close_request` runs again. The assertion is kept because it guards the contract -- `absorb_close_request` is a pure, separately callable function and nothing in its signature promises a caller that respects that ordering -- not because a live failure was seen |
 | I9 | Leave the menu's `Quit` unwired from the gate | C19 | **DID NOT BITE as first written** -- the fifth consecutive story with a specified inversion that could not fail. C19 clicked only `Reload Project`, so an unwired `Quit` was invisible to it, and C12-C18 pass by construction. **C19 phase 4 was added** to probe the `Quit` item itself. Re-run under I9, C19 fails alone: `the Quit menu item must arm a Quit intent through begin_session_intent. It did not, so Quit is handled somewhere this smoke's frame body does not run.` |
 | I10 | Skip the stale-request fix | C15, C19 | **C19 phase 5 alone; C15 PASSES** (see D4). C15 simulates the chooser's Cancel by resetting the optional directly, so it never drives the ImGui close path the fix lives on |
 | I11 | Draw the prompt outside `draw_file_path_modals` | C19 | **C19 alone**, at phase 1: the prompt never opens, which is the duplicate-frame-body hazard caught at the layer that owns it |
@@ -411,7 +685,7 @@ detector is none:
 | `apply_pending_file_action` in the **smoke's** body | MAR-181 C11 | smoke half only |
 | `apply_pending_file_action` in **`shell_main.cpp`** | **none** | *(pre-existing gap, neither created nor closed here)* |
 | `absorb_close_request` / `cancel_close_request` in the loop | **none** | manual check only; C18 covers the **decision**, not the call |
-| the prompt itself | C19 | both bodies, via `draw_menu_bar`'s single reachable path |
+| the prompt itself | C19 | the shared `draw_menu_bar` path. **C19 runs its own miniature frame body**, not either shipped one, so for `shell_main.cpp` this is *structural inference, not test coverage* -- the same caveat as row 2 |
 
 - **Row 2 is inherited, not introduced.** C11 catches deleting the *smoke's*
   `apply_pending_file_action` and is blind to deleting the *interactive* one --
@@ -424,9 +698,13 @@ detector is none:
   the real main loop, and `run_headless_smoke` returns before a window host is
   ever created. C18 covers the decision in both polarities; that it is *called*
   is covered only by the manual check. Three mitigations, stated rather than
-  hidden: (a) `ShellState::should_exit` is the loop's **only** exit condition, so
-  omitting the call makes the editor unclosable -- a loud failure, not a silent
-  data-loss one; (b) `EditorWindowHost::request_close()` is **deleted**, and with
+  hidden: (a) omitting the call breaks the **window close
+  button, Cmd+Q and `SDL_EVENT_QUIT`** and nothing else -- `File > Quit` still
+  reaches `begin_session_intent` and still sets `should_exit`, so the editor
+  remains closable by the menu. **This corrects an earlier claim that omitting
+  the call makes the editor *unclosable*, which was wrong**; the mitigation is
+  weaker than previously stated, which is exactly why it is stated accurately
+  here. It is still a loud failure rather than a silent data-loss one; (b) `EditorWindowHost::request_close()` is **deleted**, and with
   one implementor that deletion is compiler-enforced, so the old bypass cannot be
   reached by accident; (c) a manual interactive check is recorded in the
   verification list above.

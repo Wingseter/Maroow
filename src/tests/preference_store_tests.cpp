@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -23,6 +24,7 @@
 
 #include "marrow/editor/authoring.hpp"
 #include "marrow/editor/preferences.hpp"
+#include "marrow/editor/recent_projects.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/session.hpp"
 #include "../editor/preferences_internal.hpp"
@@ -1211,6 +1213,295 @@ void test_curve_preset_tokens_match_settings_tokens(TestSuite& suite) {
     }
 }
 
+// MAR-183: the recent-project list algebra, plus one isolated store round trip.
+//
+// The algebra lives in `marrow_editor` (`recent_projects.cpp`) precisely so this
+// binary can reach it without linking the shell. See the note above
+// `test_shell_preference_session`: do not "fix" that split.
+//
+// The store layer itself is NOT retested here -- MAR-156 shipped
+// `recent_projects` inside settings version 1, and the four cases above already
+// cover its parse, its fallbacks and its additive preservation. This case covers
+// only what MAR-183 adds: canonicalization, MRU ordering, de-duplication,
+// eviction at the bound, and the changed-bool every persist decision is keyed on.
+void test_recent_project_list_algebra(TestSuite& suite) {
+    using marrow::editor::canonical_recent_path;
+    using marrow::editor::drop_missing_recent_paths;
+    using marrow::editor::forget_recent_path;
+    using marrow::editor::kRecentProjectLimit;
+    using marrow::editor::normalize_recent_paths;
+    using marrow::editor::promote_recent_project;
+    using marrow::editor::recent_project_exists;
+
+    // (1) M4 gate. Printed EVERY run: design 2.3 specifies a fallback chain that
+    // only runs if `weakly_canonical` errors on a missing path, and which branch
+    // ran is a platform fact, not an assumption.
+    {
+        const fs::path missing =
+            fs::temp_directory_path() / "mar183-does-not-exist" / "x.marrow";
+        const fs::path canonical_missing = canonical_recent_path(missing);
+        std::cout << "  MAR-183 M4 measured: canonical_recent_path(missing) -> '"
+                  << canonical_missing.string() << "' absolute="
+                  << canonical_missing.is_absolute() << '\n';
+        suite.expect(!canonical_missing.empty(),
+                     "canonicalizing a missing path must return something");
+        suite.expect(canonical_missing.is_absolute(),
+                     "canonicalizing a missing path must still absolutize it -- an "
+                     "entry must outlive its file (AC4)");
+        suite.expect(canonical_recent_path(fs::path{}).empty(),
+                     "canonicalizing an empty path must return empty, not the CWD");
+    }
+
+    // (2) Canonicalization of a relative path, and agreement with its own
+    // absolute spelling. ShellState::project_path defaults to a RELATIVE path,
+    // so this is load-bearing rather than cosmetic.
+    const fs::path relative = "assets/fixtures/player_idle.marrow";
+    const fs::path canonical_relative = canonical_recent_path(relative);
+    std::cout << "  MAR-183 M4 measured: canonical_recent_path(relative existing) -> '"
+              << canonical_relative.string() << "'\n";
+    suite.expect(canonical_relative.is_absolute(),
+                 "a relative recent path must canonicalize to an absolute one");
+    suite.expect(canonical_recent_path(fs::absolute(relative)) == canonical_relative,
+                 "the relative and absolute spellings of one file must canonicalize equal");
+
+    // (3) Dedup across spellings. (I6)
+    {
+        std::vector<fs::path> list;
+        suite.expect(promote_recent_project(&list, relative),
+                     "promoting into an empty list must report a change");
+        suite.expect(promote_recent_project(&list, fs::absolute(relative)) == false,
+                     "re-promoting the head under a different spelling must be a no-op");
+        suite.expect(list.size() == 1,
+                     "two spellings of one file must collapse to exactly one entry, got " +
+                         std::to_string(list.size()));
+        suite.expect(list.front() == canonical_relative,
+                     "the surviving entry must be the canonical form");
+    }
+
+    // (4)(5) MRU ordering, and promotion rather than duplication.
+    const fs::path a = canonical_recent_path("/tmp/mar183/a.marrow");
+    const fs::path b = canonical_recent_path("/tmp/mar183/b.marrow");
+    const fs::path c = canonical_recent_path("/tmp/mar183/c.marrow");
+    {
+        std::vector<fs::path> list;
+        (void)promote_recent_project(&list, a);
+        (void)promote_recent_project(&list, b);
+        (void)promote_recent_project(&list, c);
+        suite.expect(list == std::vector<fs::path>{c, b, a},
+                     "promotion must order most-recent-first");
+        suite.expect(promote_recent_project(&list, a),
+                     "promoting a non-head existing entry must report a change");
+        suite.expect(list == std::vector<fs::path>{a, c, b},
+                     "re-promoting an existing entry must move it to the head, not duplicate it");
+        suite.expect(list.size() == 3,
+                     "re-promotion must not grow the list, got " +
+                         std::to_string(list.size()));
+    }
+
+    // (6) Eviction at exactly the bound, insert-before-truncate. (I7)
+    {
+        std::vector<fs::path> list;
+        std::vector<fs::path> ordered;
+        for (int index = 1; index <= 12; ++index) {
+            const fs::path entry = canonical_recent_path(
+                fs::path("/tmp/mar183/p") / (std::to_string(index) + ".marrow"));
+            ordered.push_back(entry);
+            (void)promote_recent_project(&list, entry);
+            // The bound is an INVARIANT, checked after EVERY promotion. A cap
+            // comparison that is off by one leaves the list one over the bound
+            // on odd promotions and corrects itself on even ones, so sampling
+            // only the final size tests the single parity that hides the bug.
+            suite.expect(list.size() <= kRecentProjectLimit,
+                         "the list must NEVER exceed kRecentProjectLimit -- after "
+                         "promotion " + std::to_string(index) + " it held " +
+                             std::to_string(list.size()));
+        }
+        suite.expect(list.size() == kRecentProjectLimit,
+                     "twelve promotions must leave exactly kRecentProjectLimit entries, got " +
+                         std::to_string(list.size()));
+        suite.expect(list.front() == ordered[11],
+                     "the newest promotion must be at the head, never the evicted one");
+        suite.expect(list.back() == ordered[2],
+                     "eviction must drop from the TAIL: the oldest survivor must be p3");
+        suite.expect(std::find(list.begin(), list.end(), ordered[0]) == list.end(),
+                     "p1 must have been evicted");
+        suite.expect(std::find(list.begin(), list.end(), ordered[1]) == list.end(),
+                     "p2 must have been evicted");
+    }
+
+    // (7) The changed-bool in both polarities. This is the precondition for the
+    // no-op skip in `persist_recent_projects` (I12): a false that is really true
+    // would suppress a needed write, and a true that is really false would
+    // rewrite the settings file on every frame.
+    {
+        std::vector<fs::path> list;
+        suite.expect(promote_recent_project(&list, a),
+                     "a new promotion must return true");
+        const std::vector<fs::path> before = list;
+        suite.expect(promote_recent_project(&list, a) == false,
+                     "re-promoting the CURRENT HEAD must return false");
+        suite.expect(list == before,
+                     "a no-op promotion must leave the list element-wise equal");
+        suite.expect(forget_recent_path(&list, b) == false,
+                     "forgetting an absent path must return false");
+        suite.expect(promote_recent_project(&list, fs::path{}) == false,
+                     "promoting an empty path must return false and store nothing");
+        suite.expect(list.size() == 1,
+                     "an empty promotion must not grow the list");
+        suite.expect(forget_recent_path(&list, a),
+                     "forgetting a present path must return true");
+        suite.expect(list.empty(), "forgetting the only entry must empty the list");
+    }
+
+    // (8) normalize_recent_paths: canonicalize, drop empties, keep the FIRST of
+    // each duplicate group, cap -- and be idempotent.
+    {
+        // The duplicate pair is deliberately NON-ADJACENT, with two unrelated
+        // entries between the two spellings. Adjacent -- or adjacent at the
+        // front -- keep-first and keep-last collapse to the same index and a
+        // keep-the-last dedup passes every assertion below.
+        std::vector<fs::path> list{fs::path{}, relative, "/tmp/mar183/c.marrow",
+                                   "/tmp/mar183/d.marrow", fs::absolute(relative)};
+        for (int index = 1; index <= 15; ++index) {
+            list.emplace_back(fs::path("/tmp/mar183/n") /
+                              (std::to_string(index) + ".marrow"));
+        }
+        suite.expect(normalize_recent_paths(&list),
+                     "normalizing a list with an empty entry and a duplicate must report a change");
+        suite.expect(list.size() == kRecentProjectLimit,
+                     "normalize must cap at kRecentProjectLimit, got " +
+                         std::to_string(list.size()));
+        suite.expect(std::find(list.begin(), list.end(), fs::path{}) == list.end(),
+                     "normalize must drop empty entries");
+        suite.expect(std::count(list.begin(), list.end(), canonical_relative) == 1,
+                     "the two spellings must have collapsed to one entry");
+        // INDEX 0, not merely "present". Keeping the LAST occurrence would put
+        // the survivor at index 2, after the two entries that separated the
+        // pair, silently reordering a list the user has already seen.
+        suite.expect(list.front() == canonical_relative,
+                     "dedup must keep the FIRST occurrence AT ITS ORIGINAL INDEX 0");
+        suite.expect(list[1] == c && list[2] == canonical_recent_path("/tmp/mar183/d.marrow"),
+                     "the entries that separated the duplicate pair must keep their "
+                     "positions behind the survivor");
+        const std::vector<fs::path> normalized = list;
+        suite.expect(normalize_recent_paths(&list) == false,
+                     "normalize must be idempotent: a second call must report no change");
+        suite.expect(list == normalized,
+                     "a second normalize must leave the list element-wise equal");
+    }
+
+    // (9) A missing path survives normalize. This is the load half of I5: an
+    // entry on an unmounted volume must never be destroyed by merely loading.
+    {
+        const fs::path gone = fs::temp_directory_path() / "mar183-gone" / "gone.marrow";
+        std::vector<fs::path> list{gone};
+        (void)normalize_recent_paths(&list);
+        suite.expect(list.size() == 1 && list.front() == canonical_recent_path(gone),
+                     "normalize must KEEP an entry whose file does not exist");
+        suite.expect(recent_project_exists(gone) == false,
+                     "recent_project_exists must be false for a missing file");
+    }
+
+    // (10) drop_missing_recent_paths over a real directory.
+    {
+        TemporaryDirectory temporary("recent-missing");
+        const fs::path present_one = temporary.path() / "one.marrow";
+        const fs::path present_two = temporary.path() / "two.marrow";
+        write_text(present_one, "{}\n");
+        write_text(present_two, "{}\n");
+        const fs::path gone_one = temporary.path() / "gone-one.marrow";
+        const fs::path gone_two = temporary.path() / "gone-two.marrow";
+        suite.expect(recent_project_exists(present_one),
+                     "recent_project_exists must be true for a real file");
+        suite.expect(recent_project_exists(temporary.path()) == false,
+                     "a DIRECTORY is not a recent project: is_regular_file, not exists");
+
+        std::vector<fs::path> list{present_one, gone_one, present_two, gone_two};
+        (void)normalize_recent_paths(&list);
+        suite.expect(drop_missing_recent_paths(&list),
+                     "dropping missing entries from a list containing two must return true");
+        suite.expect(list == std::vector<fs::path>{canonical_recent_path(present_one),
+                                                   canonical_recent_path(present_two)},
+                     "exactly the missing entries must be dropped, and the present pair "
+                     "must keep its relative order");
+        suite.expect(drop_missing_recent_paths(&list) == false,
+                     "a second drop over an all-present list must return false");
+    }
+
+    // (11) The macOS case-identity boundary, MEASURED rather than assumed.
+    //
+    // Design 2.2 and 10.1 state that `/x/A.marrow` and `/x/a.marrow` produce TWO
+    // entries on a case-insensitive volume. That is only half true, and the half
+    // it gets wrong is the common one: `weakly_canonical` resolves its longest
+    // EXISTING prefix through the filesystem, so on macOS both spellings of a
+    // file that EXISTS canonicalize to the on-disk spelling and collapse into one
+    // entry. Only when the file is MISSING does the lexical remainder survive
+    // verbatim and leave two. Both branches are asserted, and printed, so the
+    // behaviour cannot change under us silently.
+    {
+        TemporaryDirectory temporary("recent-case");
+        const fs::path upper_present = temporary.path() / "A.marrow";
+        write_text(upper_present, "{}\n");
+        const fs::path lower_present = temporary.path() / "a.marrow";
+        const bool present_collapse =
+            canonical_recent_path(upper_present) == canonical_recent_path(lower_present);
+
+        const fs::path upper_missing = temporary.path() / "GONE.marrow";
+        const fs::path lower_missing = temporary.path() / "gone.marrow";
+        const bool missing_collapse =
+            canonical_recent_path(upper_missing) == canonical_recent_path(lower_missing);
+
+        std::cout << "  MAR-183 case identity measured: existing-file spellings collapse="
+                  << present_collapse << " missing-file spellings collapse="
+                  << missing_collapse << '\n';
+        suite.expect(missing_collapse == false,
+                     "two case-variant spellings of a MISSING file must stay distinct: "
+                     "the identity rule folds no case of its own");
+        std::vector<fs::path> list{upper_missing, lower_missing};
+        (void)normalize_recent_paths(&list);
+        suite.expect(list.size() == 2,
+                     "the two missing spellings must survive normalize as two entries");
+    }
+
+    // (12) Store round trip, isolated. The list the shell will write must survive
+    // the real serializer, and `default_curve` must survive alongside it.
+    {
+        ScopedPreferenceEnvironment environment;
+        TemporaryDirectory temporary("recent-round-trip");
+        environment.set("MARROW_CONFIG_HOME", temporary.path().string());
+
+        std::vector<fs::path> list;
+        for (int index = 1; index <= 12; ++index) {
+            (void)promote_recent_project(
+                &list,
+                canonical_recent_path(temporary.path() /
+                                      ("r" + std::to_string(index) + ".marrow")));
+        }
+        suite.expect(list.size() == kRecentProjectLimit,
+                     "the round-trip fixture must be exactly at the bound");
+
+        EditorPreferences preferences;
+        preferences.default_curve = CurvePreset::EaseOut;
+        preferences.recent_projects = list;
+        const PreferenceStore store;
+        const auto saved = store.save(preferences);
+        suite.expect(static_cast<bool>(saved),
+                     "saving a normalized recent list must succeed");
+
+        const auto loaded = store.load();
+        suite.expect(loaded.status == PreferenceLoadStatus::Loaded,
+                     "a settings file this feature wrote must reload as Loaded");
+        suite.expect(loaded.preferences.recent_projects == list,
+                     "the recent list must round-trip element-wise equal");
+        suite.expect(loaded.preferences.default_curve == CurvePreset::EaseOut,
+                     "default_curve must survive a recent-list write");
+
+        std::vector<fs::path> reloaded = loaded.preferences.recent_projects;
+        suite.expect(normalize_recent_paths(&reloaded) == false,
+                     "a list that was normalized before the write must reload already normalized");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1247,6 +1538,9 @@ int main() {
     });
     suite.run("shell preference session load, save, fallback, and preservation", [&] {
         test_shell_preference_session(suite);
+    });
+    suite.run("recent project list algebra and isolated round trip", [&] {
+        test_recent_project_list_algebra(suite);
     });
     return suite.finish();
 }

@@ -3,6 +3,7 @@
 #include "shell_coalesced_edit.hpp"
 #include "shell_selection.hpp"
 #include "shell_weight_paint.hpp"
+#include "shell_recent_projects.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -681,6 +682,18 @@ bool save_project_file(ShellState* state, bool update_status_message) {
         marrow::editor::serialize_project(*state->load_result.project);
     state->project_dirty = state->session.dirty();
     state->error_message.clear();
+    // MAR-183: ONLY the FIRST successful save of a New session records. An
+    // ordinary Save is this same function with no arm, and AC2 says it records
+    // nothing. Comparing against the path actually written -- rather than
+    // reading a bare bool -- is what stops a Save As that moved the session
+    // elsewhere from consuming an arm it did not satisfy.
+    if (state->pending_recent_on_first_save.has_value() &&
+        *state->pending_recent_on_first_save == state->project_path) {
+        // reset() BEFORE the record, so a failure inside the recorder cannot
+        // leave the arm live for a second save to consume.
+        state->pending_recent_on_first_save.reset();
+        record_recent_project(state, state->project_path);
+    }
     if (update_status_message) {
         state->status_message = "Saved project to " + state->project_path.string();
     }

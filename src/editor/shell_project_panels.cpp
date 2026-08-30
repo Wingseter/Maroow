@@ -1,5 +1,7 @@
 #include "shell_project_panels.hpp"
 
+#include "shell_recent_projects.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -727,6 +729,10 @@ void draw_menu_bar(ShellState* state) {
         if (ImGui::MenuItem("Open Project...", nullptr, false, !gesture_active)) {
             begin_session_intent(state, SessionIntent::Open);
         }
+        // MAR-183: a Recent entry is an Open like any other and enters the same
+        // gate -- draw_recent_projects_menu's items call open_recent_project,
+        // whose entire body is a begin_session_intent call.
+        draw_recent_projects_menu(state);
         ImGui::Separator();
         if (ImGui::MenuItem(
                 "Save", "Ctrl+S", false, !gesture_active && project_loaded)) {

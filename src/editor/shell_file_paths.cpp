@@ -1,5 +1,7 @@
 #include "shell_file_paths.hpp"
 
+#include "shell_recent_projects.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -144,6 +146,21 @@ void seed_browse_request(
 }
 
 /** @brief Routes a committed choice to whatever asked for it. */
+/**
+ * @brief Arms a deferred Open of one specific path.
+ *
+ * The single writer of a targeted `pending_file_application`, with two callers:
+ * the chooser's `commit_path_choice`, and `perform_session_intent` when a
+ * Recent entry supplied a destination. Extracted rather than duplicated so the
+ * two origins cannot drift.
+ */
+void arm_open(ShellState* state, const std::filesystem::path& path) {
+    PendingFileApplication pending;
+    pending.action = FileAction::Open;
+    pending.path = path;
+    state->pending_file_application = std::move(pending);
+}
+
 void commit_path_choice(ShellState* state, const std::filesystem::path& chosen) {
     const FilePathTarget target = state->file_path_request->target;
     const FileAction action = state->file_path_request->action;
@@ -172,10 +189,7 @@ void commit_path_choice(ShellState* state, const std::filesystem::path& chosen) 
             if (action == FileAction::Open) {
                 // Deferred: Open replaces the session, so it lands at end of
                 // frame exactly as `Reload Project` already does.
-                PendingFileApplication pending;
-                pending.action = FileAction::Open;
-                pending.path = chosen;
-                state->pending_file_application = std::move(pending);
+                arm_open(state, chosen);
             } else if (action == FileAction::SaveAs) {
                 // Immediate: Save As replaces nothing, exactly as
                 // `save_project_file` already applies mid-frame. On failure the
@@ -582,12 +596,23 @@ bool apply_save_as(ShellState* state, const std::filesystem::path& chosen) {
     }
 
     state->project_path = chosen;
+    // BEFORE the record, exactly as `save_project_file` orders it. The project
+    // write succeeded, so any earlier error is stale -- but `record_recent_project`
+    // SETS error_message when the settings write fails, and clearing afterwards
+    // would swallow the single report design §10.7 grants that failure ("reported
+    // once and then forgotten"), leaving it reported zero times.
+    state->error_message.clear();
+    // MAR-183: Save As records its NEW destination. A failed Save As returned
+    // above without moving the path, and records nothing.
+    record_recent_project(state, chosen);
+    // The session has been written somewhere the New arm did not name, so the
+    // arm can never be consumed and must not outlive this save.
+    state->pending_recent_on_first_save.reset();
     update_project_dirty_state(state);
     // MAR-180's rebase is identity-preserving, so the recomputed watch list must
     // be element-wise equal to the one before the move. Recomputing it is free,
     // and C5 compares it as a cheap check that the rebase did what it claims.
     reset_runtime_asset_watch(state);
-    state->error_message.clear();
     state->status_message = "Saved project to " + chosen.string();
     return true;
 }
@@ -659,13 +684,23 @@ namespace {
  * branch and `tick_dirty_intent`'s `!session.dirty()` branch. Neither is
  * reachable from a failure, which is the structural reason a failed save can
  * never fall through to a discard, a replacement or a shutdown.
+ *
+ * @param path Honoured only by `Open`, and empty for every other intent because
+ *             nothing else supplies one.
  */
-void perform_session_intent(ShellState* state, SessionIntent intent) {
+void perform_session_intent(
+    ShellState* state, SessionIntent intent, const std::filesystem::path& path) {
     switch (intent) {
         case SessionIntent::New:
             begin_file_action(state, FileAction::New);
             return;
         case SessionIntent::Open:
+            if (!path.empty()) {
+                // A Recent entry: the destination is already known, so there is
+                // nothing to choose. It still arrives here, AFTER the gate.
+                arm_open(state, path);
+                return;
+            }
             begin_file_action(state, FileAction::Open);
             return;
         case SessionIntent::Reload:
@@ -679,7 +714,8 @@ void perform_session_intent(ShellState* state, SessionIntent intent) {
 
 } // namespace
 
-void begin_session_intent(ShellState* state, SessionIntent intent) {
+void begin_session_intent(
+    ShellState* state, SessionIntent intent, const std::filesystem::path& path) {
     if (state == nullptr) {
         return;
     }
@@ -690,15 +726,20 @@ void begin_session_intent(ShellState* state, SessionIntent intent) {
             return;
         }
         // Last wish wins: the prompt is already up, so retarget it rather than
-        // stacking a queue the user cannot see.
+        // stacking a queue the user cannot see. BOTH fields, UNCONDITIONALLY:
+        // retargeting the intent alone would open the first Recent entry when
+        // the user asked for the second, and assigning the path only when it is
+        // non-empty would leave a stale Open destination on a later Reload.
         state->dirty_intent->intent = intent;
+        state->dirty_intent->path = path;
         return;
     }
     if (!state->session.dirty()) {
-        perform_session_intent(state, intent);
+        perform_session_intent(state, intent, path);
         return;
     }
-    state->dirty_intent = DirtyIntentRequest{intent, DirtyIntentPhase::Prompting, false};
+    state->dirty_intent =
+        DirtyIntentRequest{intent, path, DirtyIntentPhase::Prompting, false};
 }
 
 void tick_dirty_intent(ShellState* state) {
@@ -714,8 +755,9 @@ void tick_dirty_intent(ShellState* state) {
         // deferred Save As branch, and wrong on the immediate one -- it also
         // returns false, without saving, while an authoring gesture is live.
         const SessionIntent intent = state->dirty_intent->intent;
+        const std::filesystem::path path = state->dirty_intent->path;
         state->dirty_intent.reset();
-        perform_session_intent(state, intent);
+        perform_session_intent(state, intent, path);
         return;
     }
     if (state->file_path_request.has_value()) {
@@ -747,8 +789,9 @@ void resolve_dirty_intent(ShellState* state, DirtyIntentResponse response) {
             // anything. For New/Open/Reload the unsaved work survives right up
             // until the atomic replacement lands.
             const SessionIntent intent = state->dirty_intent->intent;
+            const std::filesystem::path path = state->dirty_intent->path;
             state->dirty_intent.reset();
-            perform_session_intent(state, intent);
+            perform_session_intent(state, intent, path);
             return;
         }
         case DirtyIntentResponse::Save:
@@ -819,6 +862,13 @@ bool apply_pending_file_action(ShellState* state) {
             previous_timeline_playing,
             /*restore_transient_playback=*/false,
             /*project_is_clean=*/true);
+        // MAR-183: recorded AFTER the open succeeded and after project_path
+        // moved, so the recorded path and the shell agree, and a failed open --
+        // which returned above -- records nothing.
+        record_recent_project(state, pending.path);
+        // This session was OPENED, not created: any arm a previous New left
+        // behind belongs to a session that no longer exists.
+        state->pending_recent_on_first_save.reset();
         state->status_message = "Opened " + pending.path.string();
         return true;
     }
@@ -844,6 +894,10 @@ bool apply_pending_file_action(ShellState* state) {
         return false;
     }
     state->project_path = pending.path;
+    // MAR-183: ARM, do not record. `create` writes nothing to disk, so there is
+    // no file to put in a list of things the user can re-open. The first save
+    // that writes THIS path consumes the arm.
+    state->pending_recent_on_first_save = pending.path;
     // project_is_clean is FALSE: MAR-180 made `create` dirty-from-birth on
     // purpose, and reload_project's hardcoded `project_dirty = false` would
     // paint the session clean over a file that does not exist.

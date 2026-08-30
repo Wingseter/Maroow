@@ -1,5 +1,7 @@
 #include "shell_preferences.hpp"
 
+#include "marrow/editor/recent_projects.hpp"
+
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -77,6 +79,15 @@ void load_shell_preferences(ShellState* state) {
     const marrow::editor::PreferenceStore store;
     const marrow::editor::PreferenceLoadResult result = store.load();
     state->preferences = result.preferences;
+    // MAR-183: normalize IN MEMORY only -- canonicalize, drop empties, dedup
+    // keeping the first occurrence, cap at the bound. LOADING NEVER WRITES: a
+    // settings file the user is mid-way through hand-editing survives untouched,
+    // and an entry whose volume is merely unmounted is never destroyed. The
+    // returned bool is discarded deliberately, because there is no write to
+    // skip here. An oversized on-disk list stays oversized until the next real
+    // mutation. Design 2.5.
+    (void)marrow::editor::normalize_recent_paths(
+        &state->preferences.recent_projects);
     state->preference_status = result.status;
     state->preference_path = result.path;
     state->preference_diagnostic = result.diagnostic;
