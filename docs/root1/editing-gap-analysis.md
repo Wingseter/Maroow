@@ -77,7 +77,7 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 | 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale, attachment-local multi-vertex FFD auto-key, project world-grid/local-angle/absolute-scale snap, inclusive 8px visible-vertex magnetic FFD snap과 live Alt/Cmd·Ctrl | `viewport_interaction_kernel.cpp`, `viewport_interaction_controller.cpp`, `viewport_ffd_controller.cpp`, `shell_viewport_ui.cpp` |
 | 도프시트/그래프 | 60 FPS 눈금자, 도프시트 독립 zoom/pan, 안정적 parent-key identity, toggle/box 선택, 다중 리타임, typed clipboard; 한 focused parent track의 effective scalar projection, component toggle/Fit/wheel·Shift-wheel/middle pan, shared selection/active/playhead, actual Linear/Stepped/Cubic 표시 | `timeline_model.cpp`, `timeline_graph_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp`, `shell_timeline_graph.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
-| 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두 | `shell_constraints.cpp` |
+| 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두. MAR-177은 project layer에 rename/delete를 추가했다 — `.marrow.constraint_edits.operations`의 ordered record, base-backed/project-only ownership rule, root array와 `skins[].<family>` 동시 rewrite/prune | `shell_constraints.cpp`, `project.cpp` |
 | 언두/트랜잭션 | 스냅샷 100개 캡, 머지 키 그룹핑, 원자적 런타임 리빌드+실패 롤백 | `session.cpp` |
 | 어니언 스킨 | 프레임/키프레임 모드, 전후 개수, 스텝, 앵커 | `shell_viewport_ui.cpp` |
 | 임포트/익스포트 | PSD→리그 생성, Spine JSON/atlas 임포트, 아틀라스 패킹, `.mskl`/`.mbin`/`.matl` 익스포트 | `psd_import.cpp` 등 |
@@ -92,7 +92,7 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 - **뷰포트는 이동·회전·signed scale·attachment-local multi-vertex FFD와 transform/FFD snap까지 직접 저작** — FFD point/toggle/box sub-selection, common-world-delta group move, world-grid/local-angle/absolute-scale snap, visible nonselected vertex magnetic snap과 live modifier/guide가 구현됐다. 경로 제어점 직접 조작과 entity `SelectionSet`의 group transform은 P1 범위 밖이다.
 - **그래프 view는 값·시간·easing 편집까지 지원** — MAR-167은 effective Transform/Slot RGBA scalar series, actual easing, shared parent selection/active/playhead와 transient navigation을 제공했고, MAR-168은 axis-locked point drag로 active component 값과 parent key 전체 시간 편집을 공용 authoring primitive 위에서 추가했으며, MAR-169는 active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집하고, MAR-170은 두 timeline tab 공용 row에서 고정 preset 6종을 호환 선택 key 전체에 한 transaction으로 적용하며 기억되는 기본 curve로 새 key를 seed한다. Auto handle과 loop 동기화는 MAR-171~172이고, MAR-173은 선택 범위 반대 edge를 pivot으로 한 원자적 key 시간 scaling을 dopesheet selection range bar와 `timeline.scale_key_times`로 추가했다. MAR-174는 transport row에 `[0.05, 8.0]` transient preview 속도와 `{0.25, 0.5, 1, 2}` preset을 얹어 `advance_timeline_playback()` 한 곳의 곱셈으로 reverse·loop·scrub·일시정지와 합성하되 project·history·export에는 아무 흔적도 남기지 않는다. 수동 weight 저작 통합은 MAR-175다.
 - **제약 파라미터 일부 위젯 없음** — IK softness/compress/stretch, Physics step/x/y/rotate/scaleX/shearX/limit/massInverse (라운드트립은 됨).
-- **제약 삭제/이름변경 불가** — lifecycle schema는 MAR-177, UI·agent surface는 MAR-178, 누락 위젯은 MAR-179 범위다.
+- **제약 삭제/이름변경은 project layer만 완료** — MAR-177이 `.marrow.constraint_edits.operations` ordered schema, `rename_constraint()`/`delete_constraint()` primitive, materialization과 두 층 validation을 추가했다. GUI 버튼·확인 UI·undoable command·`SelectionSet` cascade·agent/MCP operation은 MAR-178, 누락 위젯은 MAR-179 범위다. 그래서 registry는 여전히 정확히 62 ops다.
 - **Hierarchy와 viewport entity gesture 완료** — MAR-159는 visible row range와 transient anchor를, MAR-160은 typed point hit와 visible active-Bone box selection을 완료했다. 모든 도구는 active item 하나만 편집하며 group transform은 범위 밖이다.
 
 ---
@@ -404,7 +404,7 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 | --- | --- | --- |
 | MAR-175 | Unified manual weight authoring | brush와 agent의 중복 정규화를 하나의 domain primitive로 합친다. Replace brush, active-vertex numeric table, selected-scope Normalize와 setup-pose Rebind를 제공한다. |
 | MAR-176 | Deterministic auto weights | 명시적 candidate bone 체크 목록에서 setup-world vertex와 bone segment의 inverse-square distance로 상위 4개를 선택한다. Skeleton order로 tie-break하고 zero-length/isolated vertex는 nearest candidate로 fallback한다. |
-| MAR-177 | Constraint lifecycle schema | `.marrow.constraint_edits.operations`에 ordered rename/delete를 추가한다. Base-backed constraint는 operation/tombstone, project-only constraint는 upsert 직접 변경으로 표현한다. |
+| MAR-177 | Constraint lifecycle schema (완료, 2026-08-30) | `.marrow.constraint_edits.operations`에 ordered rename/delete를 추가했다. Base-backed constraint는 operation/tombstone, project-only constraint는 upsert 직접 변경, 둘을 겸하는 shadowing upsert는 **양쪽 모두**로 표현한다. Materialization은 root array와 모든 `skins[].<family>` 이름 배열을 함께 rewrite/prune하고, 비워진 family key는 `[]`로 남기지 않고 삭제한다. |
 | MAR-178 | Constraint rename/delete surfaces | IK/Path/Transform/Physics GUI·confirmation·undo·dry-run·agent/MCP를 추가하고 root arrays, `skins[].constraints`, upsert, `SelectionSet`을 원자적으로 cascade한다. |
 | MAR-179 | Complete constraint widgets | IK softness/compress/stretch와 Physics step/x/y/rotate/scaleX/shearX/limit/massInverse UI를 추가하고 IK MCP 누락 필드를 보완한다. |
 
@@ -438,7 +438,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 #### P1 검증 기준
 
 - **Runtime unit**: explicit/inferred/empty duration, loop·queue·reverse·snapshot, curve flat/overshoot/auto tangent, auto-weight determinism.
-- **Project smoke**: 모든 신규 optional schema의 old-project compatibility, constraint rename/delete cascade, inherit/curve metadata, Save As path rebase, JSON↔MBIN equivalence.
+- **Project smoke**: 모든 신규 optional schema의 old-project compatibility, constraint rename/delete cascade(MAR-177 완료), inherit/curve metadata, Save As path rebase, JSON↔MBIN equivalence.
 - **Selection unit/shell smoke**: typed identity scope, stable order와 active fallback, prune/remap collision, invalid-range atomicity, transient project/preview/runtime/history/revision invariants.
 - **Shell smoke**: transformed/reflected/singular gizmo, signed/zero scale, weighted/unweighted/linked FFD, multi-select, snap tie-break, graph point/handle cancel, dirty modal, Problems navigation.
 - **Agent/MCP smoke**: 신규 operation metadata·dry-run·mutation·undo·export preview와 C++/Python registry parity.

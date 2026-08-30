@@ -227,6 +227,122 @@ required by MAR-210.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
 
+## MAR-177 Constraint Lifecycle Project Operations Validation Results
+
+Validated 2026-08-30. The `.marrow` constraint overlay had exactly two verbs —
+replace a root-array element whose `name` matches, and append when none does —
+so it could say "this constraint now has these values" and "there is one more
+constraint" and nothing else. **Creation already shipped** for all four
+families; what was missing was rename and delete, and for a constraint that
+lives in the base `.mskl` the project could not express either at all. MAR-177
+adds one optional, default-absent, **ordered** `.marrow` member,
+`constraint_edits.operations`, and the model layer that materializes and
+validates it. It adds no GUI, no agent operation and no registry entry.
+
+**Skins reference constraints by name, and an unresolvable name is a hard LOAD
+failure.** `parse_skin_scope_members()` fails the whole parse on one bad name,
+so a delete that does not prune `skins[*].<family>` does not produce a subtly
+wrong rig — it produces a project that still **saves** and can never be
+**opened** again. MAR-172 shipped an `ok: true` that destroyed an adjacent key;
+MAR-175 could commit and leave a project unsavable; this one would leave it
+unopenable. Proved by inversion, twice, with the failures recorded verbatim
+below. The sibling of the same rule is that a delete which empties a family
+array must **erase the key**, not leave `[]`, because the runtime rejects an
+empty family array outright.
+
+**The ownership rule ships as code, in one place, and its middle row is the one
+that is easy to get wrong.** Base-backed → append a record; project-only →
+rewrite the upsert directly and append nothing; an upsert that *shadows* a base
+constraint → **both**, because erasing only the upsert resurrects the base
+element and reads to the user as "delete did nothing".
+
+| Area | Evidence | Result |
+| --- | --- | --- |
+| The gap is rename and delete, not create | All four families already have an Add button and a defaults builder in `shell_constraints.cpp`, each allocating through `unique_constraint_name()`. Measured rather than assumed: a project carrying one default of each family (IK `ik_upper`/`ik_lower`→`ik_target`, path `guide` + `path_a`/`path_b`/`path_c`, transform `transform_source`→`transform_target`, physics `ribbon_01`/`ribbon_02`) was built and `save_project()` accepted all four. MAR-177 therefore adds no create path and specifies no defaults | PASS |
+| Order is load-bearing, and asserted through materialization | Scenario E runs a chain (`A→arm_middle`, `arm_middle→arm_final`, `delete arm_final`), a three-step swap, and a delete-then-reuse against `ik_constraints.mskl`, and asserts the materialized **and the loaded** `ik_constraints()` name sequence, not a count. Proved by inversion: applying the records back-to-front makes the chain materialize `[arm_middle, arm_negative, …]` instead of `[arm_negative, …]`; restored | PASS |
+| The skin reference is rewritten, and the failure is reachable | Scenario C2 asserts root `transform[0].name` **and** `skins.cape.transform` after a rename. Proved by inversion: deleting the skin-rewrite half makes `build_project_runtime()` fail with `assets/fixtures/skin_inherit_constraints.mskl:56:9: $.skins.cape.transform[0]: skin references unknown transform constraint 'cape_pull'` — the unopenable-project failure, verbatim. Restored | PASS |
+| An emptied family key is erased, not left `[]` | Scenario C3 asserts the materialized document has no root `transform` key and no `skins.cape.transform` key after the last delete in the family, and that the runtime still loads. Proved by inversion: keeping `[]` makes it fail with `$.transform: transform constraints must not be empty when provided`. Restored | PASS |
+| Save → reload survival, not return codes | Every accepted path is followed by `save_project()` **and** `load_project()`, and `load_project()` materializes, so a reload is a real proof the project still opens. Scenario A4 saves a project whose *only* constraint content is one tombstone and asserts the reloaded skeleton carries zero transform constraints; scenario B4 does the same for a base-backed rename; scenario E2 for an ordered pair | PASS |
+| The tombstone-only emit gate, proved by inversion | `build_project_value()` gates the whole `constraint_edits` key on the four upsert vectors being non-empty. Reverting the added `\|\| !project.constraint_lifecycle_operations.empty()` clause makes scenario A4 fail with *"a tombstone-only project lost its `constraint_edits.operations` on serialization — the emit gate still keys on the four upsert vectors alone."* — the MAR-172 failure shape exactly. Restored | PASS |
+| The shadowing row emits both halves | Scenario B5 upserts `cape_pull` over the base constraint of the same name, deletes it, and asserts a tombstone **and** an erased upsert, then that `cape_pull` occurs **0** times in the materialized document and the rig loads with zero transform constraints — i.e. the base did not resurrect | PASS |
+| Validation splits at the seam `validate_project_for_save` already has | Save time has no base document, so it replays symbolically over per-family `consumed`/`introduced` sorted vectors: 14 rows, of which four legal ones (chain, reuse, swap, cross-family independence) are **accepted**, so the validator is not merely refusing everything. Materialization time has the base and reports four causes with distinct messages across 7 rows | PASS |
+| Every rejection is atomic | `serialize_project()` is captured before and compared after every rejected call and every rejected materialization, on the string, not inferred from a return code. Each rejected `export_runtime_assets()` is additionally asserted to have written **no** file at either output path | PASS |
+| The primitives cannot leave an unsavable or unopenable project | Both run `validate_project_for_save()` **and** `validate_constraint_lifecycle_operations()` on the candidate before committing. Step 5 is not redundant with the preflight, and the witness is real rather than fabricated: an atlas-free project passes the name preflight and `save_project()` refuses it, so removing the call makes scenario B6 fail with *"the primitive returned ok for a project that save_project() refuses"*. Restored | PASS |
+| Export, on a project that was actually mutated | `cape_pull` (9 B) → `cape_pull_renamed` (17 B) over `skin_inherit_constraints.mskl`: `.mskl` **1611 → 1627 (+16)**, `.mbin` **605 → 613 (+8)**, string table unchanged at **39** entries with `cape_pull` out and `cape_pull_renamed` in. JSON counts **occurrences** (2 of them), MBIN counts **distinct strings** (1), so the `16 : 8` ratio *is* the occurrence count and a root-only rename would read `+8/+8` and fail loudly | PASS |
+| Delete export, decoded rather than sized | The deleted name occurs **0** times; neither the root `transform` key nor `skins.cape.transform` survives as an empty array; the `.mbin` reloads through `load_skeleton_document()` + `load_skeleton_data()` with zero transform constraints and skin `cape` still holding `cape_target`; the string table drops **39 → 35** — exactly `[cape_pull, source, transform, translateMix]`, asserted by name | PASS |
+| Malformed records are rejected on load, with a location | 17 cases: `operations` not an array; an element not an object; `op` absent / not a string / `"remove"`; `family` absent / `"bone"`; rename with `from` absent / empty, `to` absent / empty, `to == from`, or carrying `name`; delete with `name` absent / empty, or carrying `to` / `from`. Each asserts both the `$.constraint_edits.operations[i].<field>` path prefix and the message | PASS |
+| Registry unchanged at 62 | MAR-177 adds no `kOperationSpecs` row. `awk` over `agent_dispatch.cpp` → **62**; 7 guards in `shell_smoke_graph.cpp`, 1 in `shell_smoke_timeline.cpp`, 2 in `tools/mcp/test_client.py`, 1 `std::array<OperationExpectation, 62>` in `agent_dispatch_smoke.cpp` — all unchanged, and `git diff` is empty on `agent_dispatch.cpp`, `agent_handlers_*`, `authoring.*` and `tools/mcp/**` | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, C ABI v1 and `editor-settings.json` v1 all unchanged, with a zero-byte `git diff` on `src/runtime/**`, `include/marrow/runtime/**`, `include/marrow/marrow_c.h`, `src/c_api/**`, `src/editor/preferences.cpp`, `include/marrow/editor/preferences.hpp` and every `src/editor/shell_*`. `.marrow` gains **exactly one** optional member, omitted when empty, so every existing project serializes byte-identically. MAR-177 introduces **no** new tunable numeric constant | PASS |
+
+Errors found in this story's own governing documents, all corrected here:
+
+- **The design's claim that `player_idle.marrow` re-serializes byte-identically
+  to the file on disk is false, and always was.** `build_project_value()` emits
+  `editor.timeline.fps` unconditionally while the fixture omits the default, a
+  pre-existing **41-byte / 3-line** difference in a section MAR-177 does not
+  touch. The assertion was replaced with the one that has teeth and actually
+  states what AC4 needs: the serialized text differs from the fixture by that
+  block **and nothing else**, plus a save → reload → serialize fixed point.
+- **The design's §11.5 predicted the delete would drop the `.mbin` string table
+  by exactly 1. It drops it by 4** — 39 → 35. The cause is the same interning
+  that makes the rename cost `+8`: `collect_strings()` interns each distinct
+  string once across the **whole** document, object keys included, so deleting a
+  subtree removes every string that occurred only inside it. The four are
+  `cape_pull` (the value), `transform` (the root array key *and* the skin scope
+  key), `source` and `translateMix`; `name` and `bones` survive because bones and
+  slots use them. Re-derived by decoding both tables rather than editing the
+  constant, and the test now asserts the four **by name**.
+- **The design's §8.1 step 6 first half is incoherent and was not implemented.**
+  It requires rejecting an upsert named by an `introduced` name — but that state
+  is byte-for-byte what §5.3's middle row *requires* a shadowing rename to
+  produce (append the record, rewrite the shadowing upsert's name), and the two
+  are indistinguishable in `ProjectData`. Implementing it would have rejected the
+  ownership rule's own output. Only the second half ships (no upsert may be named
+  by a `consumed` name), which is the maximal rule knowable without the base; the
+  genuine collision is caught by the primitives' preflight against the
+  materialized name set. The plan's Task 2 "upsert collision → reject" row was
+  re-specified accordingly and is asserted as an **accept** with the reasoning in
+  the test.
+- **`build_constraint_edits_value()` has one call site, not the two the plan's
+  file map states.**
+- **The plan's Task 1 lists 13 malformed-load cases in its body and calls them
+  "eleven" in the checklist.** 17 ship: the 13 plus the three absent-key cases
+  and a delete carrying `from`.
+- **The plan's ambiguity #8 conflates two different requirements.**
+  `export_runtime_assets()` does export an atlas-free project (asserted, scenario
+  F3), but `validate_project_for_save()` requires at least one atlas path, so a
+  *savable* fixture project needs one. The constraint fixtures ship none and
+  borrow `player_idle.matl`, which nothing cross-validates against a skeleton.
+- **The design's §6 row-7 grep is not exhaustive as stated.** It claims the only
+  occurrences of the four family keys in `skeleton_parse.cpp` are
+  `is_skin_scope_key`, the four root arrays and the four skin scopes; `:4482`
+  also tests `*type_name == "path"` for the `Path` **attachment** kind. The
+  finding it supports — that no animation timeline names a constraint — is
+  unaffected and was re-confirmed.
+
+Not independently covered: `build_project_runtime_document()` is public and
+applies Phase A defensively, so calling it directly on an unresolvable record
+silently no-ops rather than reporting. That is deliberate and matches the
+mesh-weight overlay, and both real callers run the validator first; scenario C5
+asserts the defensive no-op and scenario D asserts the rejection.
+
+Current validation:
+
+- `cmake -S . -B build && cmake --build build` -> configured and built with zero new warnings; `cmake --build build --target marrow_constraint_warning_check` -> built
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting `MAR-177 A5: 17 malformed constraint_edits.operations records rejected on load`, `MAR-177 Scenario A2: 14 symbolic-replay rows`, `MAR-177 Scenario D: 7 materialization rows`, `MAR-177 F1 export: .mskl 1611 -> 1627 (+16 = 2 occurrences x 8 bytes), .mbin 605 -> 613 (+8 = 1 interned entry x 8 bytes) with the string table unchanged at 39 entries`, and `MAR-177 F2 export: ... its string table drops 39 -> 35 entries -- exactly [cape_pull, source, transform, translateMix]`; `--create` -> passed
+- Five inversions each fail the case they should and were restored: the emit-gate clause (scenario A4), the skin rewrite (scenario C2, failing at `build_project_runtime()` with `skin references unknown transform constraint 'cape_pull'`), the emptied-key erase (scenario C3, failing with `transform constraints must not be empty when provided`), the Phase A record order (scenario E), and the primitives' `validate_project_for_save()` step (scenario B6)
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` against the exact 62-operation registry, unchanged
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> `Headless editor shell smoke rendered 2 frame(s).`, unchanged; MAR-177 touches no shell file
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` with `tools/mcp/venv/bin/python tools/mcp/test_client.py` -> `mcp test_client: PASSED` with the 62/62 exact C++/Python name parity assertion unchanged
+- `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 22`; `-L runtime` -> 4/4; `-L editor` -> 12/12; no target added
+- `./build/marrow_unit_tests`, `marrow_fixture_smoke`, `marrow_selection_tests`, `marrow_timeline_model_tests`, `marrow_parameter_project_smoke`, `marrow_spine_import_smoke`, `marrow_c_smoke`, `marrow_psd_import_smoke`, `marrow_atlas_packer_smoke` -> all passed
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after it; every shell invocation ran under an isolated `MARROW_CONFIG_HOME`, and no `/tmp/marrow-shell-config-*` or scratch file was left behind
+
+Not run: any interactive confirmation, because MAR-177 ships no UI. The rename
+and delete surfaces — buttons, confirmation dialogs, affected-reference previews,
+the undoable command and the `SelectionSet` cascade — are MAR-178, and MAR-192
+through MAR-210 remain the qualification authority.
+
 ## MAR-176 Deterministic Automatic Weights Validation Results
 
 Validated 2026-08-30. MAR-176 adds one producer of influence lists — a geometric

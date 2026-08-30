@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "marrow/editor/selection.hpp"
 #include "marrow/runtime/atlas.hpp"
 #include "marrow/runtime/json.hpp"
 #include "marrow/runtime/skeleton.hpp"
@@ -323,6 +324,31 @@ struct PhysicsConstraintEdit {
     double mix{1.0};
 };
 
+/** @brief Which lifecycle transition an ordered constraint operation records. */
+enum class ConstraintLifecycleKind {
+    Rename,
+    Delete,
+};
+
+/**
+ * @brief One ordered rename or delete applied to a constraint family.
+ *
+ * A constraint's identity is `(family, name)`, never an index: a delete
+ * renumbers every element after it, and the runtime enforces name uniqueness
+ * only within a family, so an IK and a physics constraint may share a name.
+ *
+ * Records are applied front to back over the base skeleton document, and
+ * strictly before any `*_constraint_edits` upsert is merged, so a rename can
+ * never race an upsert for a name. `new_name` is meaningful only for `Rename`
+ * and must be empty for `Delete`.
+ */
+struct ConstraintLifecycleOperation {
+    ConstraintLifecycleKind kind{ConstraintLifecycleKind::Rename};
+    ConstraintKind family{ConstraintKind::Ik};
+    std::string name;      ///< `from` for a rename, the target for a delete.
+    std::string new_name;  ///< `to` for a rename; empty for a delete.
+};
+
 struct AtlasPackSprite {
     std::string region_name;
     std::filesystem::path image_path;
@@ -549,6 +575,9 @@ struct ProjectData {
     std::vector<PathConstraintEdit> path_constraint_edits;
     std::vector<TransformConstraintEdit> transform_constraint_edits;
     std::vector<PhysicsConstraintEdit> physics_constraint_edits;
+    // Ordered rename/delete records, applied over the base skeleton before the
+    // four upsert vectors above are merged onto it.
+    std::vector<ConstraintLifecycleOperation> constraint_lifecycle_operations;
     std::optional<ParameterModel> parameter_model;
     std::vector<AtlasPackDefinition> atlas_pack_definitions;
     // Unknown top-level additive fields from the loaded `.marrow` document.
@@ -919,6 +948,80 @@ ProjectLoadResult load_project(const runtime::json::Document& document);
  * @return Loaded project plus resolved runtime dependencies or an error.
  */
 ProjectLoadResult load_project(const std::filesystem::path& path);
+/** @brief Outcome of a constraint lifecycle primitive. */
+struct ConstraintLifecycleResult {
+    bool ok{false};
+    std::string message;          ///< Empty on success.
+    bool used_operation{false};   ///< True when an ordered record was appended.
+    bool changed_upsert{false};   ///< True when a `*_constraint_edits` entry was rewritten or erased.
+};
+
+/**
+ * @brief Renames a constraint, choosing the representation the ownership rule requires.
+ *
+ * A constraint that lives in the base skeleton cannot be renamed by upsert --
+ * the overlay's only verbs are replace-by-name and append -- so it gets an
+ * ordered record. A project-only constraint is rewritten in place and gets
+ * none. A project upsert that *shadows* a base constraint gets both, because
+ * renaming only the upsert would leave the base constraint standing beside the
+ * renamed one.
+ *
+ * Preflight-then-mutate: on any rejection `*project` is untouched and
+ * `serialize_project()` is byte-identical.
+ *
+ * @param project Project to mutate in place on success.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @param family Constraint family; identity is `(family, name)`, never an index.
+ * @param from Current constraint name.
+ * @param to Requested new name; a collision is refused, never auto-suffixed.
+ * @return The outcome, with which representation was used.
+ */
+ConstraintLifecycleResult rename_constraint(
+    ProjectData* project,
+    const runtime::json::Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view from,
+    std::string_view to);
+
+/**
+ * @brief Deletes a constraint, choosing the representation the ownership rule requires.
+ *
+ * Base-backed constraints get an ordered tombstone; project-only constraints
+ * have their upsert erased; a shadowing upsert needs both, because erasing only
+ * the upsert resurrects the base constraint it was covering.
+ *
+ * Preflight-then-mutate: on any rejection `*project` is untouched and
+ * `serialize_project()` is byte-identical.
+ *
+ * @param project Project to mutate in place on success.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @param family Constraint family; identity is `(family, name)`, never an index.
+ * @param name Constraint to remove.
+ * @return The outcome, with which representation was used.
+ */
+ConstraintLifecycleResult delete_constraint(
+    ProjectData* project,
+    const runtime::json::Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view name);
+
+/**
+ * @brief Validates the ordered constraint lifecycle records against a base skeleton.
+ *
+ * Replays the records front to back over the name set the base document
+ * declares, and reports the four causes separately: a source that does not
+ * exist, a rename target already taken inside the same family, a name that
+ * exists in a different family than the record claims, and a source an earlier
+ * record already consumed. Called before either runtime build, so a rejected
+ * project produces an error and writes nothing.
+ *
+ * @param project Project carrying the lifecycle records.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @return A located error describing the first fault, or `std::nullopt`.
+ */
+std::optional<runtime::json::LoadError> validate_constraint_lifecycle_operations(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document);
 /**
  * @brief Builds runtime skeleton data by applying project edits onto a base runtime document.
  * @param project Project containing editor-side overrides.

@@ -958,8 +958,56 @@ Current editor constraint-authoring payload:
 - `path`
 - `transform`
 - `physics`
+- `operations` (optional, MAR-177)
 
-The export path translates these sections directly into runtime root-level constraint arrays.
+The export path translates the four family sections directly into runtime root-level constraint arrays.
+
+#### `constraint_edits.operations`
+
+The four family sections are **upsert** vectors, and the merge that applies them has exactly two verbs: replace a root-array element whose `name` matches, and append when none does. That vocabulary can say "this constraint now has these values" and "there is one more constraint"; it cannot say "this constraint is now called something else" or "this constraint is gone" — least of all for a constraint that lives in the base `.mskl`, which the project cannot reach by upsert at all.
+
+MAR-177 adds `operations`: an **ordered** array of rename and delete records, applied over the base document **before** the four upsert merges.
+
+```json
+"constraint_edits": {
+  "operations": [
+    { "op": "rename", "family": "transform", "from": "cape_pull", "to": "cape_drag" },
+    { "op": "delete", "family": "ik",        "name": "arm_zero_parent" }
+  ],
+  "ik": [ ... ]
+}
+```
+
+Field rules, enforced on load:
+
+| Field | Rule |
+| --- | --- |
+| `op` | required string, exactly `"rename"` or `"delete"` |
+| `family` | required string, exactly one of `"ik"`, `"path"`, `"transform"`, `"physics"` |
+| `from` | required non-empty string when `op` is `"rename"`; rejected on a delete |
+| `to` | required non-empty string when `op` is `"rename"`, and must differ from `from`; rejected on a delete |
+| `name` | required non-empty string when `op` is `"delete"`; rejected on a rename |
+
+Carrying the *other* op's key is rejected rather than ignored, because a silently ignored key is how a writer's typo becomes a silent no-op.
+
+**The array is ordered, and the order is load-bearing.** A chain (`rename A→B`, then `rename B→C`) names a constraint that only exists after the first record ran; a swap (`A→tmp`, `B→A`, `tmp→B`) passes through a name that is legal only in transit; a reuse (`delete A`, then `rename B→A`) is legal in one order and a duplicate target in the other. A map keyed by source cannot express any of the three.
+
+**Identity is `(family, name)`, never an index.** A delete renumbers everything after it, and the runtime enforces name uniqueness only *within* a family, so an IK constraint and a physics constraint may both be called `arm`; a record naming the wrong family is rejected as a family mismatch, distinctly from a name that does not exist.
+
+**Ownership.** Which representation a lifecycle change takes is determined by where the constraint lives:
+
+| In the base `.mskl`? | In `constraint_edits.<family>`? | Rename | Delete |
+| --- | --- | --- | --- |
+| yes | no | append a record | append a tombstone |
+| yes | yes (an upsert shadowing the base) | append a record **and** rewrite the upsert's `name` | append a tombstone **and** erase the upsert |
+| no | yes (project-only) | rewrite the upsert's `name`; no record | erase the upsert; no record |
+| no | no | rejected: not found | rejected: not found |
+
+The middle row needs both halves: an upsert whose name also exists in the base is *shadowing* it, so erasing only the upsert resurrects the base constraint, and renaming only the upsert leaves the base constraint standing beside the renamed one.
+
+**Materialization** rewrites the root family array *and* every `skins[*].<family>` reference, because skins name constraints and the runtime fails the whole load on an unresolvable one — an unpruned reference makes the exported rig unopenable, not merely wrong. A rename never moves an element and a delete never reorders the survivors, so evaluation order (which is array order) is preserved. When a delete empties a family array, at the root or inside a skin, the **key is erased** rather than left as `[]`: the runtime rejects an empty family array outright (`"<family> constraints must not be empty when provided"`).
+
+The section is **omitted entirely when the record list is empty**, so every project written before MAR-177 serializes byte-identically. It is editor-only: it never enters `.mskl` or `.mbin`, and `.mskl` v1, `.mbin` v2, and C ABI v1 are unchanged.
 
 ### `parameter_model`
 

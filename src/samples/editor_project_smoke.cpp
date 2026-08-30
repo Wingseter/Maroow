@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -9033,6 +9034,2038 @@ bool validate_mar176_automatic_weights(
     return true;
 }
 
+// ===========================================================================
+// MAR-177 -- constraint lifecycle project operations.
+//
+// The `.marrow` constraint overlay had exactly two verbs: replace an element
+// by name, and append a new one. It could not say "this constraint is now
+// called something else" or "this constraint is gone". These scenarios cover
+// the storage, the save-time validation, the materialization, the two project
+// primitives, and the export signal for the two verbs MAR-177 adds.
+// ===========================================================================
+
+marrow::editor::ConstraintLifecycleOperation mar177_rename(
+    marrow::editor::ConstraintKind family,
+    std::string from,
+    std::string to) {
+    marrow::editor::ConstraintLifecycleOperation operation;
+    operation.kind = marrow::editor::ConstraintLifecycleKind::Rename;
+    operation.family = family;
+    operation.name = std::move(from);
+    operation.new_name = std::move(to);
+    return operation;
+}
+
+marrow::editor::ConstraintLifecycleOperation mar177_delete(
+    marrow::editor::ConstraintKind family,
+    std::string name) {
+    marrow::editor::ConstraintLifecycleOperation operation;
+    operation.kind = marrow::editor::ConstraintLifecycleKind::Delete;
+    operation.family = family;
+    operation.name = std::move(name);
+    return operation;
+}
+
+std::string mar177_read_file(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::string(
+        (std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+}
+
+/**
+ * @brief Counts whole JSON string tokens, so `cape_pull` never matches
+ *        `cape_pull_renamed`.
+ */
+std::size_t mar177_count_quoted(const std::string& text, const std::string& token) {
+    const std::string needle = "\"" + token + "\"";
+    std::size_t count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos;
+         at = text.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+/**
+ * @brief A project built directly over a constraint fixture.
+ *
+ * `player_idle` has no base constraints at all -- its four are project-only
+ * upserts over empty root arrays -- so it cannot exercise the base-backed half
+ * of the ownership rule, and no skin in it names a constraint. These scenarios
+ * therefore build their own projects over the constraint fixtures, which carry
+ * no `.marrow` and no atlas.
+ */
+struct Mar177Fixture {
+    marrow::editor::ProjectData project;
+    marrow::runtime::json::Document base;
+    bool ok{false};
+};
+
+Mar177Fixture mar177_open_fixture(
+    const std::filesystem::path& skeleton_path,
+    const std::filesystem::path& project_path) {
+    Mar177Fixture fixture;
+    const auto document = marrow::runtime::load_skeleton_document(skeleton_path);
+    if (!document) {
+        std::cerr << "MAR-177 could not load " << skeleton_path << ": "
+                  << document.error->format() << '\n';
+        return fixture;
+    }
+    fixture.base = *document.document;
+
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path = std::filesystem::absolute(skeleton_path);
+    // `validate_project_for_save()` requires at least one atlas path, and the
+    // constraint fixtures ship none, so these projects borrow `player_idle.matl`.
+    // Nothing cross-validates an atlas against a skeleton, so it is inert here.
+    options.atlas_paths = {std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    options.name = "mar177";
+    fixture.project = marrow::editor::create_minimal_project(options);
+    fixture.ok = true;
+    return fixture;
+}
+
+/**
+ * @brief Writes a `.marrow` over a constraint fixture that `load_project()` opens.
+ *
+ * `load_project()` resolves the referenced atlases and reports failure unless at
+ * least one is present, and the constraint fixtures ship none, so these projects
+ * borrow `player_idle.matl`. Nothing cross-validates an atlas against a
+ * skeleton -- the atlas carries texture data, and these scenarios assert on the
+ * skeleton document -- so the borrowed atlas is inert.
+ */
+bool mar177_write_loadable_project(
+    const marrow::editor::ProjectData& source,
+    const std::filesystem::path& skeleton_path,
+    const std::filesystem::path& project_path,
+    marrow::editor::ProjectData* project_out) {
+    marrow::editor::ProjectData project = source;
+    project.source_path = project_path;
+    project.runtime_assets.skeleton_path = std::filesystem::absolute(skeleton_path);
+    project.runtime_assets.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    *project_out = project;
+    const auto saved = marrow::editor::save_project(project, project_path);
+    if (!saved) {
+        std::cerr << "MAR-177 could not save " << project_path << ": "
+                  << saved.error->message << '\n';
+        return false;
+    }
+    return true;
+}
+
+/** @brief Reads `root[key]` as an array, or nullptr when the key is absent. */
+const marrow::runtime::json::Value* mar177_array_member(
+    const marrow::runtime::json::Value& object,
+    std::string_view key) {
+    if (!object.is_object()) {
+        return nullptr;
+    }
+    const auto found = object.as_object().find(key);
+    if (found == object.as_object().end() || !found->second.is_array()) {
+        return nullptr;
+    }
+    return &found->second;
+}
+
+/** @brief The `name` field of every element of a constraint root array. */
+std::vector<std::string> mar177_constraint_names(
+    const marrow::runtime::json::Value& root,
+    std::string_view key) {
+    std::vector<std::string> names;
+    const auto* array = mar177_array_member(root, key);
+    if (array == nullptr) {
+        return names;
+    }
+    for (const auto& element : array->as_array()) {
+        if (!element.is_object()) continue;
+        const auto found = element.as_object().find("name");
+        if (found != element.as_object().end() && found->second.is_string()) {
+            names.push_back(found->second.as_string());
+        }
+    }
+    return names;
+}
+
+/** @brief The name array a skin uses to reference one constraint family. */
+std::vector<std::string> mar177_skin_references(
+    const marrow::runtime::json::Value& root,
+    std::string_view skin_name,
+    std::string_view family_key,
+    bool* key_present) {
+    std::vector<std::string> names;
+    *key_present = false;
+    if (!root.is_object()) return names;
+    const auto skins = root.as_object().find("skins");
+    if (skins == root.as_object().end() || !skins->second.is_object()) return names;
+    const auto skin = skins->second.as_object().find(skin_name);
+    if (skin == skins->second.as_object().end() || !skin->second.is_object()) return names;
+    const auto* array = mar177_array_member(skin->second, family_key);
+    if (array == nullptr) return names;
+    *key_present = true;
+    for (const auto& element : array->as_array()) {
+        if (element.is_string()) names.push_back(element.as_string());
+    }
+    return names;
+}
+
+std::string mar177_join(const std::vector<std::string>& names) {
+    std::string joined;
+    for (const std::string& name : names) {
+        if (!joined.empty()) joined += ", ";
+        joined += name;
+    }
+    return joined;
+}
+
+// --- Scenario A: schema round trip (AC1, AC4) ------------------------------
+bool validate_mar177_scenario_a(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::ConstraintKind;
+    using marrow::editor::ConstraintLifecycleKind;
+    using marrow::editor::ConstraintLifecycleOperation;
+    using marrow::runtime::json::Value;
+
+    std::error_code ignored;
+    const std::filesystem::path fixture_path = "assets/fixtures/player_idle.marrow";
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    const auto rebase = [&](const std::filesystem::path& destination) {
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = destination;
+        return project;
+    };
+
+    // --- A1: absent means absent, and the fixture is still byte-identical --
+    if (!project_result.project->constraint_lifecycle_operations.empty()) {
+        std::cerr << "MAR-177 A1: a project with no `operations` key must load an "
+                     "empty lifecycle vector.\n";
+        return false;
+    }
+    const std::string on_disk = mar177_read_file(fixture_path);
+    const std::string untouched =
+        marrow::editor::serialize_project(*project_result.project);
+    if (untouched.find("\"operations\"") != std::string::npos) {
+        std::cerr << "MAR-177 A1: an empty lifecycle vector must not emit the key.\n";
+        return false;
+    }
+    // The design spec claimed the fixture re-serializes byte-identically. It
+    // does not, and never did: `build_project_value()` emits
+    // `editor.timeline.fps` unconditionally (project.cpp) while the fixture
+    // omits the default. That is a pre-existing 41-byte difference in a
+    // section MAR-177 does not touch, so the assertion that has teeth here is
+    // the exact one: the serialized text differs from the fixture by that
+    // block and by nothing else, which is what "MAR-177 changed zero bytes of
+    // an existing project's serialization" actually means.
+    const std::string pre_existing_timeline_block =
+        "    \"timeline\": {\n      \"fps\": 60\n    },\n";
+    const auto timeline_at = untouched.find(pre_existing_timeline_block);
+    if (timeline_at == std::string::npos) {
+        std::cerr << "MAR-177 A1: the pre-existing `editor.timeline` default block "
+                     "is no longer emitted verbatim; re-derive the difference rather "
+                     "than editing this constant.\n";
+        return false;
+    }
+    std::string without_timeline_default = untouched;
+    without_timeline_default.erase(
+        timeline_at, pre_existing_timeline_block.size());
+    if (without_timeline_default != on_disk) {
+        std::cerr << "MAR-177 A1: serialize_project() differs from " << fixture_path
+                  << " by more than the pre-existing `timeline` default ("
+                  << without_timeline_default.size() << " vs " << on_disk.size()
+                  << " bytes).\n";
+        return false;
+    }
+    // The save path is a fixed point: what save_project() writes is what
+    // load_project() reads back and serializes again.
+    {
+        const auto fixed_point_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar177_fixed_point_" + path_token + ".marrow");
+        marrow::editor::ProjectData project = rebase(fixed_point_path);
+        const std::string first = marrow::editor::serialize_project(project);
+        const auto saved = marrow::editor::save_project(project, fixed_point_path);
+        if (!saved) {
+            std::cerr << "MAR-177 A1: save_project() rejected the untouched fixture: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(fixed_point_path);
+        std::filesystem::remove(fixed_point_path, ignored);
+        if (!reloaded) {
+            std::cerr << "MAR-177 A1: reload of the untouched fixture failed: "
+                      << reloaded.error->format() << '\n';
+            return false;
+        }
+        if (marrow::editor::serialize_project(*reloaded.project) != first) {
+            std::cerr << "MAR-177 A1: save -> reload -> serialize is not a fixed "
+                         "point for a project with no lifecycle operations.\n";
+            return false;
+        }
+        if (!reloaded.project->constraint_lifecycle_operations.empty()) {
+            std::cerr << "MAR-177 A1: reload invented a lifecycle operation.\n";
+            return false;
+        }
+    }
+
+    // --- A2/A3: one record serializes and reloads field for field ---------
+    //
+    // `load_project()` materializes the runtime, so a project carrying an
+    // unresolvable record cannot be opened at all -- which is the intended
+    // behaviour, and which means the round trip has to run over a fixture that
+    // actually has the constraint. `player_idle`'s four constraints are all
+    // project-only upserts over empty base arrays (§2.9), so a *record* naming
+    // one of them is by construction illegal; the base-backed fixture is
+    // `skin_inherit_constraints`.
+    const auto skin_fixture = mar177_open_fixture(
+        "assets/fixtures/skin_inherit_constraints.mskl",
+        std::filesystem::temp_directory_path() / "marrow_mar177_a_seed.marrow");
+    if (!skin_fixture.ok) return false;
+    {
+        const auto round_trip_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar177_a_" + path_token + ".marrow");
+        marrow::editor::ProjectData project;
+        marrow::editor::ProjectData seed = skin_fixture.project;
+        seed.constraint_lifecycle_operations.push_back(
+            mar177_rename(ConstraintKind::Transform, "cape_pull", "cape_drag"));
+        if (!mar177_write_loadable_project(
+                seed,
+                "assets/fixtures/skin_inherit_constraints.mskl",
+                round_trip_path,
+                &project)) {
+            return false;
+        }
+        const std::string text = marrow::editor::serialize_project(project);
+        for (const char* fragment : {"\"operations\"", "\"op\": \"rename\"",
+                                     "\"family\": \"transform\"",
+                                     "\"from\": \"cape_pull\"",
+                                     "\"to\": \"cape_drag\""}) {
+            if (text.find(fragment) == std::string::npos) {
+                std::cerr << "MAR-177 A2: serialized project is missing " << fragment
+                          << ".\n";
+                return false;
+            }
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        std::filesystem::remove(round_trip_path, ignored);
+        if (!reloaded) {
+            std::cerr << "MAR-177 A3: reload failed: "
+                      << (reloaded.error.has_value() ? reloaded.error->format()
+                                                     : std::string("no error reported"))
+                      << '\n';
+            return false;
+        }
+        const auto& operations = reloaded.project->constraint_lifecycle_operations;
+        if (operations.size() != 1U ||
+            operations[0].kind != ConstraintLifecycleKind::Rename ||
+            operations[0].family != ConstraintKind::Transform ||
+            operations[0].name != "cape_pull" ||
+            operations[0].new_name != "cape_drag") {
+            std::cerr << "MAR-177 A3: the rename record did not round-trip.\n";
+            return false;
+        }
+        // The reload is a real materialization: the renamed constraint is what
+        // the loaded skeleton carries.
+        if (reloaded.skeleton_data->transform_constraints().size() != 1U ||
+            reloaded.skeleton_data->transform_constraints()[0].name != "cape_drag") {
+            std::cerr << "MAR-177 A3: the reloaded skeleton did not carry the rename.\n";
+            return false;
+        }
+    }
+
+    // --- A4: a tombstone-only project survives save/reload -----------------
+    //
+    // `build_project_value()` gates the whole `constraint_edits` key on the
+    // four upsert vectors being non-empty. A project whose only constraint
+    // content is one tombstone therefore serializes into nothing at all unless
+    // that gate also considers the lifecycle vector -- the MAR-172 failure
+    // shape: an `ok: true` save that silently destroys the edit.
+    {
+        const auto tombstone_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar177_tombstone_" + path_token + ".marrow");
+        marrow::editor::ProjectData project;
+        marrow::editor::ProjectData seed = skin_fixture.project;
+        seed.constraint_lifecycle_operations.push_back(
+            mar177_delete(ConstraintKind::Transform, "cape_pull"));
+        if (!mar177_write_loadable_project(
+                seed,
+                "assets/fixtures/skin_inherit_constraints.mskl",
+                tombstone_path,
+                &project)) {
+            return false;
+        }
+        if (!project.ik_constraint_edits.empty() ||
+            !project.path_constraint_edits.empty() ||
+            !project.transform_constraint_edits.empty() ||
+            !project.physics_constraint_edits.empty()) {
+            std::cerr << "MAR-177 A4 needs a project with no upserts at all.\n";
+            return false;
+        }
+        const std::string text = marrow::editor::serialize_project(project);
+        if (text.find("\"constraint_edits\"") == std::string::npos ||
+            text.find("\"operations\"") == std::string::npos) {
+            std::cerr << "MAR-177 A4: a tombstone-only project lost its "
+                         "`constraint_edits.operations` on serialization -- the emit "
+                         "gate still keys on the four upsert vectors alone.\n";
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(tombstone_path);
+        std::filesystem::remove(tombstone_path, ignored);
+        if (!reloaded) {
+            std::cerr << "MAR-177 A4: reload failed: "
+                      << (reloaded.error.has_value() ? reloaded.error->format()
+                                                     : std::string("no error reported"))
+                      << '\n';
+            return false;
+        }
+        if (!reloaded.skeleton_data->transform_constraints().empty()) {
+            std::cerr << "MAR-177 A4: the tombstone did not survive the reload into "
+                         "the materialized skeleton.\n";
+            return false;
+        }
+        const auto& operations = reloaded.project->constraint_lifecycle_operations;
+        if (operations.size() != 1U ||
+            operations[0].kind != ConstraintLifecycleKind::Delete ||
+            operations[0].family != ConstraintKind::Transform ||
+            operations[0].name != "cape_pull" ||
+            !operations[0].new_name.empty()) {
+            std::cerr << "MAR-177 A4: the tombstone did not round-trip.\n";
+            return false;
+        }
+        if (!reloaded.project->ik_constraint_edits.empty() ||
+            !reloaded.project->path_constraint_edits.empty() ||
+            !reloaded.project->transform_constraint_edits.empty() ||
+            !reloaded.project->physics_constraint_edits.empty()) {
+            std::cerr << "MAR-177 A4: the tombstone-only reload invented upserts.\n";
+            return false;
+        }
+    }
+
+    // --- A5: every malformed record is rejected on load, with a location ---
+    {
+        const auto base_document =
+            marrow::runtime::json::load_document(fixture_path);
+        if (!base_document) {
+            std::cerr << "MAR-177 A5 could not parse the fixture.\n";
+            return false;
+        }
+
+        struct MalformedCase {
+            const char* label;
+            Value operations;      ///< The whole `operations` member.
+            const char* want_path;
+            const char* want_message;
+        };
+        const auto object = [](Value::Object members) {
+            return Value(std::move(members), {});
+        };
+        const auto array = [](Value::Array items) {
+            return Value(std::move(items), {});
+        };
+        const auto text = [](std::string value) {
+            return Value(std::move(value), {});
+        };
+        const auto record = [&](std::vector<std::pair<std::string, Value>> members) {
+            Value::Object built;
+            for (auto& member : members) {
+                built.emplace(member.first, std::move(member.second));
+            }
+            return array(Value::Array{object(std::move(built))});
+        };
+
+        const std::vector<MalformedCase> cases{
+            {"`operations` that is not an array",
+             text("rename"),
+             "$.constraint_edits.operations", "expected array"},
+            {"an element that is not an object",
+             array(Value::Array{text("rename")}),
+             "$.constraint_edits.operations[0]", "expected object"},
+            {"a record with no `op`",
+             record({{"family", text("ik")}, {"name", text("a")}}),
+             "$.constraint_edits.operations[0].op", "missing required member"},
+            {"an `op` that is not a string",
+             record({{"op", Value(1.0, {})}, {"family", text("ik")}}),
+             "$.constraint_edits.operations[0].op", "expected string"},
+            {"an unknown `op`",
+             record({{"op", text("remove")}, {"family", text("ik")},
+                     {"name", text("a")}}),
+             "$.constraint_edits.operations[0].op", "must be 'rename' or 'delete'"},
+            {"a record with no `family`",
+             record({{"op", text("delete")}, {"name", text("a")}}),
+             "$.constraint_edits.operations[0].family", "missing required member"},
+            {"an unknown `family`",
+             record({{"op", text("delete")}, {"family", text("bone")},
+                     {"name", text("a")}}),
+             "$.constraint_edits.operations[0].family",
+             "must be one of 'ik', 'path', 'transform', 'physics'"},
+            {"a rename with no `from`",
+             record({{"op", text("rename")}, {"family", text("ik")},
+                     {"to", text("b")}}),
+             "$.constraint_edits.operations[0].from", "missing required member"},
+            {"a rename with an empty `from`",
+             record({{"op", text("rename")}, {"family", text("ik")},
+                     {"from", text("")}, {"to", text("b")}}),
+             "$.constraint_edits.operations[0].from", "must not be empty"},
+            {"a rename with no `to`",
+             record({{"op", text("rename")}, {"family", text("ik")},
+                     {"from", text("a")}}),
+             "$.constraint_edits.operations[0].to", "missing required member"},
+            {"a rename with an empty `to`",
+             record({{"op", text("rename")}, {"family", text("ik")},
+                     {"from", text("a")}, {"to", text("")}}),
+             "$.constraint_edits.operations[0].to", "must not be empty"},
+            {"a rename onto its own name",
+             record({{"op", text("rename")}, {"family", text("ik")},
+                     {"from", text("a")}, {"to", text("a")}}),
+             "$.constraint_edits.operations[0].to", "must differ from"},
+            {"a rename carrying `name`",
+             record({{"op", text("rename")}, {"family", text("ik")},
+                     {"from", text("a")}, {"to", text("b")}, {"name", text("a")}}),
+             "$.constraint_edits.operations[0].name",
+             "rename records must not carry"},
+            {"a delete with no `name`",
+             record({{"op", text("delete")}, {"family", text("ik")}}),
+             "$.constraint_edits.operations[0].name", "missing required member"},
+            {"a delete with an empty `name`",
+             record({{"op", text("delete")}, {"family", text("ik")},
+                     {"name", text("")}}),
+             "$.constraint_edits.operations[0].name", "must not be empty"},
+            {"a delete carrying `to`",
+             record({{"op", text("delete")}, {"family", text("ik")},
+                     {"name", text("a")}, {"to", text("b")}}),
+             "$.constraint_edits.operations[0].to",
+             "delete records must not carry"},
+            {"a delete carrying `from`",
+             record({{"op", text("delete")}, {"family", text("ik")},
+                     {"name", text("a")}, {"from", text("b")}}),
+             "$.constraint_edits.operations[0].from",
+             "delete records must not carry"},
+        };
+
+        for (const MalformedCase& malformed : cases) {
+            auto document = *base_document.document;
+            Value* constraint_edits =
+                marrow::runtime::json::find_member(document.root, "constraint_edits");
+            if (constraint_edits == nullptr || !constraint_edits->is_object()) {
+                std::cerr << "MAR-177 A5 needs the fixture's `constraint_edits`.\n";
+                return false;
+            }
+            constraint_edits->as_object()["operations"] = malformed.operations;
+            const auto loaded = marrow::editor::load_project(document);
+            if (loaded) {
+                std::cerr << "MAR-177 A5: the loader accepted " << malformed.label
+                          << ".\n";
+                return false;
+            }
+            const std::string message = loaded.error->message;
+            if (message.rfind(malformed.want_path, 0U) != 0U ||
+                message.find(malformed.want_message) == std::string::npos) {
+                std::cerr << "MAR-177 A5: rejected " << malformed.label
+                          << " with the wrong path or message: " << message << '\n';
+                return false;
+            }
+        }
+        std::cout << "MAR-177 A5: " << cases.size()
+                  << " malformed `constraint_edits.operations` records rejected on "
+                     "load, each with a located error.\n";
+    }
+
+    // --- A6: an unknown top-level key still survives load/save (AC4) -------
+    {
+        const auto base_document =
+            marrow::runtime::json::load_document(fixture_path);
+        if (!base_document) {
+            std::cerr << "MAR-177 A6 could not parse the fixture.\n";
+            return false;
+        }
+        auto document = *base_document.document;
+        Value::Object unknown;
+        unknown.emplace("kept", Value(std::string("yes"), {}));
+        document.root.as_object()["mar177_unknown"] = Value(std::move(unknown), {});
+        const auto loaded = marrow::editor::load_project(document);
+        if (!loaded) {
+            std::cerr << "MAR-177 A6: an unknown top-level key broke load: "
+                      << loaded.error->format() << '\n';
+            return false;
+        }
+        marrow::editor::ProjectData project = *loaded.project;
+        project.ik_constraint_edits.clear();
+        project.constraint_lifecycle_operations.push_back(
+            mar177_delete(ConstraintKind::Ik, "editor_arm_reach"));
+        const std::string text = marrow::editor::serialize_project(project);
+        if (text.find("\"mar177_unknown\"") == std::string::npos ||
+            text.find("\"kept\": \"yes\"") == std::string::npos) {
+            std::cerr << "MAR-177 A6: the unknown top-level key did not survive "
+                         "serialization alongside a lifecycle record.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-177 Scenario A: `constraint_edits.operations` is absent when "
+                 "empty, round-trips when present, survives with no upserts at all, "
+                 "and rejects every malformed record on load.\n";
+    return true;
+}
+
+// --- Scenario A2: save-time symbolic replay (AC3) --------------------------
+//
+// `validate_project_for_save()` has no base skeleton, so it cannot know which
+// names exist. It can still reject everything intrinsically broken, by walking
+// the operations front to back per family over two sets: `consumed` (names a
+// rename or delete has taken away) and `introduced` (names a rename created).
+bool validate_mar177_scenario_a2(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::ConstraintKind;
+    using marrow::editor::ConstraintLifecycleOperation;
+
+    std::error_code ignored;
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto case_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar177_a2_" + path_token + ".marrow");
+
+    const auto rebase = [&] {
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = case_path;
+        return project;
+    };
+
+    struct ReplayCase {
+        const char* label;
+        std::vector<ConstraintLifecycleOperation> operations;
+        bool accept;
+        const char* want_message;  ///< Substring; ignored when `accept`.
+    };
+
+    const auto rename = mar177_rename;
+    const auto erase = mar177_delete;
+    ConstraintLifecycleOperation delete_with_new_name =
+        mar177_delete(ConstraintKind::Ik, "a");
+    delete_with_new_name.new_name = "b";
+    ConstraintLifecycleOperation rename_with_empty_source =
+        mar177_rename(ConstraintKind::Ik, "", "b");
+    ConstraintLifecycleOperation rename_with_empty_target =
+        mar177_rename(ConstraintKind::Ik, "a", "");
+    ConstraintLifecycleOperation self_rename =
+        mar177_rename(ConstraintKind::Ik, "a", "a");
+
+    const std::vector<ReplayCase> cases{
+        {"an empty rename source", {rename_with_empty_source}, false,
+         "rename source must not be empty"},
+        {"an empty rename target", {rename_with_empty_target}, false,
+         "rename target must not be empty"},
+        {"a rename onto its own name", {self_rename}, false,
+         "must differ from its source"},
+        {"a delete carrying a new name", {delete_with_new_name}, false,
+         "delete records must not carry a new name"},
+        {"rename then delete the same source",
+         {rename(ConstraintKind::Ik, "a", "b"), erase(ConstraintKind::Ik, "a")},
+         false, "was already renamed or deleted"},
+        {"delete then rename the same source",
+         {erase(ConstraintKind::Ik, "a"), rename(ConstraintKind::Ik, "a", "c")},
+         false, "was already renamed or deleted"},
+        {"two renames onto the same target",
+         {rename(ConstraintKind::Ik, "a", "c"), rename(ConstraintKind::Ik, "b", "c")},
+         false, "is already introduced by an earlier operation"},
+        // The four rows below are what prove the replay is not simply refusing
+        // everything with more than one record in it.
+        {"a legal chain",
+         {rename(ConstraintKind::Ik, "a", "b"), rename(ConstraintKind::Ik, "b", "c")},
+         true, ""},
+        {"a legal reuse of a deleted name",
+         {erase(ConstraintKind::Ik, "a"), rename(ConstraintKind::Ik, "b", "a")},
+         true, ""},
+        {"a legal three-step swap",
+         {rename(ConstraintKind::Ik, "a", "t"), rename(ConstraintKind::Ik, "b", "a"),
+          rename(ConstraintKind::Ik, "t", "b")},
+         true, ""},
+        {"the same name deleted in two different families",
+         {erase(ConstraintKind::Ik, "a"), erase(ConstraintKind::Physics, "a")},
+         true, ""},
+        // A rename or delete that consumes a name an upsert still carries
+        // would re-introduce that name in Phase B -- a resurrection for a
+        // delete, and two constraints where there was one for a rename.
+        {"a rename whose source is still an upsert's name",
+         {rename(ConstraintKind::Ik, "editor_arm_reach", "x")}, false,
+         "ik constraint edit 'editor_arm_reach'"},
+        {"a delete whose target is still an upsert's name",
+         {erase(ConstraintKind::Physics, "editor_ribbon_secondary")}, false,
+         "physics constraint edit 'editor_ribbon_secondary'"},
+        // The plan expected this row to reject. It must not, and the reason is
+        // structural: `Rename{Ik, a, editor_arm_reach}` plus an IK upsert named
+        // `editor_arm_reach` is byte-for-byte the state design §5.3's middle
+        // row *requires* a shadowing rename to produce (append the record, and
+        // rewrite the shadowing upsert's name to the new one). A save-time
+        // rule that rejected it would reject the ownership rule's own output.
+        // The genuine collision -- renaming onto a name a *different*
+        // project-only constraint already holds -- is unreachable through the
+        // primitives, whose preflight resolves `to` against the materialized
+        // name set; scenario B asserts that rejection where it belongs.
+        {"a rename onto a name an upsert already carries (the shadowing shape)",
+         {rename(ConstraintKind::Ik, "a", "editor_arm_reach")}, true, ""},
+    };
+
+    for (const ReplayCase& replay : cases) {
+        marrow::editor::ProjectData project = rebase();
+        project.constraint_lifecycle_operations = replay.operations;
+        const auto saved = marrow::editor::save_project(project, case_path);
+        std::filesystem::remove(case_path, ignored);
+        if (replay.accept) {
+            if (!saved) {
+                std::cerr << "MAR-177 A2: save_project() rejected " << replay.label
+                          << ": " << saved.error->message << '\n';
+                return false;
+            }
+            continue;
+        }
+        if (saved) {
+            std::cerr << "MAR-177 A2: save_project() accepted " << replay.label
+                      << ".\n";
+            return false;
+        }
+        if (saved.error->message.find(replay.want_message) == std::string::npos) {
+            std::cerr << "MAR-177 A2: rejected " << replay.label
+                      << " with the wrong message: " << saved.error->message << '\n';
+            return false;
+        }
+    }
+
+    std::cout << "MAR-177 Scenario A2: " << cases.size()
+              << " symbolic-replay rows -- chains, reuse, a swap, and cross-family "
+                 "independence accepted; every ordering and upsert-stranding fault "
+                 "rejected before a byte is written.\n";
+    return true;
+}
+
+// --- Scenario C: Phase A materialization (AC2, AC3) ------------------------
+//
+// Skins reference constraints BY NAME, and `parse_skin_scope_members()` fails
+// the whole load on an unresolvable one. A delete or rename that does not touch
+// `skins[*].<family>` therefore does not produce a subtly wrong rig -- it
+// produces a project that still saves and can never be opened again.
+bool validate_mar177_scenario_c() {
+    using marrow::editor::ConstraintKind;
+
+    const auto skin_fixture = mar177_open_fixture(
+        "assets/fixtures/skin_inherit_constraints.mskl",
+        std::filesystem::temp_directory_path() / "marrow_mar177_skin.marrow");
+    if (!skin_fixture.ok) return false;
+
+    // --- C1: baseline ------------------------------------------------------
+    {
+        const auto runtime = marrow::editor::build_project_runtime(
+            skin_fixture.project, skin_fixture.base);
+        if (!runtime) {
+            std::cerr << "MAR-177 C1: the untouched fixture failed to build: "
+                      << runtime.error->format() << '\n';
+            return false;
+        }
+        const auto& skeleton = *runtime.skeleton_data;
+        if (skeleton.transform_constraints().size() != 1U ||
+            skeleton.transform_constraints()[0].name != "cape_pull") {
+            std::cerr << "MAR-177 C1: expected exactly one base transform constraint "
+                         "named cape_pull.\n";
+            return false;
+        }
+        const auto* cape = skeleton.find_skin("cape");
+        if (cape == nullptr || cape->transform_constraint_indices.size() != 1U ||
+            cape->bone_indices.size() != 1U) {
+            std::cerr << "MAR-177 C1: skin `cape` must reference one transform "
+                         "constraint and one bone.\n";
+            return false;
+        }
+    }
+
+    // --- C2: rename rewrites the root element AND the skin reference -------
+    {
+        marrow::editor::ProjectData project = skin_fixture.project;
+        project.constraint_lifecycle_operations.push_back(
+            mar177_rename(ConstraintKind::Transform, "cape_pull", "cape_drag"));
+        const auto document = marrow::editor::build_project_runtime_document(
+            project, skin_fixture.base);
+        const auto names = mar177_constraint_names(document.root, "transform");
+        if (names.size() != 1U || names[0] != "cape_drag") {
+            std::cerr << "MAR-177 C2: root transform is [" << mar177_join(names)
+                      << "], expected [cape_drag].\n";
+            return false;
+        }
+        bool key_present = false;
+        const auto references =
+            mar177_skin_references(document.root, "cape", "transform", &key_present);
+        if (!key_present || references.size() != 1U || references[0] != "cape_drag") {
+            std::cerr << "MAR-177 C2: skins.cape.transform is ["
+                      << mar177_join(references)
+                      << "], expected [cape_drag]; an unrewritten skin reference "
+                         "makes the exported rig unloadable.\n";
+            return false;
+        }
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, skin_fixture.base);
+        if (!runtime) {
+            std::cerr << "MAR-177 C2: the renamed rig failed to load: "
+                      << runtime.error->format() << '\n';
+            return false;
+        }
+        const auto& skeleton = *runtime.skeleton_data;
+        const auto* cape = skeleton.find_skin("cape");
+        if (skeleton.transform_constraints().size() != 1U ||
+            skeleton.transform_constraints()[0].name != "cape_drag" ||
+            cape == nullptr || cape->transform_constraint_indices.size() != 1U ||
+            cape->bone_indices.size() != 1U) {
+            std::cerr << "MAR-177 C2: the renamed rig did not keep one transform "
+                         "constraint, its skin reference, and `cape_target`.\n";
+            return false;
+        }
+    }
+
+    // --- C3: delete erases the key rather than leaving `[]` ----------------
+    //
+    // `skeleton_parse.cpp` rejects an empty `transform` array outright
+    // ("transform constraints must not be empty when provided"), so deleting
+    // the last constraint of a family must remove the key. Leaving `[]` is the
+    // difference between "the constraint was deleted" and "the project can no
+    // longer be opened".
+    {
+        marrow::editor::ProjectData project = skin_fixture.project;
+        project.constraint_lifecycle_operations.push_back(
+            mar177_delete(ConstraintKind::Transform, "cape_pull"));
+        const auto document = marrow::editor::build_project_runtime_document(
+            project, skin_fixture.base);
+        if (document.root.as_object().find("transform") !=
+            document.root.as_object().end()) {
+            std::cerr << "MAR-177 C3: the emptied root `transform` key must be erased, "
+                         "not left as [].\n";
+            return false;
+        }
+        bool key_present = true;
+        mar177_skin_references(document.root, "cape", "transform", &key_present);
+        if (key_present) {
+            std::cerr << "MAR-177 C3: the emptied `skins.cape.transform` key must be "
+                         "erased, not left as [].\n";
+            return false;
+        }
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, skin_fixture.base);
+        if (!runtime) {
+            std::cerr << "MAR-177 C3: the rig with its last transform constraint "
+                         "deleted failed to load: " << runtime.error->format() << '\n';
+            return false;
+        }
+        const auto& skeleton = *runtime.skeleton_data;
+        const auto* cape = skeleton.find_skin("cape");
+        if (!skeleton.transform_constraints().empty()) {
+            std::cerr << "MAR-177 C3: the transform constraint survived the delete.\n";
+            return false;
+        }
+        // Survival: the delete must not take the adjacent skin scope with it.
+        if (cape == nullptr || !cape->transform_constraint_indices.empty() ||
+            cape->bone_indices.size() != 1U) {
+            std::cerr << "MAR-177 C3: skin `cape` lost `cape_target` to the delete.\n";
+            return false;
+        }
+    }
+
+    // --- C4: delete preserves the relative order of the survivors ----------
+    {
+        const auto ik_fixture = mar177_open_fixture(
+            "assets/fixtures/ik_constraints.mskl",
+            std::filesystem::temp_directory_path() / "marrow_mar177_ik.marrow");
+        if (!ik_fixture.ok) return false;
+
+        const auto base_names = mar177_constraint_names(ik_fixture.base.root, "ik");
+        if (base_names.size() != 13U) {
+            std::cerr << "MAR-177 C4: expected 13 base IK constraints, found "
+                      << base_names.size() << ".\n";
+            return false;
+        }
+        marrow::editor::ProjectData project = ik_fixture.project;
+        // The 1st, the 7th, and the 13th -- the head, the middle, and the tail.
+        for (const std::size_t index : {std::size_t{0}, std::size_t{6}, std::size_t{12}}) {
+            project.constraint_lifecycle_operations.push_back(
+                mar177_delete(ConstraintKind::Ik, base_names[index]));
+        }
+        const auto document =
+            marrow::editor::build_project_runtime_document(project, ik_fixture.base);
+        std::vector<std::string> expected;
+        for (std::size_t index = 0; index < base_names.size(); ++index) {
+            if (index != 0U && index != 6U && index != 12U) {
+                expected.push_back(base_names[index]);
+            }
+        }
+        const auto survivors = mar177_constraint_names(document.root, "ik");
+        if (survivors != expected) {
+            std::cerr << "MAR-177 C4: survivors are [" << mar177_join(survivors)
+                      << "], expected [" << mar177_join(expected)
+                      << "] -- evaluation order is array order, so the sequence is "
+                         "the assertion, not the count.\n";
+            return false;
+        }
+        if (!marrow::editor::build_project_runtime(project, ik_fixture.base)) {
+            std::cerr << "MAR-177 C4: the 10-survivor rig failed to load.\n";
+            return false;
+        }
+    }
+
+    // --- C5: family is part of identity ------------------------------------
+    //
+    // `rope_follow` exists, as a *path* constraint. A delete that claims the IK
+    // family must not touch it. Phase A is defensive and no-ops; Scenario D
+    // asserts the validator rejects it with a family-mismatch message.
+    {
+        const auto mixed_fixture = mar177_open_fixture(
+            "assets/fixtures/path_transform_constraints.mskl",
+            std::filesystem::temp_directory_path() / "marrow_mar177_mixed.marrow");
+        if (!mixed_fixture.ok) return false;
+        marrow::editor::ProjectData project = mixed_fixture.project;
+        project.constraint_lifecycle_operations.push_back(
+            mar177_delete(ConstraintKind::Ik, "rope_follow"));
+        const auto document =
+            marrow::editor::build_project_runtime_document(project, mixed_fixture.base);
+        const auto path_names = mar177_constraint_names(document.root, "path");
+        const auto transform_names = mar177_constraint_names(document.root, "transform");
+        if (path_names != std::vector<std::string>{"rope_follow"} ||
+            transform_names != std::vector<std::string>{"mirror_source"}) {
+            std::cerr << "MAR-177 C5: an IK-family delete reached across families; "
+                         "path=[" << mar177_join(path_names) << "] transform=["
+                      << mar177_join(transform_names) << "].\n";
+            return false;
+        }
+    }
+
+    // --- C6: Phase A strictly precedes Phase B -----------------------------
+    //
+    // A rename record whose target is also an upsert's name must produce ONE
+    // element carrying the upsert's fields. If the upserts merged first, the
+    // upsert would append as a fourteenth element and `arm_positive` would
+    // still be standing.
+    {
+        const auto ik_fixture = mar177_open_fixture(
+            "assets/fixtures/ik_constraints.mskl",
+            std::filesystem::temp_directory_path() / "marrow_mar177_phase.marrow");
+        if (!ik_fixture.ok) return false;
+        marrow::editor::ProjectData project = ik_fixture.project;
+        project.constraint_lifecycle_operations.push_back(
+            mar177_rename(ConstraintKind::Ik, "arm_positive", "arm_renamed"));
+        marrow::editor::IkConstraintEdit upsert;
+        upsert.name = "arm_renamed";
+        upsert.bone_names = {"upper_arm_pos", "lower_arm_pos"};
+        upsert.target_bone_name = "target_pos";
+        upsert.mix = 0.25;
+        project.ik_constraint_edits.push_back(upsert);
+
+        const auto document =
+            marrow::editor::build_project_runtime_document(project, ik_fixture.base);
+        const auto names = mar177_constraint_names(document.root, "ik");
+        if (names.size() != 13U) {
+            std::cerr << "MAR-177 C6: expected 13 IK constraints after a rename plus a "
+                         "matching upsert, found " << names.size() << ": ["
+                      << mar177_join(names) << "].\n";
+            return false;
+        }
+        if (std::count(names.begin(), names.end(), std::string("arm_renamed")) != 1 ||
+            std::count(names.begin(), names.end(), std::string("arm_positive")) != 0) {
+            std::cerr << "MAR-177 C6: Phase B ran before Phase A -- names are ["
+                      << mar177_join(names) << "].\n";
+            return false;
+        }
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, ik_fixture.base);
+        if (!runtime) {
+            std::cerr << "MAR-177 C6: the merged rig failed to load: "
+                      << runtime.error->format() << '\n';
+            return false;
+        }
+        const auto& constraints = runtime.skeleton_data->ik_constraints();
+        if (constraints.size() != 13U || constraints[0].name != "arm_renamed" ||
+            std::abs(constraints[0].mix - 0.25) > 1e-9) {
+            std::cerr << "MAR-177 C6: the upsert's fields did not win in place; "
+                         "constraint 0 is " << constraints[0].name << " mix="
+                      << constraints[0].mix << ".\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-177 Scenario C: lifecycle records rewrite the root arrays and "
+                 "every skin reference, erase an emptied family key instead of "
+                 "leaving [], preserve survivor order, stay inside their family, and "
+                 "run strictly before the upsert merge.\n";
+    return true;
+}
+
+// --- Scenario D: materialization-time validation (AC3) ---------------------
+//
+// `validate_project_for_save()` has no base document and so can only replay
+// symbolically. This layer has the base, and reports the four causes AC3 names
+// separately, because they have very different fixes: a missing source is a
+// typo, a family mismatch is the wrong dropdown, a duplicate target is a name
+// that is already taken, and an invalid order is a sequence that was legal
+// when each record was written and is not legal in this order.
+bool validate_mar177_scenario_d() {
+    using marrow::editor::ConstraintKind;
+    using marrow::editor::ConstraintLifecycleOperation;
+
+    std::error_code ignored;
+    const auto ik_fixture = mar177_open_fixture(
+        "assets/fixtures/ik_constraints.mskl",
+        std::filesystem::temp_directory_path() / "marrow_mar177_d_ik.marrow");
+    const auto mixed_fixture = mar177_open_fixture(
+        "assets/fixtures/path_transform_constraints.mskl",
+        std::filesystem::temp_directory_path() / "marrow_mar177_d_mixed.marrow");
+    if (!ik_fixture.ok || !mixed_fixture.ok) return false;
+
+    struct ValidationCase {
+        const char* label;
+        const Mar177Fixture* fixture;
+        std::vector<ConstraintLifecycleOperation> operations;
+        bool accept;
+        const char* want_message;
+    };
+
+    const std::vector<ValidationCase> cases{
+        {"a rename of a name that does not exist", &ik_fixture,
+         {mar177_rename(ConstraintKind::Ik, "no_such", "x")}, false,
+         "does not exist"},
+        {"a delete of a name that does not exist", &ik_fixture,
+         {mar177_delete(ConstraintKind::Ik, "no_such")}, false,
+         "does not exist"},
+        {"a rename onto a live name in the same family", &ik_fixture,
+         {mar177_rename(ConstraintKind::Ik, "arm_positive", "arm_negative")}, false,
+         "is already taken"},
+        {"a delete naming the wrong family", &mixed_fixture,
+         {mar177_delete(ConstraintKind::Ik, "rope_follow")}, false,
+         "exists as a path constraint"},
+        // Families are independent: `rope_follow` is a live *path* name, and a
+        // *transform* constraint may take it.
+        {"a rename onto a name live only in another family", &mixed_fixture,
+         {mar177_rename(ConstraintKind::Transform, "mirror_source", "rope_follow")},
+         true, ""},
+        {"a rename of a name an earlier delete consumed", &ik_fixture,
+         {mar177_delete(ConstraintKind::Ik, "arm_positive"),
+          mar177_rename(ConstraintKind::Ik, "arm_positive", "x")},
+         false, "was already renamed or deleted by an earlier operation"},
+        // The chain is legal only in this order, which is why the records are
+        // an ordered array and not a map keyed by source.
+        {"a legal chain through an intermediate name", &ik_fixture,
+         {mar177_rename(ConstraintKind::Ik, "arm_positive", "arm_middle"),
+          mar177_rename(ConstraintKind::Ik, "arm_middle", "arm_final")},
+         true, ""},
+    };
+
+    for (const ValidationCase& validation : cases) {
+        marrow::editor::ProjectData project = validation.fixture->project;
+        project.constraint_lifecycle_operations = validation.operations;
+        const std::string before = marrow::editor::serialize_project(project);
+
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, validation.fixture->base);
+        if (validation.accept) {
+            if (!runtime) {
+                std::cerr << "MAR-177 D: build_project_runtime() rejected "
+                          << validation.label << ": " << runtime.error->format() << '\n';
+                return false;
+            }
+            continue;
+        }
+        if (runtime) {
+            std::cerr << "MAR-177 D: build_project_runtime() accepted "
+                      << validation.label << ".\n";
+            return false;
+        }
+        if (runtime.error->message.find(validation.want_message) == std::string::npos) {
+            std::cerr << "MAR-177 D: rejected " << validation.label
+                      << " with the wrong message: " << runtime.error->message << '\n';
+            return false;
+        }
+
+        // A rejected project must write nothing at all. `export_runtime_assets`
+        // writes its first byte well after the validation point, so a rejection
+        // cannot leave a truncated `.mskl` or a stale `.mbin` behind.
+        const auto reject_json = std::filesystem::temp_directory_path() /
+            "marrow_mar177_reject.mskl";
+        const auto reject_binary = std::filesystem::temp_directory_path() /
+            "marrow_mar177_reject.mbin";
+        std::filesystem::remove(reject_json, ignored);
+        std::filesystem::remove(reject_binary, ignored);
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = reject_json;
+        options.binary_output_path = reject_binary;
+        const auto exported = marrow::editor::export_runtime_assets(
+            project, validation.fixture->base, options);
+        if (exported) {
+            std::cerr << "MAR-177 D: export_runtime_assets() accepted "
+                      << validation.label << ".\n";
+            return false;
+        }
+        if (std::filesystem::exists(reject_json) ||
+            std::filesystem::exists(reject_binary)) {
+            std::cerr << "MAR-177 D: a rejected export left a file behind for "
+                      << validation.label << ".\n";
+            std::filesystem::remove(reject_json, ignored);
+            std::filesystem::remove(reject_binary, ignored);
+            return false;
+        }
+        if (marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-177 D: a rejection mutated the project for "
+                      << validation.label << ".\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-177 Scenario D: " << cases.size()
+              << " materialization rows -- missing source, duplicate target, family "
+                 "mismatch, and invalid order each rejected with their own message, "
+                 "each writing no output file; cross-family reuse and an ordered "
+                 "chain accepted.\n";
+    return true;
+}
+
+/**
+ * @brief Serializes every project section except one constraint family and the
+ *        lifecycle records.
+ *
+ * A lifecycle call is allowed to change exactly two things: its own family's
+ * upserts and the ordered records. Comparing this rendering before and after a
+ * call asserts that it changed nothing else -- the other three constraint
+ * families, the timelines, the snap settings, and the editor metadata -- byte
+ * for byte. MAR-172 shipped an `ok: true` that destroyed an adjacent key and
+ * was caught only by reading the neighbour back.
+ */
+std::string mar177_neighbour_text(
+    marrow::editor::ProjectData project,
+    marrow::editor::ConstraintKind touched) {
+    using marrow::editor::ConstraintKind;
+    project.constraint_lifecycle_operations.clear();
+    switch (touched) {
+    case ConstraintKind::Ik:
+        project.ik_constraint_edits.clear();
+        break;
+    case ConstraintKind::Path:
+        project.path_constraint_edits.clear();
+        break;
+    case ConstraintKind::Transform:
+        project.transform_constraint_edits.clear();
+        break;
+    case ConstraintKind::Physics:
+        project.physics_constraint_edits.clear();
+        break;
+    }
+    return marrow::editor::serialize_project(project);
+}
+
+// --- Scenario B: the two project primitives (AC2) ---------------------------
+//
+// The ownership rule ships as code, not as prose, so MAR-178's undoable command
+// and this smoke share one implementation of "who owns this constraint".
+bool validate_mar177_scenario_b(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::ConstraintKind;
+
+    std::error_code ignored;
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto round_trip_path = std::filesystem::temp_directory_path() /
+        ("marrow_mar177_b_" + path_token + ".marrow");
+
+    // `player_idle`'s base skeleton declares no constraints at all, so all four
+    // of its constraints are project-only upserts: the third row of the
+    // ownership table, where the rewrite happens in place and no record is
+    // appended.
+    const auto rebase = [&] {
+        marrow::editor::ProjectData project = *project_result.project;
+        project.runtime_assets.skeleton_path =
+            std::filesystem::absolute(project.resolved_skeleton_path());
+        project.runtime_assets.atlas_paths = project.resolved_atlas_paths();
+        for (auto& atlas_path : project.runtime_assets.atlas_paths) {
+            atlas_path = std::filesystem::absolute(atlas_path);
+        }
+        project.source_path = round_trip_path;
+        return project;
+    };
+    const auto& base = *project_result.base_skeleton_document;
+
+    // --- B1: a project-only rename rewrites the upsert and records nothing --
+    {
+        marrow::editor::ProjectData project = rebase();
+        const std::string neighbours_before =
+            mar177_neighbour_text(project, ConstraintKind::Ik);
+        const auto renamed = marrow::editor::rename_constraint(
+            &project, base, ConstraintKind::Ik, "editor_arm_reach", "arm_reach_v2");
+        if (!renamed.ok) {
+            std::cerr << "MAR-177 B1: rename_constraint() failed: " << renamed.message
+                      << '\n';
+            return false;
+        }
+        if (renamed.used_operation || !renamed.changed_upsert) {
+            std::cerr << "MAR-177 B1: a project-only rename must rewrite the upsert "
+                         "and append no record (used_operation="
+                      << renamed.used_operation << " changed_upsert="
+                      << renamed.changed_upsert << ").\n";
+            return false;
+        }
+        if (!project.constraint_lifecycle_operations.empty()) {
+            std::cerr << "MAR-177 B1: a project-only rename appended a record.\n";
+            return false;
+        }
+        if (project.ik_constraint_edits.size() != 1U ||
+            project.ik_constraint_edits[0].name != "arm_reach_v2") {
+            std::cerr << "MAR-177 B1: the IK upsert was not renamed in place.\n";
+            return false;
+        }
+        if (mar177_neighbour_text(project, ConstraintKind::Ik) != neighbours_before) {
+            std::cerr << "MAR-177 B1: the rename disturbed a section it does not own.\n";
+            return false;
+        }
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << "MAR-177 B1: save_project() rejected the renamed project: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        std::filesystem::remove(round_trip_path, ignored);
+        if (!reloaded) {
+            std::cerr << "MAR-177 B1: reload failed.\n";
+            return false;
+        }
+        if (reloaded.project->ik_constraint_edits.size() != 1U ||
+            reloaded.project->ik_constraint_edits[0].name != "arm_reach_v2" ||
+            !reloaded.project->constraint_lifecycle_operations.empty()) {
+            std::cerr << "MAR-177 B1: the renamed project did not round-trip.\n";
+            return false;
+        }
+    }
+
+    // --- B2: a project-only delete erases the upsert and records nothing ---
+    {
+        marrow::editor::ProjectData project = rebase();
+        const std::string neighbours_before =
+            mar177_neighbour_text(project, ConstraintKind::Physics);
+        const auto deleted = marrow::editor::delete_constraint(
+            &project, base, ConstraintKind::Physics, "editor_ribbon_secondary");
+        if (!deleted.ok) {
+            std::cerr << "MAR-177 B2: delete_constraint() failed: " << deleted.message
+                      << '\n';
+            return false;
+        }
+        if (deleted.used_operation || !deleted.changed_upsert) {
+            std::cerr << "MAR-177 B2: a project-only delete must erase the upsert and "
+                         "append no tombstone.\n";
+            return false;
+        }
+        if (!project.physics_constraint_edits.empty() ||
+            !project.constraint_lifecycle_operations.empty()) {
+            std::cerr << "MAR-177 B2: the physics upsert or the record vector is "
+                         "not what the delete should have left.\n";
+            return false;
+        }
+        // Survival: the other three constraints and every unrelated section.
+        if (mar177_neighbour_text(project, ConstraintKind::Physics) != neighbours_before) {
+            std::cerr << "MAR-177 B2: the delete destroyed adjacent project data.\n";
+            return false;
+        }
+        if (project.ik_constraint_edits.size() != 1U ||
+            project.path_constraint_edits.size() != 1U ||
+            project.transform_constraint_edits.size() != 1U) {
+            std::cerr << "MAR-177 B2: the delete took another family with it.\n";
+            return false;
+        }
+        const auto saved = marrow::editor::save_project(project, round_trip_path);
+        if (!saved) {
+            std::cerr << "MAR-177 B2: save_project() rejected the pruned project: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        std::filesystem::remove(round_trip_path, ignored);
+        if (!reloaded || !reloaded.project->physics_constraint_edits.empty()) {
+            std::cerr << "MAR-177 B2: the pruned project did not round-trip.\n";
+            return false;
+        }
+    }
+
+    // --- B3: rejections leave the project byte-identical -------------------
+    {
+        struct RejectionCase {
+            const char* label;
+            bool is_rename;
+            const char* from;
+            const char* to;
+            const char* want_message;
+        };
+        const std::vector<RejectionCase> cases{
+            {"a rename of a name that exists nowhere", true, "no_such", "x",
+             "does not exist"},
+            {"a delete of a name that exists nowhere", false, "no_such", "",
+             "does not exist"},
+            {"a rename with an empty target", true, "editor_arm_reach", "",
+             "must not be empty"},
+            {"a rename onto its own name", true, "editor_arm_reach",
+             "editor_arm_reach", "must differ"},
+        };
+        for (const RejectionCase& rejection : cases) {
+            marrow::editor::ProjectData project = rebase();
+            const std::string before = marrow::editor::serialize_project(project);
+            const auto outcome = rejection.is_rename
+                ? marrow::editor::rename_constraint(
+                      &project, base, ConstraintKind::Ik, rejection.from, rejection.to)
+                : marrow::editor::delete_constraint(
+                      &project, base, ConstraintKind::Ik, rejection.from);
+            if (outcome.ok) {
+                std::cerr << "MAR-177 B3: the primitive accepted " << rejection.label
+                          << ".\n";
+                return false;
+            }
+            if (outcome.message.find(rejection.want_message) == std::string::npos) {
+                std::cerr << "MAR-177 B3: rejected " << rejection.label
+                          << " with the wrong message: " << outcome.message << '\n';
+                return false;
+            }
+            if (marrow::editor::serialize_project(project) != before) {
+                std::cerr << "MAR-177 B3: " << rejection.label
+                          << " mutated the project despite being rejected.\n";
+                return false;
+            }
+        }
+        // A target that another live constraint in the same family already
+        // holds is a hard rejection, never a silent overwrite and never an
+        // auto-suffix: `unique_constraint_name()` owns auto-suffixing for the
+        // create path, and a rename is a user's choice of a specific name.
+        marrow::editor::ProjectData project = rebase();
+        marrow::editor::IkConstraintEdit second = project.ik_constraint_edits[0];
+        second.name = "editor_arm_reach_2";
+        project.ik_constraint_edits.push_back(second);
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto collided = marrow::editor::rename_constraint(
+            &project, base, ConstraintKind::Ik, "editor_arm_reach",
+            "editor_arm_reach_2");
+        if (collided.ok ||
+            collided.message.find("is already taken") == std::string::npos) {
+            std::cerr << "MAR-177 B3: a rename onto a live name in the same family "
+                         "was not rejected as taken: " << collided.message << '\n';
+            return false;
+        }
+        if (marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-177 B3: the collision rejection mutated the project.\n";
+            return false;
+        }
+    }
+
+    // --- B4: base-backed and shadowing ownership ---------------------------
+    const auto skin_fixture = mar177_open_fixture(
+        "assets/fixtures/skin_inherit_constraints.mskl",
+        std::filesystem::temp_directory_path() / "marrow_mar177_b_seed.marrow");
+    if (!skin_fixture.ok) return false;
+    {
+        marrow::editor::ProjectData project = skin_fixture.project;
+        const auto renamed = marrow::editor::rename_constraint(
+            &project, skin_fixture.base, ConstraintKind::Transform, "cape_pull",
+            "cape_drag");
+        if (!renamed.ok || !renamed.used_operation || renamed.changed_upsert) {
+            std::cerr << "MAR-177 B4: a base-backed rename must append exactly one "
+                         "record and touch no upsert: " << renamed.message << '\n';
+            return false;
+        }
+        if (project.constraint_lifecycle_operations.size() != 1U ||
+            !project.transform_constraint_edits.empty()) {
+            std::cerr << "MAR-177 B4: the base-backed rename did not produce one "
+                         "record and zero upserts.\n";
+            return false;
+        }
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, skin_fixture.base);
+        if (!runtime ||
+            runtime.skeleton_data->transform_constraints().size() != 1U ||
+            runtime.skeleton_data->transform_constraints()[0].name != "cape_drag") {
+            std::cerr << "MAR-177 B4: the base-backed rename did not materialize.\n";
+            return false;
+        }
+        // Survives a full save -> reload cycle.
+        const auto b4_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar177_b4_" + path_token + ".marrow");
+        marrow::editor::ProjectData written;
+        if (!mar177_write_loadable_project(
+                project, "assets/fixtures/skin_inherit_constraints.mskl", b4_path,
+                &written)) {
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(b4_path);
+        std::filesystem::remove(b4_path, ignored);
+        if (!reloaded ||
+            reloaded.project->constraint_lifecycle_operations.size() != 1U ||
+            reloaded.skeleton_data->transform_constraints().size() != 1U ||
+            reloaded.skeleton_data->transform_constraints()[0].name != "cape_drag") {
+            std::cerr << "MAR-177 B4: the base-backed rename did not survive save -> "
+                         "reload.\n";
+            return false;
+        }
+    }
+
+    // --- B5: the shadowing row -- a tombstone AND an upsert erase ----------
+    //
+    // An upsert whose name also exists in the base is *shadowing* it:
+    // `merge_named_object_array_member` replaces the base element in place.
+    // Erasing only the upsert therefore resurrects the base constraint, which
+    // reads to the user as "delete did nothing".
+    {
+        marrow::editor::ProjectData project = skin_fixture.project;
+        marrow::editor::TransformConstraintEdit shadow;
+        shadow.name = "cape_pull";
+        shadow.source_bone_name = "controller";
+        shadow.bone_names = {"constrained"};
+        shadow.rotate_mix = 0.5;
+        project.transform_constraint_edits.push_back(shadow);
+
+        const auto deleted = marrow::editor::delete_constraint(
+            &project, skin_fixture.base, ConstraintKind::Transform, "cape_pull");
+        if (!deleted.ok || !deleted.used_operation || !deleted.changed_upsert) {
+            std::cerr << "MAR-177 B5: a shadowing delete must emit BOTH a tombstone "
+                         "and an upsert erase (ok=" << deleted.ok << " used_operation="
+                      << deleted.used_operation << " changed_upsert="
+                      << deleted.changed_upsert << " message=" << deleted.message
+                      << ").\n";
+            return false;
+        }
+        if (project.constraint_lifecycle_operations.size() != 1U ||
+            !project.transform_constraint_edits.empty()) {
+            std::cerr << "MAR-177 B5: the shadowing delete left the wrong state.\n";
+            return false;
+        }
+        const auto document = marrow::editor::build_project_runtime_document(
+            project, skin_fixture.base);
+        const std::string text =
+            marrow::runtime::json::serialize_pretty(document.root);
+        if (mar177_count_quoted(text, "cape_pull") != 0U) {
+            std::cerr << "MAR-177 B5: the base constraint resurrected after the "
+                         "shadowing delete.\n";
+            return false;
+        }
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, skin_fixture.base);
+        if (!runtime || !runtime.skeleton_data->transform_constraints().empty()) {
+            std::cerr << "MAR-177 B5: the rig after a shadowing delete did not load "
+                         "with zero transform constraints.\n";
+            return false;
+        }
+    }
+
+    // --- B6: step 5 is not redundant with the preflight --------------------
+    //
+    // The preflight resolves names; it does not re-check everything
+    // `validate_project_for_save()` checks. A project with no atlas path is the
+    // witness: the preflight has no opinion about atlases, so without step 5
+    // the primitive would return `ok` and `save_project()` would then refuse
+    // the result -- the MAR-175 failure shape exactly, a successful command
+    // that leaves an unsavable project.
+    {
+        marrow::editor::ProjectData project = skin_fixture.project;
+        project.runtime_assets.atlas_paths.clear();
+        const std::string before = marrow::editor::serialize_project(project);
+        const auto renamed = marrow::editor::rename_constraint(
+            &project, skin_fixture.base, ConstraintKind::Transform, "cape_pull",
+            "cape_drag");
+        if (renamed.ok) {
+            std::cerr << "MAR-177 B6: the primitive returned ok for a project that "
+                         "save_project() refuses -- step 5's validator is missing.\n";
+            return false;
+        }
+        if (renamed.message.find("atlas") == std::string::npos) {
+            std::cerr << "MAR-177 B6: expected the save validator's atlas message, got: "
+                      << renamed.message << '\n';
+            return false;
+        }
+        if (marrow::editor::serialize_project(project) != before) {
+            std::cerr << "MAR-177 B6: the rejection mutated the project.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-177 Scenario B: project-only lifecycle rewrites the upsert and "
+                 "records nothing, base-backed appends exactly one record, a shadowing "
+                 "delete emits both so the base cannot resurrect, and every rejection "
+                 "leaves serialize_project() byte-identical.\n";
+    return true;
+}
+
+/**
+ * @brief Decodes the `.mbin` string table straight out of the header.
+ *
+ * Layout is `MBIN` (4 bytes), `varint(version)`, `varint(count)`, then
+ * `varint(len) + bytes` per entry. Reading it directly is what tells a broken
+ * encoding apart from a reshuffled fixture: `collect_strings()` interns each
+ * DISTINCT string once, so the table is the document's vocabulary, and naming
+ * the entries an edit adds or removes is a far sharper assertion than a size.
+ */
+bool mar177_mbin_string_table(
+    const std::filesystem::path& path,
+    std::vector<std::string>* table_out) {
+    std::ifstream stream(path, std::ios::binary);
+    const std::string bytes(
+        (std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (bytes.size() < 6U || bytes.compare(0, 4, "MBIN") != 0) {
+        return false;
+    }
+    std::size_t at = 4U;
+    const auto read_varint = [&](std::uint64_t* value_out) {
+        std::uint64_t value = 0;
+        unsigned shift = 0;
+        while (at < bytes.size()) {
+            const auto byte = static_cast<std::uint8_t>(bytes[at++]);
+            value |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
+            if ((byte & 0x80U) == 0U) {
+                *value_out = value;
+                return true;
+            }
+            shift += 7U;
+        }
+        return false;
+    };
+    std::uint64_t version = 0;
+    std::uint64_t count = 0;
+    if (!read_varint(&version) || !read_varint(&count)) {
+        return false;
+    }
+    table_out->clear();
+    table_out->reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t index = 0; index < count; ++index) {
+        std::uint64_t length = 0;
+        if (!read_varint(&length) || at + length > bytes.size()) {
+            return false;
+        }
+        table_out->push_back(bytes.substr(at, static_cast<std::size_t>(length)));
+        at += static_cast<std::size_t>(length);
+    }
+    return true;
+}
+
+/** @brief Entries present in `before` and absent from `after`, sorted. */
+std::vector<std::string> mar177_table_difference(
+    std::vector<std::string> before,
+    std::vector<std::string> after) {
+    std::sort(before.begin(), before.end());
+    std::sort(after.begin(), after.end());
+    std::vector<std::string> removed;
+    std::set_difference(
+        before.begin(), before.end(), after.begin(), after.end(),
+        std::back_inserter(removed));
+    return removed;
+}
+
+std::uintmax_t mar177_file_size(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    return error ? 0U : size;
+}
+
+// --- Scenario F: export, on a mutated project (AC5) ------------------------
+//
+// The fixture is the only one in the tree where a skin names a constraint, so
+// it is the only one where the "unloadable rig" failure is reachable at all.
+bool validate_mar177_scenario_f() {
+    using marrow::editor::ConstraintKind;
+
+    std::error_code ignored;
+    const auto directory =
+        std::filesystem::temp_directory_path() / "marrow_mar177_export";
+    std::filesystem::remove_all(directory, ignored);
+    std::filesystem::create_directories(directory, ignored);
+
+    const auto base_json = directory / "base.mskl";
+    const auto base_binary = directory / "base.mbin";
+    const auto rename_json = directory / "rename.mskl";
+    const auto rename_binary = directory / "rename.mbin";
+    const auto delete_json = directory / "delete.mskl";
+    const auto delete_binary = directory / "delete.mbin";
+
+    const auto fixture = mar177_open_fixture(
+        "assets/fixtures/skin_inherit_constraints.mskl",
+        directory / "project.marrow");
+    if (!fixture.ok) return false;
+
+    const auto export_to = [&](const marrow::editor::ProjectData& project,
+                               const std::filesystem::path& json_path,
+                               const std::filesystem::path& binary_path) {
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = json_path;
+        options.binary_output_path = binary_path;
+        return marrow::editor::export_runtime_assets(project, fixture.base, options);
+    };
+
+    const auto baseline = export_to(fixture.project, base_json, base_binary);
+    if (!baseline) {
+        std::cerr << "MAR-177 F: the baseline export failed: "
+                  << baseline.error->format() << '\n';
+        return false;
+    }
+    const std::string baseline_text = mar177_read_file(base_json);
+    const auto baseline_json_size = mar177_file_size(base_json);
+    const auto baseline_binary_size = mar177_file_size(base_binary);
+    std::vector<std::string> baseline_strings;
+    if (!mar177_mbin_string_table(base_binary, &baseline_strings)) {
+        std::cerr << "MAR-177 F: could not read the baseline `.mbin` string table.\n";
+        return false;
+    }
+    const std::size_t baseline_occurrences =
+        mar177_count_quoted(baseline_text, "cape_pull");
+    if (baseline_occurrences != 2U) {
+        std::cerr << "MAR-177 F: `cape_pull` occurs " << baseline_occurrences
+                  << " times in the exported baseline, expected 2 (the root "
+                     "transform[0].name and the skins.cape.transform[0] reference). "
+                     "Re-derive the delta below from this count; do not edit the "
+                     "constant.\n";
+        return false;
+    }
+
+    // --- F1: rename -- the .mskl grows by the occurrence count -------------
+    {
+        marrow::editor::ProjectData project = fixture.project;
+        const auto renamed = marrow::editor::rename_constraint(
+            &project, fixture.base, ConstraintKind::Transform, "cape_pull",
+            "cape_pull_renamed");
+        if (!renamed.ok) {
+            std::cerr << "MAR-177 F1: rename_constraint() failed: " << renamed.message
+                      << '\n';
+            return false;
+        }
+        // A stale skin reference fails `load_skeleton_data` before
+        // `export_runtime_assets` writes its first byte, so this call
+        // succeeding is itself half the assertion.
+        const auto exported = export_to(project, rename_json, rename_binary);
+        if (!exported) {
+            std::cerr << "MAR-177 F1: the renamed export failed: "
+                      << exported.error->format() << '\n';
+            return false;
+        }
+
+        const std::string text = mar177_read_file(rename_json);
+        if (mar177_count_quoted(text, "cape_pull") != 0U ||
+            mar177_count_quoted(text, "cape_pull_renamed") != 2U) {
+            std::cerr << "MAR-177 F1: the exported text has "
+                      << mar177_count_quoted(text, "cape_pull") << " `cape_pull` and "
+                      << mar177_count_quoted(text, "cape_pull_renamed")
+                      << " `cape_pull_renamed` occurrences, expected 0 and 2.\n";
+            return false;
+        }
+
+        // Derivation (design §11.2): the exported `.mskl` is serialize_pretty()
+        // of the materialized document. `cape_pull` occurs in it exactly twice
+        // -- the root transform[0].name and the skins.cape.transform[0]
+        // reference -- and nowhere else (it is not a bone, slot, skin,
+        // animation, or object key). Renaming to a name 8 UTF-8 bytes longer
+        // therefore grows the text by 2 * 8 = 16.
+        //
+        // +8 instead of +16 means the skin reference was NOT rewritten.
+        // Any other value means the occurrence count changed: re-derive it from
+        // the exported text, do not edit this constant.
+        const auto json_size = mar177_file_size(rename_json);
+        const std::intmax_t json_delta =
+            static_cast<std::intmax_t>(json_size) -
+            static_cast<std::intmax_t>(baseline_json_size);
+        if (json_delta != 16) {
+            std::cerr << "MAR-177 F1: .mskl delta is " << json_delta
+                      << ", expected +16 = 2 occurrences x 8 bytes. A delta of +8 "
+                         "means the skin reference was not rewritten; any other "
+                         "value means the occurrence count changed -- re-derive it "
+                         "from the exported text rather than editing the constant.\n";
+            return false;
+        }
+
+        // Derivation (design §11.3): collect_strings() interns each DISTINCT
+        // string once, so the name occupies one string-table entry no matter
+        // how many times it occurs. The new name occurs nowhere else and the
+        // old name occurs nowhere else, so the table keeps its entry count and
+        // every index; every index varint in encode_value is unchanged, as is
+        // the boolean block and the animation section. The only delta is that
+        // entry's varint(len)+bytes, and both 9 and 17 are < 128 so both length
+        // varints are one byte: (1 + 17) - (1 + 9) = 8.
+        //
+        // A delta of 16 would mean the `.mbin` counts occurrences, i.e. the
+        // encoding stopped interning. Any other value means the string table
+        // reshuffled or the encoding moved; the entry counts below say which.
+        std::vector<std::string> renamed_strings;
+        if (!mar177_mbin_string_table(rename_binary, &renamed_strings)) {
+            std::cerr << "MAR-177 F1: could not read the renamed `.mbin` string table.\n";
+            return false;
+        }
+        const auto binary_size = mar177_file_size(rename_binary);
+        const std::intmax_t binary_delta =
+            static_cast<std::intmax_t>(binary_size) -
+            static_cast<std::intmax_t>(baseline_binary_size);
+        const auto rename_removed =
+            mar177_table_difference(baseline_strings, renamed_strings);
+        const auto rename_added =
+            mar177_table_difference(renamed_strings, baseline_strings);
+        if (renamed_strings.size() != baseline_strings.size() || binary_delta != 8 ||
+            rename_removed != std::vector<std::string>{"cape_pull"} ||
+            rename_added != std::vector<std::string>{"cape_pull_renamed"}) {
+            std::cerr << "MAR-177 F1: .mbin delta is " << binary_delta
+                      << ", expected +8; string-table entry count went "
+                      << baseline_strings.size() << " -> " << renamed_strings.size()
+                      << " with [" << mar177_join(rename_removed) << "] out and ["
+                      << mar177_join(rename_added)
+                      << "] in (an equal count means the encoding moved; an unequal "
+                         "one means the table reshuffled).\n";
+            return false;
+        }
+
+        std::cout << "MAR-177 F1 export: .mskl " << baseline_json_size << " -> "
+                  << json_size << " (+" << json_delta << " = 2 occurrences x 8 bytes), "
+                     ".mbin " << baseline_binary_size << " -> " << binary_size << " (+"
+                  << binary_delta << " = 1 interned entry x 8 bytes) with the string "
+                     "table unchanged at " << renamed_strings.size()
+                  << " entries (`cape_pull` out, `cape_pull_renamed` in). The 16:8 ratio IS the occurrence count: JSON counts "
+                     "occurrences, MBIN counts distinct strings, so a root-only rename "
+                     "would read +8/+8 and fail loudly.\n";
+    }
+
+    // --- F2: delete -- the family key leaves, and the .mbin still loads ----
+    {
+        marrow::editor::ProjectData project = fixture.project;
+        const auto deleted = marrow::editor::delete_constraint(
+            &project, fixture.base, ConstraintKind::Transform, "cape_pull");
+        if (!deleted.ok) {
+            std::cerr << "MAR-177 F2: delete_constraint() failed: " << deleted.message
+                      << '\n';
+            return false;
+        }
+        const auto exported = export_to(project, delete_json, delete_binary);
+        if (!exported) {
+            std::cerr << "MAR-177 F2: the pruned export failed: "
+                      << exported.error->format() << '\n';
+            return false;
+        }
+        const std::string text = mar177_read_file(delete_json);
+        if (mar177_count_quoted(text, "cape_pull") != 0U) {
+            std::cerr << "MAR-177 F2: `cape_pull` still occurs "
+                      << mar177_count_quoted(text, "cape_pull")
+                      << " times in the exported text.\n";
+            return false;
+        }
+        const auto exported_document =
+            marrow::runtime::json::load_document(delete_json);
+        if (!exported_document) {
+            std::cerr << "MAR-177 F2: the exported `.mskl` did not parse.\n";
+            return false;
+        }
+        bool skin_key_present = true;
+        mar177_skin_references(
+            exported_document.document->root, "cape", "transform", &skin_key_present);
+        if (exported_document.document->root.as_object().count("transform") != 0U ||
+            skin_key_present) {
+            std::cerr << "MAR-177 F2: the exported `.mskl` still carries an empty "
+                         "`transform` key at the root or inside `skins.cape`; the "
+                         "runtime rejects an empty family array outright.\n";
+            return false;
+        }
+
+        // The `.mbin` must reload, which is the assertion the byte model cannot
+        // make for a delete: the table loses an entry and every later index
+        // shifts, so structure is the signal and the header count is the one
+        // number read directly.
+        const auto reloaded =
+            marrow::runtime::load_skeleton_document(delete_binary);
+        if (!reloaded) {
+            std::cerr << "MAR-177 F2: the exported `.mbin` did not reload: "
+                      << reloaded.error->format() << '\n';
+            return false;
+        }
+        const auto skeleton = marrow::runtime::load_skeleton_data(*reloaded.document);
+        if (!skeleton) {
+            std::cerr << "MAR-177 F2: the reloaded `.mbin` did not parse: "
+                      << skeleton.error->format() << '\n';
+            return false;
+        }
+        const auto* cape = skeleton.skeleton_data->find_skin("cape");
+        if (!skeleton.skeleton_data->transform_constraints().empty() ||
+            cape == nullptr || !cape->transform_constraint_indices.empty() ||
+            cape->bone_indices.size() != 1U) {
+            std::cerr << "MAR-177 F2: the reloaded `.mbin` did not carry zero "
+                         "transform constraints with skin `cape` still holding "
+                         "`cape_target`.\n";
+            return false;
+        }
+        std::vector<std::string> deleted_strings;
+        if (!mar177_mbin_string_table(delete_binary, &deleted_strings)) {
+            std::cerr << "MAR-177 F2: could not read the pruned `.mbin` string table.\n";
+            return false;
+        }
+        // Derivation, measured rather than assumed. The design spec predicted
+        // the table would lose exactly one entry. It loses FOUR, and the reason
+        // is the same interning that makes the rename cost +8: `collect_strings()`
+        // interns each distinct string once across the WHOLE document, object
+        // keys included, so deleting a subtree removes every string that
+        // occurred only inside it -- not just the value that was named.
+        //
+        //   cape_pull     the constraint's name
+        //   transform     the root array key AND the skin scope key, both gone
+        //   source        an object key used only by a transform constraint
+        //   translateMix  likewise
+        //
+        // `name` and `bones` survive because bones and slots use them too. A
+        // fifth removal, or a different set, means the fixture changed shape:
+        // re-derive from the decoded table, do not edit this list.
+        const std::vector<std::string> expected_removed{
+            "cape_pull", "source", "transform", "translateMix"};
+        const auto removed = mar177_table_difference(baseline_strings, deleted_strings);
+        const auto added = mar177_table_difference(deleted_strings, baseline_strings);
+        if (removed != expected_removed || !added.empty()) {
+            std::cerr << "MAR-177 F2: the `.mbin` string table went "
+                      << baseline_strings.size() << " -> " << deleted_strings.size()
+                      << " with [" << mar177_join(removed) << "] out and ["
+                      << mar177_join(added) << "] in, expected ["
+                      << mar177_join(expected_removed)
+                      << "] out and nothing in.\n";
+            return false;
+        }
+        std::cout << "MAR-177 F2 export: the deleted name occurs 0 times, neither the "
+                     "root `transform` key nor `skins.cape.transform` survives as an "
+                     "empty array, the `.mbin` reloads with zero transform constraints "
+                     "and `cape_target` intact, and its string table drops "
+                  << baseline_strings.size() << " -> " << deleted_strings.size()
+                  << " entries -- exactly [" << mar177_join(removed)
+                  << "], because interning is per distinct string across the whole "
+                     "document, so a deleted subtree takes every key that occurred "
+                     "only inside it.\n";
+    }
+
+    // --- F3: ambiguity #8 -- an atlas-free project still exports -----------
+    //
+    // `validate_project_for_save()` requires at least one atlas path, so a
+    // *savable* project needs one; `export_runtime_assets()` only iterates
+    // `resolved_atlas_paths()`, so an atlas-free project exports fine. Those
+    // are two different requirements and the plan's ambiguity #8 conflated them.
+    {
+        marrow::editor::ProjectData project = fixture.project;
+        project.runtime_assets.atlas_paths.clear();
+        const auto atlas_free_json = directory / "atlas_free.mskl";
+        const auto exported = export_to(project, atlas_free_json, directory / "atlas_free.mbin");
+        if (!exported || !exported.atlas_paths.empty()) {
+            std::cerr << "MAR-177 F3: an atlas-free export did not succeed with zero "
+                         "exported atlases.\n";
+            return false;
+        }
+    }
+
+    std::filesystem::remove_all(directory, ignored);
+    return true;
+}
+
+// --- Scenario E: ordered chains through materialization, merge, reload -----
+//
+// Scenario A2 replays the sequences symbolically, without a base. These run the
+// same shapes against real fixtures and assert the materialized array, because
+// order is load-bearing: a chain needs a name that only exists after the
+// previous record ran, a swap passes through a name that is legal only in
+// transit, and a reuse is legal in one order and a duplicate target in the
+// other. A map keyed by source cannot express any of the three.
+bool validate_mar177_scenario_e() {
+    using marrow::editor::ConstraintKind;
+    using marrow::editor::ConstraintLifecycleKind;
+    using marrow::editor::ConstraintLifecycleOperation;
+
+    std::error_code ignored;
+    const std::string path_token = std::to_string(
+        static_cast<unsigned long long>(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    const auto ik_fixture = mar177_open_fixture(
+        "assets/fixtures/ik_constraints.mskl",
+        std::filesystem::temp_directory_path() / "marrow_mar177_e_ik.marrow");
+    if (!ik_fixture.ok) return false;
+    const auto base_names = mar177_constraint_names(ik_fixture.base.root, "ik");
+
+    struct SequenceCase {
+        const char* label;
+        std::vector<ConstraintLifecycleOperation> operations;
+        std::vector<std::string> expected;
+    };
+    std::vector<SequenceCase> cases;
+    {
+        // Chain: a name that exists only after the previous record ran, then a
+        // delete of the name the chain produced.
+        std::vector<std::string> expected(base_names.begin() + 1, base_names.end());
+        cases.push_back(
+            {"a chain that ends in a delete",
+             {mar177_rename(ConstraintKind::Ik, base_names[0], "arm_middle"),
+              mar177_rename(ConstraintKind::Ik, "arm_middle", "arm_final"),
+              mar177_delete(ConstraintKind::Ik, "arm_final")},
+             expected});
+    }
+    {
+        // Swap: every intermediate state is legal, every reordering is not.
+        // Both constraints keep their array positions and exchange names.
+        std::vector<std::string> expected = base_names;
+        std::swap(expected[0], expected[1]);
+        cases.push_back(
+            {"a three-step swap",
+             {mar177_rename(ConstraintKind::Ik, base_names[0], "arm_swap_tmp"),
+              mar177_rename(ConstraintKind::Ik, base_names[1], base_names[0]),
+              mar177_rename(ConstraintKind::Ik, "arm_swap_tmp", base_names[1])},
+             expected});
+    }
+    {
+        // Reuse: legal in this order, a duplicate target in the other.
+        std::vector<std::string> expected(base_names.begin() + 1, base_names.end());
+        expected[0] = base_names[0];
+        cases.push_back(
+            {"a delete whose name a later rename reuses",
+             {mar177_delete(ConstraintKind::Ik, base_names[0]),
+              mar177_rename(ConstraintKind::Ik, base_names[1], base_names[0])},
+             expected});
+    }
+
+    for (const SequenceCase& sequence : cases) {
+        marrow::editor::ProjectData project = ik_fixture.project;
+        project.constraint_lifecycle_operations = sequence.operations;
+        const auto document =
+            marrow::editor::build_project_runtime_document(project, ik_fixture.base);
+        const auto names = mar177_constraint_names(document.root, "ik");
+        if (names != sequence.expected) {
+            std::cerr << "MAR-177 E: " << sequence.label << " materialized ["
+                      << mar177_join(names) << "], expected ["
+                      << mar177_join(sequence.expected) << "].\n";
+            return false;
+        }
+        const auto runtime =
+            marrow::editor::build_project_runtime(project, ik_fixture.base);
+        if (!runtime) {
+            std::cerr << "MAR-177 E: " << sequence.label << " failed to load: "
+                      << runtime.error->format() << '\n';
+            return false;
+        }
+        // The runtime evaluates each family by a plain index loop, so array
+        // position IS evaluation order; the sequence is the assertion.
+        std::vector<std::string> runtime_names;
+        for (const auto& constraint : runtime.skeleton_data->ik_constraints()) {
+            runtime_names.push_back(constraint.name);
+        }
+        if (runtime_names != sequence.expected) {
+            std::cerr << "MAR-177 E: " << sequence.label
+                      << " loaded in the order [" << mar177_join(runtime_names)
+                      << "], expected [" << mar177_join(sequence.expected) << "].\n";
+            return false;
+        }
+        const auto save_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar177_e_seq_" + path_token + ".marrow");
+        const auto saved = marrow::editor::save_project(project, save_path);
+        std::filesystem::remove(save_path, ignored);
+        if (!saved) {
+            std::cerr << "MAR-177 E: save_project() rejected " << sequence.label
+                      << ": " << saved.error->message << '\n';
+            return false;
+        }
+    }
+
+    // --- E2: unknown top-level keys survive a populated `operations` array --
+    {
+        const auto merge_path = std::filesystem::temp_directory_path() /
+            ("marrow_mar177_e_merge_" + path_token + ".marrow");
+        const auto skin_fixture = mar177_open_fixture(
+            "assets/fixtures/skin_inherit_constraints.mskl",
+            std::filesystem::temp_directory_path() / "marrow_mar177_e_seed.marrow");
+        if (!skin_fixture.ok) return false;
+
+        marrow::editor::ProjectData seed = skin_fixture.project;
+        // Unknown *top-level* keys survive load/save because `build_project_value`
+        // starts from the preserved root and overwrites only the known keys.
+        marrow::runtime::json::Value::Object unknown;
+        unknown.emplace("note", marrow::runtime::json::Value(std::string("kept"), {}));
+        marrow::runtime::json::Value::Object preserved;
+        preserved.emplace(
+            "mar177_future_section",
+            marrow::runtime::json::Value(std::move(unknown), {}));
+        seed.preserved_root = marrow::runtime::json::Value(std::move(preserved), {});
+        seed.constraint_lifecycle_operations = {
+            mar177_rename(ConstraintKind::Transform, "cape_pull", "cape_stage_one")};
+
+        marrow::editor::ProjectData written;
+        if (!mar177_write_loadable_project(
+                seed, "assets/fixtures/skin_inherit_constraints.mskl", merge_path,
+                &written)) {
+            return false;
+        }
+        auto loaded = marrow::editor::load_project(merge_path);
+        if (!loaded) {
+            std::cerr << "MAR-177 E2: the seeded project did not load.\n";
+            return false;
+        }
+        if (loaded.project->constraint_lifecycle_operations.size() != 1U) {
+            std::cerr << "MAR-177 E2: the seeded record did not survive the first load.\n";
+            return false;
+        }
+
+        // One accepted mutation on top of the existing record, producing an
+        // ordered pair whose second element depends on the first having run.
+        marrow::editor::ProjectData project = *loaded.project;
+        const auto renamed = marrow::editor::rename_constraint(
+            &project, skin_fixture.base, ConstraintKind::Transform, "cape_stage_one",
+            "cape_stage_two");
+        if (!renamed.ok || !renamed.used_operation) {
+            std::cerr << "MAR-177 E2: the chained rename failed: " << renamed.message
+                      << '\n';
+            return false;
+        }
+        const auto saved = marrow::editor::save_project(project, merge_path);
+        if (!saved) {
+            std::cerr << "MAR-177 E2: save_project() rejected the chain: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(merge_path);
+        const std::string text = mar177_read_file(merge_path);
+        std::filesystem::remove(merge_path, ignored);
+        if (!reloaded) {
+            std::cerr << "MAR-177 E2: the chained project did not reload.\n";
+            return false;
+        }
+        const auto& operations = reloaded.project->constraint_lifecycle_operations;
+        if (operations.size() != 2U ||
+            operations[0].kind != ConstraintLifecycleKind::Rename ||
+            operations[0].name != "cape_pull" ||
+            operations[0].new_name != "cape_stage_one" ||
+            operations[1].kind != ConstraintLifecycleKind::Rename ||
+            operations[1].name != "cape_stage_one" ||
+            operations[1].new_name != "cape_stage_two") {
+            std::cerr << "MAR-177 E2: the two records did not round-trip in order.\n";
+            return false;
+        }
+        if (text.find("\"mar177_future_section\"") == std::string::npos ||
+            text.find("\"note\": \"kept\"") == std::string::npos) {
+            std::cerr << "MAR-177 E2: the unknown top-level key did not survive the "
+                         "save that wrote the records.\n";
+            return false;
+        }
+        if (reloaded.skeleton_data->transform_constraints().size() != 1U ||
+            reloaded.skeleton_data->transform_constraints()[0].name !=
+                "cape_stage_two") {
+            std::cerr << "MAR-177 E2: the reloaded skeleton did not carry the chained "
+                         "rename.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-177 Scenario E: chains, swaps, and reuse materialize in array "
+                 "order and load in that order, every accepted sequence saves, and an "
+                 "ordered pair of records round-trips beside an unknown top-level "
+                 "section.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -9105,6 +11138,27 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar176_automatic_weights(result)) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_a(result)) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_a2(result)) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_c()) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_d()) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_b(result)) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_e()) {
+            return 1;
+        }
+        if (!validate_mar177_scenario_f()) {
             return 1;
         }
     }

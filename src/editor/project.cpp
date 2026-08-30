@@ -3802,6 +3802,210 @@ std::optional<LoadError> parse_physics_constraint_edits(
     return std::nullopt;
 }
 
+// The one mapping between a constraint family and the root array that holds
+// it. The parser, the serializer, the lifecycle materializer, both validators,
+// and the two project primitives all read it, so "which key is this family"
+// has exactly one answer.
+std::string_view constraint_family_json_key(ConstraintKind family) {
+    switch (family) {
+    case ConstraintKind::Ik:
+        return "ik";
+    case ConstraintKind::Path:
+        return "path";
+    case ConstraintKind::Transform:
+        return "transform";
+    case ConstraintKind::Physics:
+        return "physics";
+    }
+    return "ik";
+}
+
+std::optional<ConstraintKind> constraint_family_from_json_key(std::string_view key) {
+    if (key == "ik") return ConstraintKind::Ik;
+    if (key == "path") return ConstraintKind::Path;
+    if (key == "transform") return ConstraintKind::Transform;
+    if (key == "physics") return ConstraintKind::Physics;
+    return std::nullopt;
+}
+
+constexpr std::array<ConstraintKind, 4> kConstraintFamilies{
+    ConstraintKind::Ik,
+    ConstraintKind::Path,
+    ConstraintKind::Transform,
+    ConstraintKind::Physics,
+};
+
+std::optional<LoadError> parse_constraint_lifecycle_operations(
+    const Document& document,
+    const Value& root,
+    std::vector<ConstraintLifecycleOperation>* operations_out) {
+    operations_out->clear();
+    const Value* constraint_edits = find_optional_member(root, "constraint_edits");
+    if (constraint_edits == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *constraint_edits, Value::Type::Object, "$.constraint_edits")) {
+        return error;
+    }
+
+    const Value* operations = find_optional_member(*constraint_edits, "operations");
+    if (operations == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document,
+            *operations,
+            Value::Type::Array,
+            "$.constraint_edits.operations")) {
+        return error;
+    }
+
+    std::vector<ConstraintLifecycleOperation> parsed;
+    parsed.reserve(operations->as_array().size());
+    for (std::size_t index = 0; index < operations->as_array().size(); ++index) {
+        const Value& record = operations->as_array()[index];
+        const std::string path =
+            "$.constraint_edits.operations[" + std::to_string(index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, record, Value::Type::Object, path)) {
+            return error;
+        }
+
+        ConstraintLifecycleOperation operation;
+
+        std::string op;
+        if (const auto error = read_required_string(document, record, "op", path, &op)) {
+            return error;
+        }
+        if (op == "rename") {
+            operation.kind = ConstraintLifecycleKind::Rename;
+        } else if (op == "delete") {
+            operation.kind = ConstraintLifecycleKind::Delete;
+        } else {
+            return validation_error(
+                document,
+                record.location(),
+                path + ".op",
+                "constraint lifecycle op must be 'rename' or 'delete'");
+        }
+
+        std::string family;
+        if (const auto error =
+                read_required_string(document, record, "family", path, &family)) {
+            return error;
+        }
+        const auto parsed_family = constraint_family_from_json_key(family);
+        if (!parsed_family.has_value()) {
+            return validation_error(
+                document,
+                record.location(),
+                path + ".family",
+                "constraint lifecycle family must be one of 'ik', 'path', "
+                "'transform', 'physics'");
+        }
+        operation.family = *parsed_family;
+
+        // Rejecting the key that belongs to the *other* op, rather than
+        // ignoring it, is deliberate: a silently ignored key is how a future
+        // writer's typo becomes a silent no-op.
+        if (operation.kind == ConstraintLifecycleKind::Rename) {
+            if (find_optional_member(record, "name") != nullptr) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".name",
+                    "constraint lifecycle rename records must not carry 'name'; "
+                    "use 'from' and 'to'");
+            }
+            if (const auto error =
+                    read_required_string(document, record, "from", path, &operation.name)) {
+                return error;
+            }
+            if (operation.name.empty()) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".from",
+                    "constraint lifecycle rename source must not be empty");
+            }
+            if (const auto error = read_required_string(
+                    document, record, "to", path, &operation.new_name)) {
+                return error;
+            }
+            if (operation.new_name.empty()) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".to",
+                    "constraint lifecycle rename target must not be empty");
+            }
+            if (operation.new_name == operation.name) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".to",
+                    "constraint lifecycle rename target must differ from its source");
+            }
+        } else {
+            if (find_optional_member(record, "from") != nullptr) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".from",
+                    "constraint lifecycle delete records must not carry 'from'; "
+                    "use 'name'");
+            }
+            if (find_optional_member(record, "to") != nullptr) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".to",
+                    "constraint lifecycle delete records must not carry 'to'; "
+                    "use 'name'");
+            }
+            if (const auto error =
+                    read_required_string(document, record, "name", path, &operation.name)) {
+                return error;
+            }
+            if (operation.name.empty()) {
+                return validation_error(
+                    document,
+                    record.location(),
+                    path + ".name",
+                    "constraint lifecycle delete target must not be empty");
+            }
+        }
+
+        parsed.push_back(std::move(operation));
+    }
+
+    *operations_out = std::move(parsed);
+    return std::nullopt;
+}
+
+Value build_constraint_lifecycle_operations_value(
+    const std::vector<ConstraintLifecycleOperation>& operations) {
+    Value::Array records;
+    records.reserve(operations.size());
+    for (const ConstraintLifecycleOperation& operation : operations) {
+        Value::Object record;
+        record.emplace(
+            "family",
+            make_string_value(std::string(constraint_family_json_key(operation.family))));
+        if (operation.kind == ConstraintLifecycleKind::Rename) {
+            record.emplace("from", make_string_value(operation.name));
+            record.emplace("op", make_string_value(std::string("rename")));
+            record.emplace("to", make_string_value(operation.new_name));
+        } else {
+            record.emplace("name", make_string_value(operation.name));
+            record.emplace("op", make_string_value(std::string("delete")));
+        }
+        records.push_back(make_object_value(std::move(record)));
+    }
+    return make_array_value(std::move(records));
+}
+
 Value build_transform_keyframes_value(
     const TransformTimelineEdit& edit) {
     Value::Array keyframes;
@@ -4261,8 +4465,14 @@ Value build_constraint_edits_value(
     const std::vector<IkConstraintEdit>& ik_edits,
     const std::vector<PathConstraintEdit>& path_edits,
     const std::vector<TransformConstraintEdit>& transform_edits,
-    const std::vector<PhysicsConstraintEdit>& physics_edits) {
+    const std::vector<PhysicsConstraintEdit>& physics_edits,
+    const std::vector<ConstraintLifecycleOperation>& lifecycle_operations) {
     Value::Object constraint_edits;
+    if (!lifecycle_operations.empty()) {
+        constraint_edits.emplace(
+            "operations",
+            build_constraint_lifecycle_operations_value(lifecycle_operations));
+    }
     if (!ik_edits.empty()) {
         constraint_edits.emplace("ik", build_ik_constraint_edits_value(ik_edits));
     }
@@ -4660,15 +4870,21 @@ Value build_project_value(const ProjectData& project) {
     } else {
         root.erase("mesh_edits");
     }
+    // The lifecycle vector is part of this gate: a project whose only
+    // constraint content is a tombstone has four empty upsert vectors, and
+    // without the fifth clause its `constraint_edits` key -- and with it the
+    // tombstone -- is erased on save.
     if (!project.ik_constraint_edits.empty() ||
         !project.path_constraint_edits.empty() ||
         !project.transform_constraint_edits.empty() ||
-        !project.physics_constraint_edits.empty()) {
+        !project.physics_constraint_edits.empty() ||
+        !project.constraint_lifecycle_operations.empty()) {
         root["constraint_edits"] = build_constraint_edits_value(
                 project.ik_constraint_edits,
                 project.path_constraint_edits,
                 project.transform_constraint_edits,
-                project.physics_constraint_edits);
+                project.physics_constraint_edits,
+                project.constraint_lifecycle_operations);
     } else {
         root.erase("constraint_edits");
     }
@@ -4685,6 +4901,110 @@ Value build_project_value(const ProjectData& project) {
     }
 
     return make_object_value(std::move(root));
+}
+
+/**
+ * @brief Applies the ordered lifecycle records to a runtime document (Phase A).
+ *
+ * Runs over the four root constraint arrays *and* over every
+ * `skins[*].<family>` name array, because skins reference constraints by name
+ * and `parse_skin_scope_members()` fails the whole load on an unresolvable one.
+ * A rename that missed a skin, or a delete that left one behind, would produce
+ * a project that still saves and can never be opened again.
+ *
+ * `build_project_runtime_document()` is public and can be called without the
+ * validator, so this is defensive: an unresolvable operation is a no-op and the
+ * walk continues, exactly as the mesh-weight overlay skips a missing
+ * attachment. Each operation either applies completely or not at all;
+ * rejection is `validate_constraint_lifecycle_operations()`'s job, and both
+ * real callers run it.
+ */
+void apply_constraint_lifecycle_operations(
+    Value* root,
+    const std::vector<ConstraintLifecycleOperation>& operations) {
+    if (root == nullptr || !root->is_object() || operations.empty()) {
+        return;
+    }
+
+    const auto is_named = [](const Value& element, const std::string& name) {
+        const Value* member = find_optional_member(element, "name");
+        return member != nullptr && member->is_string() && member->as_string() == name;
+    };
+
+    for (const ConstraintLifecycleOperation& operation : operations) {
+        const std::string key(constraint_family_json_key(operation.family));
+        Value* family_value = marrow::runtime::json::find_member(*root, key);
+        if (family_value == nullptr || !family_value->is_array()) {
+            continue;
+        }
+        Value::Array& elements = family_value->as_array();
+        const auto source = std::find_if(
+            elements.begin(), elements.end(), [&](const Value& element) {
+                return is_named(element, operation.name);
+            });
+        if (source == elements.end()) {
+            continue;
+        }
+        if (operation.kind == ConstraintLifecycleKind::Rename) {
+            const bool target_taken = std::any_of(
+                elements.begin(), elements.end(), [&](const Value& element) {
+                    return &element != &*source && is_named(element, operation.new_name);
+                });
+            if (target_taken) {
+                continue;
+            }
+            source->as_object()["name"] = make_string_value(operation.new_name);
+        } else {
+            elements.erase(source);
+        }
+
+        // Referrer 1: `skins[*].{ik,path,transform,physics}` are arrays of
+        // constraint *names*. The runtime treats these six keys as skin scopes
+        // rather than slots, so an array under the family key is a reference
+        // list and never an attachment map.
+        Value* skins = marrow::runtime::json::find_member(*root, "skins");
+        if (skins != nullptr && skins->is_object()) {
+            for (auto& skin_entry : skins->as_object()) {
+                Value& skin_value = skin_entry.second;
+                if (!skin_value.is_object()) {
+                    continue;
+                }
+                Value* references = marrow::runtime::json::find_member(skin_value, key);
+                if (references == nullptr || !references->is_array()) {
+                    continue;
+                }
+                Value::Array& names = references->as_array();
+                if (operation.kind == ConstraintLifecycleKind::Rename) {
+                    for (Value& name_value : names) {
+                        if (name_value.is_string() &&
+                            name_value.as_string() == operation.name) {
+                            name_value = make_string_value(operation.new_name);
+                        }
+                    }
+                    continue;
+                }
+                names.erase(
+                    std::remove_if(
+                        names.begin(),
+                        names.end(),
+                        [&](const Value& name_value) {
+                            return name_value.is_string() &&
+                                name_value.as_string() == operation.name;
+                        }),
+                    names.end());
+                if (names.empty()) {
+                    skin_value.as_object().erase(key);
+                }
+            }
+        }
+
+        // A family array that is present but empty is a hard parse failure
+        // ("<family> constraints must not be empty when provided"), so the last
+        // delete in a family erases the key rather than leaving `[]`.
+        if (operation.kind == ConstraintLifecycleKind::Delete && elements.empty()) {
+            root->as_object().erase(key);
+        }
+    }
 }
 
 void merge_named_object_array_member(
@@ -5147,6 +5467,14 @@ Document build_runtime_document(
                 build_slot_attachment_keyframes_value(edit);
         }
     }
+
+    // Phase A -- lifecycle, over the root arrays and every skin reference --
+    // strictly precedes Phase B, the four upsert merges below. That ordering is
+    // what makes the ownership rule coherent: a project-only rename rewrote its
+    // upsert entry directly, so it lands after every base rename has run and
+    // the two can never race for a name.
+    apply_constraint_lifecycle_operations(
+        &document.root, project.constraint_lifecycle_operations);
 
     merge_named_object_array_member(
         &document.root,
@@ -5778,6 +6106,126 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
         if (std::adjacent_find(sorted_names.begin(), sorted_names.end()) != sorted_names.end()) {
             error_out->message = "physics constraint edit bones must be unique";
             return false;
+        }
+    }
+
+    // MAR-177 symbolic replay. This function has no base skeleton document, so
+    // it cannot know which constraint names exist; `validate_constraint_lifecycle_operations`
+    // does that at materialization time. What is knowable here is everything
+    // intrinsic to the sequence: walk it front to back, per family, over
+    // `consumed` (names a rename or delete has taken away) and `introduced`
+    // (names a rename has created). Sorted vectors, not hash sets, matching the
+    // `seen_*_names` idiom above -- nothing on this path may depend on hash order.
+    if (!project.constraint_lifecycle_operations.empty()) {
+        struct FamilyReplayState {
+            std::vector<std::string> consumed;
+            std::vector<std::string> introduced;
+        };
+        std::array<FamilyReplayState, kConstraintFamilies.size()> replay{};
+        const auto family_slot = [](ConstraintKind family) {
+            return static_cast<std::size_t>(family);
+        };
+        const auto contains = [](const std::vector<std::string>& names,
+                                 const std::string& name) {
+            return std::find(names.begin(), names.end(), name) != names.end();
+        };
+        const auto insert_name = [&](std::vector<std::string>& names,
+                                     const std::string& name) {
+            if (!contains(names, name)) {
+                names.push_back(name);
+                std::sort(names.begin(), names.end());
+            }
+        };
+        const auto erase_name = [](std::vector<std::string>& names,
+                                   const std::string& name) {
+            names.erase(std::remove(names.begin(), names.end(), name), names.end());
+        };
+
+        for (const ConstraintLifecycleOperation& operation :
+             project.constraint_lifecycle_operations) {
+            const std::string family(constraint_family_json_key(operation.family));
+            FamilyReplayState& state = replay[family_slot(operation.family)];
+
+            if (operation.name.empty()) {
+                error_out->message = operation.kind == ConstraintLifecycleKind::Rename
+                    ? family + " constraint lifecycle rename source must not be empty"
+                    : family + " constraint lifecycle delete target must not be empty";
+                return false;
+            }
+            if (operation.kind == ConstraintLifecycleKind::Rename) {
+                if (operation.new_name.empty()) {
+                    error_out->message =
+                        family + " constraint lifecycle rename target must not be empty";
+                    return false;
+                }
+                if (operation.new_name == operation.name) {
+                    error_out->message = family +
+                        " constraint lifecycle rename target must differ from its source";
+                    return false;
+                }
+            } else if (!operation.new_name.empty()) {
+                error_out->message =
+                    family + " constraint lifecycle delete records must not carry a new name";
+                return false;
+            }
+
+            // Invalid order, source side: the name is gone by the time this
+            // operation runs.
+            if (contains(state.consumed, operation.name)) {
+                error_out->message = family + " constraint lifecycle operation source '" +
+                    operation.name + "' was already renamed or deleted by an earlier operation";
+                return false;
+            }
+            // Invalid order, target side.
+            if (operation.kind == ConstraintLifecycleKind::Rename &&
+                contains(state.introduced, operation.new_name)) {
+                error_out->message = family + " constraint lifecycle rename target '" +
+                    operation.new_name + "' is already introduced by an earlier operation";
+                return false;
+            }
+
+            erase_name(state.introduced, operation.name);
+            insert_name(state.consumed, operation.name);
+            if (operation.kind == ConstraintLifecycleKind::Rename) {
+                erase_name(state.consumed, operation.new_name);
+                insert_name(state.introduced, operation.new_name);
+            }
+        }
+
+        // Cross-check against the upserts. A consumed name that an upsert still
+        // carries is re-introduced by Phase B after Phase A took it away: a
+        // resurrection for a delete, and two constraints where there was one
+        // for a rename.
+        //
+        // The mirror check -- an upsert named by an *introduced* name -- is
+        // deliberately absent. That state is byte-for-byte what a shadowing
+        // rename is required to produce (append the record, rewrite the
+        // shadowing upsert's name), so rejecting it would reject the ownership
+        // rule's own output. The genuine collision is caught by the primitives'
+        // preflight, which resolves the target against the materialized name set.
+        const auto reject_consumed_upsert = [&](ConstraintKind family,
+                                                const std::string& name) {
+            const std::vector<std::string>& consumed = replay[family_slot(family)].consumed;
+            if (!contains(consumed, name)) {
+                return false;
+            }
+            error_out->message = std::string(constraint_family_json_key(family)) +
+                " constraint edit '" + name +
+                "' is named by a constraint lifecycle operation that already renamed "
+                "or deleted it";
+            return true;
+        };
+        for (const IkConstraintEdit& edit : project.ik_constraint_edits) {
+            if (reject_consumed_upsert(ConstraintKind::Ik, edit.name)) return false;
+        }
+        for (const PathConstraintEdit& edit : project.path_constraint_edits) {
+            if (reject_consumed_upsert(ConstraintKind::Path, edit.name)) return false;
+        }
+        for (const TransformConstraintEdit& edit : project.transform_constraint_edits) {
+            if (reject_consumed_upsert(ConstraintKind::Transform, edit.name)) return false;
+        }
+        for (const PhysicsConstraintEdit& edit : project.physics_constraint_edits) {
+            if (reject_consumed_upsert(ConstraintKind::Physics, edit.name)) return false;
         }
     }
 
@@ -6993,6 +7441,11 @@ ProjectLoadResult load_project(const Document& document) {
         result.error = error;
         return result;
     }
+    if (const auto error = parse_constraint_lifecycle_operations(
+            document, document.root, &project.constraint_lifecycle_operations)) {
+        result.error = error;
+        return result;
+    }
     if (const auto error = parse_parameter_model(
             document, document.root, &project.parameter_model)) {
         result.error = error;
@@ -7072,6 +7525,299 @@ ProjectLoadResult load_project(const std::filesystem::path& path) {
     return load_project(*document_result.document);
 }
 
+namespace {
+
+/** @brief Runs `visitor` on the upsert vector that belongs to `family`. */
+template <typename Visitor>
+bool visit_constraint_edits(ProjectData* project, ConstraintKind family, Visitor&& visitor) {
+    switch (family) {
+    case ConstraintKind::Ik:
+        return visitor(project->ik_constraint_edits);
+    case ConstraintKind::Path:
+        return visitor(project->path_constraint_edits);
+    case ConstraintKind::Transform:
+        return visitor(project->transform_constraint_edits);
+    case ConstraintKind::Physics:
+        return visitor(project->physics_constraint_edits);
+    }
+    return false;
+}
+
+/** @brief Names of the upserts a family carries, in vector order. */
+std::vector<std::string> constraint_edit_names(
+    const ProjectData& project,
+    ConstraintKind family) {
+    std::vector<std::string> names;
+    const auto collect = [&names](const auto& edits) {
+        for (const auto& edit : edits) {
+            names.push_back(edit.name);
+        }
+        return true;
+    };
+    visit_constraint_edits(const_cast<ProjectData*>(&project), family, collect);
+    return names;
+}
+
+/** @brief The `name` of every element of one base constraint array. */
+std::vector<std::string> constraint_array_names(const Value& root, std::string_view key) {
+    std::vector<std::string> names;
+    const Value* array = find_optional_member(root, key);
+    if (array == nullptr || !array->is_array()) {
+        return names;
+    }
+    for (const Value& element : array->as_array()) {
+        const Value* name = find_optional_member(element, "name");
+        if (name != nullptr && name->is_string()) {
+            names.push_back(name->as_string());
+        }
+    }
+    return names;
+}
+
+/**
+ * @brief Applies the ownership rule for one constraint, preflight-then-mutate.
+ *
+ * `new_name` empty means delete. The name set the request resolves against is
+ * the one the user sees: the base family array with the project's existing
+ * records already replayed, plus the family's upserts. It is produced by
+ * running the same `apply_constraint_lifecycle_operations()` the materializer
+ * runs, so "what names exist" has exactly one definition.
+ */
+ConstraintLifecycleResult apply_constraint_lifecycle_request(
+    ProjectData* project,
+    const Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view from,
+    std::string_view new_name) {
+    ConstraintLifecycleResult result;
+    if (project == nullptr) {
+        result.message = "no project";
+        return result;
+    }
+    const bool is_rename = !new_name.empty();
+    const std::string family_key(constraint_family_json_key(family));
+    const std::string source(from);
+    const std::string target(new_name);
+
+    if (source.empty()) {
+        result.message = family_key + " constraint name must not be empty";
+        return result;
+    }
+
+    ProjectData candidate = *project;
+
+    Value replayed_root = base_skeleton_document.root;
+    apply_constraint_lifecycle_operations(
+        &replayed_root, candidate.constraint_lifecycle_operations);
+    const std::vector<std::string> base_names =
+        constraint_array_names(replayed_root, family_key);
+    const std::vector<std::string> upsert_names = constraint_edit_names(candidate, family);
+    const auto holds = [](const std::vector<std::string>& names, const std::string& name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+
+    const bool in_base = holds(base_names, source);
+    const bool in_upserts = holds(upsert_names, source);
+    if (!in_base && !in_upserts) {
+        result.message = family_key + " constraint '" + source + "' does not exist";
+        return result;
+    }
+
+    if (is_rename) {
+        if (target == source) {
+            result.message = family_key + " constraint rename target '" + target +
+                "' must differ from its source";
+            return result;
+        }
+        // A collision is refused rather than auto-suffixed. `unique_constraint_name()`
+        // owns auto-suffixing for the create path; a rename is the user's choice
+        // of a specific name, and quietly giving them a different one is worse
+        // than declining.
+        if (holds(base_names, target) || holds(upsert_names, target)) {
+            result.message = family_key + " constraint rename target '" + target +
+                "' is already taken by a live " + family_key + " constraint";
+            return result;
+        }
+    } else if (!target.empty()) {
+        result.message = family_key + " constraint delete must not carry a new name";
+        return result;
+    }
+
+    // The ownership rule. A base-backed constraint cannot be renamed or removed
+    // by upsert, so it needs a record; a shadowing upsert needs both, because
+    // rewriting only the record would leave the upsert's old name to reappear
+    // in Phase B, and erasing only the upsert would resurrect the base element.
+    if (in_base) {
+        ConstraintLifecycleOperation operation;
+        operation.kind = is_rename ? ConstraintLifecycleKind::Rename
+                                   : ConstraintLifecycleKind::Delete;
+        operation.family = family;
+        operation.name = source;
+        operation.new_name = is_rename ? target : std::string{};
+        candidate.constraint_lifecycle_operations.push_back(std::move(operation));
+        result.used_operation = true;
+    }
+    if (in_upserts) {
+        const auto rewrite = [&](auto& edits) {
+            const auto found = std::find_if(
+                edits.begin(), edits.end(), [&](const auto& edit) {
+                    return edit.name == source;
+                });
+            if (found == edits.end()) {
+                return false;
+            }
+            if (is_rename) {
+                found->name = target;
+            } else {
+                edits.erase(found);
+            }
+            return true;
+        };
+        result.changed_upsert = visit_constraint_edits(&candidate, family, rewrite);
+    }
+
+    // Both the ordered records and the resulting upserts must survive the save
+    // validator, so no primitive can return success and leave a project
+    // `save_project()` refuses.
+    ProjectSaveError save_error;
+    if (!validate_project_for_save(candidate, &save_error)) {
+        return ConstraintLifecycleResult{false, save_error.message, false, false};
+    }
+    // And the whole record sequence must still resolve against the base, so no
+    // primitive can return success and leave a project that cannot be opened.
+    if (const auto lifecycle_error =
+            validate_constraint_lifecycle_operations(candidate, base_skeleton_document)) {
+        return ConstraintLifecycleResult{false, lifecycle_error->message, false, false};
+    }
+
+    *project = std::move(candidate);
+    result.ok = true;
+    return result;
+}
+
+} // namespace
+
+ConstraintLifecycleResult rename_constraint(
+    ProjectData* project,
+    const runtime::json::Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view from,
+    std::string_view to) {
+    if (to.empty()) {
+        ConstraintLifecycleResult result;
+        result.message = std::string(constraint_family_json_key(family)) +
+            " constraint rename target must not be empty";
+        return result;
+    }
+    return apply_constraint_lifecycle_request(
+        project, base_skeleton_document, family, from, to);
+}
+
+ConstraintLifecycleResult delete_constraint(
+    ProjectData* project,
+    const runtime::json::Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view name) {
+    return apply_constraint_lifecycle_request(
+        project, base_skeleton_document, family, name, std::string_view{});
+}
+
+std::optional<runtime::json::LoadError> validate_constraint_lifecycle_operations(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document) {
+    if (project.constraint_lifecycle_operations.empty()) {
+        return std::nullopt;
+    }
+
+    struct FamilyState {
+        std::vector<std::string> live;      ///< Names present when the next record runs.
+        std::vector<std::string> consumed;  ///< Names an earlier record took away.
+    };
+    std::array<FamilyState, kConstraintFamilies.size()> families;
+    for (std::size_t slot = 0; slot < kConstraintFamilies.size(); ++slot) {
+        const std::string key(constraint_family_json_key(kConstraintFamilies[slot]));
+        const Value* array = find_optional_member(base_skeleton_document.root, key);
+        if (array == nullptr || !array->is_array()) {
+            continue;
+        }
+        for (const Value& element : array->as_array()) {
+            const Value* name = find_optional_member(element, "name");
+            if (name != nullptr && name->is_string()) {
+                families[slot].live.push_back(name->as_string());
+            }
+        }
+    }
+
+    const auto contains = [](const std::vector<std::string>& names,
+                             const std::string& name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+    const auto reject = [&](const std::string& path, std::string message) {
+        return validation_error(
+            base_skeleton_document,
+            base_skeleton_document.root.location(),
+            path,
+            std::move(message));
+    };
+
+    for (std::size_t index = 0; index < project.constraint_lifecycle_operations.size();
+         ++index) {
+        const ConstraintLifecycleOperation& operation =
+            project.constraint_lifecycle_operations[index];
+        const std::string path =
+            "$.constraint_edits.operations[" + std::to_string(index) + "]";
+        const std::string family(constraint_family_json_key(operation.family));
+        FamilyState& state = families[static_cast<std::size_t>(operation.family)];
+
+        const auto source = std::find(state.live.begin(), state.live.end(), operation.name);
+        if (source == state.live.end()) {
+            if (contains(state.consumed, operation.name)) {
+                return reject(
+                    path,
+                    family + " constraint '" + operation.name +
+                        "' was already renamed or deleted by an earlier operation");
+            }
+            // A name that exists, but in a different family, is a distinct
+            // fault from a name that does not exist: the fix is the family, not
+            // the spelling. Identity is `(family, name)`, and the runtime
+            // enforces uniqueness only within a family, so the two can coexist.
+            for (const ConstraintKind other : kConstraintFamilies) {
+                if (other == operation.family) {
+                    continue;
+                }
+                if (contains(families[static_cast<std::size_t>(other)].live,
+                             operation.name)) {
+                    return reject(
+                        path,
+                        family + " constraint '" + operation.name + "' exists as a " +
+                            std::string(constraint_family_json_key(other)) +
+                            " constraint, not a " + family + " constraint");
+                }
+            }
+            return reject(
+                path,
+                family + " constraint '" + operation.name +
+                    "' does not exist in the base skeleton");
+        }
+
+        if (operation.kind == ConstraintLifecycleKind::Rename) {
+            if (contains(state.live, operation.new_name)) {
+                return reject(
+                    path,
+                    family + " constraint lifecycle rename target '" +
+                        operation.new_name + "' is already taken by a live " + family +
+                        " constraint");
+            }
+            *source = operation.new_name;
+        } else {
+            state.live.erase(source);
+        }
+        state.consumed.push_back(operation.name);
+    }
+
+    return std::nullopt;
+}
+
 ProjectRuntimeResult build_project_runtime(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document) {
@@ -7079,6 +7825,11 @@ ProjectRuntimeResult build_project_runtime(
     if (const auto animation_error =
             validate_animation_edit_sequence(project, base_skeleton_document)) {
         result.error = animation_error;
+        return result;
+    }
+    if (const auto lifecycle_error =
+            validate_constraint_lifecycle_operations(project, base_skeleton_document)) {
+        result.error = lifecycle_error;
         return result;
     }
     const Document runtime_document = build_runtime_document(project, base_skeleton_document);
@@ -7146,6 +7897,13 @@ ProjectExportResult export_runtime_assets(
     if (const auto animation_error =
             validate_animation_edit_sequence(project, base_skeleton_document)) {
         export_error.message = animation_error->format();
+        result.error = std::move(export_error);
+        return result;
+    }
+
+    if (const auto lifecycle_error =
+            validate_constraint_lifecycle_operations(project, base_skeleton_document)) {
+        export_error.message = lifecycle_error->format();
         result.error = std::move(export_error);
         return result;
     }
