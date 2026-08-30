@@ -270,9 +270,23 @@ void print_summary(const marrow::editor::ProjectLoadResult& result, const std::f
  * therefore loads the `DebugOverlaySettings` defaults. Asserting the fixture's
  * shape against a freshly created project is what made `--create` fail.
  */
-bool validate_viewport_settings(
-    const marrow::editor::ProjectLoadResult& result,
-    bool created_minimal_project) {
+/**
+ * @brief Asserts the viewport metadata a project actually carries.
+ *
+ * The debug-overlay half keys on the project's CONTENT -- whether the document
+ * authors `editor.viewport.debug_overlay` -- and never on how the project was
+ * produced. An earlier fix keyed it on `--create`, which is a property of the
+ * invocation rather than of the file, so it repaired only that one symptom:
+ * every other project lacking an authored overlay block still failed, including
+ * `assets/fixtures/atlas_pack_smoke/atlas_pack_project.marrow`, which AGENTS.md
+ * documents as a validation command. A smoke pointed at an arbitrary project
+ * must not demand one fixture's authored state from it.
+ *
+ * Both branches assert something real, so this cannot degrade into a gate that
+ * silently skips: an authored block must round-trip value for value, and an
+ * absent one must produce the documented `DebugOverlaySettings` defaults.
+ */
+bool validate_viewport_settings(const marrow::editor::ProjectLoadResult& result) {
     if (result.project == nullptr) {
         std::cerr << "Viewport validation requires a loaded project.\n";
         return false;
@@ -294,29 +308,166 @@ bool validate_viewport_settings(
         std::cerr << "Viewport validation expected the default 3+3 frame-based onion-skin settings.\n";
         return false;
     }
-    if (created_minimal_project) {
-        if (!debug_overlay.bones ||
-            debug_overlay.ik_constraints ||
-            debug_overlay.path_constraints ||
-            debug_overlay.physics_constraints ||
-            debug_overlay.mesh_wireframes ||
-            debug_overlay.bounding_boxes) {
-            std::cerr << "Viewport validation expected a created project to load the default bones-only debug overlay.\n";
-            return false;
+
+    // `load_project()` keeps the whole original document on `preserved_root`,
+    // so the authored state is readable without re-opening the file or
+    // assuming anything about `source_path`.
+    const marrow::runtime::json::Value* authored_overlay = nullptr;
+    if (result.project->preserved_root.is_object()) {
+        if (const auto* editor_object = marrow::runtime::json::find_member(
+                result.project->preserved_root, "editor")) {
+            if (const auto* viewport_object =
+                    marrow::runtime::json::find_member(*editor_object, "viewport")) {
+                authored_overlay = marrow::runtime::json::find_member(
+                    *viewport_object, "debug_overlay");
+            }
         }
-    } else if (
-        !debug_overlay.bones ||
-        !debug_overlay.ik_constraints ||
-        !debug_overlay.path_constraints ||
-        !debug_overlay.physics_constraints ||
-        !debug_overlay.mesh_wireframes ||
-        !debug_overlay.bounding_boxes) {
-        std::cerr << "Viewport validation expected the fixture debug overlay toggles to be enabled.\n";
+    }
+    if (authored_overlay != nullptr && !authored_overlay->is_object()) {
+        std::cerr << "Viewport validation found a non-object "
+                     "$.editor.viewport.debug_overlay.\n";
         return false;
     }
 
-    std::cout << "Viewport metadata validated.\n";
+    struct OverlayToggle {
+        const char* key;
+        bool marrow::editor::DebugOverlaySettings::* field;
+    };
+    static constexpr std::array<OverlayToggle, 6> kOverlayToggles{{
+        {"bones", &marrow::editor::DebugOverlaySettings::bones},
+        {"ik", &marrow::editor::DebugOverlaySettings::ik_constraints},
+        {"path", &marrow::editor::DebugOverlaySettings::path_constraints},
+        {"physics", &marrow::editor::DebugOverlaySettings::physics_constraints},
+        {"meshes", &marrow::editor::DebugOverlaySettings::mesh_wireframes},
+        {"bounds", &marrow::editor::DebugOverlaySettings::bounding_boxes},
+    }};
+    const marrow::editor::DebugOverlaySettings defaults{};
+
+    std::size_t authored_count = 0U;
+    for (const OverlayToggle& toggle : kOverlayToggles) {
+        bool expected = defaults.*(toggle.field);
+        bool from_document = false;
+        if (authored_overlay != nullptr) {
+            if (const auto* value =
+                    marrow::runtime::json::find_member(*authored_overlay, toggle.key)) {
+                if (!value->is_boolean()) {
+                    std::cerr << "Viewport validation found a non-boolean "
+                                 "$.editor.viewport.debug_overlay." << toggle.key << ".\n";
+                    return false;
+                }
+                expected = value->as_boolean();
+                from_document = true;
+                ++authored_count;
+            }
+        }
+        if (debug_overlay.*(toggle.field) != expected) {
+            std::cerr << "Viewport validation expected debug overlay toggle '"
+                      << toggle.key << "' to load as "
+                      << (expected ? "true" : "false") << " ("
+                      << (from_document ? "the project's authored value"
+                                        : "the documented default")
+                      << "), measured "
+                      << (debug_overlay.*(toggle.field) ? "true" : "false") << ".\n";
+            return false;
+        }
+    }
+
+    // The round trip above cannot catch two toggles wired to each other's key
+    // when a fixture happens to author them all alike -- `player_idle.marrow`
+    // authors all six `true`. A distinct alternating pattern, pushed through
+    // the serializer and the parser, does catch it, and it needs no fixture to
+    // carry that pattern.
+    {
+        marrow::editor::ProjectData permuted = *result.project;
+        auto& permuted_overlay = permuted.editor_metadata.viewport.debug_overlay;
+        for (std::size_t index = 0; index < kOverlayToggles.size(); ++index) {
+            permuted_overlay.*(kOverlayToggles[index].field) = (index % 2U) == 1U;
+        }
+        const auto permuted_document = marrow::runtime::json::parse_document(
+            marrow::editor::serialize_project(permuted),
+            result.project->source_path);
+        const auto permuted_reloaded = permuted_document
+            ? marrow::editor::load_project(*permuted_document.document)
+            : marrow::editor::ProjectLoadResult{};
+        if (!permuted_document || !permuted_reloaded) {
+            std::cerr << "Viewport validation could not round-trip a permuted debug "
+                         "overlay.\n";
+            return false;
+        }
+        const auto& reloaded_overlay =
+            permuted_reloaded.project->editor_metadata.viewport.debug_overlay;
+        for (std::size_t index = 0; index < kOverlayToggles.size(); ++index) {
+            const bool expected = (index % 2U) == 1U;
+            if (reloaded_overlay.*(kOverlayToggles[index].field) != expected) {
+                std::cerr << "Viewport validation found debug overlay toggle '"
+                          << kOverlayToggles[index].key
+                          << "' crossed with another key: an alternating pattern "
+                             "round-tripped as "
+                          << (reloaded_overlay.*(kOverlayToggles[index].field)
+                                  ? "true" : "false")
+                          << " where " << (expected ? "true" : "false")
+                          << " was written.\n";
+                return false;
+            }
+        }
+    }
+
+    std::cout << "Viewport metadata validated (" << authored_count
+              << " of 6 debug overlay toggles authored by the project, the rest "
+                 "defaulted; all six independently round-tripped).\n";
     return true;
+}
+
+/**
+ * @brief Which markers of the `player_idle` EDITING fixture a project carries.
+ *
+ * Everything below `validate_undo_redo_cycle` in `main` is written against that
+ * one fixture: it names bones `spine`/`arm_l`, animations `attack`/`aim` and
+ * skin `mesh_base` directly. Those suites used to run for every project that
+ * was not `--create`, which is a property of the INVOCATION, so pointing the
+ * smoke at any other project ran a suite the project cannot satisfy. That is
+ * the same mistake the viewport gate made, one level up.
+ *
+ * Only markers unique to the editing fixture are listed. `root` and `idle` are
+ * deliberately excluded: they are generic enough that
+ * `atlas_pack_project.marrow` has both, and including them would turn a clean
+ * "not this fixture" into a partial match.
+ */
+struct EditingFixtureMarkers {
+    std::vector<std::string> present;
+    std::vector<std::string> missing;
+};
+
+EditingFixtureMarkers editing_fixture_markers(
+    const marrow::editor::ProjectLoadResult& result) {
+    EditingFixtureMarkers markers;
+    if (result.skeleton_data == nullptr) {
+        markers.missing.emplace_back("a materialized skeleton");
+        return markers;
+    }
+    const auto& skeleton = *result.skeleton_data;
+    const auto note = [&](bool found, std::string label) {
+        (found ? markers.present : markers.missing).push_back(std::move(label));
+    };
+    for (const char* bone : {"spine", "arm_l"}) {
+        note(skeleton.find_bone_index(bone).has_value(),
+             "bone '" + std::string(bone) + "'");
+    }
+    for (const char* animation : {"attack", "aim"}) {
+        note(skeleton.find_animation(animation) != nullptr,
+             "animation '" + std::string(animation) + "'");
+    }
+    note(skeleton.find_skin("mesh_base") != nullptr, "skin 'mesh_base'");
+    return markers;
+}
+
+std::string join_markers(const std::vector<std::string>& markers) {
+    std::string joined;
+    for (const std::string& marker : markers) {
+        if (!joined.empty()) joined += ", ";
+        joined += marker;
+    }
+    return joined;
 }
 
 bool require_near(double actual, double expected, std::string_view label);
@@ -12851,7 +13002,7 @@ int main(int argc, char** argv) {
     }
 
     print_summary(result, parse_result.options.project_path);
-    if (!validate_viewport_settings(result, parse_result.options.create_project)) {
+    if (!validate_viewport_settings(result)) {
         return 1;
     }
     if (!validate_snap_settings(result)) {
@@ -12865,6 +13016,27 @@ int main(int argc, char** argv) {
                 result, parse_result.options.project_path)) {
             return 1;
         }
+    } else if (const EditingFixtureMarkers markers = editing_fixture_markers(result);
+               markers.present.empty()) {
+        // Not the editing fixture at all. Say so loudly and by name -- a silent
+        // skip here would be the "test that cannot fail" failure mode -- then
+        // fall through to the export validation, which is what a command like
+        // the documented atlas-pack one is actually for.
+        std::cout << "Editing-suite validation skipped: this project is not the "
+                     "player_idle editing fixture (missing "
+                  << join_markers(markers.missing)
+                  << "). The project-shape checks above and any export "
+                     "validation below still ran.\n";
+    } else if (!markers.missing.empty()) {
+        // A partial match is a CORRUPTED editing fixture, never a skip. Without
+        // this branch, player_idle losing one bone would quietly stop running
+        // roughly two dozen suites and still exit 0.
+        std::cerr << "Editing-suite validation aborted: this project carries "
+                  << join_markers(markers.present) << " but is missing "
+                  << join_markers(markers.missing)
+                  << ". A project that partially matches the player_idle editing "
+                     "fixture is a corrupted fixture, not a project to skip.\n";
+        return 1;
     } else {
         if (!validate_undo_redo_cycle(result)) {
             return 1;

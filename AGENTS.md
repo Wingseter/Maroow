@@ -41,6 +41,7 @@
 - Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
 - Timeline scalar-graph projection/geometry/view/drag-math tests: `./build/marrow_timeline_graph_model_tests`
 - Editor project authoring smoke including `offset_keyframe_scalars`: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- `marrow_project_smoke` asserts only what the project it is pointed at actually contains. The viewport debug-overlay gate keys on whether the document authors `editor.viewport.debug_overlay` (round-tripping it value for value when present, asserting the `DebugOverlaySettings` defaults when absent, plus an alternating-pattern round trip that catches two toggles wired to each other's key — which an all-`true` fixture cannot), and the `player_idle`-specific editing suites run only for a project carrying their markers (bones `spine`/`arm_l`, animations `attack`/`aim`, skin `mesh_base`). A project matching NONE of them prints a named skip and still runs the shape and export checks; a project matching SOME of them ABORTS, because a partial match is a corrupted fixture rather than a project to skip
 - Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
@@ -163,7 +164,7 @@
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
-- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, the constraint rename/delete lifecycle, the eleven IK/physics constraint parameter widgets located by a real mouse through `HoveredId` with per-drag undo granularity and a Ctrl+click clamp, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, the constraint rename/delete lifecycle, the eleven IK/physics constraint parameter widgets located by a real mouse through `HoveredId` with per-drag undo granularity and a Ctrl+click clamp, MAR-178's Rename.../Delete... buttons and their modals driven end to end by that same mouse (see **Headless Frame Smoke Notes** before writing another such scenario), and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
@@ -193,6 +194,53 @@
 - Parameter deformer renderer preparation: `./build/marrow_renderer_sample --skip-render assets/fixtures/parameter_deformer_grid.mskl assets/fixtures/parameter_face_basic.matl`
 - Atlas-free ArtPath renderer preparation: `./build/marrow_renderer_sample --no-atlas --skip-render assets/fixtures/art_path_stroke.mskl`
 - Use `./build/marrow_renderer_sample` to verify atlas-backed setup-pose region draw preparation, clipping-mask propagation, sequence frame selection, GPU-skinned weighted-mesh draw preparation, animated slot presentation, slot blend modes, straight-alpha/PMA two-color tint propagation, and the single-color shader fast path from the checked-in fixtures
+
+## Headless Frame Smoke Notes
+
+Hard-won mechanics for anyone writing a scenario that renders real ImGui frames
+and drives a synthesized mouse or keyboard (`shell_smoke_frames.cpp`,
+`shell_smoke_constraints.cpp`). Each was measured, not inferred, and each
+produces a silently wrong test rather than a loud failure if you get it wrong.
+
+- **Locating a widget.** `ImGuiContext::HoveredId` names whatever the cursor is
+  over; compare it against `ImGui::FindWindowByName(title)->GetID(label)` while
+  sweeping the mouse. This only holds while the widget is emitted at plain
+  window scope — `widgets::seg_toggle` has a balanced `PushID`/`PopID` and the
+  constraint panels close every `BeginChild` before their parameters, so it
+  holds there today. A `BeginTabItem`, a surviving `PushID` or a wrapping child
+  breaks the seed and the sweep then reports the widget "absent". Always sweep
+  at least one control that already exists, so a broken seed cannot be mistaken
+  for a missing widget.
+- **A widget on a `SameLine()` needs its own sweep column.** A left-edge column
+  reaches checkboxes and sliders but not the second button of a row —
+  `Delete...` sits right of `Rename...` and is missed entirely by a column at
+  the item's left edge.
+- **On macOS, `io.AddKeyEvent(ImGuiMod_Ctrl, true)` does not press Ctrl.**
+  `io.ConfigMacOSXBehaviors` defaults on, and `AddKeyAnalogEvent` swaps Cmd and
+  Ctrl at the EVENT layer, so the flag raises `io.KeySuper`; `AddMouseButtonEvent`
+  then converts the left press into a **right** click. Measured as
+  `keyctrl=0 super=1 mdown=0 mdown1=1 active=0` — the widget never activates.
+  Clear `ConfigMacOSXBehaviors` for the gesture and restore it, and assert
+  `ImGuiContext::TempInputId` before typing so a regression says "Ctrl+click did
+  not open the text input" instead of reporting a bare wrong value.
+- **Two presses at the same pixel are a double click**, and ImGui turns a
+  double-clicked `DragScalar` into a text input instead of dragging it. A
+  repeated gesture in one scenario hits this: the second drag left the widget
+  active as a temp input with the value unchanged. Advance the simulated clock
+  (`io.DeltaTime`) past `io.MouseDoubleClickTime` between gestures.
+- **A modal stays open until something calls `CloseCurrentPopup()`.**
+  `draw_constraint_catalog_popups()` calls `BeginPopupModal` unconditionally, so
+  clearing the surface's own request state does not close it, and the open modal
+  then blocks every later click in the scenario. Drive the modal's own button —
+  a popup is an ordinary window, so `FindWindowByName("Title##suffix")` plus the
+  same `HoveredId` sweep works on it — and check `window->Active` to tell an
+  open modal from a stale one.
+- **A UI-free helper cannot observe a deleted widget.** Calling the function a
+  button calls asserts the handler, not the button; such a test passes unchanged
+  after the widget is removed. When "the widget is on screen" is the deliverable,
+  the frame is the only mechanism that can see it — demonstrated by deleting
+  `draw_constraint_catalog_buttons()`'s body, which left MAR-178's own scenario
+  printing its full success line while the frame smoke failed by name.
 
 ## MAR-192–210 Platform Program Local Implementation Checkpoint
 
@@ -453,8 +501,8 @@ Errors found in this story's own governing documents, all corrected here:
 
 - **The design's §8.6 claim that "a blind `62` → `64` substitution is safe" is
   false.** This file contains `t = 0.62`, a timeline time in the MAR-170
-  shell-smoke checkpoint (`AGENTS.md:1303` as of MAR-179), and "62 lines", a
-  line count in the MAR-175 compatibility row (`:957` as of MAR-179) — both match
+  shell-smoke checkpoint (`AGENTS.md:1351` as of MAR-179), and "62 lines", a
+  line count in the MAR-175 compatibility row (`:1005` as of MAR-179) — both match
   a `\b62\b` grep and both would be corrupted. Both line numbers are
   self-referential and shift whenever this file grows, so they are anchored to
   the sections that own them above; re-measure rather than trust them. The claim
