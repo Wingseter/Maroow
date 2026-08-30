@@ -68,6 +68,17 @@ bool normalize_weights_command(ShellState* state);
 bool rebind_weights_command(ShellState* state);
 
 /**
+ * @brief Regenerates the scoped vertices' influences from the checked candidate
+ *        bones, in one transaction and one history entry.
+ *
+ * Reads `state->weight_paint.candidate_bone_names` and never expands it: an
+ * empty checklist rejects rather than falling back to the whole skeleton. The
+ * result depends only on the setup pose, so it is identical whatever the
+ * playhead, the current animation, or the preview pose happen to be.
+ */
+bool generate_weights_command(ShellState* state);
+
+/**
  * @brief Writes one vertex's influence list through the canonical primitive.
  *
  * The numeric influence table's only mutation path. `influences` carries the

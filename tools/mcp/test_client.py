@@ -41,15 +41,16 @@ async def test(parameter_only=False):
         "timeline.set_loop_sync",
         "timeline.scale_key_times",
         "mesh.rebind_weights",
+        "mesh.generate_weights",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 61
+    assert len(registry_names) == 62
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 61
+    assert len(mcp_names) == 62
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -106,6 +107,13 @@ async def test(parameter_only=False):
     }
     assert registry_by_name["mesh.rebind_weights"] == {
         "name": "mesh.rebind_weights",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["mesh.generate_weights"] == {
+        "name": "mesh.generate_weights",
         "category": "edit",
         "mutating": True,
         "requires_review": False,
@@ -1462,6 +1470,169 @@ async def test(parameter_only=False):
     )
     require_ok("undo MAR-175 weight edits", await client.send_command("undo"))
     require_ok("undo MAR-175 weight edits again", await client.send_command("undo"))
+
+    # MAR-176: mesh.generate_weights, the 62nd operation. Earlier cases rewrote
+    # these vertices, so restore the fixture's authored influences first -- the
+    # exact 0.5/0.5 tie below is a property of WHERE vertex 2 sits, and asserting
+    # it against whatever the previous case left behind would assert nothing.
+    require_ok(
+        "restore fixture weights before generating",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "vertices": [
+                    {
+                        "index": 0,
+                        "influences": [{"bone": "spine", "x": -64, "y": -80, "weight": 1.0}],
+                    },
+                    {
+                        "index": 2,
+                        "influences": [
+                            {"bone": "spine", "x": 64, "y": 80, "weight": 0.2},
+                            {"bone": "arm_l", "x": 94, "y": 70, "weight": 0.6},
+                        ],
+                    },
+                ],
+            },
+        ),
+    )
+    generate_dry = require_ok(
+        "mesh.generate_weights dry-run",
+        await client.send_command(
+            "mesh.generate_weights",
+            {**weight_target, "bones": ["spine", "arm_l"], "dry_run": True},
+        ),
+    )
+    assert generate_dry["message"] == "Mesh weight generation validated."
+    assert generate_dry["scene_delta"]["dry_run"] is True
+    assert generate_dry["scene_delta"]["vertex_count"] == 4
+    assert generate_dry["scene_delta"]["scoped_vertex_count"] == 4
+    assert generate_dry["scene_delta"]["candidate_bone_count"] == 2
+
+    describe = require_ok(
+        "mesh.describe before generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_before_generate = json.dumps(describe["scene_delta"]["weights"])
+    require_ok(
+        "mesh.generate_weights live",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine", "arm_l"]}
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_first_generate = describe["scene_delta"]["weights"]
+    # Vertex 2's two candidates are exactly equidistant -- both clamp to spine's
+    # world origin -- so the tie is exact and breaks on ascending skeleton index.
+    assert [row["bone"] for row in weights_first_generate[2]] == ["spine", "arm_l"]
+    assert weights_first_generate[2][0]["weight"] == 0.5
+    assert weights_first_generate[2][1]["weight"] == 0.5
+
+    # Generation is deterministic but NOT bit-exactly idempotent, for the same
+    # reason rebind is not: BoneWorldTransform is float32 while bind offsets are
+    # double. Report the measured second-application stability; do not assert a
+    # no_change disposition the design does not guarantee.
+    generate_again = require_ok(
+        "mesh.generate_weights second application",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine", "arm_l"]}
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after the second generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_second_generate = describe["scene_delta"]["weights"]
+    max_generate_delta = 0.0
+    for first_vertex, second_vertex in zip(weights_first_generate, weights_second_generate):
+        assert len(first_vertex) == len(second_vertex)
+        for first, second in zip(first_vertex, second_vertex):
+            assert first["bone"] == second["bone"], "generate must be order-stable"
+            max_generate_delta = max(
+                max_generate_delta,
+                abs(first["weight"] - second["weight"]),
+                abs(first["x"] - second["x"]),
+                abs(first["y"] - second["y"]),
+            )
+    assert max_generate_delta <= 1e-9, f"second generate moved a value by {max_generate_delta}"
+    print(
+        f"  mesh.generate_weights: second application stable to {max_generate_delta:.3e} "
+        f"(message: {generate_again['message']!r}) -- deterministic, not bit-exactly idempotent"
+    )
+    if generate_again["message"] != "Mesh weights already match the generated candidates.":
+        require_ok("undo the second generate", await client.send_command("undo"))
+    require_ok("undo mesh.generate_weights", await client.send_command("undo"))
+    describe = require_ok(
+        "mesh.describe after generate undo",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_generate
+
+    # A single candidate must take the whole weight, whatever its distance.
+    require_ok(
+        "mesh.generate_weights with one candidate",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine"], "vertices": [1]}
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after the single-candidate generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert len(describe["scene_delta"]["weights"][1]) == 1
+    assert describe["scene_delta"]["weights"][1][0]["bone"] == "spine"
+    assert describe["scene_delta"]["weights"][1][0]["weight"] == 1.0
+    require_ok("undo the single-candidate generate", await client.send_command("undo"))
+
+    # The advisory JSON schema did not loosen the C++ gate. Each of these is
+    # sent deliberately, including the empty `bones` array that `minItems: 1`
+    # forbids on the Python side.
+    require_rejected(
+        "mesh.generate_weights rejects a missing bones list",
+        await client.send_command("mesh.generate_weights", dict(weight_target)),
+    )
+    require_rejected(
+        "mesh.generate_weights rejects an empty bones list",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": []}
+        ),
+    )
+    unknown_bone = require_rejected(
+        "mesh.generate_weights rejects an unknown bone",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["no_such_bone"]}
+        ),
+    )
+    assert unknown_bone["error"]["code"] == "not_found"
+    require_rejected(
+        "mesh.generate_weights rejects a duplicate bone",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine", "spine"]}
+        ),
+    )
+    require_rejected(
+        "mesh.generate_weights rejects a non-string bone",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": [7]}
+        ),
+    )
+    require_rejected(
+        "mesh.generate_weights rejects an out-of-range vertex",
+        await client.send_command(
+            "mesh.generate_weights",
+            {**weight_target, "bones": ["spine"], "vertices": [99]},
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after the generate rejections",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_generate
+    require_ok("undo the fixture weight restore", await client.send_command("undo"))
 
     require_ok("agent.permissions.describe", await client.send_command("agent.permissions.describe"))
     require_ok("agent.pause", await client.send_command("agent.pause"))

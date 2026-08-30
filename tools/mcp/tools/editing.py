@@ -1103,6 +1103,38 @@ def get_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="mesh.generate_weights",
+            description=(
+                "Generate deterministic top-four weights for a weighted mesh from an "
+                "explicit candidate-bone list, using inverse-square distance to each "
+                "candidate's setup-pose bone segment."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skin": {"type": "string"},
+                    "slot": {"type": "string"},
+                    "attachment": {"type": "string"},
+                    "bones": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": (
+                            "Candidate bone names. Required; never expanded to the whole "
+                            "skeleton."
+                        )
+                    },
+                    "vertices": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "description": "Vertex indices to regenerate. Absent means every vertex."
+                    },
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["skin", "slot", "attachment", "bones"]
+            }
+        ),
+        types.Tool(
             name="set_slot_color_keyframe",
             description="Create or replace a slot RGBA color keyframe.",
             inputSchema={

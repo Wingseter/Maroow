@@ -2635,6 +2635,284 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             std::remove(round_trip.source_path.c_str());
         }
 
+        // ── MAR-176: deterministic automatic weight generation ──────────────
+        //
+        // Earlier cases in this block rewrote these vertices, so restore the
+        // fixture's authored influences first. The exact 0.5/0.5 tie asserted
+        // below is a property of WHERE the vertex sits -- past spine's segment
+        // end and behind arm_l's segment start, so both clamp to spine's world
+        // origin -- and asserting it against whatever the previous case left
+        // behind would be asserting nothing.
+        if (!set_active_vertex_weights_command(
+                &shell_state, 0U, {{"spine", -64.0, -80.0, 1.0}}) ||
+            !set_active_vertex_weights_command(
+                &shell_state,
+                2U,
+                {{"spine", 64.0, 80.0, 0.2}, {"arm_l", 94.0, 70.0, 0.6}})) {
+            std::cerr << "MAR-176 could not restore the fixture weights before generating.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+        {
+            const std::string project_before_generate =
+                marrow::editor::serialize_project(*shell_state.load_result.project);
+            const std::string all_before_generate = weight_edit_snapshot();
+
+            // AC1 on the GUI: an empty checklist rejects. It must never fall
+            // back to "every bone" -- that is the silent expansion the story
+            // forbids, and it is the one place a convenience default would
+            // violate an acceptance criterion outright.
+            shell_state.weight_paint.candidate_bone_names.clear();
+            if (generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 Generate must refuse an empty candidate checklist.\n";
+                return false;
+            }
+            if (shell_state.error_message !=
+                "mesh.generate_weights requires at least one candidate bone.") {
+                // Asserted so this case cannot pass merely because the target
+                // failed to resolve for some unrelated reason.
+                std::cerr << "MAR-176 the empty-checklist refusal must name the candidate rule, "
+                             "but said \"" << shell_state.error_message << "\".\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*shell_state.load_result.project) !=
+                    project_before_generate ||
+                shell_state.session.undo_count() != 0U) {
+                std::cerr << "MAR-176 a refused Generate must leave the project byte-identical.\n";
+                return false;
+            }
+
+            // `From selection` is a one-shot fill: the checklist is built from
+            // the bone selection once, and the generate that follows uses
+            // exactly those two bones.
+            shell_state.selection.clear();
+            shell_state.selection.add_range(
+                {marrow::editor::BoneSelection{"spine"}, marrow::editor::BoneSelection{"arm_l"}},
+                marrow::editor::BoneSelection{"spine"});
+            {
+                std::vector<std::string> filled;
+                for (const auto& bone : shell_state.load_result.skeleton_data->bones()) {
+                    for (const auto& item : shell_state.selection.items()) {
+                        const auto* selected =
+                            std::get_if<marrow::editor::BoneSelection>(&item);
+                        if (selected != nullptr && selected->bone_name == bone.name) {
+                            filled.push_back(bone.name);
+                            break;
+                        }
+                    }
+                }
+                shell_state.weight_paint.candidate_bone_names = filled;
+            }
+            if (shell_state.weight_paint.candidate_bone_names !=
+                std::vector<std::string>{"spine", "arm_l"}) {
+                std::cerr << "MAR-176 From selection must fill the checklist in skeleton order "
+                             "with exactly the selected bones.\n";
+                return false;
+            }
+            // Clearing the selection afterwards must NOT change the checklist:
+            // the fill is one-shot, not a live binding.
+            shell_state.selection.clear();
+            if (shell_state.weight_paint.candidate_bone_names !=
+                std::vector<std::string>{"spine", "arm_l"}) {
+                std::cerr << "MAR-176 the candidate checklist must not track the selection.\n";
+                return false;
+            }
+            // Selecting bones replaced the slot selection the weight target
+            // resolves through, so restore it before driving any command.
+            select_slot(&shell_state, *body_slot_index, "Smoke", false);
+
+            // A rejection for a candidate that no longer resolves.
+            shell_state.weight_paint.candidate_bone_names = {"spine", "ghost_bone"};
+            if (generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 Generate must refuse an unresolvable candidate name.\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*shell_state.load_result.project) !=
+                    project_before_generate ||
+                shell_state.session.undo_count() != 0U) {
+                std::cerr << "MAR-176 an unresolvable-candidate rejection must change nothing.\n";
+                return false;
+            }
+            shell_state.weight_paint.candidate_bone_names = {"spine", "arm_l"};
+
+            // Scoped: a two-vertex FFD selection narrows the command to exactly
+            // those two, and the other two must survive byte-identical.
+            const std::optional<MeshWeightPaintTarget> generate_target = current_weight_target();
+            if (!generate_target.has_value()) {
+                std::cerr << "MAR-176 could not resolve the weight target.\n";
+                return false;
+            }
+            ViewportFfdSelection ffd;
+            ffd.scope.slot_index = generate_target->slot_index;
+            ffd.scope.deform_attachment_name = generate_target->source_attachment_name;
+            ffd.scope.vertex_count = 4U;
+            ffd.vertex_indices = {0U, 1U};
+            shell_state.viewport_ffd_selection = ffd;
+            if (weight_command_scope(shell_state) != std::vector<std::size_t>{0U, 1U}) {
+                std::cerr << "MAR-176 the FFD selection did not narrow the generate scope.\n";
+                return false;
+            }
+            const std::string scoped_v2_before = vertex_snapshot(2U);
+            const std::string scoped_v3_before = vertex_snapshot(3U);
+            const std::string scoped_v0_before = vertex_snapshot(0U);
+            if (!generate_weights_command(&shell_state) ||
+                shell_state.session.undo_count() != 1U) {
+                std::cerr << "MAR-176 a scoped Generate must be exactly one history entry.\n";
+                return false;
+            }
+            if (vertex_snapshot(2U) != scoped_v2_before ||
+                vertex_snapshot(3U) != scoped_v3_before) {
+                std::cerr << "MAR-176 a scoped Generate disturbed a vertex outside the scope.\n";
+                return false;
+            }
+            if (!undo_project_change(&shell_state) || vertex_snapshot(0U) != scoped_v0_before) {
+                std::cerr << "MAR-176 undoing a Generate must restore the influences "
+                             "bit-exactly.\n";
+                return false;
+            }
+            shell_state.viewport_ffd_selection.reset();
+            shell_state.session.clear_history();
+            update_project_dirty_state(&shell_state);
+
+            // Unscoped: every vertex, one history entry.
+            if (!generate_weights_command(&shell_state) ||
+                shell_state.session.undo_count() != 1U) {
+                std::cerr << "MAR-176 an unscoped Generate must be exactly one history entry.\n";
+                return false;
+            }
+            const std::string generated_at_setup = weight_edit_snapshot();
+            if (generated_at_setup == all_before_generate) {
+                std::cerr << "MAR-176 an unscoped Generate changed nothing at all.\n";
+                return false;
+            }
+            // Vertex 2's candidates are exactly equidistant -- both clamp to
+            // spine's world origin -- so the weights are exactly one half each
+            // and the tie breaks on ascending skeleton index.
+            {
+                const marrow::editor::MeshWeightAttachmentEdit* edit =
+                    shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                        "mesh_base", "body", "body_mesh");
+                if (edit == nullptr || edit->vertices[2].influences.size() != 2U ||
+                    edit->vertices[2].influences[0].bone_name != "spine" ||
+                    edit->vertices[2].influences[1].bone_name != "arm_l" ||
+                    edit->vertices[2].influences[0].weight != 0.5 ||
+                    edit->vertices[2].influences[1].weight != 0.5) {
+                    std::cerr << "MAR-176 vertex 2 must generate exactly spine 0.5 then arm_l "
+                                 "0.5, but generated " << vertex_snapshot(2U) << ".\n";
+                    return false;
+                }
+            }
+            // A Generate whose scope changes nothing records no history entry
+            // and does not dirty -- the GUI analogue of the agent's no_change.
+            const std::size_t undo_after_generate = shell_state.session.undo_count();
+            if (!generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 a repeated Generate must not fail.\n";
+                return false;
+            }
+            std::cout << "  MAR-176 note: a repeated Generate on its own output added "
+                      << (shell_state.session.undo_count() - undo_after_generate)
+                      << " history entr(y/ies) -- generation is deterministic but not "
+                         "bit-exactly idempotent, so either 0 or 1 is correct here and "
+                         "neither is asserted.\n";
+            while (shell_state.session.undo_count() > undo_after_generate) {
+                if (!undo_project_change(&shell_state)) {
+                    std::cerr << "MAR-176 could not unwind the repeated Generate.\n";
+                    return false;
+                }
+            }
+
+            // ── Pose independence, the direct descendant of MAR-175's D9 ──
+            //
+            // The algorithm reads only the setup pose, so scrubbing the playhead
+            // off setup must not move a single bit of the result.
+            if (!undo_project_change(&shell_state)) {
+                std::cerr << "MAR-176 could not restore the pre-generate state.\n";
+                return false;
+            }
+            shell_state.session.clear_history();
+            update_project_dirty_state(&shell_state);
+            if (!set_selected_animation(&shell_state, "attack", "Smoke", false, true) ||
+                !scrub_timeline_time(&shell_state, 0.2, "Smoke", false)) {
+                std::cerr << "MAR-176 could not scrub to attack@0.2 for the pose check.\n";
+                return false;
+            }
+            if (!generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 Generate failed while the playhead was off setup pose.\n";
+                return false;
+            }
+            const std::string generated_off_pose = weight_edit_snapshot();
+            if (generated_off_pose != generated_at_setup) {
+                std::cerr << "MAR-176 generating at attack@0.2 must be bit-identical to "
+                             "generating at setup pose.\n  setup: " << generated_at_setup
+                          << "\n  posed: " << generated_off_pose << '\n';
+                return false;
+            }
+            std::cout << "  MAR-176 pose independence: generating at attack@0.2 is "
+                         "bit-identical to generating at setup pose.\n";
+
+            // ── Cross-path identity: the GUI command and the project primitive
+            // must produce a bit-identical vertex ──
+            {
+                marrow::editor::ProjectData primitive_project =
+                    *shell_state.load_result.project;
+                if (!undo_project_change(&shell_state)) {
+                    std::cerr << "MAR-176 could not unwind before the cross-path check.\n";
+                    return false;
+                }
+                marrow::editor::ProjectData primitive_source =
+                    *shell_state.load_result.project;
+                const auto primitive_result = marrow::editor::generate_mesh_weights(
+                    &primitive_source,
+                    *shell_state.load_result.skeleton_data,
+                    *generate_target->source_attachment,
+                    marrow::editor::MeshWeightTarget{"mesh_base", "body", "body_mesh"},
+                    {"spine", "arm_l"},
+                    {});
+                if (!primitive_result) {
+                    std::cerr << "MAR-176 cross-path identity failed on the primitive path: "
+                              << primitive_result.error << '\n';
+                    return false;
+                }
+                const auto* gui_edit = primitive_project.find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+                const auto* primitive_edit = primitive_source.find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+                if (gui_edit == nullptr || primitive_edit == nullptr ||
+                    gui_edit->vertices.size() != primitive_edit->vertices.size()) {
+                    std::cerr << "MAR-176 cross-path identity lost an overlay.\n";
+                    return false;
+                }
+                for (std::size_t vertex = 0; vertex < gui_edit->vertices.size(); ++vertex) {
+                    const auto& lhs = gui_edit->vertices[vertex].influences;
+                    const auto& rhs = primitive_edit->vertices[vertex].influences;
+                    if (lhs.size() != rhs.size()) {
+                        std::cerr << "MAR-176 the GUI command and mesh.generate_weights "
+                                     "disagreed on vertex " << vertex << "'s influence count.\n";
+                        return false;
+                    }
+                    for (std::size_t index = 0; index < lhs.size(); ++index) {
+                        if (lhs[index].bone_name != rhs[index].bone_name ||
+                            lhs[index].weight != rhs[index].weight ||
+                            lhs[index].x != rhs[index].x || lhs[index].y != rhs[index].y) {
+                            std::cerr << std::setprecision(17)
+                                      << "MAR-176 the GUI command and the project primitive "
+                                         "produced different influences at vertex " << vertex
+                                      << ".\n";
+                            return false;
+                        }
+                    }
+                }
+                std::cout << "  MAR-176 cross-path identity: the GUI Generate command and "
+                             "generate_mesh_weights() produced a bit-identical overlay.\n";
+            }
+            shell_state.weight_paint.candidate_bone_names.clear();
+            shell_state.session.clear_history();
+            shell_state.pending_edit_action.reset();
+            update_project_dirty_state(&shell_state);
+        }
+
         if (!apply_history_snapshot(&shell_state, weight_paint_baseline) ||
             !apply_current_animation_state_to_preview(&shell_state)) {
             std::cerr << "Weight paint smoke could not restore the baseline after MAR-175 coverage.\n";
@@ -3416,8 +3694,8 @@ bool validate_preview_playback_speed_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Preview speed shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Preview speed shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
     state.session.clear_history();

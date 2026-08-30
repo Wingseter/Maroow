@@ -4373,4 +4373,103 @@ MeshWeightResult rebind_mesh_weights(
     return result;
 }
 
+MeshWeightResult generate_mesh_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::string>& candidate_bone_names,
+    const std::vector<std::size_t>& scope) {
+    if (project == nullptr) {
+        return mesh_weight_failure("Mesh weight authoring requires an open project.");
+    }
+
+    const std::vector<runtime::BoneWorldTransform> setup_transforms =
+        mesh_weight_model::setup_pose_bone_world_transforms(skeleton);
+    if (setup_transforms.empty()) {
+        return mesh_weight_failure("The skeleton has no bones to generate weights against.");
+    }
+
+    // Candidate validation runs once per call and BEFORE anything is copied or
+    // staged. A singular candidate is fatal for the whole call rather than
+    // silently excluded: dropping a bone the caller explicitly named is the
+    // mirror image of the silent expansion the story forbids, and a per-vertex
+    // exclusion would make the outcome depend on which vertices were in scope.
+    if (candidate_bone_names.empty()) {
+        return mesh_weight_failure("mesh.generate_weights requires at least one candidate bone.");
+    }
+    std::vector<std::size_t> candidate_indices;
+    candidate_indices.reserve(candidate_bone_names.size());
+    for (const std::string& bone_name : candidate_bone_names) {
+        const auto bone_index = skeleton.find_bone_index(bone_name);
+        if (!bone_index.has_value()) {
+            return mesh_weight_failure("Bone not found: " + bone_name);
+        }
+        if (*bone_index >= setup_transforms.size()) {
+            return mesh_weight_failure("Bone '" + bone_name + "' is outside the setup pose.");
+        }
+        if (std::find(candidate_indices.begin(), candidate_indices.end(), *bone_index) !=
+            candidate_indices.end()) {
+            return mesh_weight_failure("A candidate bone was listed more than once.");
+        }
+        if (!mesh_weight_model::inverse_transform_point_safe(
+                 setup_transforms[*bone_index], 0.0, 0.0)
+                 .has_value()) {
+            return mesh_weight_failure(
+                "Bone '" + bone_name +
+                "' has a singular setup transform and cannot be used as a weight candidate.");
+        }
+        candidate_indices.push_back(*bone_index);
+    }
+    // Sorting here, rather than preserving the caller's order, is what makes
+    // "the result does not depend on the order the candidates were listed in"
+    // true by construction instead of by accident of the later distance sort.
+    std::sort(candidate_indices.begin(), candidate_indices.end());
+
+    // Built once per call, never per vertex.
+    const std::vector<mesh_weight_model::BoneSetupSegment> segments =
+        mesh_weight_model::bone_setup_segments(skeleton, setup_transforms);
+
+    ProjectData candidate = *project;
+    MeshWeightAttachmentEdit& edit =
+        ensure_weight_edit(candidate, skeleton, target, attachment);
+    if (edit.vertices.empty()) {
+        return mesh_weight_failure("mesh.generate_weights requires a weighted mesh attachment.");
+    }
+
+    MeshWeightResult result;
+    result.vertex_count = edit.vertices.size();
+    std::vector<std::size_t> resolved;
+    if (const std::string error =
+            resolve_weight_scope(scope, edit.vertices.size(), &resolved);
+        !error.empty()) {
+        return mesh_weight_failure(error);
+    }
+    result.scoped_vertex_count = resolved.size();
+
+    std::vector<std::pair<std::size_t, MeshWeightVertexEdit>> staged;
+    staged.reserve(resolved.size());
+    for (const std::size_t vertex_index : resolved) {
+        MeshWeightVertexEdit generated = edit.vertices[vertex_index];
+        if (const std::string error = mesh_weight_model::generate_mesh_weight_vertex(
+                skeleton, setup_transforms, segments, candidate_indices, &generated);
+            !error.empty()) {
+            return mesh_weight_failure(error);
+        }
+        staged.emplace_back(vertex_index, std::move(generated));
+    }
+
+    for (auto& [vertex_index, generated] : staged) {
+        if (!weight_vertices_equal(edit.vertices[vertex_index], generated)) {
+            result.affected_vertices.push_back(vertex_index);
+            edit.vertices[vertex_index] = std::move(generated);
+        }
+    }
+    result.changed = !result.affected_vertices.empty();
+    if (result.changed) {
+        *project = std::move(candidate);
+    }
+    return result;
+}
+
 } // namespace marrow::editor

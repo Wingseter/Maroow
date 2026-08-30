@@ -945,6 +945,11 @@ names, shapes, and types are exactly what they were, and the accepted value
 range is narrower than what the loader admits, so every project Marrow can write
 after MAR-175 is one it could already load before it.
 
+MAR-176 adds automatic weight generation (`mesh.generate_weights`) and it writes
+through that same canonicalizer into this same `mesh_edits.weights` shape. No
+field was added, removed, or retyped, and there is no migration and no version
+bump: a generated vertex is a canonical vertex.
+
 ### `constraint_edits`
 
 Current editor constraint-authoring payload:

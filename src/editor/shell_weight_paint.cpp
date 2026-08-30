@@ -1082,6 +1082,28 @@ bool rebind_weights_command(ShellState* state) {
         });
 }
 
+bool generate_weights_command(ShellState* state) {
+    const std::vector<std::size_t> scope =
+        state != nullptr ? weight_command_scope(*state) : std::vector<std::size_t>{};
+    const std::vector<std::string> candidates =
+        state != nullptr ? state->weight_paint.candidate_bone_names
+                         : std::vector<std::string>{};
+    return run_weight_command(
+        state,
+        "Generated",
+        [&](marrow::editor::ProjectData* project,
+            const marrow::editor::MeshWeightTarget& target,
+            const marrow::runtime::AttachmentData& attachment) {
+            return marrow::editor::generate_mesh_weights(
+                project,
+                *state->load_result.skeleton_data,
+                attachment,
+                target,
+                candidates,
+                scope);
+        });
+}
+
 bool set_active_vertex_weights_command(
     ShellState* state,
     std::size_t vertex_index,

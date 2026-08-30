@@ -72,6 +72,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"set_vertex_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"normalize_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"mesh.rebind_weights", "edit", true, false, true, true, &handle_editing_operation},
+    {"mesh.generate_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"edit_ik_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_path_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_transform_constraint", "edit", true, false, true, true, &handle_constraint_operation},

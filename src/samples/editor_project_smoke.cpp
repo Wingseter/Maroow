@@ -8359,6 +8359,674 @@ bool validate_mar175_weight_authoring(
     return true;
 }
 
+// MAR-176 deterministic automatic weight generation.
+bool validate_mar176_automatic_weights(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    using marrow::editor::MeshWeightInfluenceEdit;
+    using marrow::editor::MeshWeightTarget;
+    using marrow::editor::MeshWeightVertexEdit;
+
+    const std::string baseline_json_path = "/tmp/marrow_mar176_baseline.mskl";
+    const std::string baseline_binary_path = "/tmp/marrow_mar176_baseline.mbin";
+    const std::string case_a_json = "/tmp/marrow_mar176_case_a.mskl";
+    const std::string case_a_bin = "/tmp/marrow_mar176_case_a.mbin";
+    const std::string case_b_json = "/tmp/marrow_mar176_case_b.mskl";
+    const std::string case_b_bin = "/tmp/marrow_mar176_case_b.mbin";
+
+    const auto& skeleton = *project_result.skeleton_data;
+    const auto body_slot = skeleton.find_slot_index("body");
+    const auto* mesh_skin = skeleton.find_skin("mesh_base");
+    const marrow::runtime::AttachmentData* attachment =
+        body_slot.has_value() && mesh_skin != nullptr
+        ? mesh_skin->find_attachment(*body_slot, "body_mesh")
+        : nullptr;
+    if (attachment == nullptr || attachment->mesh_geometry == nullptr) {
+        std::cerr << "MAR-176 needs the fixture's mesh_base/body/body_mesh weighted mesh.\n";
+        return false;
+    }
+    const MeshWeightTarget target{"mesh_base", "body", "body_mesh"};
+    const std::vector<std::string> candidates{"spine", "arm_l"};
+
+    const auto generate = [&](marrow::editor::ProjectData* project,
+                              const std::vector<std::string>& bones,
+                              const std::vector<std::size_t>& scope) {
+        return marrow::editor::generate_mesh_weights(
+            project, skeleton, *attachment, target, bones, scope);
+    };
+    const auto weight_edit = [](const marrow::editor::ProjectData& project)
+        -> const marrow::editor::MeshWeightAttachmentEdit* {
+        return project.find_mesh_weight_attachment_edit("mesh_base", "body", "body_mesh");
+    };
+    const auto vertex_text = [&](const marrow::editor::ProjectData& project,
+                                 std::size_t vertex_index) {
+        const auto* edit = weight_edit(project);
+        if (edit == nullptr || vertex_index >= edit->vertices.size()) {
+            return std::string("<none>");
+        }
+        std::ostringstream stream;
+        stream << std::setprecision(17);
+        for (const auto& influence : edit->vertices[vertex_index].influences) {
+            stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                   << ',' << influence.y << ';';
+        }
+        return stream.str();
+    };
+
+    // The weight overlay is materialized lazily, on first mutation, so the
+    // loaded project carries none. Materializing it up front is what makes the
+    // survival assertions below apples-to-apples: an unnamed vertex is compared
+    // against the value the overlay already held, not against "<none>".
+    marrow::editor::ProjectData export_base = *project_result.project;
+    export_base.mesh_weight_attachment_edits.push_back(
+        marrow::editor::mesh_weight_model::mesh_weight_edit_from_runtime(
+            skeleton, "mesh_base", "body", "body_mesh", *attachment));
+
+    // A baseline project additionally carrying an authored weight edit on a
+    // DIFFERENT attachment, so every scoped write below can prove it left a
+    // neighbour alone rather than merely returning success.
+    marrow::editor::ProjectData baseline = export_base;
+    marrow::editor::MeshWeightAttachmentEdit neighbour;
+    neighbour.skin_name = "mage";
+    neighbour.slot_name = "body";
+    neighbour.attachment_name = "mage_body";
+    MeshWeightVertexEdit neighbour_vertex;
+    neighbour_vertex.influences = {{"spine", 7.0, 8.0, 1.0}};
+    neighbour.vertices.push_back(neighbour_vertex);
+    baseline.mesh_weight_attachment_edits.push_back(neighbour);
+    const std::string baseline_serialized = marrow::editor::serialize_project(baseline);
+    const auto neighbour_text = [&](const marrow::editor::ProjectData& project) {
+        const auto* edit =
+            project.find_mesh_weight_attachment_edit("mage", "body", "mage_body");
+        if (edit == nullptr || edit->vertices.empty()) {
+            return std::string("<none>");
+        }
+        std::ostringstream stream;
+        stream << std::setprecision(17);
+        for (const auto& influence : edit->vertices[0].influences) {
+            stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                   << ',' << influence.y << ';';
+        }
+        return stream.str();
+    };
+    const std::string neighbour_before = neighbour_text(baseline);
+
+    // ── Scoped generation writes exactly what it names ──
+    marrow::editor::ProjectData scoped = baseline;
+    const auto scoped_result = generate(&scoped, candidates, {0U});
+    if (!scoped_result) {
+        std::cerr << "MAR-176 scoped generate failed: " << scoped_result.error << '\n';
+        return false;
+    }
+    if (!scoped_result.changed || scoped_result.affected_vertices != std::vector<std::size_t>{0U}) {
+        std::cerr << "MAR-176 scoped generate must report vertex 0 and only vertex 0.\n";
+        return false;
+    }
+    if (scoped_result.vertex_count != 4U || scoped_result.scoped_vertex_count != 1U) {
+        std::cerr << "MAR-176 scoped generate reported vertex_count "
+                  << scoped_result.vertex_count << " and scoped_vertex_count "
+                  << scoped_result.scoped_vertex_count << ".\n";
+        return false;
+    }
+    // Vertex 0 carries one influence in the fixture and must gain arm_l.
+    {
+        const auto* edit = weight_edit(scoped);
+        if (edit == nullptr || edit->vertices.size() != 4U ||
+            edit->vertices[0].influences.size() != 2U ||
+            edit->vertices[0].influences[0].bone_name != "spine" ||
+            edit->vertices[0].influences[1].bone_name != "arm_l") {
+            std::cerr << "MAR-176 vertex 0 should hold spine then arm_l, but holds "
+                      << vertex_text(scoped, 0U) << ".\n";
+            return false;
+        }
+        if (edit->vertices[0].influences[0].weight != 0.6494527252054849 ||
+            edit->vertices[0].influences[1].weight != 0.35054727479451514) {
+            std::cerr << "MAR-176 vertex 0 weights were " << vertex_text(scoped, 0U) << ".\n";
+            return false;
+        }
+    }
+    for (std::size_t index = 1; index < 4U; ++index) {
+        if (vertex_text(scoped, index) != vertex_text(baseline, index)) {
+            std::cerr << "MAR-176 scoped generate disturbed unnamed vertex " << index << ": "
+                      << vertex_text(baseline, index) << " -> " << vertex_text(scoped, index)
+                      << '\n';
+            return false;
+        }
+    }
+    if (neighbour_text(scoped) != neighbour_before) {
+        std::cerr << "MAR-176 scoped generate disturbed an adjacent attachment edit.\n";
+        return false;
+    }
+
+    // ── Determinism at project level ──
+    //
+    // Two generates from the SAME starting project must serialize byte for
+    // byte identically. This is the property MAR-176 guarantees.
+    {
+        marrow::editor::ProjectData first = baseline;
+        marrow::editor::ProjectData second = baseline;
+        if (!generate(&first, candidates, {}) || !generate(&second, candidates, {})) {
+            std::cerr << "MAR-176 unscoped generate failed.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(first) !=
+            marrow::editor::serialize_project(second)) {
+            std::cerr << "MAR-176 two generates from the same project were not byte-identical.\n";
+            return false;
+        }
+        // Reversing the candidate list must not change anything either.
+        marrow::editor::ProjectData reversed = baseline;
+        if (!generate(&reversed, {"arm_l", "spine"}, {})) {
+            std::cerr << "MAR-176 reversed-candidate generate failed.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(reversed) !=
+            marrow::editor::serialize_project(first)) {
+            std::cerr << "MAR-176 the result depended on the order the candidates were listed.\n";
+            return false;
+        }
+    }
+
+    // ── Unscoped generation touches every vertex, in ascending order ──
+    marrow::editor::ProjectData unscoped = baseline;
+    const auto unscoped_result = generate(&unscoped, candidates, {});
+    if (!unscoped_result || !unscoped_result.changed) {
+        std::cerr << "MAR-176 unscoped generate did not change the project.\n";
+        return false;
+    }
+    if (unscoped_result.affected_vertices !=
+        std::vector<std::size_t>{0U, 1U, 2U, 3U}) {
+        std::cerr << "MAR-176 unscoped generate must report all four vertices ascending.\n";
+        return false;
+    }
+    // Vertex 2's tie is the acceptance value: both distances clamp to spine's
+    // world origin, so they evaluate the identical expression on identical
+    // operands and the weights are exactly one half each, whatever the float32
+    // setup-pose error and whatever the compiler does about contraction.
+    {
+        const auto* edit = weight_edit(unscoped);
+        const auto& influences = edit->vertices[2].influences;
+        if (influences.size() != 2U || influences[0].bone_name != "spine" ||
+            influences[1].bone_name != "arm_l" || influences[0].weight != 0.5 ||
+            influences[1].weight != 0.5) {
+            std::cerr << "MAR-176 vertex 2 must generate exactly spine 0.5 then arm_l 0.5, "
+                      << "but generated " << vertex_text(unscoped, 2U) << ".\n";
+            return false;
+        }
+    }
+
+    // ── Determinism is NOT idempotence, and the difference is measured ──
+    //
+    // A second generate reads V back out of the influences the first one wrote.
+    // BoneWorldTransform is six float32 while bind offsets are double, so
+    // S(S^-1(V)) does not reproduce V bit for bit and the recovered distances
+    // differ in the last ULPs. The stability figure is MEASURED and printed;
+    // no assertion here claims a second generate reports no change.
+    double worst_repeat_delta = 0.0;
+    {
+        marrow::editor::ProjectData again = unscoped;
+        const auto repeat = generate(&again, candidates, {});
+        if (!repeat) {
+            std::cerr << "MAR-176 a repeated generate failed: " << repeat.error << '\n';
+            return false;
+        }
+        const auto* before = weight_edit(unscoped);
+        const auto* after = weight_edit(again);
+        if (before == nullptr || after == nullptr ||
+            before->vertices.size() != after->vertices.size()) {
+            std::cerr << "MAR-176 a repeated generate changed the vertex count.\n";
+            return false;
+        }
+        for (std::size_t index = 0; index < before->vertices.size(); ++index) {
+            const auto& lhs = before->vertices[index].influences;
+            const auto& rhs = after->vertices[index].influences;
+            if (lhs.size() != rhs.size()) {
+                std::cerr << "MAR-176 a repeated generate changed vertex " << index
+                          << "'s influence count.\n";
+                return false;
+            }
+            for (std::size_t slot = 0; slot < lhs.size(); ++slot) {
+                if (lhs[slot].bone_name != rhs[slot].bone_name) {
+                    std::cerr << "MAR-176 a repeated generate reordered vertex " << index
+                              << ".\n";
+                    return false;
+                }
+                worst_repeat_delta = std::max(
+                    worst_repeat_delta, std::abs(lhs[slot].weight - rhs[slot].weight));
+            }
+        }
+        if (!(worst_repeat_delta < 1e-9)) {
+            std::cerr << "MAR-176 a repeated generate moved a weight by " << worst_repeat_delta
+                      << ", far more than the float32 transform asymmetry explains.\n";
+            return false;
+        }
+        std::cout << std::setprecision(4)
+                  << "MAR-176 determinism vs idempotence: two generates from the SAME project "
+                     "are byte-identical (asserted); a generate applied to a previous "
+                     "generate's output is stable to "
+                  << worst_repeat_delta
+                  << " (measured, not asserted bit-exact). The residue is the float32 "
+                     "BoneWorldTransform against double bind offsets, the same asymmetry "
+                     "MAR-175 recorded for rebind -- not nondeterminism.\n"
+                  << std::setprecision(6);
+    }
+
+    // ── An accepted generate must leave a savable, reloadable project ──
+    {
+        const std::filesystem::path round_trip_dir = "/tmp/marrow_mar176_round_trip";
+        std::error_code copy_error;
+        std::filesystem::create_directories(round_trip_dir, copy_error);
+        for (const char* asset :
+             {"player_idle.mskl", "player_idle.matl", "player_fixture.png"}) {
+            std::filesystem::copy_file(
+                std::filesystem::path("assets/fixtures") / asset,
+                round_trip_dir / asset,
+                std::filesystem::copy_options::overwrite_existing,
+                copy_error);
+        }
+        if (copy_error) {
+            std::cerr << "MAR-176 could not stage the round-trip assets: "
+                      << copy_error.message() << '\n';
+            return false;
+        }
+        const std::string round_trip_path = (round_trip_dir / "round_trip.marrow").string();
+        marrow::editor::ProjectData savable = unscoped;
+        savable.source_path = round_trip_path;
+        const auto saved = marrow::editor::save_project(savable, round_trip_path);
+        if (!saved) {
+            std::cerr << "MAR-176 save round trip failed: " << saved.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(round_trip_path);
+        if (!reloaded) {
+            std::cerr << "MAR-176 could not reload the saved generated project.\n";
+            return false;
+        }
+        const auto* reloaded_edit = weight_edit(*reloaded.project);
+        if (reloaded_edit == nullptr || reloaded_edit->vertices.size() != 4U) {
+            std::cerr << "MAR-176 reload lost the generated weight overlay.\n";
+            return false;
+        }
+        // `.marrow` is serialized with `json::serialize_pretty`, which writes 15
+        // significant digits (`src/runtime/json.cpp:597`); the exact
+        // `serialize_pretty_round_trip` variant exists but is not the one
+        // project save uses. A double therefore does NOT survive save/reload bit
+        // for bit, so what is asserted here is stability to a tolerance and the
+        // measured figure is printed. This is a pre-existing property of the
+        // project writer, not something generation introduces, and changing it
+        // would rewrite every `.marrow` file's bytes -- out of scope here.
+        double worst_reload_delta = 0.0;
+        for (std::size_t index = 0; index < 4U; ++index) {
+            const auto& before = unscoped.find_mesh_weight_attachment_edit(
+                                     "mesh_base", "body", "body_mesh")->vertices[index].influences;
+            const auto& after = reloaded_edit->vertices[index].influences;
+            if (before.size() != after.size()) {
+                std::cerr << "MAR-176 reload changed vertex " << index
+                          << "'s influence count.\n";
+                return false;
+            }
+            for (std::size_t slot = 0; slot < before.size(); ++slot) {
+                if (before[slot].bone_name != after[slot].bone_name) {
+                    std::cerr << "MAR-176 reload reordered vertex " << index << ": "
+                              << vertex_text(unscoped, index) << " -> "
+                              << vertex_text(*reloaded.project, index) << '\n';
+                    return false;
+                }
+                worst_reload_delta = std::max(
+                    worst_reload_delta,
+                    std::max(
+                        std::abs(before[slot].weight - after[slot].weight),
+                        std::max(
+                            std::abs(before[slot].x - after[slot].x),
+                            std::abs(before[slot].y - after[slot].y))));
+            }
+        }
+        if (!(worst_reload_delta < 1e-12)) {
+            std::cerr << "MAR-176 a save/reload moved a generated value by "
+                      << worst_reload_delta << ", more than 15-digit serialization explains.\n";
+            return false;
+        }
+        std::cout << std::setprecision(4)
+                  << "MAR-176 save/reload round trip: the project saves, reloads, and keeps "
+                     "every generated influence in order, stable to "
+                  << worst_reload_delta
+                  << ". It is NOT bit-exact because `.marrow` writes 15 significant digits "
+                     "(json.cpp:597), which is a pre-existing property of the project writer.\n"
+                  << std::setprecision(6);
+        // Generating again on the reloaded project must reproduce the same
+        // project the in-memory second generate produced: the generated form is
+        // a fixed point of the .marrow round trip, not merely of memory.
+        marrow::editor::ProjectData reloaded_again = *reloaded.project;
+        marrow::editor::ProjectData memory_again = unscoped;
+        if (!generate(&reloaded_again, candidates, {}) ||
+            !generate(&memory_again, candidates, {})) {
+            std::cerr << "MAR-176 could not regenerate after a reload.\n";
+            return false;
+        }
+        const auto* reloaded_twice = weight_edit(reloaded_again);
+        const auto* memory_twice = weight_edit(memory_again);
+        if (reloaded_twice == nullptr || memory_twice == nullptr) {
+            std::cerr << "MAR-176 regeneration lost the weight overlay.\n";
+            return false;
+        }
+        double worst_regenerate_delta = 0.0;
+        for (std::size_t index = 0; index < 4U; ++index) {
+            const auto& lhs = reloaded_twice->vertices[index].influences;
+            const auto& rhs = memory_twice->vertices[index].influences;
+            if (lhs.size() != rhs.size()) {
+                std::cerr << "MAR-176 regenerating after a reload changed vertex " << index
+                          << "'s influence count.\n";
+                return false;
+            }
+            for (std::size_t slot = 0; slot < lhs.size(); ++slot) {
+                if (lhs[slot].bone_name != rhs[slot].bone_name) {
+                    std::cerr << "MAR-176 regenerating after a reload chose different bones at "
+                                 "vertex " << index << ".\n";
+                    return false;
+                }
+                worst_regenerate_delta = std::max(
+                    worst_regenerate_delta, std::abs(lhs[slot].weight - rhs[slot].weight));
+            }
+        }
+        if (!(worst_regenerate_delta < 1e-12)) {
+            std::cerr << "MAR-176 regenerating after a reload diverged by "
+                      << worst_regenerate_delta << ".\n";
+            return false;
+        }
+        std::cout << std::setprecision(4)
+                  << "MAR-176 regenerate after reload: same bones in the same order as "
+                     "regenerating in memory, weights within "
+                  << worst_regenerate_delta
+                  << " -- the generated form is a fixed point of the `.marrow` round trip to "
+                     "the precision that round trip preserves.\n"
+                  << std::setprecision(6);
+        std::filesystem::remove_all(round_trip_dir, copy_error);
+    }
+
+    // ── Every rejection leaves the project byte-identical ──
+    {
+        struct Rejection {
+            const char* label;
+            std::vector<std::string> bones;
+            std::vector<std::size_t> scope;
+            const char* message;
+        };
+        const std::vector<Rejection> rejections{
+            {"empty candidate list", {}, {}, "mesh.generate_weights requires at least one candidate bone."},
+            {"unknown bone", {"nope"}, {}, "Bone not found: nope"},
+            {"repeated bone", {"spine", "spine"}, {}, "A candidate bone was listed more than once."},
+            {"empty bone name", {""}, {}, "Bone not found: "},
+            {"out-of-range vertex", {"spine"}, {9U}, "vertex index is outside the target mesh."},
+            {"repeated vertex", {"spine"}, {1U, 1U}, "A vertex was selected more than once."},
+        };
+        for (const Rejection& rejection : rejections) {
+            marrow::editor::ProjectData rejected = baseline;
+            const auto result = generate(&rejected, rejection.bones, rejection.scope);
+            if (result) {
+                std::cerr << "MAR-176 accepted an invalid generate: " << rejection.label << '\n';
+                return false;
+            }
+            if (result.error != rejection.message) {
+                std::cerr << "MAR-176 " << rejection.label << " message was \"" << result.error
+                          << "\".\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(rejected) != baseline_serialized) {
+                std::cerr << "MAR-176 a rejected generate (" << rejection.label
+                          << ") changed the project.\n";
+                return false;
+            }
+        }
+        // An unweighted attachment has no setup-world position to derive, and
+        // turning it into a weighted one would change the exported attachment's
+        // kind. Named rejection, not a silent no-op.
+        const marrow::runtime::AttachmentData* region_attachment =
+            skeleton.find_attachment("default", *body_slot, "body");
+        if (region_attachment == nullptr) {
+            std::cerr << "MAR-176 needs the fixture's default/body/body region attachment to "
+                         "prove the unweighted rejection; without it that case cannot fail.\n";
+            return false;
+        }
+        if (region_attachment->mesh_geometry != nullptr) {
+            std::cerr << "MAR-176 expected default/body/body to carry no mesh geometry.\n";
+            return false;
+        }
+        {
+            marrow::editor::ProjectData unweighted = baseline;
+            const MeshWeightTarget region_target{"default", "body", "body"};
+            const auto result = marrow::editor::generate_mesh_weights(
+                &unweighted, skeleton, *region_attachment, region_target, candidates, {});
+            if (result ||
+                result.error != "mesh.generate_weights requires a weighted mesh attachment.") {
+                std::cerr << "MAR-176 an unweighted attachment must reject with a named "
+                             "message, but got \"" << result.error << "\".\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(unweighted) != baseline_serialized) {
+                std::cerr << "MAR-176 an unweighted-attachment rejection changed the project.\n";
+                return false;
+            }
+        }
+    }
+
+    // ── Export, proved on a project that was actually mutated and written ──
+    if (!export_project_baseline(project_result, baseline_json_path, baseline_binary_path)) {
+        std::cerr << "MAR-176 could not export the untouched baseline.\n";
+        return false;
+    }
+    const auto export_project = [&](const marrow::editor::ProjectData& project,
+                                    const std::string& json_path,
+                                    const std::string& binary_path) {
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = json_path;
+        options.binary_output_path = binary_path;
+        return marrow::editor::export_runtime_assets(
+            project, *project_result.base_skeleton_document, options);
+    };
+    const auto file_size_of = [](const std::string& path) -> std::uintmax_t {
+        std::error_code error;
+        const auto size = std::filesystem::file_size(path, error);
+        return error ? 0U : size;
+    };
+    const auto exported_influences = [&](const std::string& json_path, std::size_t vertex)
+        -> std::vector<marrow::runtime::MeshGeometry::VertexWeight> {
+        const auto reloaded = marrow::runtime::load_skeleton_data(json_path);
+        if (!reloaded) {
+            return {};
+        }
+        const auto slot = reloaded.skeleton_data->find_slot_index("body");
+        const auto* reloaded_attachment = slot.has_value()
+            ? reloaded.skeleton_data->find_attachment("mesh_base", *slot, "body_mesh")
+            : nullptr;
+        if (reloaded_attachment == nullptr || reloaded_attachment->mesh_geometry == nullptr ||
+            vertex >= reloaded_attachment->mesh_geometry->weights.size()) {
+            return {};
+        }
+        return reloaded_attachment->mesh_geometry->weights[vertex].influences;
+    };
+    const std::uintmax_t baseline_size = file_size_of(baseline_binary_path);
+
+    // Case A -- count-changing. Vertex 0 goes from one influence to two, so the
+    // encoded document gains exactly one influence object. Both bone names are
+    // already interned from `bones[]`, so no string is added and no string index
+    // shifts: the delta is clean.
+    marrow::editor::ProjectData case_a = export_base;
+    if (!generate(&case_a, candidates, {0U})) {
+        std::cerr << "MAR-176 Case A generate failed.\n";
+        return false;
+    }
+    if (!export_project(case_a, case_a_json, case_a_bin)) {
+        std::cerr << "MAR-176 Case A export failed.\n";
+        return false;
+    }
+    const std::uintmax_t case_a_size = file_size_of(case_a_bin);
+    // Derived from src/runtime/binary.cpp, not fitted: an influence object costs
+    // 1 object tag + 1 varint member count + 4 key-index varints + 1 String tag
+    // + 1 bone-name-index varint + 3 Number tags + 3 float32 = 18 + K, where K
+    // is the five string-index varint bytes. For this fixture's string table
+    // `bone` is index 139 and `weight` index 140 (two bytes each) while `x` (15),
+    // `y` (16), `spine` (17) and `arm_l` (3) are one byte each, so K = 7 and one
+    // influence costs 25 bytes.
+    constexpr std::uintmax_t kInfluenceBytes = 25U;
+    if (case_a_size != baseline_size + kInfluenceBytes) {
+        std::cerr << "MAR-176 Case A: the .mbin grew from " << baseline_size << " to "
+                  << case_a_size << " bytes, but the encoding model predicts exactly "
+                  << kInfluenceBytes << " bytes for one added influence (18 + K, K = 7: "
+                  << "object tag, member-count varint, four key-index varints, a String tag "
+                  << "plus the bone-name-index varint, three Number tags, three float32). "
+                  << "If this fails the model is wrong -- re-derive it, do not adjust the "
+                  << "constant.\n";
+        return false;
+    }
+    {
+        const auto decoded = exported_influences(case_a_json, 0U);
+        if (decoded.size() != 2U) {
+            std::cerr << "MAR-176 Case A: the exported vertex kept " << decoded.size()
+                      << " influences.\n";
+            return false;
+        }
+        const auto spine_index = skeleton.find_bone_index("spine");
+        const auto arm_index = skeleton.find_bone_index("arm_l");
+        if (!spine_index.has_value() || !arm_index.has_value() ||
+            decoded[0].bone_index != *spine_index || decoded[1].bone_index != *arm_index) {
+            std::cerr << "MAR-176 Case A: the exported influence order is not spine then "
+                         "arm_l.\n";
+            return false;
+        }
+        // The generator produces `spine 0.6494527252054849` and
+        // `arm_l 0.35054727479451514` in memory. The exported `.mskl` is written
+        // by `json::serialize_pretty` at 15 significant digits
+        // (`src/runtime/json.cpp:597`), so the decoded doubles are that value
+        // rounded, not that value exactly -- a property of the writer, not of
+        // generation. The tolerance below is the 15-digit round trip; Case B's
+        // `0.5` needs none because one half is exact at any precision, which is
+        // why it and not this pair is the story's acceptance value.
+        const double expected_weights[2] = {0.6494527252054849, 0.35054727479451514};
+        double worst_export_delta = 0.0;
+        for (std::size_t slot = 0; slot < 2U; ++slot) {
+            worst_export_delta = std::max(
+                worst_export_delta, std::abs(decoded[slot].weight - expected_weights[slot]));
+        }
+        if (!(worst_export_delta < 1e-14)) {
+            std::cerr << std::setprecision(17)
+                      << "MAR-176 Case A: exported weights were " << decoded[0].weight << " and "
+                      << decoded[1].weight << ", which is " << worst_export_delta
+                      << " from what the generator produced -- more than 15-digit "
+                         "serialization explains.\n";
+            return false;
+        }
+        std::cout << std::setprecision(4)
+                  << "MAR-176 Case A decoded weights match the generated pair to "
+                  << worst_export_delta << " (15-digit `.mskl` serialization).\n"
+                  << std::setprecision(6);
+    }
+    // No new string was interned: both candidate names already appear in the
+    // baseline document's own bone list, which is why the byte delta is clean.
+    {
+        std::ifstream baseline_stream(baseline_json_path);
+        const std::string baseline_text(
+            (std::istreambuf_iterator<char>(baseline_stream)),
+            std::istreambuf_iterator<char>());
+        if (baseline_text.find("\"spine\"") == std::string::npos ||
+            baseline_text.find("\"arm_l\"") == std::string::npos) {
+            std::cerr << "MAR-176 Case A: a candidate bone name was not already interned, so "
+                         "the byte delta is not attributable to the added influence alone.\n";
+            return false;
+        }
+    }
+    for (std::size_t index = 1; index < 4U; ++index) {
+        if (vertex_text(case_a, index) != vertex_text(export_base, index)) {
+            std::cerr << "MAR-176 Case A: unnamed vertex " << index << " changed.\n";
+            return false;
+        }
+    }
+
+    // Case B -- value-only. Vertex 2 already holds {spine, arm_l} and its
+    // generated bind offsets are the ones it already carries, so the influence
+    // set, the count and the offsets are unchanged. What moves is the pair of
+    // weights and their ORDER.
+    marrow::editor::ProjectData case_b = export_base;
+    if (!generate(&case_b, candidates, {2U})) {
+        std::cerr << "MAR-176 Case B generate failed.\n";
+        return false;
+    }
+    if (!export_project(case_b, case_b_json, case_b_bin)) {
+        std::cerr << "MAR-176 Case B export failed.\n";
+        return false;
+    }
+    const std::uintmax_t case_b_size = file_size_of(case_b_bin);
+    if (case_b_size != baseline_size) {
+        std::cerr << "MAR-176 Case B: a value-only weight edit must not change the .mbin size ("
+                  << baseline_size << " -> " << case_b_size << ").\n";
+        return false;
+    }
+    {
+        const auto decoded = exported_influences(case_b_json, 2U);
+        const auto spine_index = skeleton.find_bone_index("spine");
+        const auto arm_index = skeleton.find_bone_index("arm_l");
+        if (decoded.size() != 2U || !spine_index.has_value() || !arm_index.has_value()) {
+            std::cerr << "MAR-176 Case B: the exported vertex lost an influence.\n";
+            return false;
+        }
+        // The fixture canonicalizes to arm_l first (0.6/0.8 = 0.7499999999999999
+        // against spine's 0.25); generation ties them at one half each and the
+        // ascending-index tie-break moves spine to the front. The order flip is
+        // part of the assertion.
+        if (decoded[0].bone_index != *spine_index || decoded[1].bone_index != *arm_index) {
+            std::cerr << "MAR-176 Case B: the exported influence order did not flip to spine "
+                         "then arm_l.\n";
+            return false;
+        }
+        if (decoded[0].weight != 0.5 || decoded[1].weight != 0.5) {
+            std::cerr << std::setprecision(17)
+                      << "MAR-176 Case B: exported weights were " << decoded[0].weight << " and "
+                      << decoded[1].weight << ", not exactly 0.5 and 0.5.\n";
+            return false;
+        }
+        // The bind offsets are the fixture's own, to within the float32
+        // setup-pose error Gate C measured at 5.1e-06.
+        const double expected_x[2] = {64.0, 94.0};
+        const double expected_y[2] = {80.0, 70.0};
+        for (std::size_t slot = 0; slot < 2U; ++slot) {
+            if (std::abs(decoded[slot].x - expected_x[slot]) > 1e-5 ||
+                std::abs(decoded[slot].y - expected_y[slot]) > 1e-5) {
+                std::cerr << std::setprecision(17)
+                          << "MAR-176 Case B: bind offset " << slot << " moved to ("
+                          << decoded[slot].x << ", " << decoded[slot].y << ").\n";
+                return false;
+            }
+        }
+    }
+    for (const std::size_t index : {0U, 1U, 3U}) {
+        if (vertex_text(case_b, index) != vertex_text(export_base, index)) {
+            std::cerr << "MAR-176 Case B: unnamed vertex " << index << " changed.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-176 Case A export: MBIN " << baseline_size << " -> " << case_a_size
+              << " bytes, exactly " << kInfluenceBytes
+              << " bytes for the one added influence, matching the 18 + K encoding model "
+                 "derived from binary.cpp (K = 7 for this fixture's string table: bone=139 "
+                 "and weight=140 cost two varint bytes each, x=15, y=16 and the bone-name "
+                 "index cost one each).\n";
+    std::cout << "MAR-176 Case B export: MBIN " << case_b_size
+              << " bytes, identical. float32 is fixed width, so size is not a signal for a "
+                 "value-only weight edit; the decoded value and the influence order are -- "
+                 "the pair ties at exactly 0.5 each and spine moves ahead of arm_l on the "
+                 "ascending skeleton-index tie-break.\n";
+
+    for (const auto& path : {baseline_json_path, baseline_binary_path, case_a_json, case_a_bin,
+                             case_b_json, case_b_bin}) {
+        std::remove(path.c_str());
+    }
+    std::remove("/tmp/player_idle.matl");
+
+    std::cout << "MAR-176 deterministic automatic weights validated: explicit candidates only, "
+                 "inverse-square over setup-pose bone segments, ties broken on skeleton order, "
+                 "and canonicalized through the MAR-175 primitive.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -8428,6 +9096,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar175_weight_authoring(result)) {
+            return 1;
+        }
+        if (!validate_mar176_automatic_weights(result)) {
             return 1;
         }
     }

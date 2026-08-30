@@ -145,8 +145,8 @@ bool validate_timeline_graph_shell_smoke(
         marrow::editor::agent_operation_descriptor_count();
     const bool dirty_before = state.session.dirty();
     const bool shell_dirty_before = state.project_dirty;
-    if (operation_count_before != 61U) {
-        std::cerr << "Graph shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Graph shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
 
@@ -633,8 +633,8 @@ bool validate_timeline_graph_edit_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Graph edit shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Graph edit shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
 
@@ -1555,8 +1555,8 @@ bool validate_timeline_curve_preset_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Curve preset shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Curve preset shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
 
@@ -2125,8 +2125,8 @@ bool validate_timeline_graph_easing_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Graph easing shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Graph easing shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
 
@@ -3139,8 +3139,8 @@ bool validate_timeline_curve_mode_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Curve mode shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Curve mode shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
 
@@ -3954,8 +3954,8 @@ bool validate_timeline_loop_sync_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Loop sync shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Loop sync shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
 
@@ -4600,8 +4600,8 @@ bool validate_timeline_scale_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 61U) {
-        std::cerr << "Key scale shell smoke requires the exact 61-operation registry.\n";
+    if (operation_count_before != 62U) {
+        std::cerr << "Key scale shell smoke requires the exact 62-operation registry.\n";
         return false;
     }
     state.session.clear_history();

@@ -260,6 +260,17 @@ struct WeightPaintSettings {
     float radius_pixels{44.0f};
     float strength{0.35f};
     bool show_heatmap{true};
+    /// Candidate bones for automatic weight generation, stored by NAME.
+    ///
+    /// By name rather than by index so a reload that renumbers bones cannot
+    /// silently retarget the set; a name that stops resolving is shown struck
+    /// through and makes Generate reject rather than being quietly dropped.
+    ///
+    /// This is a tool setting, so it is deliberately not in `ProjectData`, not
+    /// serialized to `.marrow`, not in `editor-settings.json`, not in
+    /// `PreviewState`, and not in the history snapshot -- a field undo rewrites
+    /// but `history_snapshots_equal()` does not compare would jump on Ctrl+Z.
+    std::vector<std::string> candidate_bone_names;
 };
 
 struct MeshWeightPaintTarget {

@@ -1,8 +1,10 @@
 #include "mesh_weight_model.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -672,6 +674,620 @@ void test_rebind_rejects_atomically(TestSuite& suite) {
         "an unresolvable-bone rejection must leave the vertex byte-unchanged");
 }
 
+// ── MAR-176: deterministic automatic weight generation ─────────────────────
+
+using Segment = weights::BoneSetupSegment;
+
+/// A synthetic skeleton carrying only bones. Every other SkeletonData member is
+/// empty: the generator reads bone names and parent indices and nothing else.
+marrow::runtime::SkeletonData make_bone_skeleton(
+    const std::vector<std::pair<std::string, long long>>& bones) {
+    std::vector<marrow::runtime::BoneData> data;
+    data.reserve(bones.size());
+    for (const auto& [name, parent] : bones) {
+        marrow::runtime::BoneData bone;
+        bone.name = name;
+        if (parent >= 0) {
+            bone.parent_index = static_cast<std::size_t>(parent);
+        }
+        data.push_back(std::move(bone));
+    }
+    return marrow::runtime::SkeletonData(
+        marrow::runtime::SkeletonInfo{"synthetic", 0.0, 0.0},
+        std::move(data),
+        {}, {}, {}, {}, {}, {}, {}, {},
+        0.0,
+        {});
+}
+
+marrow::runtime::BoneWorldTransform world_at(double x, double y) {
+    marrow::runtime::BoneWorldTransform transform;
+    transform.world_x = static_cast<float>(x);
+    transform.world_y = static_cast<float>(y);
+    return transform;
+}
+
+/// The fixture's candidate indices, by name, so a test never hard-codes an
+/// index the fixture could renumber.
+std::vector<std::size_t> candidates_by_name(
+    TestSuite& suite,
+    const marrow::runtime::SkeletonData& skeleton,
+    const std::vector<std::string>& names) {
+    std::vector<std::size_t> indices;
+    for (const std::string& name : names) {
+        const auto index = skeleton.find_bone_index(name);
+        suite.expect(index.has_value(), "candidate bone '" + name + "' must resolve");
+        indices.push_back(index.value_or(0U));
+    }
+    return indices;
+}
+
+struct GenerateHarness {
+    std::vector<marrow::runtime::BoneWorldTransform> transforms;
+    std::vector<Segment> segments;
+};
+
+GenerateHarness fixture_harness(TestSuite& suite) {
+    const auto& loaded = fixture_project(suite);
+    GenerateHarness harness;
+    harness.transforms = weights::setup_pose_bone_world_transforms(loaded.skeleton_data);
+    harness.segments = weights::bone_setup_segments(*loaded.skeleton_data, harness.transforms);
+    return harness;
+}
+
+/// The fixture's four weighted vertices, exactly as `player_idle.marrow`
+/// authors them. Kept literal so a test failure names the input that produced
+/// it rather than sending the reader to the fixture.
+std::vector<Vertex> fixture_weight_vertices() {
+    return {
+        vertex({{"spine", -64.0, -80.0, 1.0}}),
+        vertex({{"spine", 64.0, -80.0, 0.6}, {"arm_l", 94.0, -90.0, 0.2}}),
+        vertex({{"spine", 64.0, 80.0, 0.2}, {"arm_l", 94.0, 70.0, 0.6}}),
+        vertex({{"spine", -64.0, 80.0, 0.6}, {"arm_l", -34.0, 70.0, 0.2}}),
+    };
+}
+
+/// Generates, then asserts the two determinism properties every accepted case
+/// must have: a repeat run is bit-identical, and so is a run whose candidate
+/// list was supplied in the reverse order.
+Vertex generate_or_report(
+    TestSuite& suite,
+    const marrow::runtime::SkeletonData& skeleton,
+    const GenerateHarness& harness,
+    const std::vector<std::size_t>& candidates,
+    Vertex subject,
+    std::string_view label) {
+    Vertex first = subject;
+    const std::string error = weights::generate_mesh_weight_vertex(
+        skeleton, harness.transforms, harness.segments, candidates, &first);
+    suite.expect(error.empty(), std::string(label) + ": unexpected rejection \"" + error + "\"");
+    if (!error.empty()) {
+        return first;
+    }
+
+    Vertex again = subject;
+    weights::generate_mesh_weight_vertex(
+        skeleton, harness.transforms, harness.segments, candidates, &again);
+    suite.expect(
+        identical(again, first),
+        std::string(label) + ": two runs from the same input must be bit-identical");
+
+    std::vector<std::size_t> reversed(candidates.rbegin(), candidates.rend());
+    Vertex flipped = subject;
+    weights::generate_mesh_weight_vertex(
+        skeleton, harness.transforms, harness.segments, reversed, &flipped);
+    suite.expect(
+        identical(flipped, first),
+        std::string(label) + ": the result must not depend on the caller's candidate order");
+    return first;
+}
+
+void expect_generate_rejected(
+    TestSuite& suite,
+    const marrow::runtime::SkeletonData& skeleton,
+    const GenerateHarness& harness,
+    const std::vector<std::size_t>& candidates,
+    Vertex subject,
+    std::string_view expected_message,
+    std::string_view label) {
+    const Vertex before = subject;
+    const std::string error = weights::generate_mesh_weight_vertex(
+        skeleton, harness.transforms, harness.segments, candidates, &subject);
+    suite.expect(
+        error == expected_message,
+        std::string(label) + ": message was \"" + error + "\"");
+    suite.expect(
+        identical(subject, before),
+        std::string(label) + ": rejection must leave the vertex byte-unchanged");
+}
+
+void test_bone_setup_segments(TestSuite& suite) {
+    // `late` forward-references `tail` at index 4, which `SkeletonData` accepts
+    // -- it topologically sorts, and only rejects a parent index outside
+    // `bones()`. Supplying four transforms for five bones is therefore the only
+    // way an unresolvable parent is reachable at all, and it is exactly what the
+    // guard defends against.
+    const auto skeleton = make_bone_skeleton(
+        {{"root", -1}, {"spine", 0}, {"stacked", 1}, {"late", 4}, {"tail", -1}});
+    const std::vector<marrow::runtime::BoneWorldTransform> transforms{
+        world_at(0.0, 0.0), world_at(0.0, 50.0), world_at(0.0, 50.0), world_at(7.0, 11.0)};
+    const auto segments = weights::bone_setup_segments(skeleton, transforms);
+    suite.expect(
+        segments.size() == 4U,
+        "one segment per bone that has a setup transform, never more");
+    if (segments.size() != 4U) {
+        return;
+    }
+
+    suite.expect(
+        segments[0].start_x == 0.0 && segments[0].start_y == 0.0 &&
+            segments[0].end_x == 0.0 && segments[0].end_y == 0.0,
+        "a root bone degenerates to the point at its own origin");
+    suite.expect(
+        segments[1].start_x == 0.0 && segments[1].start_y == 0.0 &&
+            segments[1].end_x == 0.0 && segments[1].end_y == 50.0,
+        "a child bone runs from its parent's world origin to its own");
+    suite.expect(
+        segments[2].start_x == segments[2].end_x && segments[2].start_y == segments[2].end_y,
+        "a bone sitting on its parent yields a zero-length segment, not a special case");
+    suite.expect(
+        segments[3].start_x == 7.0 && segments[3].start_y == 11.0 &&
+            segments[3].end_x == 7.0 && segments[3].end_y == 11.0,
+        "a parent outside the setup transforms degenerates to a point rather than reading "
+        "out of bounds");
+}
+
+void test_point_segment_distance(TestSuite& suite) {
+    // Exact small integers, so every intermediate is representable and the
+    // assertions can use `==` rather than a tolerance.
+    const Segment vertical{0.0, 0.0, 0.0, 10.0};
+    suite.expect(
+        weights::point_segment_distance_squared(3.0, 4.0, vertical) == 9.0,
+        "an interior projection measures the perpendicular distance");
+    suite.expect(
+        weights::point_segment_distance_squared(3.0, -4.0, vertical) == 25.0,
+        "a projection before the start clamps to the start");
+    suite.expect(
+        weights::point_segment_distance_squared(3.0, 14.0, vertical) == 25.0,
+        "a projection past the end clamps to the end");
+    suite.expect(
+        weights::point_segment_distance_squared(0.0, 5.0, vertical) == 0.0,
+        "a point on the segment is exactly zero away from it");
+
+    const Segment degenerate{6.0, 8.0, 6.0, 8.0};
+    suite.expect(
+        weights::point_segment_distance_squared(3.0, 4.0, degenerate) == 25.0,
+        "a zero-length segment measures the distance to its point");
+    suite.expect(
+        weights::point_segment_distance_squared(6.0, 8.0, degenerate) == 0.0,
+        "a point on a zero-length segment is exactly zero away and never divides by zero");
+}
+
+void test_setup_world_position_extraction(TestSuite& suite) {
+    const auto& skeleton = fixture_skeleton(suite);
+    const GenerateHarness harness = fixture_harness(suite);
+
+    // Gate C: the runtime composes the setup pose in float32, so these origins
+    // are NOT the exact integers the fixture authors. Printed so every tolerance
+    // below is visible in the log rather than inferred.
+    std::cout << std::setprecision(17)
+              << "  MAR-176 measured setup-pose origins (float32-composed, not exact):\n";
+    for (const char* name : {"root", "spine", "arm_l", "pivot"}) {
+        const auto index = skeleton.find_bone_index(name);
+        if (!index.has_value() || *index >= harness.transforms.size()) {
+            continue;
+        }
+        std::cout << "    " << name << " = ("
+                  << static_cast<double>(harness.transforms[*index].world_x) << ", "
+                  << static_cast<double>(harness.transforms[*index].world_y) << ")\n";
+    }
+
+    const std::vector<Vertex> fixture = fixture_weight_vertices();
+    const double expected_x[4] = {
+        -63.9999951917473, 64.00000607987091, 63.99998939009735, -64.00000965622858};
+    const double expected_y[4] = {-30.0, -30.0, 130.0, 130.0};
+    for (std::size_t index = 0; index < fixture.size(); ++index) {
+        double world_x = 0.0;
+        double world_y = 0.0;
+        const std::string error = weights::setup_world_position_of_weight_vertex(
+            skeleton, harness.transforms, fixture[index], &world_x, &world_y);
+        suite.expect(error.empty(), "extraction must accept fixture vertex " + std::to_string(index));
+        suite.expect(
+            world_x == expected_x[index] && world_y == expected_y[index],
+            "fixture vertex " + std::to_string(index) + " setup-world position was (" +
+                std::to_string(world_x) + ", " + std::to_string(world_y) + ")");
+    }
+
+    // The extracted step is what rebind uses, so rebinding a vertex must land
+    // every influence on exactly that point.
+    Vertex rebound = fixture[1];
+    const std::string rebind_error =
+        weights::rebind_mesh_weight_vertex(skeleton, harness.transforms, &rebound);
+    suite.expect(rebind_error.empty(), "rebind must still accept the fixture vertex");
+    double rebound_x = 0.0;
+    double rebound_y = 0.0;
+    weights::setup_world_position_of_weight_vertex(
+        skeleton, harness.transforms, rebound, &rebound_x, &rebound_y);
+    suite.expect(
+        std::abs(rebound_x - expected_x[1]) < 1e-9 && std::abs(rebound_y - expected_y[1]) < 1e-9,
+        "the extracted derivation must agree with the one rebind performs internally");
+}
+
+void test_generate_fixture_table(TestSuite& suite) {
+    const auto& skeleton = fixture_skeleton(suite);
+    const GenerateHarness harness = fixture_harness(suite);
+    const auto candidates = candidates_by_name(suite, skeleton, {"spine", "arm_l"});
+    const std::vector<Vertex> fixture = fixture_weight_vertices();
+
+    // These are the values THIS BINARY produces, and they are asserted bit
+    // exactly because determinism within one binary is what MAR-176 guarantees.
+    // Two separate effects move them off the design document's table:
+    //
+    //  1. The setup pose is composed in float32 and is NOT the idealised
+    //     integer origins the document assumed -- `spine` sits at
+    //     x = -2.1855694285477512e-06, not 0, and `arm_l` at
+    //     x = -30.000001907348633, not -30. That shifts the eighth significant
+    //     digit.
+    //  2. Floating-point contraction. Marrow sets no `-ffp-contract`, so the
+    //     arm64 default fuses the multiply-adds in
+    //     `point_segment_distance_squared()` into `fma`. Verified directly:
+    //     compiling that expression at `-ffp-contract=on` yields
+    //     `d2 = 10496.001057976433` for vertex 1's `arm_l` and at `=off` yields
+    //     `10496.001057976431`, a 1 ULP difference that propagates to 1 ULP on
+    //     the smaller weight of the pair.
+    //
+    // Effect 2 is exactly why cross-compiler and cross-architecture identity is
+    // NOT claimed. Both contraction-immune signals -- vertex 2's exact 0.5/0.5
+    // and the mutual bit-identity of the three-way tie -- are asserted in their
+    // own cases below and hold under either setting.
+    struct Expected {
+        const char* first_bone;
+        double first_weight;
+        const char* second_bone;
+        double second_weight;
+    };
+    const Expected expected[4] = {
+        {"spine", 0.6494527252054849, "arm_l", 0.35054727479451514},
+        {"spine", 0.6775109613949678, "arm_l", 0.32248903860503214},
+        {"spine", 0.5, "arm_l", 0.5},
+        {"arm_l", 0.63412276557114722, "spine", 0.36587723442885278},
+    };
+
+    // Generating with {spine, arm_l} must reproduce the geometry the fixture
+    // already authors: every generated bind offset is the offset the fixture
+    // carries, and the one offset the fixture lacks -- arm_l on vertex 0 -- is
+    // the (-34, -90) MAR-175 recorded as "what setup requires" when it fixed the
+    // paint-pose defect. The tolerance is 1e-5, set from Gate C's measurement
+    // that the float32 setup pose carries up to 3.9e-6 of error here; AGENTS.md
+    // describes that error as "~1e-6", which would not have covered it.
+    const auto authored_offset = [](std::size_t vertex_index, const std::string& bone)
+        -> std::pair<double, double> {
+        if (bone == "spine") {
+            const double x[4] = {-64.0, 64.0, 64.0, -64.0};
+            const double y[4] = {-80.0, -80.0, 80.0, 80.0};
+            return {x[vertex_index], y[vertex_index]};
+        }
+        const double x[4] = {-34.0, 94.0, 94.0, -34.0};
+        const double y[4] = {-90.0, -90.0, 70.0, 70.0};
+        return {x[vertex_index], y[vertex_index]};
+    };
+    double worst_offset_delta = 0.0;
+
+    for (std::size_t index = 0; index < fixture.size(); ++index) {
+        const std::string label = "fixture vertex " + std::to_string(index);
+        const Vertex result =
+            generate_or_report(suite, skeleton, harness, candidates, fixture[index], label);
+        suite.expect(
+            result.influences.size() == 2U,
+            label + ": two candidates must yield two influences");
+        if (result.influences.size() != 2U) {
+            continue;
+        }
+        suite.expect(
+            result.influences[0].bone_name == expected[index].first_bone &&
+                result.influences[1].bone_name == expected[index].second_bone,
+            label + ": canonical order was " + bone_order(result));
+        suite.expect(
+            result.influences[0].weight == expected[index].first_weight &&
+                result.influences[1].weight == expected[index].second_weight,
+            label + ": weights were " + std::to_string(result.influences[0].weight) + " / " +
+                std::to_string(result.influences[1].weight));
+
+        for (const Influence& influence : result.influences) {
+            const auto [expected_x, expected_y] = authored_offset(index, influence.bone_name);
+            const double delta_x = std::abs(influence.x - expected_x);
+            const double delta_y = std::abs(influence.y - expected_y);
+            worst_offset_delta = std::max(worst_offset_delta, std::max(delta_x, delta_y));
+            suite.expect(
+                delta_x < 1e-5 && delta_y < 1e-5,
+                label + ": generated bind offset for " + influence.bone_name +
+                    " must reproduce the fixture's authored geometry, but moved by (" +
+                    std::to_string(delta_x) + ", " + std::to_string(delta_y) + ")");
+        }
+    }
+    std::cout << std::setprecision(3)
+              << "  MAR-176 worst generated-vs-authored bind offset delta: "
+              << worst_offset_delta << " (tolerance 1e-5, set from the measured float32 "
+              << "setup-pose error)\n"
+              << std::setprecision(6);
+}
+
+void test_generate_exact_half_tie(TestSuite& suite) {
+    const auto& skeleton = fixture_skeleton(suite);
+    const GenerateHarness harness = fixture_harness(suite);
+    const auto candidates = candidates_by_name(suite, skeleton, {"spine", "arm_l"});
+
+    // Vertex 2 sits past `spine`'s segment end and behind `arm_l`'s segment
+    // start, and by construction those are the SAME double pair -- `arm_l`'s
+    // segment starts at its parent `spine`'s world origin. Both distances
+    // therefore evaluate the identical expression on identical operands, so
+    // they are equal bit for bit whatever the origin happens to be and whatever
+    // the compiler does about contraction. This is the one acceptance value in
+    // MAR-176 that is immune to the float32 setup-pose error.
+    const Vertex result = generate_or_report(
+        suite, skeleton, harness, candidates, fixture_weight_vertices()[2], "exact half tie");
+    suite.expect(result.influences.size() == 2U, "the tie must keep both candidates");
+    if (result.influences.size() != 2U) {
+        return;
+    }
+    suite.expect(
+        result.influences[0].weight == 0.5 && result.influences[1].weight == 0.5,
+        "equidistant candidates must weigh exactly 0.5 each, not 0.5 within a tolerance");
+    suite.expect(
+        result.influences[0].bone_name == "spine" && result.influences[1].bone_name == "arm_l",
+        "an exact weight tie must break on ascending skeleton index, so spine precedes arm_l");
+}
+
+void test_generate_three_way_tie(TestSuite& suite) {
+    const auto& skeleton = fixture_skeleton(suite);
+    const GenerateHarness harness = fixture_harness(suite);
+    const auto candidates = candidates_by_name(suite, skeleton, {"root", "spine", "arm_l", "pivot"});
+
+    // Vertex 0 lies behind root's degenerate point and behind both spine's and
+    // pivot's segment starts, and all three clamp to root's world origin. The
+    // fixture therefore contains a genuine three-way exact distance tie; AC3's
+    // tie-break needs no synthetic case.
+    const Vertex result = generate_or_report(
+        suite, skeleton, harness, candidates, fixture_weight_vertices()[0], "three-way tie");
+    suite.expect(result.influences.size() == 4U, "four candidates must yield four influences");
+    if (result.influences.size() != 4U) {
+        return;
+    }
+    suite.expect(
+        bone_order(result) == "root,spine,pivot,arm_l",
+        "three tied weights must order on ascending skeleton index (0, 1, 12), then arm_l (2); "
+        "order was " + bone_order(result));
+    suite.expect(
+        result.influences[0].weight == result.influences[1].weight &&
+            result.influences[1].weight == result.influences[2].weight,
+        "the three tied distances must produce bit-identical weights");
+    suite.expect(
+        result.influences[0].weight == 0.28250519180307471 &&
+            result.influences[3].weight == 0.15248442459077582,
+        "three-way tie weights were " + std::to_string(result.influences[0].weight) + " / " +
+            std::to_string(result.influences[3].weight));
+}
+
+void test_generate_coincident_and_single(TestSuite& suite) {
+    const auto skeleton = make_bone_skeleton({{"root", -1}, {"spine", 0}, {"arm", 1}});
+    const std::vector<marrow::runtime::BoneWorldTransform> transforms{
+        world_at(0.0, 0.0), world_at(0.0, 100.0), world_at(60.0, 100.0)};
+    GenerateHarness harness;
+    harness.transforms = transforms;
+    harness.segments = weights::bone_setup_segments(skeleton, transforms);
+
+    // A vertex bound to spine with a zero offset sits exactly on spine's
+    // segment: 1/d^2 is not a weight, so the nearest candidate takes all of it.
+    const Vertex coincident = generate_or_report(
+        suite, skeleton, harness, {0U, 1U, 2U},
+        vertex({{"spine", 0.0, 0.0, 1.0}}), "coincident vertex");
+    suite.expect(
+        coincident.influences.size() == 1U && coincident.influences[0].bone_name == "spine",
+        "a vertex lying on a candidate's segment falls back to that one candidate");
+    suite.expect(
+        coincident.influences.size() == 1U && coincident.influences[0].weight == 1.0,
+        "the nearest-candidate fallback weighs exactly 1.0");
+
+    const Vertex single = generate_or_report(
+        suite, skeleton, harness, {1U}, vertex({{"arm", 10.0, 10.0, 1.0}}), "single candidate");
+    suite.expect(
+        single.influences.size() == 1U && single.influences[0].bone_name == "spine" &&
+            single.influences[0].weight == 1.0,
+        "a single candidate normalizes to exactly 1.0 whatever its distance");
+
+    // `root` is parentless, so its segment is the point (0,0); a candidate set
+    // containing it must measure a point distance rather than divide by zero.
+    const Vertex zero_length = generate_or_report(
+        suite, skeleton, harness, {0U, 1U}, vertex({{"arm", 0.0, 0.0, 1.0}}), "zero-length candidate");
+    suite.expect(
+        zero_length.influences.size() == 2U,
+        "a zero-length candidate segment must be measured, not rejected");
+    for (const Influence& influence : zero_length.influences) {
+        suite.expect(
+            std::isfinite(influence.weight) && influence.weight > 0.0,
+            "a zero-length candidate must not produce a NaN weight");
+    }
+}
+
+void test_generate_caps_at_the_four_nearest(TestSuite& suite) {
+    const auto skeleton = make_bone_skeleton(
+        {{"root", -1}, {"b1", 0}, {"b2", 1}, {"b3", 2}, {"b4", 3}, {"b5", 4}});
+    const std::vector<marrow::runtime::BoneWorldTransform> transforms{
+        world_at(0.0, 0.0),
+        world_at(0.0, 10.0),
+        world_at(0.0, 30.0),
+        world_at(0.0, 60.0),
+        world_at(0.0, 100.0),
+        world_at(0.0, 150.0)};
+    GenerateHarness harness;
+    harness.transforms = transforms;
+    harness.segments = weights::bone_setup_segments(skeleton, transforms);
+
+    const Vertex subject = vertex({{"b1", 40.0, 0.0, 1.0}});
+    const std::vector<std::size_t> ascending{0U, 1U, 2U, 3U, 4U, 5U};
+    const Vertex result =
+        generate_or_report(suite, skeleton, harness, ascending, subject, "six candidates");
+    suite.expect(
+        result.influences.size() == weights::kMaxMeshWeightInfluences,
+        "six candidates must cap at four influences");
+
+    // Which four survive is a function of the input SET, never of the order it
+    // arrived in. `std::sort` is unstable and that is fine: the comparator is a
+    // strict total order because bone indices are unique.
+    const std::vector<std::vector<std::size_t>> permutations{
+        {5U, 4U, 3U, 2U, 1U, 0U},
+        {3U, 0U, 5U, 1U, 4U, 2U},
+        {2U, 5U, 0U, 4U, 1U, 3U}};
+    for (std::size_t index = 0; index < permutations.size(); ++index) {
+        Vertex permuted = subject;
+        weights::generate_mesh_weight_vertex(
+            skeleton, harness.transforms, harness.segments, permutations[index], &permuted);
+        suite.expect(
+            identical(permuted, result),
+            "permutation " + std::to_string(index) +
+                " of the candidate list must select and weigh the same four bones");
+    }
+}
+
+void test_generate_tie_break_decides_the_cap(TestSuite& suite) {
+    // AC3's tie-break, asserted where it is actually observable.
+    //
+    // A distance tie among candidates that all SURVIVE the cap is invisible in
+    // the output: their weights come out exactly equal, and
+    // `canonicalize_mesh_weight_vertex()` then re-sorts equal weights on
+    // ascending skeleton index -- so the canonical order is the same whatever
+    // the generator's own tie-break did. The generator's tie-break is only
+    // observable where it changes WHICH candidates survive, and that is here: a
+    // distance tie straddling the four-influence cap.
+    //
+    // Every bone is parentless, so every segment is the point at its own origin
+    // and each d^2 is a plain point distance on exact integers.
+    const auto skeleton = make_bone_skeleton(
+        {{"host", -1}, {"near", -1}, {"mid", -1}, {"far", -1}, {"tied_low", -1}, {"tied_high", -1}});
+    GenerateHarness harness;
+    harness.transforms = {
+        world_at(0.0, 0.0),
+        world_at(0.0, 10.0),
+        world_at(0.0, 20.0),
+        world_at(0.0, 30.0),
+        world_at(40.0, 0.0),
+        world_at(-40.0, 0.0)};
+    harness.segments = weights::bone_setup_segments(skeleton, harness.transforms);
+
+    // V = (0,0): d^2 is 100, 400, 900, 1600, 1600 for the five candidates, so
+    // `tied_low` (index 4) and `tied_high` (index 5) tie exactly on the cap
+    // boundary and only one of them can be kept.
+    const Vertex result = generate_or_report(
+        suite, skeleton, harness, {1U, 2U, 3U, 4U, 5U},
+        vertex({{"host", 0.0, 0.0, 1.0}}), "cap-boundary tie");
+    suite.expect(
+        result.influences.size() == weights::kMaxMeshWeightInfluences,
+        "five candidates must cap at four");
+    suite.expect(
+        bone_order(result) == "near,mid,far,tied_low",
+        "a distance tie straddling the cap must be broken on ASCENDING skeleton index, so "
+        "tied_low survives and tied_high does not; order was " + bone_order(result));
+}
+
+void test_generate_is_scale_free(TestSuite& suite) {
+    // The regression for the design's single most important decision. The
+    // canonicalizer drops `weight <= 1e-6` BEFORE it normalizes, so a raw
+    // `1/d^2` hands an absolute gate a world-units-squared number: the gate
+    // becomes "farther than 1000 units". At 100x the fixture's scale every raw
+    // weight here is below 1e-6.
+    const auto skeleton = make_bone_skeleton({{"root", -1}, {"spine", 0}, {"arm_l", 1}});
+    const auto build = [&](double scale) {
+        GenerateHarness harness;
+        harness.transforms = {
+            world_at(0.0, 0.0), world_at(0.0, 50.0 * scale), world_at(-30.0 * scale, 60.0 * scale)};
+        harness.segments = weights::bone_setup_segments(skeleton, harness.transforms);
+        return harness;
+    };
+
+    const GenerateHarness small = build(1.0);
+    const GenerateHarness large = build(100.0);
+    const Vertex at_one = generate_or_report(
+        suite, skeleton, small, {1U, 2U}, vertex({{"spine", 14.0, -80.0, 1.0}}), "scale 1x");
+    const Vertex at_hundred = generate_or_report(
+        suite, skeleton, large, {1U, 2U}, vertex({{"spine", 1400.0, -8000.0, 1.0}}), "scale 100x");
+
+    suite.expect(
+        at_one.influences.size() == 2U && at_hundred.influences.size() == 2U,
+        "this case fails if the generator hands raw 1/d^2 to the canonicalizer; the absolute "
+        "1e-6 drop is not scale-free");
+    if (at_one.influences.size() != 2U || at_hundred.influences.size() != 2U) {
+        return;
+    }
+    suite.expect(
+        at_one.influences[0].bone_name == at_hundred.influences[0].bone_name &&
+            at_one.influences[1].bone_name == at_hundred.influences[1].bone_name,
+        "a uniform rescale must not change which bones are chosen or their order");
+    for (std::size_t index = 0; index < 2U; ++index) {
+        const double difference =
+            std::abs(at_one.influences[index].weight - at_hundred.influences[index].weight);
+        suite.expect(
+            difference < 1e-12,
+            "a uniform rescale must not change the assignment; influence " +
+                std::to_string(index) + " moved by " + std::to_string(difference));
+    }
+}
+
+void test_generate_rejects_atomically(TestSuite& suite) {
+    const auto& skeleton = fixture_skeleton(suite);
+    const GenerateHarness harness = fixture_harness(suite);
+    const auto candidates = candidates_by_name(suite, skeleton, {"spine", "arm_l"});
+    const Vertex healthy = fixture_weight_vertices()[1];
+
+    expect_generate_rejected(
+        suite, skeleton, harness, {}, healthy,
+        "mesh.generate_weights requires at least one candidate bone.",
+        "empty candidate list");
+    expect_generate_rejected(
+        suite, skeleton, harness, {9999U}, healthy,
+        "A candidate bone is outside the setup pose.",
+        "out-of-range candidate index");
+    // The caller is documented to de-duplicate, but the check is made here too:
+    // a repeated index would break the strict total order the determinism
+    // argument rests on, and a silently-defended precondition is a precondition
+    // no test can prove.
+    expect_generate_rejected(
+        suite, skeleton, harness, {candidates[0], candidates[0]}, healthy,
+        "A candidate bone was listed more than once.",
+        "repeated candidate bone");
+    expect_generate_rejected(
+        suite, skeleton, harness, candidates, vertex({}),
+        "A weighted vertex must keep at least one positive influence.",
+        "vertex with no influences");
+    expect_generate_rejected(
+        suite, skeleton, harness, candidates,
+        vertex({{"spine", 1.0, 2.0, 1.0}, {"arm_l", 3.0, 4.0, -1.0}}),
+        "Weighted vertex influences must sum to a positive weight.",
+        "existing weights sum to zero");
+    expect_generate_rejected(
+        suite, skeleton, harness, candidates, vertex({{"nope", 1.0, 2.0, 1.0}}),
+        "Bone not found: nope",
+        "unknown bone on the vertex");
+
+    // A singular candidate transform is rejected rather than silently excluded:
+    // dropping a bone the user explicitly checked is the mirror image of the
+    // silent expansion AC1 forbids.
+    const auto singular_skeleton = make_bone_skeleton({{"root", -1}, {"flat", 0}});
+    marrow::runtime::BoneWorldTransform flat;
+    flat.a = 0.0f;
+    flat.b = 0.0f;
+    flat.c = 0.0f;
+    flat.d = 0.0f;
+    flat.world_x = 10.0f;
+    flat.world_y = 0.0f;
+    GenerateHarness singular;
+    singular.transforms = {world_at(0.0, 0.0), flat};
+    singular.segments = weights::bone_setup_segments(singular_skeleton, singular.transforms);
+    expect_generate_rejected(
+        suite, singular_skeleton, singular, {1U}, vertex({{"root", 5.0, 5.0, 1.0}}),
+        "Bone 'flat' has a singular setup transform and cannot be used as a weight candidate.",
+        "singular candidate transform");
+}
+
 } // namespace
 
 int main() {
@@ -696,5 +1312,24 @@ int main() {
         test_rebind_makes_offsets_consistent(suite);
     });
     suite.run("rebind rejects atomically", [&]() { test_rebind_rejects_atomically(suite); });
+    suite.run("builds bone setup segments", [&]() { test_bone_setup_segments(suite); });
+    suite.run("measures point-to-segment distance", [&]() { test_point_segment_distance(suite); });
+    suite.run("extracts the setup-world position", [&]() {
+        test_setup_world_position_extraction(suite);
+    });
+    suite.run("generates the fixture assignment", [&]() { test_generate_fixture_table(suite); });
+    suite.run("generates an exact half tie", [&]() { test_generate_exact_half_tie(suite); });
+    suite.run("breaks a three-way distance tie", [&]() { test_generate_three_way_tie(suite); });
+    suite.run("falls back to the nearest candidate", [&]() {
+        test_generate_coincident_and_single(suite);
+    });
+    suite.run("caps at the four nearest", [&]() {
+        test_generate_caps_at_the_four_nearest(suite);
+    });
+    suite.run("breaks a cap-boundary tie on skeleton order", [&]() {
+        test_generate_tie_break_decides_the_cap(suite);
+    });
+    suite.run("generates scale-free weights", [&]() { test_generate_is_scale_free(suite); });
+    suite.run("generate rejects atomically", [&]() { test_generate_rejects_atomically(suite); });
     return suite.finish();
 }

@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 61> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 62> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -82,6 +82,7 @@ constexpr std::array<OperationExpectation, 61> kExpectedOperations{{
     {"set_vertex_weights", "edit", true, false, true},
     {"normalize_weights", "edit", true, false, true},
     {"mesh.rebind_weights", "edit", true, false, true},
+    {"mesh.generate_weights", "edit", true, false, true},
     {"edit_ik_constraint", "edit", true, false, true},
     {"edit_path_constraint", "edit", true, false, true},
     {"edit_transform_constraint", "edit", true, false, true},
@@ -3265,6 +3266,222 @@ int main(int argc, char** argv) {
         "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
         "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[]}}",
         false);
+
+    // ── MAR-176: mesh.generate_weights ────────────────────────────────────
+    //
+    // Earlier cases in this smoke have rewritten these vertices, so restore the
+    // fixture's authored influences first. The exact 0.5/0.5 tie below is a
+    // property of WHERE the vertex sits -- past spine's segment end and behind
+    // arm_l's segment start, so both clamp to spine's world origin -- and
+    // asserting it against whatever the previous case happened to leave behind
+    // would be asserting nothing.
+    harness.invoke(
+        "restore fixture weights before generate",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":0,\"influences\":[{\"bone\":\"spine\",\"x\":-64,\"y\":-80,\"weight\":1}]},"
+        "{\"index\":2,\"influences\":[{\"bone\":\"spine\",\"x\":64,\"y\":80,\"weight\":0.2},"
+        "{\"bone\":\"arm_l\",\"x\":94,\"y\":70,\"weight\":0.6}]}]}}");
+    const std::string vertex0_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 0U);
+    const std::string vertex1_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 1U);
+    const std::string vertex2_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 2U);
+    const std::string vertex3_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 3U);
+    const DispatchObservation generate_dry_run = harness.invoke(
+        "mesh.generate_weights dry-run",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"],"
+        "\"dry_run\":true}}");
+    harness.expect(
+        string_member(&generate_dry_run.root, "message") ==
+            std::optional<std::string_view>("Mesh weight generation validated."),
+        "mesh.generate_weights dry-run",
+        "a dry run must report the documented validation message");
+    harness.expect(
+        bool_member(generate_dry_run.scene_delta(), "dry_run") == std::optional<bool>(true) &&
+            number_member(generate_dry_run.scene_delta(), "vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(generate_dry_run.scene_delta(), "scoped_vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(generate_dry_run.scene_delta(), "candidate_bone_count") ==
+                std::optional<double>(2.0),
+        "mesh.generate_weights dry-run",
+        "the dry run must report the attachment size, the scope size, and the candidate count");
+    // A dry run must leave the project exactly where it was.
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after generate dry run"), 2U) ==
+            vertex2_before_generate,
+        "mesh.generate_weights dry-run",
+        "a dry run must not touch the project");
+    const DispatchObservation generate_dry_run_again = harness.invoke(
+        "mesh.generate_weights dry-run repeated",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"],"
+        "\"dry_run\":true}}");
+    harness.expect(
+        json::serialize_pretty_round_trip(*generate_dry_run.scene_delta()) ==
+            json::serialize_pretty_round_trip(*generate_dry_run_again.scene_delta()),
+        "mesh.generate_weights dry-run repeated",
+        "two dry runs must report an identical payload, affected_vertices included");
+
+    // Scoped: vertices [0] only. Vertex 0 carries one influence in the fixture
+    // and must gain arm_l; the other three must be byte-identical afterwards.
+    harness.invoke(
+        "mesh.generate_weights scoped to vertex 0",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"],"
+        "\"vertices\":[0]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after scoped generate");
+        harness.expect(
+            influence_count(rows, 0U) == std::optional<std::size_t>(2U),
+            "mesh.generate_weights scoped to vertex 0",
+            "vertex 0 must gain a second influence");
+        harness.expect(
+            string_member(influence_of(rows, 0U, 0U), "bone") ==
+                    std::optional<std::string_view>("spine") &&
+                string_member(influence_of(rows, 0U, 1U), "bone") ==
+                    std::optional<std::string_view>("arm_l"),
+            "mesh.generate_weights scoped to vertex 0",
+            "vertex 0 must hold spine then arm_l in canonical order");
+        harness.expect(
+            serialize_rows(rows, 1U) == vertex1_before_generate &&
+                serialize_rows(rows, 2U) == vertex2_before_generate &&
+                serialize_rows(rows, 3U) == vertex3_before_generate,
+            "mesh.generate_weights scoped to vertex 0",
+            "vertices outside the scope must be byte-identical");
+    }
+    harness.invoke("undo scoped mesh.generate_weights", "{\"op\":\"undo\"}");
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after scoped generate undo"), 0U) ==
+            vertex0_before_generate,
+        "undo scoped mesh.generate_weights",
+        "undo must restore the pre-generate influences bit-exactly");
+
+    // Unscoped: every vertex. Vertex 2's two candidates are exactly equidistant
+    // -- both clamp to spine's world origin -- so the weights are exactly one
+    // half each and the tie breaks on ascending skeleton index.
+    harness.invoke(
+        "mesh.generate_weights live",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after generate");
+        harness.expect(
+            number_member(influence_of(rows, 2U, 0U), "weight") ==
+                    std::optional<double>(0.5) &&
+                number_member(influence_of(rows, 2U, 1U), "weight") ==
+                    std::optional<double>(0.5),
+            "mesh.generate_weights live",
+            "vertex 2's equidistant candidates must weigh exactly 0.5 each");
+        harness.expect(
+            string_member(influence_of(rows, 2U, 0U), "bone") ==
+                    std::optional<std::string_view>("spine") &&
+                string_member(influence_of(rows, 2U, 1U), "bone") ==
+                    std::optional<std::string_view>("arm_l"),
+            "mesh.generate_weights live",
+            "an exact weight tie must order spine before arm_l on skeleton index");
+    }
+    const DispatchObservation generate_again = harness.invoke(
+        "mesh.generate_weights repeated",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"]}}");
+    // Deliberately NOT asserted as `no_change`: generation is deterministic but
+    // not bit-exactly idempotent, because BoneWorldTransform is float32 while
+    // bind offsets are double. A repeat may legitimately report a change of a
+    // few ULPs. What is asserted is that it succeeds and keeps the exact tie.
+    harness.expect(
+        bool_member(&generate_again.root, "ok") == std::optional<bool>(true),
+        "mesh.generate_weights repeated",
+        "a repeated generate must succeed whether or not it reports a change");
+    harness.expect(
+        number_member(influence_of(weight_rows("mesh.describe after repeat"), 2U, 0U),
+                      "weight") == std::optional<double>(0.5),
+        "mesh.generate_weights repeated",
+        "the exact tie must survive a second generate");
+    // How many history entries the repeat created is exactly the open question
+    // of section 7.6: a repeated generate is deterministic but not bit-exactly
+    // idempotent, so it may legitimately commit a few-ULP change or may report
+    // no_change. Drive the undo count off what it actually reported rather than
+    // assuming either answer -- assuming one is how a test starts passing for
+    // the wrong reason.
+    const bool repeat_committed =
+        bool_member(generate_again.scene_delta(), "changed") == std::optional<bool>(true);
+    std::cout << "  MAR-176 note: a repeated mesh.generate_weights reported changed="
+              << (repeat_committed ? "true" : "false")
+              << " -- generation is deterministic but not bit-exactly idempotent, so either "
+                 "answer is correct and neither is asserted.\n";
+    if (repeat_committed) {
+        harness.invoke("undo mesh.generate_weights repeat", "{\"op\":\"undo\"}");
+    }
+    harness.invoke("undo mesh.generate_weights", "{\"op\":\"undo\"}");
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after generate undo"), 2U) ==
+            vertex2_before_generate,
+        "undo mesh.generate_weights",
+        "undo must restore the pre-generate influences bit-exactly");
+
+    // AC1 on the wire: `bones` is required and is never expanded.
+    harness.invoke(
+        "mesh.generate_weights requires bones",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects an empty bones array",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects an unknown bone",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"nope\"]}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "mesh.generate_weights rejects a repeated bone",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\","
+        "\"bones\":[\"spine\",\"spine\"]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects a non-string bone entry",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[7]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects an empty bone name",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"\"]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects a missing attachment",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"no_such_mesh\","
+        "\"bones\":[\"spine\"]}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "mesh.generate_weights rejects an out-of-range vertex",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\"],"
+        "\"vertices\":[99]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "mesh.generate_weights rejects an empty scope",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\"],"
+        "\"vertices\":[]}}",
+        false);
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after generate rejections"), 2U) ==
+            vertex2_before_generate,
+        "mesh.generate_weights rejections",
+        "no rejected generate may change the project");
 
     harness.invoke(
         "set_slot_color_keyframe",

@@ -632,4 +632,36 @@ MeshWeightResult rebind_mesh_weights(
     const MeshWeightTarget& target,
     const std::vector<std::size_t>& scope);
 
+/**
+ * @brief Regenerates the scoped vertices' influences from an explicit
+ *        candidate-bone set, in setup pose.
+ *
+ * An empty `scope` means every vertex, matching the rest of the family.
+ * `candidate_bone_names` is required and is never expanded: an empty list, an
+ * unresolvable name, and a repeated name are all rejections. Silently widening
+ * the set to the whole skeleton, or silently dropping a bone the caller named,
+ * are both refused -- a candidate the caller could not see is a weight the
+ * caller cannot predict.
+ *
+ * Every vertex keeps its setup-world position; only which bones hold it, with
+ * what weights and what bind offsets, changes. Weights are the normalized
+ * inverse squares of the distance from that position to each candidate's
+ * setup-pose bone segment (parent world origin to own world origin), and the
+ * closest four win, ties broken on ascending skeleton index. Existing painted
+ * influences are overwritten rather than blended, which is what makes the
+ * result a function of `(geometry, candidates)` alone.
+ *
+ * Deterministic: the same project, skeleton, candidates, and scope produce a
+ * bit-identical result across runs and across the GUI, agent, and MCP entry
+ * points within one binary. It is **not** bit-exactly idempotent -- see
+ * `mesh_weight_model::generate_mesh_weight_vertex()`.
+ */
+MeshWeightResult generate_mesh_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::string>& candidate_bone_names,
+    const std::vector<std::size_t>& scope);
+
 } // namespace marrow::editor

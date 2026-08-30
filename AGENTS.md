@@ -158,11 +158,11 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (61 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, timeline key-time scaling, and mesh weight rebind authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (62 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, timeline key-time scaling, mesh weight rebind, and deterministic automatic weight generation authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
-- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize and setup-pose Rebind, transient preview playback speed, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Editor shell smoke validation for viewport FBO/docking/bone picking, onion skinning, independent debug overlay toggles (bones, IK, path, physics, mesh wireframe, bounds), the runtime performance HUD overlay, timeline, clip-duration live editing/queue boundary/clamp/reject, draw-order, event, state-preview, attachment-local multi-vertex FFD auto-key, shared world-grid/local-angle/absolute-scale transform snapping, FFD world-grid/magnetic-vertex snapping, live Alt/Cmd/Ctrl modifiers, deform, brush-based mesh weight painting with Paint/Erase/Smooth/Replace, the active-vertex numeric influence table, selected-scope Normalize, setup-pose Rebind and the candidate-bone checklist with deterministic automatic weight Generate, transient preview playback speed, constraint authoring preview, and runtime asset hot-reload: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Parameter Modeling shell validation: `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --auto-close 2`
 - Native macOS launch-focus note: sandboxed SDL/AppKit startup can stall after `com.apple.hiservices-xpcservice` LaunchServices/XPC errors; use an interactive macOS session to visually confirm that `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow` comes to the front and appears in Cmd+Tab.
 - MAR-119 E2E editor validation: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
@@ -226,6 +226,107 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-176 Deterministic Automatic Weights Validation Results
+
+Validated 2026-08-30. MAR-176 adds one producer of influence lists — a geometric
+one — and feeds it into the canonicalizer MAR-175 built. It adds no rule about
+what a valid weight list is, no new tunable constant, no file-format change and
+no `ProjectData` member. The whole engineering content is the determinism the
+story is named after, and the two places the governing documents were wrong
+about it.
+
+**The generator normalizes its top-four raw weights BEFORE handing them to the
+canonicalizer, and that ordering is load-bearing.** The canonicalizer's
+`<= 1e-6` drop is absolute and runs *before* its own normalization, so a raw
+`1/d²` turns that gate into "farther than 1000 world units". Proved by
+inversion: deleting the pre-normalization makes the 100×-scale case fail with
+the canonicalizer's own *"A weighted vertex must keep at least one positive
+influence."* — the vertex is rejected outright. The shipped `tank` rig is 10×
+the fixture (max `|world|` 2395 against 230), so this is a live bug avoided.
+
+**Floating-point contraction is real here, measured rather than predicted.** The
+design stated the hazard and declined to claim cross-architecture identity.
+Compiling `point_segment_distance_squared()`'s expression at
+`-ffp-contract=on` (the arm64 clang default this build uses, since Marrow sets
+no flag) yields `d² = 10496.001057976433` for fixture vertex 1's `arm_l`; at
+`=off` it yields `10496.001057976431`. That 1 ULP propagates to 1 ULP on the
+smaller weight of the pair. Bit-identity is therefore claimed **within one
+binary** and nowhere else — and the story's primary acceptance value was chosen
+to survive it anyway.
+
+| Area | Evidence | Result |
+| --- | --- | --- |
+| A bone's segment is parent origin → own origin | `runtime::BoneData` has no `length` field — absent from `skeleton.hpp:60-65`, from `skeleton_parse.cpp`, and from the `.mskl` schema — so the segment comes from the hierarchy, matching the only definition a user can see: `shell_viewport.cpp:1659-1675` draws it and `:2127-2140` hit-tests it. A root bone degenerates to the point at its own origin, as the viewport also shows | PASS |
+| The setup-world vertex position is shared, not re-derived | Rebind's step 1 was extracted **verbatim** into `setup_world_position_of_weight_vertex()` and both callers now use it. The extraction was gated by an inverted test: `marrow_mesh_weight_model_tests`, `marrow_project_smoke` and `marrow_agent_dispatch_smoke` were captured before and `diff`ed after — all three byte-identical. `geometry.vertices` is not an alternative source: `skeleton_skin.cpp:529` reads it only for the vertex count in the weighted branch | PASS |
+| Pre-normalization, proved by inversion | Removing it makes `generates scale-free weights` fail at 100× with *"A weighted vertex must keep at least one positive influence."*; restored | PASS |
+| The exact `0.5 / 0.5` acceptance value | Fixture vertex 2 is past `spine`'s segment end (`t = 2.6 → 1`) and behind `arm_l`'s segment start (`t = -1.12 → 0`), and by construction those are the **same double pair** — `arm_l`'s segment starts at its parent `spine`'s world origin. Both distances evaluate the identical expression on identical operands, so they are equal bit for bit whatever the origin is and whatever the compiler does about contraction. Asserted with `==` on `double`, not a tolerance, in the model tests, the project smoke, the shell smoke, the agent smoke and the MCP client | PASS |
+| AC3's tie-break, asserted where it is observable | The fixture contains a genuine three-way exact tie: vertex 0 is behind `root`'s degenerate point and behind both `spine`'s and `pivot`'s segment starts, so all three clamp to `root`'s origin and yield `d² = 4995.999384543678` bit for bit, weights `0.28250519180307471` each, ordered `root(0), spine(1), pivot(12)` then `arm_l(2)` at `0.15248442459077582`. **A tie among candidates that all survive the cap does not prove the generator's tie-break** — the canonicalizer re-sorts equal weights on ascending index anyway. A distance tie *straddling* the four-influence cap was added, where only one of two tied candidates can be kept; reversing the tie-break makes it fail | PASS |
+| Determinism has no implicit input | Every container on the path is a `std::vector` indexed or sorted on the skeleton bone index; `grep` for `unordered_`, `std::map`, `sqrt`, `hypot`, `pow`, `fma`, `execution::` in `mesh_weight_model.cpp` returns **nothing**. `std::sort` on the strict total order `(d² asc, bone index asc)`; instability is irrelevant because bone indices are unique. Every accepted case runs twice and compares, and runs again with the candidate list reversed and compares. The plan's proposed `std::stable_sort` inversion is a **no-op** — 25/25 still pass — exactly as the design argues; the inversion with teeth is dropping the tie-break, which fails both order-independence assertions | PASS |
+| Determinism is not idempotence, and the figures are measured | Two generates from the same starting project produce a byte-identical `serialize_project()` (asserted). A generate applied to a previous generate's output is asserted *stable* and the figure printed: **5.551e-17** in the project smoke, **0.000e+00** through MCP where it reports `no_change`, and **0 history entries** in the shell. No test asserts a second generate reports `no_change`, because the design does not guarantee it | PASS |
+| Pose independence | Generating while scrubbed to `attack@0.2` is **bit-identical** to generating at setup pose — the direct descendant of MAR-175's D9 defect. The algorithm reads only `setup_pose_bone_world_transforms()`, which builds a scratch skeleton | PASS |
+| Cross-path identity | The GUI `Generate` command and `generate_mesh_weights()` driven with the same candidates and scope produce a bit-identical overlay, compared influence by influence on `bone_name`, `weight`, `x` and `y` | PASS |
+| Export, on a project that was actually mutated and written | Mutate → `save_project()` → `export_runtime_assets()` → reload → assert decoded values. Case A (count-changing, vertex 0 gains `arm_l`): MBIN **3984 → 4009**, exactly **25** bytes, asserted against the `18 + K` model **derived from `binary.cpp` rather than fitted** — the fixture's string table gives `bone`=139 and `weight`=140 (two varint bytes each) and `x`=15, `y`=16, `spine`=17, `arm_l`=3 (one each), so `K = 7`. Both names were already interned, so no string index shifts. Case B (value-only, vertex 2): MBIN **3984 bytes, identical** — float32 is fixed width, so size is not a signal; the decoded weights are exactly `0.5` and `0.5` with the influence order flipping from the fixture's `arm_l 0.7499999999999999, spine 0.25` to `spine, arm_l` on the tie-break | PASS |
+| Survival, not return codes | Every scoped write reads back the vertices it did not name and an adjacent *attachment* edit and asserts them byte-identical, in the project smoke, the agent smoke and the shell smoke. Every rejection — empty candidate list, unknown bone, repeated bone, empty bone name, out-of-range vertex, repeated vertex, unweighted attachment — leaves `serialize_project()` byte-identical. Proved by inversion: making the scoped path write every vertex fails the survival assertion; dropping the unweighted-attachment guard fails with the project silently accepting a no-op | PASS |
+| A real save round trip | `save_project()` succeeds after every accepted generate and the project reloads with every influence in order. It is **not** bit-exact, and the reason is recorded rather than papered over: `.marrow` is written by `json::serialize_pretty` at 15 significant digits (`src/runtime/json.cpp:597`) while an exact `serialize_pretty_round_trip` exists and is not what project save uses. Measured reload stability **3.553e-14**; regenerating on the reloaded project agrees with regenerating in memory to **1.11e-16**. This is a pre-existing property of the project writer, not something generation introduces | PASS |
+| AC1 on every surface, proved by inversion | `bones` is required on the wire with no default. Making an omitted `bones` fall back to every bone makes the agent rejection case fail; restored. The GUI `Generate` button is disabled with the reason shown when the checklist is empty, and the command still refuses with *"mesh.generate_weights requires at least one candidate bone."* — asserted on the message, so the case cannot pass merely because the target failed to resolve | PASS |
+| Agent and MCP at 62 | `mesh.generate_weights` sits immediately after `mesh.rebind_weights` as (`edit`, mutating, not review, dry-run supported). `marrow_agent_dispatch_smoke` → `PASSED` over **382** `[ OK ]` cases (up from 354) against the exact **62**-operation registry. The three shipped weight operations' dry-run payloads are byte-identical — `candidate_bone_count` is emitted by the new operation alone — and the `normalize_weights idempotent` row is unchanged. Dry runs run the identical preflight a live call runs and change nothing | PASS |
+| The candidate checklist is a tool setting | `WeightPaintSettings::candidate_bone_names` is stored by **name**, not index, so a reload that renumbers bones cannot silently retarget it, and a name that stops resolving is shown struck through and makes Generate reject rather than being dropped. It is not in `ProjectData`, not serialized to `.marrow`, not in `editor-settings.json`, not in `PreviewState`, and not in the history snapshot — MAR-174's lesson applied unchanged. `From selection` is a one-shot fill: clearing the selection afterwards leaves the checklist unchanged, asserted | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, C ABI v1, the `.marrow` schema and `editor-settings.json` v1 all unchanged; `ProjectData` gained no member; `git diff` is empty on `src/runtime/**`, `include/marrow/marrow_c.h` and `src/editor/preferences.cpp`; `kMeshWeightEpsilon`, `kMaxMeshWeightInfluences` and `kMeshWeightSumTolerance` keep their values. MAR-176 adds **no** new tunable numeric constant — no radius, no exponent, no smoothing parameter, no minimum-weight slider | PASS |
+
+Errors found in this story's own governing documents, all corrected here:
+
+- **The `4015` export baseline was wrong.** The design derived it from MAR-175's
+  recorded `4065 → 4040 → 4015` chain, but that chain ran on a project MAR-175's
+  smoke had already mutated to four influences on one vertex. The untouched
+  fixture exports at **3984** bytes. The `18 + K` model and `K = 7` were
+  re-derived independently from the `.mbin` string table and **held**; only the
+  baseline constant was wrong.
+- **The setup pose is not exact, and "~1e-6" understates it.** Measured:
+  `root (0, 0)`, `spine (-2.1855694285477512e-06, 50)`,
+  `arm_l (-30.000001907348633, 60)`, `pivot (80.000007629394531, -120)`. The
+  worst generated-versus-authored bind offset delta is **5.09e-06**, so the 1e-6
+  tolerance the documents imply would have failed; 1e-5 is used and the figure
+  is printed.
+- **Every bit-exact weight in the design's §5.6 and §13 tables was wrong**, because
+  they were computed from idealised `(0,50)` / `(-30,60)` origins. The as-built
+  values are in the tests. The `0.5 / 0.5` acceptance value and the three-way
+  tie survive exactly, which is precisely why the design chose them.
+- **`docs/root1/refector.md:112` states what the surface is and was missing from
+  the spec's list of `61 → 62` sites** (§12 named only `:20`). Updated.
+- **The plan's `std::stable_sort` inversion cannot fail**, since the comparator is
+  a strict total order — the design's own §7.2 says so. Replaced with an
+  inversion that does.
+- **A tie among candidates that all survive the cap does not exercise AC3's
+  tie-break**, because the canonicalizer re-sorts equal weights on ascending
+  skeleton index regardless. A cap-straddling tie case was added.
+
+Not independently covered: the duplicate-candidate guard in
+`generate_mesh_weights()` is redundant with the one in
+`generate_mesh_weight_vertex()` — removing the former leaves the smoke passing,
+because the latter produces the same message. It is kept because it rejects
+before the full `ProjectData` copy.
+
+Current validation:
+
+- `cmake -S . -B build && cmake --build build` -> configured and built with zero new warnings; `cmake --build build --target marrow_verify_third_party` -> vendored SDL3, zlib, Dear ImGui, Sokol, sokol_imgui and sokol-shdc hashes verified
+- `./build/marrow_mesh_weight_model_tests` -> `Mesh weight model: 25 cases passed`, up from 14, printing the measured float32 setup-pose origins and the `5.09e-06` worst bind-offset delta so every tolerance is visible in the log. The fourteen shipped MAR-175 cases and their output are unchanged
+- Three inversions each fail the case they should and were restored: deleting the pre-normalization fails `generates scale-free weights`; reversing the bone-index tie-break fails `falls back to the nearest candidate` and `breaks a cap-boundary tie on skeleton order` (order becomes `near,mid,far,tied_high`); dropping the tie-break entirely fails both order-independence assertions. The plan's `std::stable_sort`-only inversion passes 25/25 and is recorded as a no-op
+- `ctest --test-dir build` -> `100% tests passed, 0 tests failed out of 22`; no target added
+- `./build/marrow_unit_tests`, `marrow_timeline_model_tests`, `marrow_timeline_graph_model_tests`, `marrow_viewport_interaction_tests`, `marrow_selection_tests`, `marrow_preference_tests`, `marrow_windowing_tests`, `marrow_pen_input_tests`, `marrow_agent_socket_tests` -> all passed
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting `MAR-176 Case A export: MBIN 3984 -> 4009 bytes, exactly 25 bytes for the one added influence`, `MAR-176 Case B export: MBIN 3984 bytes, identical`, `determinism vs idempotence: ... stable to 5.551e-17`, `save/reload round trip: ... stable to 3.553e-14`, and `regenerate after reload: ... within 1.11e-16`; `--create` -> passed
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` over 382 `[ OK ]` cases against the exact 62-operation registry, reporting that a repeated `mesh.generate_weights` returned `changed=false`
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> passed, reporting `MAR-176 pose independence: generating at attack@0.2 is bit-identical to generating at setup pose` and `MAR-176 cross-path identity: the GUI Generate command and generate_mesh_weights() produced a bit-identical overlay`; every shipped MAR-175 weight assertion in the block unchanged; `parameter_face_basic.marrow --auto-close 2` -> passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` with `tools/mcp/venv/bin/python tools/mcp/test_client.py` -> `mcp test_client: PASSED` with **62/62** exact C++/Python name parity, the explicit `mesh.generate_weights` registry metadata row, and a dry-run -> live -> read-back -> second-application -> undo -> read-back sequence reporting `second application stable to 0.000e+00 (message: 'Mesh weights already match the generated candidates.')`; MAR-175's `mesh.rebind_weights` figure is unchanged at `9.948e-14`; `--parameter-only` -> `mcp parameter test_client: PASSED`, unchanged; `python -m py_compile` over all four MCP files -> clean. The MCP tool-removal negative was verified by hand once: deleting the new `types.Tool` makes the client fail on `assert len(mcp_names) == 62`, and it was restored
+- `./build/marrow_inspect --compare` on the exported bundle -> matches, JSON `14336` bytes, MBIN v2 `3984` bytes; `./build/marrow_fixture_smoke` on the exported `.mskl` -> passed
+- `./build/marrow_fixture_smoke` on `.mskl` and `.mbin`, `./build/marrow_spine_import_smoke` (the owl zero-weight weighted-mesh and tank weighted-clipping regressions unchanged), `./build/marrow_renderer_sample --skip-render`, `./build/marrow_c_smoke`, `marrow_psd_import_smoke`, `marrow_atlas_packer_smoke`, `marrow_bootstrap`, `marrow_parameter_project_smoke` -> all passed
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after it; every shell and smoke invocation ran under an isolated `MARROW_CONFIG_HOME`, and no `/tmp/marrow-shell-config-*` or scratch file was left behind
+
+Not run: the interactive macOS confirmation that the candidate-bone checklist,
+its `All` / `None` / `From selection` buttons, the `candidates: N` readout and
+the `Generate` button render and respond in the viewport weight panel. The
+headless smoke drives the command directly and cannot see layout. MAR-192
+through MAR-210 remain the qualification authority.
 
 ## MAR-175 Unified Manual Weight Authoring Validation Results
 

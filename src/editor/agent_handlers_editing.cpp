@@ -2521,7 +2521,7 @@ AgentDispatchResult handle_timeline_editing_operation(
     }
 
     if (op == "set_vertex_weights" || op == "normalize_weights" ||
-        op == "mesh.rebind_weights") {
+        op == "mesh.rebind_weights" || op == "mesh.generate_weights") {
         const json::Value* args = command_args(cmd);
         if (args == nullptr) {
             return make_error(std::string(op) + " requires 'args' object.", op, spec);
@@ -2539,6 +2539,43 @@ AgentDispatchResult handle_timeline_editing_operation(
         }
         const MeshWeightTarget target{
             std::string(*skin_name), std::string(*slot_name), std::string(*attachment_name)};
+
+        // `bones` is REQUIRED for mesh.generate_weights and is never expanded.
+        // A default of "every bone" is exactly the silent expansion the story
+        // forbids, and a default of "the bones already influencing the vertex"
+        // would make the operation a no-op for its main use. Parsed here, before
+        // any transaction, so an unresolvable name is reported as `not_found`
+        // rather than surfacing from the primitive as `invalid_request`.
+        std::vector<std::string> requested_bones;
+        if (op == "mesh.generate_weights") {
+            const json::Value* bones = json::find_member(*args, "bones");
+            if (bones == nullptr || !bones->is_array()) {
+                return make_error(
+                    "mesh.generate_weights requires a 'bones' array of candidate bone names.",
+                    op,
+                    spec);
+            }
+            if (bones->as_array().empty()) {
+                return make_error(
+                    "mesh.generate_weights requires at least one candidate bone.", op, spec);
+            }
+            for (const json::Value& bone_value : bones->as_array()) {
+                if (!bone_value.is_string() || bone_value.as_string().empty()) {
+                    return make_error(
+                        "candidate bone names must be non-empty strings.", op, spec);
+                }
+                const std::string bone_name = bone_value.as_string();
+                if (!skeleton.find_bone_index(bone_name).has_value()) {
+                    return make_error("Bone not found: " + bone_name, op, spec, "not_found");
+                }
+                if (std::find(requested_bones.begin(), requested_bones.end(), bone_name) !=
+                    requested_bones.end()) {
+                    return make_error(
+                        "A candidate bone was listed more than once.", op, spec);
+                }
+                requested_bones.push_back(bone_name);
+            }
+        }
 
         // Preflight everything into locals BEFORE opening a transaction. The
         // shipped handler wrote `edit->vertices[i]` for earlier entries and
@@ -2638,6 +2675,10 @@ AgentDispatchResult handle_timeline_editing_operation(
                 return normalize_mesh_weights(
                     into, skeleton, *attachment, target, requested_scope);
             }
+            if (op == "mesh.generate_weights") {
+                return generate_mesh_weights(
+                    into, skeleton, *attachment, target, requested_bones, requested_scope);
+            }
             return rebind_mesh_weights(
                 into, skeleton, *attachment, target, requested_scope);
         };
@@ -2661,13 +2702,22 @@ AgentDispatchResult handle_timeline_editing_operation(
             }
             payload.emplace("affected_vertices", array_value(std::move(affected)));
             payload.emplace("changed", bool_value(preview_result.changed));
+            // Emitted by mesh.generate_weights alone. Adding it unconditionally
+            // would change the shipped payload of three operations whose exact
+            // shape agent_dispatch_smoke asserts.
+            if (op == "mesh.generate_weights") {
+                payload.emplace(
+                    "candidate_bone_count", number_value(requested_bones.size()));
+            }
             return object_value(std::move(payload));
         };
 
         if (bool_arg(args, "dry_run")) {
             return make_success(
-                op == "mesh.rebind_weights" ? "Mesh weight rebind validated."
-                                            : "Mesh weight edit validated.",
+                op == "mesh.rebind_weights"
+                    ? "Mesh weight rebind validated."
+                    : (op == "mesh.generate_weights" ? "Mesh weight generation validated."
+                                                     : "Mesh weight edit validated."),
                 op,
                 spec,
                 build_payload(true));
@@ -2702,14 +2752,23 @@ AgentDispatchResult handle_timeline_editing_operation(
                          NoChangeResult::Success,
                          "Mesh weights already bound to the setup pose.",
                          {}}
-                   : CommitPolicy{"Failed to apply mesh weights: "});
+                   : (op == "mesh.generate_weights"
+                          ? CommitPolicy{
+                                "Failed to apply mesh weights: ",
+                                "invalid_request",
+                                NoChangeResult::Success,
+                                "Mesh weights already match the generated candidates.",
+                                {}}
+                          : CommitPolicy{"Failed to apply mesh weights: "}));
         if (auto result = commit_or_error(
                 transaction, op, spec, commit_policy)) {
             return std::move(*result);
         }
         return make_success(
-            op == "mesh.rebind_weights" ? "Rebound mesh weights successfully."
-                                        : "Edited mesh weights successfully.",
+            op == "mesh.rebind_weights"
+                ? "Rebound mesh weights successfully."
+                : (op == "mesh.generate_weights" ? "Generated mesh weights successfully."
+                                                 : "Edited mesh weights successfully."),
             op,
             spec,
             build_payload(false));

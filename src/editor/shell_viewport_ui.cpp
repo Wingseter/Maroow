@@ -1941,11 +1941,93 @@ void draw_viewport_settings(ShellState* state) {
                 rebind_weights_command(state);
             }
             ImGui::SameLine();
+            // MAR-176: automatic generation from an EXPLICIT candidate set.
+            // Disabled with the reason shown when nothing is checked -- an empty
+            // checklist must never fall back to the whole skeleton.
+            ImGui::BeginDisabled(state->weight_paint.candidate_bone_names.empty());
+            if (ImGui::Button("Generate##weight_paint")) {
+                generate_weights_command(state);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
             if (scope.empty()) {
                 ImGui::TextDisabled("scope: every vertex");
             } else {
                 ImGui::TextDisabled("scope: %zu selected", scope.size());
             }
+            if (state->weight_paint.candidate_bone_names.empty()) {
+                ImGui::TextDisabled("Generate needs at least one candidate bone.");
+            }
+
+            // The candidate checklist, in SKELETON order -- the same order the
+            // hierarchy panel shows and the same order the generator's distance
+            // tie-break uses.
+            const auto& bones = state->load_result.skeleton_data->bones();
+            std::vector<std::string>& candidates = state->weight_paint.candidate_bone_names;
+            const auto is_checked = [&](const std::string& name) {
+                return std::find(candidates.begin(), candidates.end(), name) != candidates.end();
+            };
+            if (ImGui::Button("All##weight_candidates")) {
+                candidates.clear();
+                for (const auto& bone : bones) {
+                    candidates.push_back(bone.name);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("None##weight_candidates")) {
+                candidates.clear();
+            }
+            ImGui::SameLine();
+            // A ONE-SHOT fill, not a live binding: binding the candidate set to
+            // the transient bone selection would make the same click produce
+            // different weights depending on what was selected a moment ago.
+            if (ImGui::Button("From selection##weight_candidates")) {
+                candidates.clear();
+                // Walked in skeleton order rather than selection order, so the
+                // checklist reads the same way however the bones were clicked.
+                for (const auto& bone : bones) {
+                    for (const auto& item : state->selection.items()) {
+                        const auto* selected = std::get_if<BoneSelection>(&item);
+                        if (selected != nullptr && selected->bone_name == bone.name) {
+                            candidates.push_back(bone.name);
+                            break;
+                        }
+                    }
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("candidates: %zu", candidates.size());
+            if (ImGui::BeginChild(
+                    "##weight_candidate_bones", ImVec2(0.0f, 120.0f), true)) {
+                for (std::size_t index = 0; index < bones.size(); ++index) {
+                    const std::string& name = bones[index].name;
+                    bool checked = is_checked(name);
+                    if (ImGui::Checkbox(
+                            (name + "##weight_candidate_" + std::to_string(index)).c_str(),
+                            &checked)) {
+                        if (checked) {
+                            if (!is_checked(name)) {
+                                candidates.push_back(name);
+                            }
+                        } else {
+                            candidates.erase(
+                                std::remove(candidates.begin(), candidates.end(), name),
+                                candidates.end());
+                        }
+                    }
+                }
+                // A checked name that no longer resolves is SHOWN rather than
+                // dropped, so a rig edit cannot silently shrink the candidate
+                // set behind the user's back. Generate rejects while one is
+                // present.
+                for (const std::string& name : candidates) {
+                    if (state->load_result.skeleton_data->find_bone_index(name).has_value()) {
+                        continue;
+                    }
+                    ImGui::TextDisabled("%s (no longer in the skeleton)", name.c_str());
+                }
+            }
+            ImGui::EndChild();
         }
         ImGui::EndDisabled();
 

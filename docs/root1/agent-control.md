@@ -34,6 +34,7 @@ The current dispatcher implements edit ops: `animation.create`,
 `remove_draw_order_keyframe`, `set_event_keyframe`,
 `remove_event_keyframe`, `set_deform_keyframe`, `remove_deform_keyframe`,
 `set_vertex_weights`, `normalize_weights`, `mesh.rebind_weights`,
+`mesh.generate_weights`,
 `set_slot_color_keyframe`,
 `remove_slot_color_keyframe`, `set_attachment_keyframe`,
 `remove_attachment_keyframe`, `edit_ik_constraint`, `edit_path_constraint`,
@@ -108,6 +109,27 @@ There is no separate `move_bone` op - bone motion is expressed as
   setup frame. Takes the same `skin`/`slot`/`attachment` triple plus an optional
   `vertices` scope. Never changes which bones influence a vertex, never changes
   a weight, and never touches mesh topology.
+- `mesh.generate_weights`: Regenerates a weighted mesh's influences from an
+  explicit candidate-bone set, using inverse-square distance to each candidate's
+  setup-pose bone segment (parent world origin to own world origin). Takes the
+  same `skin`/`slot`/`attachment` triple, an optional `vertices` scope, and a
+  **required** `bones` array. `bones` has no default: omitting it is a rejection,
+  not "use every bone", because silently widening the candidate set is exactly
+  what the operation must not do. An empty array, a repeated name, an
+  unresolvable name, and a bone whose setup transform is singular are all
+  rejections; a singular candidate fails the whole call rather than being
+  silently excluded. The dry-run payload carries `candidate_bone_count` in
+  addition to the family's shipped fields; the other three weight operations'
+  payloads are unchanged.
+
+  The result is **deterministic**: the same project, skeleton, candidates and
+  scope produce bit-identical weights and bind offsets across runs and across
+  the GUI, agent and MCP surfaces, independently of the playhead and of the
+  order the candidates were listed in. That guarantee holds **within one
+  binary**; cross-compiler and cross-architecture identity is not claimed,
+  because floating-point contraction is unconstrained in this build. Generation
+  is deterministic but not bit-exactly idempotent, so a repeated call may
+  legitimately report a change of a few ULPs.
 - `set_slot_color_keyframe` / `remove_slot_color_keyframe`: Edits slot RGBA timelines.
 - `set_attachment_keyframe` / `remove_attachment_keyframe`: Edits attachment timelines.
 - `edit_ik_constraint`: Modifies IK constraint properties.
