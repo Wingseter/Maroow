@@ -1,5 +1,7 @@
 #include "shell_preview.hpp"
 
+#include "shell_file_paths.hpp"
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -209,6 +211,15 @@ void handle_project_history_shortcuts(ShellState* state) {
 
     const ImGuiIO& io = ImGui::GetIO();
     if (io.WantTextInput) {
+        return;
+    }
+
+    // BELOW the io.WantTextInput guard above, so typing a filename into the path
+    // modal cannot save the project. Save is the only one of the four File
+    // actions with a shortcut: it neither replaces the session nor needs a
+    // modal, so it needs no MAR-182 gate and cannot surprise the user.
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, ImGuiInputFlags_RouteGlobal)) {
+        begin_file_action(state, FileAction::Save);
         return;
     }
 

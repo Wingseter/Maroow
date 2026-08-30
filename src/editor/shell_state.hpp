@@ -17,6 +17,7 @@
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_file_paths.hpp"
 #include "timeline_graph_model.hpp"
 #include "timeline_model.hpp"
 #include "viewport_interaction_kernel.hpp"
@@ -851,6 +852,14 @@ struct ShellState {
     bool project_dirty{false};
     bool default_dock_layout_initialized{false};
     std::string saved_project_snapshot;
+    // MAR-181: the live path-chooser request, the New form, and the deferred
+    // New/Open application. These are ShellState fields rather than file-statics
+    // like the two catalog popups because ImGui::OpenPopup inside BeginMenu
+    // hashes against the MENU window's id stack and cannot open a root-level
+    // modal, and because MAR-182 must be able to observe a cancel.
+    std::optional<FilePathRequest> file_path_request;
+    std::optional<NewProjectForm> new_project_form;
+    std::optional<PendingFileApplication> pending_file_application;
     std::string status_message;
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
@@ -1002,6 +1011,20 @@ bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);
 bool save_project_file(ShellState* state, bool update_status_message);
 bool export_runtime_assets_file(ShellState* state, bool update_status_message);
+/** MAR-181: adopts whatever project the session currently holds into every
+ *  shell-side cache, selection, preview alias and timeline field. Extracted from
+ *  reload_project so New and Open can reuse it. `project_is_clean` is a caller
+ *  intent, not a session read: reload and Open adopt a project that exists on
+ *  disk and are clean, while New is dirty from birth and its target does not
+ *  exist yet. `restore_transient_playback` is reload's own reload-vs-open flag. */
+void adopt_session_project_into_shell(
+    ShellState* state,
+    const std::string& previous_animation_name,
+    double previous_timeline_time,
+    bool previous_timeline_loop,
+    bool previous_timeline_playing,
+    bool restore_transient_playback,
+    bool project_is_clean);
 bool reload_project(ShellState* state);
 
 // Viewport renderer and geometry helpers.

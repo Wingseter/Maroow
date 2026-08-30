@@ -26,7 +26,7 @@ ArtPath, expression/lip-sync, Parameter Modeling mode와 64개 에이전트 오�
 
 1. **고급 타임라인 저작 UX 미구현** — P0 도프시트와 MAR-167 읽기 전용 scalar graph view는 완성됐지만 graph point/Bezier handle 편집, 리타임 스케일, 커브 프리셋/자동 핸들/루프 동기화는 P1이다.
 2. **리그/메시 저작 불가** — 본·슬롯·스킨·어태치먼트·메시 지오메트리를 에디터에서 생성/삭제/편집할 수 없다(임포트 전용). 이는 오버레이 아키텍처의 의도된 결과지만, "에디터"로서는 결정적 제약.
-3. **파일·복구 UX 미완성** — MAR-180이 그 아래의 primitive를 끝냈다: project 저장은 대상 디렉터리 temp+rename으로 원자적이 됐고(write·flush·close 오류를 모두 검사하므로 잘린 파일 위에서 성공을 보고하던 close-time 실패가 사라졌다), Save As는 다섯 경로 family를 identity 보존으로 rebase하며, `EditorSession::create`/`close`/`adopt_runtime_sources`가 all-or-nothing으로 동작한다. 남은 것은 그 위의 UX다 — file path modal(MAR-181), dirty intent state machine(MAR-182), Recent Projects(MAR-183), external-conflict workflow, structured Problems, staged/atomic PSD re-import.
+3. **파일·복구 UX 미완성** — MAR-180이 그 아래의 primitive를 끝냈다: project 저장은 대상 디렉터리 temp+rename으로 원자적이 됐고(write·flush·close 오류를 모두 검사하므로 잘린 파일 위에서 성공을 보고하던 close-time 실패가 사라졌다), Save As는 다섯 경로 family를 identity 보존으로 rebase하며, `EditorSession::create`/`close`/`adopt_runtime_sources`가 all-or-nothing으로 동작한다. MAR-181이 그 위의 첫 UX 층을 올렸다: File 메뉴의 New/Open/Save/Save As와 의존성 없는 path modal, `Ctrl+S`. 남은 것은 dirty intent state machine(MAR-182), Recent Projects(MAR-183), external-conflict workflow, structured Problems, staged/atomic PSD re-import다. **MAR-181 단독 트리에서는 dirty session 위의 New/Open이 경고 없이 작업을 버린다** — MAR-182가 닫을 실재하는 공백이며, 절반만 구현하는 편보다 기록하는 편을 택했다.
 
 이전의 네 번째 핵심 gap이던 **Live2D식 파라미터 모델링 레이어는 해소됐다**. MAR-121은 MAR-122에 통합됐고,
 MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoint가 2026-07-16에 검증됐다.
@@ -204,7 +204,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 | 부재 기능 | 참조 | 심각도 |
 |---|---|---|
 | 전역 entity 멀티 셀렉트/박스 셀렉트 (도프시트 키 선택은 P0에서 구현) | 양쪽 다 [CORE] | 🟡 — P1은 selection/gesture와 active item 편집까지만 포함; group transform 제외 |
-| File 메뉴: New/Open/Save/Save As/Recent Projects | 양쪽 다 [CORE] | 🟡 — Save가 툴바에만 있음. MAR-180이 원자적 저장·Save As rebase·`create`/`close` primitive를 끝냈으므로 남은 것은 메뉴와 modal(MAR-181~183)이다 |
+| File 메뉴: New/Open/Save/Save As/Recent Projects | 양쪽 다 [CORE] | 🟢 — MAR-181이 New/Open/Save/Save As를 File 메뉴와 외부 의존성 없는 ImGui path modal로 연결했다. 측정 결과 이전 상태는 🟡이 아니라 🔴에 가까웠다: Save만 툴바 아이콘으로 존재했고 New·Open·Save As는 **모든 표면에서 완전히 부재**였다. Recent Projects는 MAR-183 잔여 |
 | 대칭 편집 — 반전 붙여넣기/미러 | Live2D 5.2 반전 형상 붙여넣기, Spine flip | 🟢 |
 | Problems 뷰 (경고 목록 + 클릭 이동 + allowlist 수정) | Spine 4.3 [+] | 🟢 — 기존 summary 위에 MAR-186 structured collector를 추가한 뒤 MAR-187 UI 연결 |
 | 숫자 필드 수식 입력 (`10 + v * 8`) | Spine 4.3 [+] | 🟢 |
@@ -415,7 +415,7 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
 | MAR-180 (완료, 2026-08-30) | Atomic project I/O | 같은 디렉터리 temp+rename 저장, Save As 상대 asset/export/atlas-pack 경로 rebase, `EditorSession::create`/`close`/`adopt_runtime_sources`를 구현했다. `write_atomically`는 `preferences.cpp`에서 복사가 아니라 **추출**해 `src/editor/atomic_file_write.{hpp,cpp}`로 옮겼고, 설정 writer와 project writer가 같은 primitive와 같은 rename test seam을 공유한다. Rebase 대상은 struct에서 직렬화되는 다섯 family(`runtime.skeleton`, `runtime.atlases[]`, `editor.export_directory`, `atlas_packs[].atlas`, `atlas_packs[].sprites[].image`)이며 empty·absolute 참조는 그대로 둔다. `export_directory`는 acceptance criterion의 문자 그대로 identity rebase라서 Save As 후에도 export는 원래 폴더로 간다 — 다른 선택지는 MAR-181의 UI 문제다. **PSD provenance 경로는 rebase하지 않는다**: `.marrow.editor.import_sources.psd`는 아직 schema에 없고 MAR-188 범위다. 대신 `rebase_project_paths`가 새 project-relative field를 등록하는 단일 지점이 되고 doc comment가 MAR-188을 지목한다. `fsync`는 명시적 non-goal이고, crash가 rename 직전에 나면 고아 `*.tmp.*` 하나가 남을 수 있다 — 처리된 실패는 모두 지운다. `.marrow` schema는 무변경. |
-| MAR-181 | File path UI | 외부 의존성 없는 ImGui directory/path modal과 New/Open/Save/Save As를 연결한다. New는 skeleton·최소 한 atlas·대상 `.marrow` 경로를 검증한 뒤 dirty in-memory session으로 시작한다. |
+| MAR-181 (완료, 2026-08-30) | File path UI | 외부 의존성 없는 ImGui path modal 두 개(공용 chooser `Choose Path##file_path`와 New 폼 `New Project##file_new`)와 File 메뉴 항목 넷, `Ctrl+S`를 연결했다. 네이티브 dialog를 쓰지 않은 것은 취향이 아니라 필요다: `SDL_ShowOpenFileDialog`는 `--auto-close` headless 하네스가 구동할 수 없어 acceptance criterion 전부가 검증 불가가 된다. New는 skeleton과 최소 한 atlas를 **실제로 로드해** 검증한 뒤 dirty in-memory session으로 시작하고 대상 파일은 **쓰지 않는다** — 명시적 Save 전까지 디스크에 존재하지 않는다. 세션을 교체하는 New/Open은 `Reload`와 같은 규율로 프레임 끝에 적용하고, 교체하지 않는 Save/Save As는 `save_project_file`처럼 즉시 적용한다. `reload_project`의 reset 블록은 `adopt_session_project_into_shell`로 **순수 추출**했으며 하드코딩된 `project_dirty = false`가 caller intent 파라미터가 됐다 — New는 MAR-180이 의도한 대로 dirty-from-birth로 남는다. `ShellState::project_path`와 `project()->source_path`는 성공 시 함께 움직이고 실패 시 **둘 다 움직이지 않는다**. dirty-session 확인은 **의도적으로 없다**(MAR-182 범위). `.marrow` schema 무변경 — 새 seam과 기존 seam의 key set이 56:56으로 동일함을 실측했다. registry 64 불변. |
 | MAR-182 | Dirty intent state machine | New/Open/Reload/Quit/OS close를 Save/Discard/Cancel로 통합한다. Save 실패나 Cancel은 현재 session과 pending intent를 유지한다. |
 | MAR-183 | Recent Projects | 성공한 New-save/Open/Save As만 canonical absolute path로 최대 10개 저장한다. 사라진 경로는 disabled로 남겨 Remove/Clear Missing을 제공한다. |
 | MAR-184 | Inherit overlay | runtime과 같은 5개 mode의 stepped-only inherit timeline project schema, materialization, merge/export primitive를 추가한다. |

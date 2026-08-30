@@ -14,6 +14,7 @@
 #include "agent_socket.hpp"
 #include "timeline_controller.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_file_paths.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_theme.hpp"
@@ -700,6 +701,9 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
 
 ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
     if (!ImGui::BeginMainMenuBar()) {
+        // The modals must still be drawn when the menu bar is clipped, or an
+        // open interaction would vanish for as long as it stays clipped.
+        draw_file_path_modals(state);
         return ProjectMenuAction::None;
     }
 
@@ -711,13 +715,31 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
     ImGui::TextDisabled("·");
 
     if (ImGui::BeginMenu("File")) {
+        // Every item calls begin_file_action and nothing else -- one entry point
+        // is what makes MAR-182's dirty-intent gate a pure addition. There is
+        // deliberately NO dirty check here (design section 6, property 4).
+        const bool gesture_active = authoring_gesture_active(*state);
+        const bool project_loaded = state->load_result.project != nullptr;
+        if (ImGui::MenuItem("New Project...", nullptr, false, !gesture_active)) {
+            begin_file_action(state, FileAction::New);
+        }
+        if (ImGui::MenuItem("Open Project...", nullptr, false, !gesture_active)) {
+            begin_file_action(state, FileAction::Open);
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem(
-                "Reload Project",
-                nullptr,
-                false,
-                !authoring_gesture_active(*state))) {
+                "Save", "Ctrl+S", false, !gesture_active && project_loaded)) {
+            begin_file_action(state, FileAction::Save);
+        }
+        if (ImGui::MenuItem(
+                "Save As...", nullptr, false, !gesture_active && project_loaded)) {
+            begin_file_action(state, FileAction::SaveAs);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reload Project", nullptr, false, !gesture_active)) {
             *reload_requested = true;
         }
+        ImGui::Separator();
         if (ImGui::MenuItem("Quit")) {
             action = ProjectMenuAction::QuitRequested;
         }
@@ -898,6 +920,9 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
     ImGui::EndMainMenuBar();
 
     draw_shell_toolbar(reload_requested, state);
+    // Root scope: BeginViewportSideBar/End have already balanced. One call site,
+    // reached by BOTH frame bodies through their existing draw_menu_bar call.
+    draw_file_path_modals(state);
     return action;
 }
 

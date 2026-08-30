@@ -34,6 +34,7 @@
 #include "shell_weight_paint.hpp"
 #include "shell_viewport_ui.hpp"
 #include "shell_theme.hpp"
+#include "shell_file_paths.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
 #include "sdl_input.hpp"
@@ -610,6 +611,12 @@ ShellFrameOutcome render_shell_frame(
     if (reload_requested) {
         reload_project(shell_state);
     }
+    // MAR-181: New and Open replace the session, so they land here at end of
+    // frame exactly as Reload does. THIS EDIT HAS A TWIN in
+    // src/editor/shell_smoke_frames.cpp -- the two frame bodies are
+    // hand-maintained duplicates, and editing only one ships a New/Open that
+    // works interactively and is invisible to the smoke.
+    (void)apply_pending_file_action(shell_state);
 
     sg_pass main_pass{};
     main_pass.swapchain = surface.swapchain;

@@ -32,6 +32,7 @@
 #include "shell_timeline_graph.hpp"
 #include "shell_weight_paint.hpp"
 #include "shell_viewport_ui.hpp"
+#include "shell_file_paths.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
@@ -125,6 +126,9 @@ bool render_headless_smoke_frames(
             std::cerr << shell_state.error_message;
             return false;
         }
+        // MAR-181: the twin of src/editor/shell_main.cpp's call. Without this
+        // the smoke would never run a deferred New or Open at all.
+        (void)apply_pending_file_action(&shell_state);
     }
 
     apply_shell_mode(&shell_state, ShellMode::Animation);

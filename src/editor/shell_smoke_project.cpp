@@ -23,6 +23,7 @@
 #include "shell_agent_panel.hpp"
 #include "shell_coalesced_edit.hpp"
 #include "shell_derived_cache.hpp"
+#include "shell_file_paths.hpp"
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
@@ -1442,6 +1443,1261 @@ bool validate_animation_duration_shell_smoke(
     return true;
 }
 
+/**
+ * @brief MAR-181 C8 -- the path modal's acceptance rule, UI-free.
+ *
+ * Table-driven against `resolve_choice` directly. Every row asserts BOTH the
+ * returned path and whether the choice was acceptable, so deleting any single
+ * branch of the rule flips exactly one row and leaves the other ten green.
+ *
+ * The last row is the one an over-eager "safety" edit would break: a SaveTarget
+ * over an EXISTING file is a legitimate, deliberate overwrite that MAR-180 made
+ * atomic, so it asserts ACCEPTANCE and merely carries an informational
+ * diagnostic.
+ */
+bool validate_mar181_path_resolution_smoke() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "marrow_mar181_c8";
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    error.clear();
+    const std::filesystem::path browse = root / "browse";
+    const std::filesystem::path sibling = root / "sib";
+    std::filesystem::create_directories(browse / "subdir", error);
+    if (error) {
+        std::cerr << "MAR-181 C8 could not create the browse tree.\n";
+        return false;
+    }
+    error.clear();
+    std::filesystem::create_directories(sibling, error);
+    if (error) {
+        std::cerr << "MAR-181 C8 could not create the sibling directory.\n";
+        return false;
+    }
+    std::string file_error;
+    if (!write_text_file(browse / "existing.marrow", "{}\n", &file_error)) {
+        std::cerr << "MAR-181 C8: " << file_error << '\n';
+        return false;
+    }
+
+    struct Row {
+        const char* label;
+        const char* typed;
+        FilePathMode mode;
+        bool expect_acceptable;
+        std::filesystem::path expected_path;   // empty == not asserted
+        const char* expect_diagnostic;         // nullptr == not asserted
+    };
+
+    const std::filesystem::path missing_parent = browse / "no_such_dir" / "x.marrow";
+    const std::vector<Row> rows{
+        {"empty name", "", FilePathMode::SaveTarget, false, {}, "Enter a file name."},
+        {"whitespace-only name", "   \t ", FilePathMode::SaveTarget, false, {},
+         "Enter a file name."},
+        {"no extension appends the filter", "x", FilePathMode::SaveTarget, true,
+         browse / "x.marrow", ""},
+        {"wrong extension is rejected", "x.mskl", FilePathMode::SaveTarget, false, {},
+         "Expected a .marrow file."},
+        {"absolute typed path is used verbatim", nullptr, FilePathMode::SaveTarget, true,
+         sibling / "y.marrow", ""},
+        {"relative parent path is normalized", "../sib/y.marrow",
+         FilePathMode::SaveTarget, true, sibling / "y.marrow", ""},
+        {"OpenExisting on a missing file", "nope.marrow", FilePathMode::OpenExisting,
+         false, {}, "That file does not exist."},
+        {"OpenExisting on a directory", "subdir.marrow", FilePathMode::OpenExisting,
+         false, {}, "That is a directory."},
+        {"SaveTarget whose parent is missing", "no_such_dir/x.marrow",
+         FilePathMode::SaveTarget, false, {}, "The destination folder does not exist."},
+        {"SaveTarget that is an existing directory", "subdir.marrow",
+         FilePathMode::SaveTarget, false, {}, "That is a directory."},
+        {"SaveTarget over an existing file is ACCEPTED", "existing.marrow",
+         FilePathMode::SaveTarget, true, browse / "existing.marrow",
+         "Replaces the existing file."},
+    };
+
+    // Row 8 and row 10 need a directory whose name ends in the filter extension,
+    // so the extension rule cannot reject them before the is_directory branch is
+    // reached. That is the whole point of those two rows.
+    error.clear();
+    std::filesystem::create_directories(browse / "subdir.marrow", error);
+    if (error) {
+        std::cerr << "MAR-181 C8 could not create the extension-named directory.\n";
+        return false;
+    }
+
+    const std::string absolute_typed = (sibling / "y.marrow").string();
+    for (const Row& row : rows) {
+        const std::string typed =
+            row.typed != nullptr ? std::string(row.typed) : absolute_typed;
+        const FilePathChoice choice =
+            resolve_choice(browse, typed, row.mode, ".marrow");
+        if (choice.acceptable != row.expect_acceptable) {
+            std::cerr << "MAR-181 C8 row \"" << row.label << "\": expected "
+                      << (row.expect_acceptable ? "acceptable" : "rejected")
+                      << " but resolve_choice returned "
+                      << (choice.acceptable ? "acceptable" : "rejected")
+                      << " with diagnostic \"" << choice.diagnostic << "\".\n";
+            return false;
+        }
+        if (!row.expected_path.empty() &&
+            choice.path != row.expected_path.lexically_normal()) {
+            std::cerr << "MAR-181 C8 row \"" << row.label << "\": expected path "
+                      << row.expected_path.lexically_normal() << " but got "
+                      << choice.path << ".\n";
+            return false;
+        }
+        if (row.expect_diagnostic != nullptr &&
+            choice.diagnostic != row.expect_diagnostic) {
+            std::cerr << "MAR-181 C8 row \"" << row.label << "\": expected diagnostic \""
+                      << row.expect_diagnostic << "\" but got \"" << choice.diagnostic
+                      << "\".\n";
+            return false;
+        }
+    }
+
+    error.clear();
+    std::filesystem::remove_all(root, error);
+    std::cout << "MAR-181 C8: resolve_choice appends a missing extension, rejects a "
+                 "wrong one without case folding, normalizes relative and honours "
+                 "absolute typed paths, rejects a missing OpenExisting target, a "
+                 "directory in either mode and a SaveTarget whose parent is absent, "
+                 "and ACCEPTS a SaveTarget over an existing file with an "
+                 "informational diagnostic.\n";
+    return true;
+}
+
+
+/** @brief The six values a failed action must leave bit-identical. */
+struct SessionSnapshot {
+    std::string serialized;
+    std::uint64_t project_revision{0U};
+    std::uint64_t runtime_revision{0U};
+    std::uint64_t preview_revision{0U};
+    std::size_t undo_count{0U};
+    bool dirty{false};
+
+    bool operator==(const SessionSnapshot& other) const {
+        return serialized == other.serialized &&
+            project_revision == other.project_revision &&
+            runtime_revision == other.runtime_revision &&
+            preview_revision == other.preview_revision &&
+            undo_count == other.undo_count && dirty == other.dirty;
+    }
+};
+
+SessionSnapshot capture_session_snapshot(const ShellState& state) {
+    SessionSnapshot snapshot;
+    if (state.session.project() != nullptr) {
+        snapshot.serialized = marrow::editor::serialize_project(*state.session.project());
+    }
+    snapshot.project_revision = state.session.project_revision();
+    snapshot.runtime_revision = state.session.runtime_revision();
+    snapshot.preview_revision = state.session.preview_revision();
+    snapshot.undo_count = state.session.undo_count();
+    snapshot.dirty = state.session.dirty();
+    return snapshot;
+}
+
+/** @brief Copies the seeded assets only -- no `.marrow` -- for the New cases. */
+bool seed_shell_asset_copy(
+    const ShellState& source_state,
+    const std::filesystem::path& directory,
+    std::filesystem::path* skeleton_out,
+    std::vector<std::filesystem::path>* atlases_out) {
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    error.clear();
+    std::filesystem::create_directories(directory, error);
+    if (error) return false;
+
+    const std::filesystem::path source_skeleton =
+        source_state.load_result.project->resolved_skeleton_path();
+    const std::vector<std::filesystem::path> source_atlases =
+        source_state.load_result.project->resolved_atlas_paths();
+    if (source_atlases.empty()) return false;
+
+    const std::filesystem::path temp_skeleton = directory / source_skeleton.filename();
+    error.clear();
+    std::filesystem::copy_file(
+        source_skeleton, temp_skeleton,
+        std::filesystem::copy_options::overwrite_existing, error);
+    if (error) return false;
+
+    for (const std::filesystem::path& atlas : source_atlases) {
+        const std::filesystem::path temp_atlas = directory / atlas.filename();
+        error.clear();
+        std::filesystem::copy_file(
+            atlas, temp_atlas,
+            std::filesystem::copy_options::overwrite_existing, error);
+        if (error) return false;
+        if (atlases_out != nullptr) atlases_out->push_back(temp_atlas);
+        const std::filesystem::path source_texture =
+            atlas.parent_path() / "player_fixture.png";
+        error.clear();
+        std::filesystem::copy_file(
+            source_texture, directory / source_texture.filename(),
+            std::filesystem::copy_options::overwrite_existing, error);
+    }
+    if (skeleton_out != nullptr) *skeleton_out = temp_skeleton;
+    return true;
+}
+
+/**
+ * @brief MAR-181 C7 -- a failed Open changes nothing, INCLUDING the shell's path.
+ *
+ * `save_project_file` writes `ShellState::project_path` while the agent save
+ * writes `project()->source_path`; the two agree today only because nothing ever
+ * moves the project. A shell that adopted the chosen path before knowing the
+ * open succeeded would leave the toolbar's Save writing to a file the session
+ * never loaded.
+ *
+ * `broken.marrow` is valid JSON naming a `.mskl` that does not exist -- exactly
+ * the shape `json::load_document` ACCEPTS and `load_project` REJECTS. The case
+ * therefore fails only if the shell adopts a project it could not materialize.
+ */
+bool validate_mar181_failed_open_preserves_shell(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "MAR-181 C7 requires a loaded project.\n";
+        return false;
+    }
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar181_c7";
+    std::filesystem::path temp_project;
+    std::filesystem::path temp_skeleton;
+    if (!seed_shell_project_copy(source_state, temp_root, &temp_project, &temp_skeleton)) {
+        std::cerr << "MAR-181 C7 could not seed a project copy.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = temp_project;
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-181 C7 could not load the seeded project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    std::string project_text;
+    std::string file_error;
+    if (!read_text_file(temp_project, &project_text, &file_error)) {
+        std::cerr << "MAR-181 C7: " << file_error << '\n';
+        return false;
+    }
+    const std::string skeleton_name = temp_skeleton.filename().string();
+    const std::size_t skeleton_position = project_text.find(skeleton_name);
+    if (skeleton_position == std::string::npos) {
+        std::cerr << "MAR-181 C7 could not find the skeleton reference to break.\n";
+        return false;
+    }
+    project_text.replace(
+        skeleton_position, skeleton_name.size(), "does_not_exist.mskl");
+    const std::filesystem::path broken_project = temp_root / "broken.marrow";
+    if (!write_text_file(broken_project, project_text, &file_error)) {
+        std::cerr << "MAR-181 C7: " << file_error << '\n';
+        return false;
+    }
+    // The premise of the case: the bytes PARSE. If they did not, C7 would be
+    // testing a JSON syntax error rather than an unresolvable cross-reference,
+    // and `load_project` would reject it for the wrong reason.
+    if (!marrow::runtime::json::load_document(broken_project).document.has_value()) {
+        std::cerr << "MAR-181 C7 requires broken.marrow to be VALID JSON -- the whole "
+                     "case is that json::load_document accepts what load_project "
+                     "rejects.\n";
+        return false;
+    }
+
+    const SessionSnapshot before = capture_session_snapshot(state);
+    const std::filesystem::path path_before = state.project_path;
+    const marrow::runtime::Skeleton* preview_before = state.preview_skeleton;
+    const marrow::runtime::AnimationState* animation_before = state.animation_state;
+
+    PendingFileApplication pending;
+    pending.action = FileAction::Open;
+    pending.path = broken_project;
+    state.pending_file_application = pending;
+    if (apply_pending_file_action(&state)) {
+        std::cerr << "MAR-181 C7: opening a project whose skeleton is missing must "
+                     "FAIL.\n";
+        return false;
+    }
+    if (state.error_message.empty() || state.status_message != "Project load failed") {
+        std::cerr << "MAR-181 C7: a failed Open must report an error and the load "
+                     "failure status; status was \"" << state.status_message << "\".\n";
+        return false;
+    }
+    if (state.project_path != path_before) {
+        std::cerr << "MAR-181 C7: a failed Open must NOT move the shell's project "
+                     "path. It moved to " << state.project_path
+                  << ", which would leave the toolbar's Save writing to a file the "
+                     "session never loaded.\n";
+        return false;
+    }
+    if (!(capture_session_snapshot(state) == before)) {
+        std::cerr << "MAR-181 C7: a failed Open must leave the six-value session "
+                     "snapshot bit-identical.\n";
+        return false;
+    }
+    if (state.preview_skeleton != preview_before ||
+        state.animation_state != animation_before ||
+        state.preview_skeleton == nullptr) {
+        std::cerr << "MAR-181 C7: a failed Open must leave the shell's cached preview "
+                     "pointers usable and unchanged.\n";
+        return false;
+    }
+
+    pending.path = temp_project;
+    state.pending_file_application = pending;
+    if (!apply_pending_file_action(&state)) {
+        std::cerr << "MAR-181 C7: opening the good project must succeed: "
+                  << state.error_message << '\n';
+        return false;
+    }
+    if (state.project_path != temp_project || state.session.dirty() ||
+        state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-181 C7: a successful Open must adopt the chosen path, land "
+                     "clean, and materialize a skeleton.\n";
+        return false;
+    }
+    if (state.status_message != "Opened " + temp_project.string()) {
+        std::cerr << "MAR-181 C7: a successful Open must report the opened path; "
+                     "status was \"" << state.status_message << "\".\n";
+        return false;
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(temp_root, ignored);
+    std::cout << "MAR-181 C7: an Open of valid JSON naming a missing skeleton fails, "
+                 "reports the load failure status, and leaves the shell's project "
+                 "path, the six-value session snapshot and the cached preview "
+                 "pointers untouched; the following Open of the good project adopts "
+                 "the chosen path and lands clean.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-181 C5 -- a cross-directory Save As moves the shell's path and
+ *        keeps every asset resolving.
+ *
+ * The `project_path` equality is design §1.3's divergence and nothing else in
+ * the suite checks it. The watch-list equality is MAR-180's identity-preserving
+ * rebase observed at the SHELL layer: `current_runtime_asset_paths` is rebuilt
+ * from `resolved_skeleton_path()` and each `resolved_atlas_paths()` entry, so
+ * recomputing it after the move is free and comparing it is a cheap check that
+ * the rebase did what it claims.
+ *
+ * Every "the project is good" clause reloads from disk via `load_project`.
+ * `validate_project_for_save` takes no base document and cannot resolve a
+ * cross-reference, so a ProjectSaveResult that is `ok` proves nothing, and
+ * `json::load_document` proves only that the bytes parse.
+ */
+bool validate_mar181_save_as_moves_the_shell_path(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "MAR-181 C5 requires a loaded project.\n";
+        return false;
+    }
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar181_c5";
+    std::error_code error;
+    std::filesystem::remove_all(temp_root, error);
+    const std::filesystem::path directory_a = temp_root / "a";
+    const std::filesystem::path directory_b = temp_root / "b";
+    std::filesystem::path temp_project;
+    if (!seed_shell_project_copy(source_state, directory_a, &temp_project, nullptr)) {
+        std::cerr << "MAR-181 C5 could not seed a project copy.\n";
+        return false;
+    }
+    error.clear();
+    std::filesystem::create_directories(directory_b, error);
+    if (error) {
+        std::cerr << "MAR-181 C5 could not create the destination directory.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = temp_project;
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-181 C5 could not load the seeded project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    const std::vector<std::filesystem::path> watch_before =
+        current_runtime_asset_paths(state);
+    const std::filesystem::path original_skeleton =
+        state.load_result.project->resolved_skeleton_path().lexically_normal();
+    std::vector<std::filesystem::path> original_atlases;
+    for (const std::filesystem::path& atlas :
+         state.load_result.project->resolved_atlas_paths()) {
+        original_atlases.push_back(atlas.lexically_normal());
+    }
+
+    const std::filesystem::path moved = directory_b / "moved.marrow";
+    if (!apply_save_as(&state, moved)) {
+        std::cerr << "MAR-181 C5: the cross-directory Save As must succeed: "
+                  << state.error_message << '\n';
+        return false;
+    }
+    if (state.project_path != moved) {
+        std::cerr << "MAR-181 C5: Save As must move the SHELL's project path to "
+                  << moved << "; it is " << state.project_path
+                  << ". The toolbar's Save writes ShellState::project_path, so a "
+                     "Save As that moved only the project's source_path would keep "
+                     "saving to the old file -- and, after MAR-180, rebase the "
+                     "references back to the old directory on the way.\n";
+        return false;
+    }
+    if (state.session.project() == nullptr ||
+        state.session.project()->source_path != moved) {
+        std::cerr << "MAR-181 C5: the session's source_path and the shell's "
+                     "project_path must AGREE after a Save As.\n";
+        return false;
+    }
+    if (state.project_dirty || state.session.dirty()) {
+        std::cerr << "MAR-181 C5: a successful Save As must land clean.\n";
+        return false;
+    }
+
+    const marrow::editor::ProjectLoadResult reloaded = marrow::editor::load_project(moved);
+    if (!reloaded || reloaded.project == nullptr || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-181 C5: the moved project must OPEN -- a passing save() "
+                     "proves nothing, because validate_project_for_save cannot "
+                     "resolve a cross-reference.\n";
+        return false;
+    }
+    if (reloaded.project->resolved_skeleton_path().lexically_normal() !=
+        original_skeleton) {
+        std::cerr << "MAR-181 C5: the moved project's skeleton must resolve to the "
+                     "ORIGINAL file " << original_skeleton << "; it resolves to "
+                  << reloaded.project->resolved_skeleton_path().lexically_normal()
+                  << ".\n";
+        return false;
+    }
+    const std::vector<std::filesystem::path> reloaded_atlases =
+        reloaded.project->resolved_atlas_paths();
+    if (reloaded_atlases.size() != original_atlases.size()) {
+        std::cerr << "MAR-181 C5: the moved project lost an atlas reference.\n";
+        return false;
+    }
+    for (std::size_t index = 0; index < original_atlases.size(); ++index) {
+        if (reloaded_atlases[index].lexically_normal() != original_atlases[index]) {
+            std::cerr << "MAR-181 C5: atlas " << index << " resolves to "
+                      << reloaded_atlases[index].lexically_normal() << " rather than "
+                      << original_atlases[index] << ".\n";
+            return false;
+        }
+    }
+
+    const std::vector<std::filesystem::path> watch_after =
+        current_runtime_asset_paths(state);
+    if (watch_after.size() != watch_before.size()) {
+        std::cerr << "MAR-181 C5: the runtime asset watch list changed SIZE across a "
+                     "Save As: " << join_paths(watch_before) << " -> "
+                  << join_paths(watch_after) << ".\n";
+        return false;
+    }
+    for (std::size_t index = 0; index < watch_before.size(); ++index) {
+        if (watch_before[index] != watch_after[index]) {
+            std::cerr << "MAR-181 C5: the runtime asset watch list is not "
+                         "element-wise equal across a Save As. MAR-180's rebase is "
+                         "identity-preserving, so entry " << index << " must still be "
+                      << watch_before[index] << "; it is " << watch_after[index]
+                      << ".\n";
+            return false;
+        }
+    }
+
+    if (!std::filesystem::exists(temp_project) ||
+        !marrow::editor::load_project(temp_project)) {
+        std::cerr << "MAR-181 C5: a Save As must leave the ORIGINAL project in place "
+                     "and still openable.\n";
+        return false;
+    }
+
+    error.clear();
+    std::filesystem::remove_all(temp_root, error);
+    std::cout << "MAR-181 C5: a cross-directory Save As moves ShellState::project_path "
+                 "and the session's source_path together, lands clean, produces a "
+                 "project that RELOADS from disk with every asset resolving to the "
+                 "original file, leaves the runtime asset watch list element-wise "
+                 "equal, and leaves the original project openable.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-181 C6 -- a failed Save As leaves the shell pointing where it was.
+ *
+ * The failure is INJECTED at the process-global atomic-rename seam -- the only
+ * thing between a fully written temporary and the destination -- so it is real,
+ * not simulated. The seam is shared with the settings writer, so it is scoped by
+ * RAII and no preference save happens inside it.
+ */
+bool validate_mar181_failed_save_as_preserves_shell_path(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "MAR-181 C6 requires a loaded project.\n";
+        return false;
+    }
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar181_c6";
+    std::error_code error;
+    std::filesystem::remove_all(temp_root, error);
+    const std::filesystem::path directory_a = temp_root / "a";
+    const std::filesystem::path directory_b = temp_root / "b";
+    std::filesystem::path project_a;
+    std::filesystem::path project_b;
+    if (!seed_shell_project_copy(source_state, directory_a, &project_a, nullptr) ||
+        !seed_shell_project_copy(source_state, directory_b, &project_b, nullptr)) {
+        std::cerr << "MAR-181 C6 could not seed the two project copies.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_a;
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-181 C6 could not load the seeded project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    auto transaction = state.session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "MAR-181 C6 note",
+        "mar181-c6",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!transaction || transaction.project() == nullptr) {
+        std::cerr << "MAR-181 C6 could not begin the seeding edit.\n";
+        return false;
+    }
+    transaction.project()->editor_metadata.notes += " mar181-c6";
+    if (!transaction.commit()) {
+        std::cerr << "MAR-181 C6 could not commit the seeding edit.\n";
+        return false;
+    }
+    update_project_dirty_state(&state);
+    if (!state.project_dirty || !state.session.dirty()) {
+        std::cerr << "MAR-181 C6 requires a dirty session before the Save As.\n";
+        return false;
+    }
+
+    std::string previous_bytes;
+    std::string file_error;
+    if (!read_text_file(project_b, &previous_bytes, &file_error)) {
+        std::cerr << "MAR-181 C6: " << file_error << '\n';
+        return false;
+    }
+    const std::filesystem::path path_before = state.project_path;
+
+    {
+        const ScopedRenameCallback rename_failure(
+            [](const std::filesystem::path&, const std::filesystem::path&) {
+                return std::make_error_code(std::errc::permission_denied);
+            });
+        if (apply_save_as(&state, project_b)) {
+            std::cerr << "MAR-181 C6: an injected rename failure must fail the "
+                         "Save As.\n";
+            return false;
+        }
+    }
+
+    if (state.project_path != path_before) {
+        std::cerr << "MAR-181 C6: a FAILED Save As must not move the shell's project "
+                     "path. It moved to " << state.project_path << " rather than "
+                     "staying at " << path_before << ".\n";
+        return false;
+    }
+    if (state.session.project() == nullptr ||
+        state.session.project()->source_path != path_before) {
+        std::cerr << "MAR-181 C6: a failed Save As must leave the session's "
+                     "source_path where it was.\n";
+        return false;
+    }
+    if (!state.project_dirty || !state.session.dirty()) {
+        std::cerr << "MAR-181 C6: a failed Save As must leave the session dirty.\n";
+        return false;
+    }
+    if (state.status_message != "Project save failed" || state.error_message.empty()) {
+        std::cerr << "MAR-181 C6: a failed Save As must report the save failure "
+                     "status; status was \"" << state.status_message << "\".\n";
+        return false;
+    }
+    std::string current_bytes;
+    if (!read_text_file(project_b, &current_bytes, &file_error) ||
+        current_bytes != previous_bytes) {
+        std::cerr << "MAR-181 C6: a failed Save As must leave the DESTINATION file "
+                     "byte-for-byte unchanged.\n";
+        return false;
+    }
+    if (!marrow::editor::load_project(project_b)) {
+        std::cerr << "MAR-181 C6: the preserved destination must still OPEN.\n";
+        return false;
+    }
+    if (!marrow::editor::load_project(project_a)) {
+        std::cerr << "MAR-181 C6: the source project must still OPEN.\n";
+        return false;
+    }
+
+    if (!apply_save_as(&state, project_b)) {
+        std::cerr << "MAR-181 C6: the Save As must succeed once the seam is "
+                     "released: " << state.error_message << '\n';
+        return false;
+    }
+    if (state.project_path != project_b || state.project_dirty ||
+        state.session.dirty()) {
+        std::cerr << "MAR-181 C6: the retried Save As must move the shell's path and "
+                     "land clean.\n";
+        return false;
+    }
+    if (!marrow::editor::load_project(project_b)) {
+        std::cerr << "MAR-181 C6: the newly saved project must OPEN.\n";
+        return false;
+    }
+
+    error.clear();
+    std::filesystem::remove_all(temp_root, error);
+    std::cout << "MAR-181 C6: an injected rename failure fails the Save As, leaves the "
+                 "shell's project path and the session's source_path where they were, "
+                 "keeps the session dirty, leaves the destination byte-for-byte "
+                 "unchanged and still openable, and the retry after releasing the "
+                 "seam moves the path and reloads from disk.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-181 C4 -- New writes nothing, starts dirty, and is only real after
+ *        a Save.
+ *
+ * `exists(target) == false` is checked against the FILESYSTEM, not a flag, so it
+ * can only hold if no code path wrote it. MAR-180 made `create` dirty-from-birth
+ * on purpose -- `saved_serialized_project` empty, `project_dirty` true -- and
+ * `reload_project` hardcoded `project_dirty = false`, which is correct for open
+ * and reload and WRONG for New. Reusing the reset block verbatim would paint the
+ * session clean over a file that does not exist, destroying exactly the warning
+ * MAR-180 built.
+ */
+bool validate_mar181_new_project_writes_nothing(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "MAR-181 C4 requires a loaded project.\n";
+        return false;
+    }
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar181_c4";
+    std::error_code error;
+    std::filesystem::remove_all(temp_root, error);
+    const std::filesystem::path base_directory = temp_root / "base";
+    const std::filesystem::path fresh_directory = temp_root / "fresh";
+    std::filesystem::path base_project;
+    if (!seed_shell_project_copy(source_state, base_directory, &base_project, nullptr)) {
+        std::cerr << "MAR-181 C4 could not seed the base project.\n";
+        return false;
+    }
+    std::filesystem::path fresh_skeleton;
+    std::vector<std::filesystem::path> fresh_atlases;
+    if (!seed_shell_asset_copy(
+            source_state, fresh_directory, &fresh_skeleton, &fresh_atlases) ||
+        fresh_atlases.empty()) {
+        std::cerr << "MAR-181 C4 could not seed the rig assets.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = base_project;
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-181 C4 could not load the base project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    const std::filesystem::path target = fresh_directory / "new_project.marrow";
+    if (std::filesystem::exists(target)) {
+        std::cerr << "MAR-181 C4: the target must not exist before New runs.\n";
+        return false;
+    }
+    if (!validate_new_project_sources(fresh_skeleton, fresh_atlases).empty()) {
+        std::cerr << "MAR-181 C4: the seeded rig must pass New's validation pass.\n";
+        return false;
+    }
+
+    PendingFileApplication pending;
+    pending.action = FileAction::New;
+    pending.path = target;
+    pending.skeleton_path = fresh_skeleton;
+    pending.atlas_paths = fresh_atlases;
+    state.pending_file_application = pending;
+    if (!apply_pending_file_action(&state)) {
+        std::cerr << "MAR-181 C4: New must succeed on a rig that loads: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    if (std::filesystem::exists(target)) {
+        std::cerr << "MAR-181 C4: New must write NOTHING. " << target
+                  << " exists on disk, so some code path saved a project the user "
+                     "has not asked to save.\n";
+        return false;
+    }
+    if (!state.session.dirty() || !state.project_dirty) {
+        std::cerr << "MAR-181 C4: a New project must be dirty from birth -- both the "
+                     "session's dirty() and the shell's project_dirty. session.dirty()="
+                  << (state.session.dirty() ? "true" : "false")
+                  << " project_dirty=" << (state.project_dirty ? "true" : "false")
+                  << ". A clean flag over a file that does not exist is the exact "
+                     "warning MAR-180 built and reload_project's hardcoded "
+                     "project_dirty=false would destroy.\n";
+        return false;
+    }
+    if (state.session.undo_count() != 0U || state.session.redo_count() != 0U) {
+        std::cerr << "MAR-181 C4: a New project must start with empty history; "
+                     "undo=" << state.session.undo_count()
+                  << " redo=" << state.session.redo_count() << ".\n";
+        return false;
+    }
+    if (state.project_path != target) {
+        std::cerr << "MAR-181 C4: New must adopt the chosen target as the shell's "
+                     "project path.\n";
+        return false;
+    }
+    if (state.load_result.skeleton_data == nullptr || state.preview_skeleton == nullptr) {
+        std::cerr << "MAR-181 C4: New must materialize a rig and bind the preview.\n";
+        return false;
+    }
+    if (state.status_message != "New project (unsaved): " + target.string()) {
+        std::cerr << "MAR-181 C4: New must report that the project is unsaved; status "
+                     "was \"" << state.status_message << "\".\n";
+        return false;
+    }
+
+    if (!save_project_file(&state, true)) {
+        std::cerr << "MAR-181 C4: the explicit Save must succeed: "
+                  << state.error_message << '\n';
+        return false;
+    }
+    if (!std::filesystem::exists(target)) {
+        std::cerr << "MAR-181 C4: the explicit Save must create the target.\n";
+        return false;
+    }
+    if (state.session.dirty() || state.project_dirty) {
+        std::cerr << "MAR-181 C4: the explicit Save must clear the dirty flag.\n";
+        return false;
+    }
+    const marrow::editor::ProjectLoadResult reloaded =
+        marrow::editor::load_project(target);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-181 C4: the saved New project must RELOAD from disk with a "
+                     "materialized skeleton -- a passing save() proves nothing.\n";
+        return false;
+    }
+
+    // --- The failure half: a New whose skeleton does not exist. -------------
+    const SessionSnapshot before = capture_session_snapshot(state);
+    const std::filesystem::path path_before = state.project_path;
+    const std::filesystem::path missing_skeleton =
+        fresh_directory / "does_not_exist.mskl";
+    if (validate_new_project_sources(missing_skeleton, fresh_atlases).empty()) {
+        std::cerr << "MAR-181 C4: New's validation pass must reject a skeleton that "
+                     "does not exist, BEFORE a session is constructed.\n";
+        return false;
+    }
+    PendingFileApplication broken = pending;
+    broken.skeleton_path = missing_skeleton;
+    broken.path = fresh_directory / "second_project.marrow";
+    state.pending_file_application = broken;
+    if (apply_pending_file_action(&state)) {
+        std::cerr << "MAR-181 C4: a New against a missing rig must FAIL.\n";
+        return false;
+    }
+    if (state.error_message.empty() || state.status_message != "New project failed") {
+        std::cerr << "MAR-181 C4: a failed New must report an error and the New "
+                     "failure status; status was \"" << state.status_message << "\".\n";
+        return false;
+    }
+    if (state.project_path != path_before) {
+        std::cerr << "MAR-181 C4: a failed New must not move the shell's project "
+                     "path.\n";
+        return false;
+    }
+    if (!(capture_session_snapshot(state) == before)) {
+        std::cerr << "MAR-181 C4: a failed New must leave the six-value session "
+                     "snapshot bit-identical.\n";
+        return false;
+    }
+    if (!std::filesystem::exists(target) ||
+        std::filesystem::exists(broken.path)) {
+        std::cerr << "MAR-181 C4: a failed New must touch no file on disk.\n";
+        return false;
+    }
+
+    error.clear();
+    std::filesystem::remove_all(temp_root, error);
+    std::cout << "MAR-181 C4: New writes NOTHING to disk, lands dirty-from-birth in "
+                 "both the session and the shell with empty history and the chosen "
+                 "target as the shell's path, becomes a real file only after an "
+                 "explicit Save that RELOADS from disk, and a New against a missing "
+                 "rig fails without moving the path, the six-value snapshot, or any "
+                 "file.\n";
+    return true;
+}
+
+namespace {
+
+/**
+ * @brief How ImGui derives the id of the widget a label names.
+ *
+ * MEASURED against imgui_widgets.cpp, not assumed. `BeginMenuBar` pushes
+ * `"##MenuBar"` onto the id stack (imgui.cpp), so a menu-bar menu's id is
+ * seeded through it. `MenuItemEx` does `PushID(label)` and then submits
+ * `Selectable("")`, so a menu item's id is the hash of the EMPTY string seeded
+ * by the label -- `window->GetID(label)` alone never matches one. An ordinary
+ * button or input in a modal body has no extra push.
+ */
+enum class ProbeIdKind {
+    Direct,
+    MenuBarMenu,
+    MenuItem,
+};
+
+/** @brief One label the sweep must find, and where it found it. */
+struct MenuProbe {
+    const char* label;
+    ProbeIdKind kind{ProbeIdKind::Direct};
+    ImGuiID id{0};
+    ImVec2 position{0.0f, 0.0f};
+    bool found{false};
+};
+
+ImGuiID probe_id(const ImGuiWindow& window, const MenuProbe& probe) {
+    switch (probe.kind) {
+        case ProbeIdKind::MenuBarMenu:
+            return ImHashStr(
+                probe.label, 0, ImHashStr("##MenuBar", 0, window.ID));
+        case ProbeIdKind::MenuItem:
+            return ImHashStr("", 0, ImHashStr(probe.label, 0, window.ID));
+        case ProbeIdKind::Direct:
+            break;
+    }
+    return ImHashStr(probe.label, 0, window.ID);
+}
+
+} // namespace
+
+/**
+ * @brief MAR-181 C9 -- the File menu items and the chooser exist, and a real
+ *        mouse reaches them.
+ *
+ * This is the one observation C4-C8 cannot make: they call the shell seams
+ * directly and would ALL pass with every menu item deleted. A widget that is not
+ * emitted cannot own an id equal to `window->GetID(label)`, so a label that is
+ * never hovered at any scanned position is a FAILURE, never a skip.
+ */
+bool validate_mar181_file_menu_mouse_smoke(const std::filesystem::path& project_path) {
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) || state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-181 C9 could not load " << project_path << ".\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool macos_behaviors_before = io.ConfigMacOSXBehaviors;
+    io.ConfigMacOSXBehaviors = false;
+
+    const auto render_frame = [&]() {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        bool reload_requested = false;
+        (void)draw_menu_bar(&reload_requested, &state);
+        ImGui::Render();
+    };
+
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        io.ConfigMacOSXBehaviors = macos_behaviors_before;
+        return false;
+    };
+
+    /** @brief Sweeps a real mouse across one window and records what it hovered. */
+    const auto sweep = [&](std::vector<MenuProbe>& probes,
+                           const char* window_title,
+                           const char* case_label) -> bool {
+        ImGuiWindow* window = ImGui::FindWindowByName(window_title);
+        if (window == nullptr) {
+            std::cerr << "MAR-181 C9 " << case_label << ": \"" << window_title
+                      << "\" was never submitted.\n";
+            return false;
+        }
+        for (MenuProbe& probe : probes) {
+            probe.id = probe_id(*window, probe);
+            probe.found = false;
+        }
+        // An ImGuiWindowFlags_AlwaysAutoResize window is submitted at a stub size
+        // on its first frame and only reaches its content size on the next one.
+        // Measured: the chooser's Rect() one frame after it opens is
+        // (452,259)-(468,296), a 16x37 stub, so a sweep that captured bounds
+        // immediately would scan a sliver and find nothing.
+        for (int settle = 0; settle < 3; ++settle) {
+            render_frame();
+        }
+        window = ImGui::FindWindowByName(window_title);
+        if (window == nullptr) {
+            std::cerr << "MAR-181 C9 " << case_label << ": lost \"" << window_title
+                      << "\" while it settled.\n";
+            return false;
+        }
+        // The window's FULL rect, not InnerClipRect: a menu bar's client area is
+        // empty (measured: ##MainMenuBar's InnerClipRect is (0,21)-(1440,21), a
+        // zero-height band), because the bar itself lives in MenuBarRect.
+        const ImRect bounds = window->Rect();
+        bool remaining = true;
+        for (float y = bounds.Min.y + 2.0f; y <= bounds.Max.y - 2.0f && remaining;
+             y += 4.0f) {
+            for (float x = bounds.Min.x + 4.0f; x <= bounds.Max.x - 2.0f && remaining;
+                 x += 12.0f) {
+                io.AddMousePosEvent(x, y);
+                render_frame();
+                const ImGuiContext* context = ImGui::GetCurrentContext();
+                const ImGuiID hovered = context != nullptr ? context->HoveredId : 0U;
+                if (hovered == 0U) continue;
+                remaining = false;
+                for (MenuProbe& probe : probes) {
+                    if (!probe.found && probe.id == hovered) {
+                        probe.found = true;
+                        probe.position = ImVec2(x, y);
+                    }
+                    if (!probe.found) remaining = true;
+                }
+            }
+        }
+        bool complete = true;
+        for (const MenuProbe& probe : probes) {
+            if (!probe.found) {
+                std::cerr << "MAR-181 C9 " << case_label << ": \"" << window_title
+                          << "\" never emitted a widget with the id of \""
+                          << probe.label
+                          << "\". A real mouse swept every position in the window and "
+                             "HoveredId never equalled window->GetID(\"" << probe.label
+                          << "\"), so the widget is absent.\n";
+                complete = false;
+            }
+        }
+        return complete;
+    };
+
+    const auto click_position = [&](ImVec2 position) {
+        io.AddMousePosEvent(position.x, position.y);
+        render_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_frame();
+    };
+
+    render_frame();
+    render_frame();
+
+    // --- Step 1: reach the File menu itself. --------------------------------
+    std::vector<MenuProbe> bar_probes{{"File", ProbeIdKind::MenuBarMenu}};
+    if (!sweep(bar_probes, "##MainMenuBar", "step 1 (menu bar)")) {
+        return fail("");
+    }
+    click_position(bar_probes[0].position);
+
+    // --- Step 2: MEASURE the opened menu popup's ImGui window name. ---------
+    const ImGuiContext* context = ImGui::GetCurrentContext();
+    if (context == nullptr || context->OpenPopupStack.Size == 0) {
+        return fail(
+            "MAR-181 C9 step 2: clicking \"File\" opened no popup, so the menu is "
+            "undrivable under this harness.\n");
+    }
+    const ImGuiWindow* menu_window =
+        context->OpenPopupStack[context->OpenPopupStack.Size - 1].Window;
+    if (menu_window == nullptr) {
+        return fail(
+            "MAR-181 C9 step 2: the File menu popup has no window yet.\n");
+    }
+    const std::string menu_window_name = menu_window->Name;
+    std::cout << "MAR-181 C9 measured: the open File menu popup's ImGui window name is "
+                 "\"" << menu_window_name << "\".\n";
+
+    // --- Step 3: every File item is present and hoverable. ------------------
+    std::vector<MenuProbe> menu_probes{
+        {"New Project...", ProbeIdKind::MenuItem},
+        {"Open Project...", ProbeIdKind::MenuItem},
+        {"Save", ProbeIdKind::MenuItem},
+        {"Save As...", ProbeIdKind::MenuItem},
+        {"Reload Project", ProbeIdKind::MenuItem},
+        {"Quit", ProbeIdKind::MenuItem}};
+    if (!sweep(menu_probes, menu_window_name.c_str(), "step 3 (File menu)")) {
+        return fail("");
+    }
+
+    // --- Step 4: a real click on Open Project... raises the chooser. --------
+    click_position(menu_probes[1].position);
+    const ImGuiWindow* chooser = ImGui::FindWindowByName(kFilePathModal);
+    if (chooser == nullptr || !chooser->Active) {
+        return fail(
+            "MAR-181 C9 step 4: a real click on \"Open Project...\" did not open \"" +
+            std::string(kFilePathModal) +
+            "\". The click never reached begin_file_action, or the modal is not "
+            "drawn at root scope -- ImGui::OpenPopup inside BeginMenu hashes "
+            "against the MENU window's id stack and cannot open a root-level "
+            "modal.\n");
+    }
+    if (!state.file_path_request.has_value()) {
+        return fail(
+            "MAR-181 C9 step 4: the chooser is open but ShellState carries no "
+            "request, so MAR-182 could not observe its lifetime.\n");
+    }
+
+    // --- Step 5: Cancel closes it and clears the request. -------------------
+    const SessionSnapshot before = capture_session_snapshot(state);
+    std::vector<MenuProbe> modal_probes{{"Cancel", ProbeIdKind::Direct}};
+    if (!sweep(modal_probes, kFilePathModal, "step 5 (chooser)")) {
+        return fail("");
+    }
+    click_position(modal_probes[0].position);
+    // ImGui::CloseCurrentPopup() runs inside the frame the window was already
+    // submitted in, so `Active` only falls on the following NewFrame.
+    render_frame();
+    render_frame();
+    const ImGuiWindow* chooser_after = ImGui::FindWindowByName(kFilePathModal);
+    if (chooser_after != nullptr && chooser_after->Active) {
+        return fail("MAR-181 C9 step 5: Cancel did not close the chooser.\n");
+    }
+    if (state.file_path_request.has_value()) {
+        return fail(
+            "MAR-181 C9 step 5: Cancel must clear ShellState::file_path_request -- "
+            "that clearing is exactly how MAR-182 sees a cancelled save path.\n");
+    }
+    if (!(capture_session_snapshot(state) == before)) {
+        return fail(
+            "MAR-181 C9 step 5: cancelling the chooser must not touch the "
+            "session.\n");
+    }
+
+    render_frame();
+    io.ConfigMacOSXBehaviors = macos_behaviors_before;
+    std::cout << "MAR-181 C9: a real mouse reaches File in the menu bar, every one of "
+                 "New Project.../Open Project.../Save/Save As.../Reload Project/Quit "
+                 "in the opened menu, and a click on Open Project... raises \""
+              << kFilePathModal
+              << "\" at root scope whose Cancel closes it and clears the request "
+                 "without touching the session.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-181 C10 -- Ctrl+S saves, and does not fire while typing.
+ *
+ * `handle_project_history_shortcuts` returns early on `io.WantTextInput`, so
+ * placing the Ctrl+S handler ABOVE that guard would let a project save while the
+ * user is typing a filename into the chooser. The second half is what catches
+ * that; the first half still passes under the inversion.
+ */
+bool validate_mar181_save_shortcut_smoke(const std::filesystem::path& project_path) {
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar181_c10";
+    std::filesystem::path temp_project;
+    {
+        ShellState source;
+        source.project_path = project_path;
+        if (!reload_project(&source)) {
+            std::cerr << "MAR-181 C10 could not load " << project_path << ".\n";
+            return false;
+        }
+        if (!seed_shell_project_copy(source, temp_root, &temp_project, nullptr)) {
+            std::cerr << "MAR-181 C10 could not seed a project copy.\n";
+            return false;
+        }
+    }
+
+    ShellState state;
+    state.project_path = temp_project;
+    if (!reload_project(&state) || state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-181 C10 could not load the seeded project.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    ImGuiIO& io = ImGui::GetIO();
+    // ImGui swaps Cmd and Ctrl at the EVENT layer when io.ConfigMacOSXBehaviors
+    // is set, which is the default on Apple (measured by MAR-179 C5). The widget
+    // under test is the guard ORDERING, not the platform's modifier mapping.
+    const bool macos_behaviors_before = io.ConfigMacOSXBehaviors;
+    io.ConfigMacOSXBehaviors = false;
+
+    const auto render_frame = [&]() {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        handle_project_history_shortcuts(&state);
+        bool reload_requested = false;
+        (void)draw_menu_bar(&reload_requested, &state);
+        ImGui::Render();
+    };
+
+    const auto fail = [&](const std::string& message) {
+        std::cerr << message;
+        io.ConfigMacOSXBehaviors = macos_behaviors_before;
+        std::error_code ignored;
+        std::filesystem::remove_all(temp_root, ignored);
+        return false;
+    };
+
+    const auto send_ctrl_s = [&]() {
+        io.AddKeyEvent(ImGuiMod_Ctrl, true);
+        render_frame();
+        io.AddKeyEvent(ImGuiKey_S, true);
+        render_frame();
+        io.AddKeyEvent(ImGuiKey_S, false);
+        io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        render_frame();
+    };
+
+    const auto dirty_the_project = [&](const char* note) {
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "MAR-181 C10 note",
+            "mar181-c10",
+            false,
+            marrow::editor::EditImpact::Project});
+        if (!transaction || transaction.project() == nullptr) return false;
+        transaction.project()->editor_metadata.notes += note;
+        if (!transaction.commit()) return false;
+        update_project_dirty_state(&state);
+        return state.session.dirty();
+    };
+
+    render_frame();
+    render_frame();
+
+    // --- Half 1: Ctrl+S saves. ---------------------------------------------
+    if (!dirty_the_project(" c10-a")) {
+        return fail("MAR-181 C10 could not dirty the project.\n");
+    }
+    send_ctrl_s();
+    if (state.session.dirty()) {
+        return fail(
+            "MAR-181 C10 half 1: Ctrl+S did not save -- the session is still "
+            "dirty.\n");
+    }
+    if (!marrow::editor::load_project(temp_project)) {
+        return fail(
+            "MAR-181 C10 half 1: the Ctrl+S-saved project must RELOAD from disk.\n");
+    }
+
+    // --- Half 2: Ctrl+S does not fire while a text field has focus. --------
+    begin_file_action(&state, FileAction::SaveAs);
+    render_frame();
+    render_frame();
+    ImGuiWindow* chooser = ImGui::FindWindowByName(kFilePathModal);
+    if (chooser == nullptr || !chooser->Active) {
+        return fail(
+            "MAR-181 C10 half 2 needs the chooser open to own a focused text "
+            "field.\n");
+    }
+    const ImGuiID name_field = chooser->GetID("Name");
+    bool focused = false;
+    for (float y = chooser->InnerClipRect.Min.y + 2.0f;
+         y <= chooser->InnerClipRect.Max.y - 2.0f && !focused;
+         y += 4.0f) {
+        for (float x = chooser->InnerClipRect.Min.x + 4.0f;
+             x <= chooser->InnerClipRect.Max.x - 2.0f && !focused;
+             x += 12.0f) {
+            io.AddMousePosEvent(x, y);
+            render_frame();
+            const ImGuiContext* context = ImGui::GetCurrentContext();
+            if (context == nullptr || context->HoveredId != name_field) continue;
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+            render_frame();
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+            render_frame();
+            focused = io.WantTextInput;
+        }
+    }
+    if (!focused) {
+        return fail(
+            "MAR-181 C10 half 2: a real click never focused the chooser's Name "
+            "field, so io.WantTextInput never became true and the guard under test "
+            "was never reached.\n");
+    }
+    if (!dirty_the_project(" c10-b")) {
+        return fail("MAR-181 C10 half 2 could not dirty the project.\n");
+    }
+    send_ctrl_s();
+    if (!state.session.dirty()) {
+        return fail(
+            "MAR-181 C10 half 2: Ctrl+S fired while the chooser's Name field had "
+            "keyboard focus. The handler must sit BELOW "
+            "handle_project_history_shortcuts' io.WantTextInput guard, or typing a "
+            "filename saves the project.\n");
+    }
+
+    // Leave the context clean for the cases that follow.
+    state.file_path_request.reset();
+    render_frame();
+    render_frame();
+    io.ConfigMacOSXBehaviors = macos_behaviors_before;
+    std::error_code ignored;
+    std::filesystem::remove_all(temp_root, ignored);
+    std::cout << "MAR-181 C10: Ctrl+S saves a dirty project to a file that RELOADS "
+                 "from disk, and the same chord with the chooser's Name field focused "
+                 "leaves the session dirty because the handler sits below the "
+                 "io.WantTextInput guard.\n";
+    return true;
+}
+
+
+/**
+ * @brief MAR-181 C11 -- a deferred file action actually reaches the SMOKE's
+ *        frame body.
+ *
+ * `shell_main.cpp` and `shell_smoke_frames.cpp` carry hand-maintained duplicate
+ * frame bodies. Deleting `apply_pending_file_action` from the smoke's copy
+ * leaves a New/Open that works interactively and is invisible to every test --
+ * MEASURED: with that one line removed, C4-C10 all still pass, because they
+ * drive the UI-free seam directly. This case is the only one that observes the
+ * wiring itself.
+ *
+ * The armed action deliberately FAILS (it names a project that does not exist)
+ * so that consuming it perturbs nothing: `EditorSession::open` is atomic, so the
+ * session, the runtime and every cached pointer are identical afterwards. What
+ * changes is only the bookkeeping this case reads.
+ */
+bool validate_mar181_arm_deferred_action_for_frame_body(ShellState* state) {
+    PendingFileApplication pending;
+    pending.action = FileAction::Open;
+    pending.path = state->project_path.parent_path() /
+        "mar181_absent_project.marrow";
+    state->pending_file_application = pending;
+    return true;
+}
+
+bool validate_mar181_frame_body_applied_pending(const ShellState& state) {
+    if (state.pending_file_application.has_value()) {
+        std::cerr << "MAR-181 C11: the headless smoke's frame body never called "
+                     "apply_pending_file_action -- a deferred action armed before "
+                     "the frames was still pending after them. src/editor/"
+                     "shell_smoke_frames.cpp and src/editor/shell_main.cpp are "
+                     "hand-maintained duplicate frame bodies; the smoke's copy is "
+                     "missing the call, so every New and Open in this build is "
+                     "untested.\n";
+        return false;
+    }
+    // The frame body keeps running after the loop and overwrites status_message
+    // (measured: it ends at "Edited key easing"), so the surviving assertion is
+    // the one that matters anyway -- the failed Open must not have moved the
+    // shell's path, end to end through the real frame body.
+    if (state.project_path.filename() == "mar181_absent_project.marrow") {
+        std::cerr << "MAR-181 C11: the frame body adopted a project that does not "
+                     "exist.\n";
+        return false;
+    }
+    std::cout << "MAR-181 C11: a file action armed before the headless frames is "
+                 "consumed by the smoke's OWN frame body without moving the shell's "
+                 "project path, so the duplicate-frame-body wiring is observed "
+                 "rather than assumed.\n";
+    return true;
+}
+
 
 bool validate_shell_foundation_smoke(
     ShellState& shell_state,
@@ -1696,6 +2952,31 @@ bool validate_shell_foundation_smoke(
         return false;
     }
     if (!validate_mar180_failed_hot_reload_shell_coherence(shell_state)) {
+        return false;
+    }
+    if (!validate_mar181_path_resolution_smoke()) {
+        return false;
+    }
+    if (!validate_mar181_new_project_writes_nothing(shell_state)) {
+        return false;
+    }
+    if (!validate_mar181_save_as_moves_the_shell_path(shell_state)) {
+        return false;
+    }
+    if (!validate_mar181_failed_save_as_preserves_shell_path(shell_state)) {
+        return false;
+    }
+    if (!validate_mar181_failed_open_preserves_shell(shell_state)) {
+        return false;
+    }
+    if (!validate_mar181_save_shortcut_smoke(options.project_path)) {
+        return false;
+    }
+    if (!validate_mar181_file_menu_mouse_smoke(options.project_path)) {
+        return false;
+    }
+    // C11 arms here and is asserted after render_headless_smoke_frames.
+    if (!validate_mar181_arm_deferred_action_for_frame_body(&shell_state)) {
         return false;
     }
     if (!validate_mar180_failed_shell_save_preserves_file(shell_state)) {

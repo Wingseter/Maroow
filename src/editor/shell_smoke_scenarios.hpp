@@ -14,6 +14,15 @@ bool validate_parameter_mode_shell_smoke(
 bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state);
 bool validate_mar180_failed_hot_reload_shell_coherence(const ShellState& source_state);
 bool validate_mar180_failed_shell_save_preserves_file(const ShellState& source_state);
+bool validate_mar181_path_resolution_smoke();
+bool validate_mar181_new_project_writes_nothing(const ShellState& source_state);
+bool validate_mar181_save_as_moves_the_shell_path(const ShellState& source_state);
+bool validate_mar181_failed_save_as_preserves_shell_path(const ShellState& source_state);
+bool validate_mar181_failed_open_preserves_shell(const ShellState& source_state);
+bool validate_mar181_file_menu_mouse_smoke(const std::filesystem::path& project_path);
+bool validate_mar181_save_shortcut_smoke(const std::filesystem::path& project_path);
+bool validate_mar181_arm_deferred_action_for_frame_body(ShellState* state);
+bool validate_mar181_frame_body_applied_pending(const ShellState& state);
 bool validate_animation_catalog_smoke(const std::filesystem::path& project_path);
 bool validate_animation_duration_shell_smoke(
     const std::filesystem::path& project_path);

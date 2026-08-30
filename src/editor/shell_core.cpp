@@ -541,34 +541,14 @@ bool rebuild_project_runtime(ShellState* state) {
     return true;
 }
 
-bool reload_project(ShellState* state) {
-    if (state == nullptr) return false;
-    if (authoring_gesture_active(*state)) {
-        state->status_message = "Finish the active edit before reloading";
-        return false;
-    }
-
-    const std::string previous_animation_name = state->selected_animation_name;
-    const double previous_timeline_time = state->timeline_time_seconds;
-    const bool previous_timeline_loop = state->timeline_loop;
-    const bool previous_timeline_playing = state->timeline_playing;
-
-    const bool reload_current_project =
-        state->session.has_project() && state->session.project() != nullptr &&
-        state->session.project()->source_path == state->project_path;
-    const marrow::editor::ProjectLoadResult attempted_load = reload_current_project
-        ? state->session.reload()
-        : state->session.open(state->project_path);
-    if (!attempted_load) {
-        state->status_message = "Project load failed";
-        if (attempted_load.error.has_value()) {
-            state->error_message = attempted_load.error->format();
-        } else {
-            state->error_message = "Unknown project load failure.";
-        }
-        return false;
-    }
-
+void adopt_session_project_into_shell(
+    ShellState* state,
+    const std::string& previous_animation_name,
+    double previous_timeline_time,
+    bool previous_timeline_loop,
+    bool previous_timeline_playing,
+    bool restore_transient_playback,
+    bool project_is_clean) {
     // A source adoption invalidates the screen-space rectangle captured by an
     // in-flight viewport box gesture, even when every selected identity survives.
     state->viewport_ffd_selection.reset();
@@ -589,7 +569,7 @@ bool reload_project(ShellState* state) {
     state->preview_speed = kDefaultPreviewSpeed;
     state->pending_edit_action.reset();
     
-    state->project_dirty = false;
+    state->project_dirty = !project_is_clean;
     state->saved_project_snapshot.clear();
     state->error_message.clear();
 
@@ -619,7 +599,7 @@ bool reload_project(ShellState* state) {
         state->selected_animation_name = animations.front().name;
     }
     normalize_state_preview_settings(state);
-    if (reload_current_project) {
+    if (restore_transient_playback) {
         sync_shell_from_editor_session(state);
     } else if (!state->selected_animation_name.empty()) {
         state->timeline_time_seconds = std::clamp(
@@ -640,7 +620,44 @@ bool reload_project(ShellState* state) {
     reconcile_hierarchy_anchor_to_runtime(
         state,
         *state->load_result.skeleton_data);
+}
 
+bool reload_project(ShellState* state) {
+    if (state == nullptr) return false;
+    if (authoring_gesture_active(*state)) {
+        state->status_message = "Finish the active edit before reloading";
+        return false;
+    }
+
+    const std::string previous_animation_name = state->selected_animation_name;
+    const double previous_timeline_time = state->timeline_time_seconds;
+    const bool previous_timeline_loop = state->timeline_loop;
+    const bool previous_timeline_playing = state->timeline_playing;
+
+    const bool reload_current_project =
+        state->session.has_project() && state->session.project() != nullptr &&
+        state->session.project()->source_path == state->project_path;
+    const marrow::editor::ProjectLoadResult attempted_load = reload_current_project
+        ? state->session.reload()
+        : state->session.open(state->project_path);
+    if (!attempted_load) {
+        state->status_message = "Project load failed";
+        if (attempted_load.error.has_value()) {
+            state->error_message = attempted_load.error->format();
+        } else {
+            state->error_message = "Unknown project load failure.";
+        }
+        return false;
+    }
+
+    adopt_session_project_into_shell(
+        state,
+        previous_animation_name,
+        previous_timeline_time,
+        previous_timeline_loop,
+        previous_timeline_playing,
+        /*restore_transient_playback=*/reload_current_project,
+        /*project_is_clean=*/true);
     return true;
 }
 

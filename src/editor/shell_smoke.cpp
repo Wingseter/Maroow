@@ -142,7 +142,8 @@ int run_headless_smoke(const Options& options) {
         validate_shell_foundation_smoke(shell_state, options) &&
         validate_viewport_selection_smoke(shell_state) &&
         validate_timeline_project_smoke(shell_state) &&
-        render_headless_smoke_frames(shell_state, options, io);
+        render_headless_smoke_frames(shell_state, options, io) &&
+        validate_mar181_frame_body_applied_pending(shell_state);
 
     ImGui::DestroyContext();
     return passed ? 0 : 1;

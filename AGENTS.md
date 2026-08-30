@@ -45,6 +45,7 @@
 - Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Atomic project save, cross-directory Save As rebasing, history rebasing, session `create`/`close`, and failure-safe runtime-source adoption (S1-S10): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Shell hot-reload failure coherence and save-failure preservation (C2, C3): `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Core File path workflows -- New/Open/Save/Save As through the dependency-free ImGui path modal, path-resolution rules, failed-Open and failed-Save-As shell preservation, `Ctrl+S` under the text-input guard, the mouse-driven File menu, and the deferred-action wiring of the smoke's own frame body (C4-C11): `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
@@ -277,6 +278,113 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-181 Core File Path Workflows Validation Results
+
+Validated 2026-08-30. MAR-181 is the shell layer on top of MAR-180's primitives:
+four File-menu items, two dependency-free ImGui modals, one pure refactor and one
+shortcut. It adds **no model-layer primitive**, so `marrow_project_smoke` carries
+none of the new coverage and `marrow_editor_shell` carries all of it. **No
+`.marrow` schema change** — proved empirically, not asserted: the same loaded
+fixture saved through MAR-181's new Save As seam and through the pre-existing
+`save_project_file` seam produces **key sets that are identical, 56 keys to 56,
+with zero keys on either side only**. `.mskl` v1, `.mbin` v2 and C ABI v1 are
+untouched (`git diff --stat` on `include/marrow/c/`, `src/c/`,
+`include/marrow/runtime/` is empty), as are `project.cpp`, `session.cpp`,
+`atomic_file_write.*` and `preferences.cpp`. The registry is unchanged at 64,
+proved by an empty `git diff --stat` over `agent_dispatch.cpp`,
+`agent_handlers_*.cpp`, `agent_dispatch_smoke.cpp` and `tools/`.
+
+### What was measured before any code was written
+
+| Claim | Measured |
+|---|---|
+| Registry rows / split | **64**, split **39 edit / 12 inspection / 10 management / 3 validation** |
+| `!= 64U` guards | **10** — `shell_smoke_constraints.cpp:147,676`; `shell_smoke_graph.cpp:148,636,1558,2128,3142,3957,4603`; `shell_smoke_timeline.cpp:3697`, each with a message one line below |
+| `std::array<OperationExpectation, 64>` | **1**, `agent_dispatch_smoke.cpp:39` |
+| Python `== 64` assertions | **2**, `test_client.py:53,55` |
+| File menu contents | Exactly two items: `Reload Project` (`:714-720`), `Quit` (`:721-723`). New/Open/Save/Save As **absent from every surface** |
+| `EditorSession::create` callers outside `session.cpp` | **zero** |
+| File-dialog capability anywhere in the tree | **one hit, and it is prose** (`docs/root1/research-windowing-glfw-vs-sdl3.md:27`). In-ImGui modals are therefore required, not preferred |
+| `saved_project_snapshot` | 1 declaration, 3 writes, **0 reads** — still 4 lines total after MAR-181, which adds no fourth write |
+| Two frame bodies | `shell_main.cpp:611` and `shell_smoke_frames.cpp:124`, hand-maintained duplicates |
+
+### Result
+
+| Check | Evidence | Status |
+|---|---|---|
+| Task 1's pure-refactor gate | `adopt_session_project_into_shell` extracted from `reload_project`, then `git diff --stat -- src/editor/shell_smoke_*.cpp src/samples/*.cpp src/tests/` was **empty**, with `ctest -L editor` 12/12 green. The extraction's whole claim is "nothing changed", and the ~40 existing smokes that call `reload_project` are a better witness than any new test | PASS |
+| C4 New writes nothing | `exists(target)` is **false** after New and true only after an explicit Save; the session and shell are both dirty from birth; history empty; the saved file **RELOADS** via `load_project` | PASS |
+| C5 Save As moves the shell path | `project_path` and `project()->source_path` agree at the new location; the moved project **RELOADS** with every asset resolving to the original file; the runtime asset watch list is **element-wise equal** across the move | PASS |
+| C6 failed Save As | Injected `permission_denied` at the process-global rename seam under RAII: path unmoved on both the shell and the session, session still dirty, destination byte-identical and still openable, retry succeeds and reloads | PASS |
+| C7 failed Open | Valid JSON naming a missing `.mskl`: `project_path` unmoved, six-value snapshot bit-identical, cached preview pointers unchanged and non-null | PASS |
+| C8 path resolution | 11 rows against `resolve_choice`, each asserting the path **and** acceptance | PASS |
+| C9 File menu by real mouse | A real mouse reaches `File`, then all six menu items, then the chooser and its Cancel | PASS |
+| C10 `Ctrl+S` | Saves a dirty project to a file that reloads; the same chord with the chooser's `Name` field focused leaves it dirty | PASS |
+| C11 deferred action reaches the smoke's frame body | Added because inversion I9 proved the planned coverage did **not** exist (below) | PASS |
+| Registry unchanged at 64 | Zero-line diff over the four untouchable trees; re-measured 64 / 39-12-10-3, 10 guards, 1 array, 2 python assertions. `git diff -U0 \| grep -E '\b6[0-9]\b'` returns **2 lines, both `1.0f / 60.0f`** frame deltas in the new test harness — no count literal moved | PASS |
+| Two-site frame-body gate | `apply_pending_file_action` appears **exactly once in each** of `shell_main.cpp` and `shell_smoke_frames.cpp` | PASS |
+| No dirty check anywhere | `grep -n "dirty" src/editor/shell_file_paths.cpp` returns one `update_project_dirty_state` call after a **successful** save and two comment lines. No gate exists | PASS |
+| `EditorSession::close` still unused | No caller outside `session.cpp` | PASS |
+| Preference isolation | `~/Library/Application Support/Marrow` **does not exist** after the full run. Every rename-seam install is RAII-scoped and performs no preference save inside it | PASS |
+| Full suite | `ctest` 22/22, `-L editor` 12/12, `-L runtime` 4/4; all 13 test binaries pass; `marrow_verify_third_party` verified (**no new dependency**); `marrow_constraint_warning_check` built | PASS |
+
+### The measurement C9 was required to make, not assume
+
+The design left the ImGui window name of an open `BeginMenu` popup unmeasured and
+required the implementer to measure or report it. **Measured: `File###Menu_00`.**
+Two further ImGui facts had to be measured before the mouse harness worked at all,
+and both are recorded in the test:
+
+- `##MainMenuBar`'s `InnerClipRect` is **`(0,21)-(1440,21)`**, a zero-height band —
+  a menu bar's content lives in `MenuBarRect`, not the client area, so a sweep over
+  `InnerClipRect` scans nothing. The sweep uses `window->Rect()`.
+- An `ImGuiWindowFlags_AlwaysAutoResize` modal is submitted at a stub size on its
+  first frame: the chooser's `Rect()` one frame after opening is
+  **`(452,259)-(468,296)`**, 16x37 px. The sweep renders three settle frames and
+  re-reads the rect, or it would scan a sliver and report every widget absent.
+- Menu item ids are **not** `window->GetID(label)`. `MenuItemEx` does
+  `PushID(label)` and submits `Selectable("")`, so the id is
+  `ImHashStr("", 0, GetID(label))`; a menu-bar menu is seeded through
+  `BeginMenuBar`'s `PushID("##MenuBar")`. Probing with the naive form finds nothing
+  and looks exactly like a deleted widget.
+
+### Inversions — ten planned, run, and one that changed the story
+
+Each was applied, built, run and reverted; the working tree was byte-compared
+against pre-inversion copies afterwards.
+
+| # | Inversion | Result |
+|---|---|---|
+| I1 | New calls `save_project_file` right after `create` | **C4 alone fails**: `New must write NOTHING. …/new_project.marrow exists on disk, so some code path saved a project the user has not asked to save.` C5/C6/C7/C8/C9/C10 pass |
+| I2 | Pass `project_is_clean = true` for New | **C4 alone fails, at a DIFFERENT assertion**: `a New project must be dirty from birth … session.dirty()=true project_dirty=false`. Two inversions failing two different clauses is what proves C4 covers two defects |
+| I3 | Delete `project_path = chosen` from Save As success | **C5 and C6 fail.** `Save As must move the SHELL's project path to …/b/moved.marrow; it is …/a/mar180_shell.marrow.` C6 also fails because its retry half asserts the same success-branch move — a wider blast radius than the plan predicted, and correct |
+| I4 | Move `project_path = chosen` above `session.save` | **C6 alone fails**: `a FAILED Save As must not move the shell's project path. It moved to …/b/mar180_shell.marrow rather than staying at …/a/mar180_shell.marrow.` Every byte assertion still passes, isolating exactly the divergence |
+| I5 | Move `project_path = chosen` above `session.open` | **C7 alone fails**: `a failed Open must NOT move the shell's project path. It moved to …/broken.marrow, which would leave the toolbar's Save writing to a file the session never loaded.` The six-value snapshot assertions still pass, because `open` is already atomic — C7 tests the shell's bookkeeping, not the session's atomicity |
+| I6 | Delete `rebase_project_paths` from `save_project`, then compare the two assertion forms | **This is evidence, not a defect hunt.** With the rebase gone, C5 fails on `the moved project must OPEN`. Both forms were then run against the same bytes: `json::load_document(moved) -> PASSES \| load_project(moved) -> FAILS \| load_project error: …/marrow_mar181_c5/b/player_idle.mskl:1:1: failed to open file`. **The parse assertion is blind to the exact bug the reload assertion catches** |
+| I7 | Put `Ctrl+S` above the `io.WantTextInput` guard | **C10 alone fails, second half only**: `Ctrl+S fired while the chooser's Name field had keyboard focus. The handler must sit BELOW handle_project_history_shortcuts' io.WantTextInput guard, or typing a filename saves the project.` Half 1 still passes |
+| I8 | Delete `Open Project...` from the File menu | **C9 alone fails**: `"File###Menu_00" never emitted a widget with the id of "Open Project..."`. C4-C7, C8 and C10 **all pass** — which is precisely why C9 exists: they call the shell seams directly and would pass with every menu item deleted |
+| I9 | Omit `apply_pending_file_action` from `shell_smoke_frames.cpp` only | **DID NOT BITE.** The plan predicted C4 and C7 would fail. Measured: **all seven cases passed** with that line deleted, because C4 and C7 drive the UI-free seam directly. Per the plan's own rule — strengthen the test, never weaken the gate — **case C11 was added**, arming a deferred action before the headless frames and asserting it was consumed after them. Re-run under I9, **C11 fails alone**: `the headless smoke's frame body never called apply_pending_file_action …` |
+| I10 | Reject an existing file in `SaveTarget` mode | **C8 alone fails, at the final row**: `row "SaveTarget over an existing file is ACCEPTED": expected acceptable but resolve_choice returned rejected with diagnostic "That file already exists."` |
+
+### Two gaps recorded rather than half-closed
+
+- **No dirty-session check exists anywhere in MAR-181.** A New or Open over a
+  dirty session **discards unsaved work silently**. This is deliberate: MAR-182
+  owns the intent state machine, and a partial check here is rework MAR-182 must
+  undo. The seam is `begin_file_action(ShellState*, FileAction)` — every File
+  surface MAR-181 adds, four menu items and `Ctrl+S`, calls it and nothing else —
+  and `apply_pending_file_action` returns `bool` so MAR-182 can tell a cancel from
+  a success without re-deriving it from shell fields.
+- **New writes `active_animation: "idle"` for a rig that may have no `idle`
+  clip.** Behaviourally inert by three re-measured links: `PreviewController::
+  normalize_state` (`session.cpp:754-758`) falls back to the rig's first
+  animation; `validate_project_for_save` (`project.cpp:5622-5627`) checks only
+  preview-skin non-emptiness and never reads `active_animation`; and the shell's
+  pick (`shell_core.cpp:608-620`) prefers it only when it resolves. The single
+  observable consequence is one metadata line in the Project panel on a project
+  that has not been saved. Fixing it properly needs an animation/skin picker in
+  the New form, which no acceptance criterion asks for.
 
 ## MAR-180 Atomic Project I/O and Source Adoption Validation Results
 

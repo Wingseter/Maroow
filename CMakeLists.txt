@@ -875,6 +875,7 @@ add_dependencies(marrow_renderer_link_boundary_tests
 add_executable(marrow_editor_shell
     src/editor/shell_main.cpp
     src/editor/shell_core.cpp
+    src/editor/shell_file_paths.cpp
     src/editor/shell_preferences.cpp
     src/editor/shell_preview.cpp
     src/editor/shell_asset_watch.cpp
