@@ -367,6 +367,44 @@ against pre-inversion copies afterwards.
 | I9 | Omit `apply_pending_file_action` from `shell_smoke_frames.cpp` only | **DID NOT BITE.** The plan predicted C4 and C7 would fail. Measured: **all seven cases passed** with that line deleted, because C4 and C7 drive the UI-free seam directly. Per the plan's own rule — strengthen the test, never weaken the gate — **case C11 was added**, arming a deferred action before the headless frames and asserting it was consumed after them. Re-run under I9, **C11 fails alone**: `the headless smoke's frame body never called apply_pending_file_action …` |
 | I10 | Reject an existing file in `SaveTarget` mode | **C8 alone fails, at the final row**: `row "SaveTarget over an existing file is ACCEPTED": expected acceptable but resolve_choice returned rejected with diagnostic "That file already exists."` |
 
+### Document errors found (4)
+
+Every story in this arc has found errors in its own governing documents (175
+three, 176 seven, 177 six, 178 six, 179 six, 180 seven). MAR-181's four. The
+first was corrected in the design document itself; the rest are recorded here.
+
+| # | Where | Error | Resolution |
+|---|---|---|---|
+| D1 | Design §3.2, the `Choose` / `Cancel` row | Said "`Choose` is disabled whenever the diagnostic is non-empty", which **contradicts §3.4 rule 5** — a `SaveTarget` over an existing file is *accepted* and *carries* the diagnostic `"Replaces the existing file."` Gating on emptiness would refuse a legitimate, deliberate overwrite that MAR-180 made atomic | Acceptance and the diagnostic are two separate outputs: `FilePathChoice::acceptable` gates `Choose`, `::diagnostic` is display-only. §9 C8's last row already asserted acceptance, so §3.2 was the wrong half. **The design document has been corrected in place** (`…-design.md:256-257`) so MAR-182/183 do not inherit it |
+| D2 | Design §4.5 and plan Task 1 step 2/3 | Cite the extraction range as `shell_core.cpp:566-643` and say `reload_project` "keeps `:544-565`". Line `:566` is `} else {` **inside the failed-load early return**, and `:643` is a blank line. Keeping only `:544-565` would truncate the failure branch mid-`if` | The reset block actually begins at `:572` (its explanatory comment) / `:574` (first statement) and the body ends at `:642`; the head that must be kept is `:544-570`, through the closing brace of the early return. Extracted on the real boundaries; Task 1's zero-line test diff gate passed |
+| D3 | Plan Task 4 | Schedules case C10 in Task 4, but C10's second half needs `draw_file_path_modals` to render an `InputText` before `io.WantTextInput` can become true — and the modal body is not implemented until Task 6's step list. **Task 4 cannot be completed as written before Task 6** | C10 was written in Task 4 and went green only once Task 6's modal body existed. A reader following the plan literally will hit this |
+| D4 | Plan's file-and-responsibility map | Three counts are low. "**two fields**" on `ShellState` → **three**: the New form needs `new_project_form` for the same menu-scope `ImGui::OpenPopup` reason §3.3 gives for the other two. "the **seven** new validators" → **nine** declared in `shell_smoke_scenarios.hpp`. "cases **C4–C10**" → **C4–C11**, because inversion I9 forced C11 into existence | Implemented at the real counts; C11's origin is recorded in the inversion table above |
+
+### Not independently covered
+
+- **Deleting the *interactive* frame body's `apply_pending_file_action` call
+  (`shell_main.cpp:619`) is invisible to every test.** This is the exact
+  **inverse** of inversion I9, and the coverage is therefore **one-directional**:
+  C11 arms a deferred action before the headless frames and observes
+  `shell_smoke_frames.cpp:131` consuming it, so the *smoke's* copy is checked,
+  but nothing exercises `render_shell_frame` — in headless mode
+  `shell_main.cpp:663` returns into `run_headless_smoke` before that function is
+  ever reached. The only guard on the interactive twin is the comment block in
+  each file naming the other. Closing it properly means unifying the two
+  hand-maintained frame bodies, which is a refactor with no story behind it and
+  is deliberately **not** attempted here.
+- **C11's load-bearing assertion is `pending_file_application.has_value()`
+  (`shell_smoke_project.cpp:2675`), not the `project_path.filename()` check at
+  `:2687`.** The second is near-tautological — `EditorSession::open` on a file
+  that does not exist cannot move the path, as C7 already proves — and is kept
+  only as a cheap end-to-end restatement through the real frame body. If either
+  is ever "simplified" away, it must be the second one. Verified statically that
+  the first is sufficient and non-vacuous: `pending_file_application` has exactly
+  one resetter in the tree (`shell_file_paths.cpp:637`), the four in-test
+  `apply_pending_file_action` calls all run on local `ShellState`s and all
+  precede the arm, and the arm is an unconditional assignment that cannot
+  silently no-op.
+
 ### Two gaps recorded rather than half-closed
 
 - **No dirty-session check exists anywhere in MAR-181.** A New or Open over a

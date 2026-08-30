@@ -253,8 +253,8 @@ Contents, top to bottom:
 | Directory rows | Every subdirectory, sorted by name. Click navigates. |
 | File rows | Every regular file whose extension equals the request's filter, sorted by name. Click fills the name field. `OpenExisting` shows only matching files; `SaveTarget` shows them too, so the user can overwrite deliberately. |
 | `Name` `InputText` | The file name. `EnterReturnsTrue`. |
-| Diagnostic line | The single reason the current selection is not acceptable, or the empty string |
-| `Choose` / `Cancel` | `Choose` is disabled whenever the diagnostic is non-empty |
+| Diagnostic line | The single reason the current selection is not acceptable, **or**, when it IS acceptable, an informational note. Empty when there is nothing to say |
+| `Choose` / `Cancel` | `Choose` is disabled whenever the choice is **not acceptable**. **Corrected 2026-08-30 (MAR-181 implementation):** this row previously read "disabled whenever the diagnostic is non-empty", which contradicts §3.4 rule 5 — a `SaveTarget` over an existing file is *accepted* and *carries* the diagnostic `"Replaces the existing file."` Gating on emptiness would refuse a legitimate, deliberate overwrite that MAR-180 made atomic. Acceptance and the diagnostic are therefore two separate outputs: `FilePathChoice::acceptable` gates `Choose`, and `FilePathChoice::diagnostic` is display-only. §9 C8's last row asserts acceptance, so the shipped tests follow §3.4, not this row's original wording |
 
 **Listing errors are shown, never thrown.** Every filesystem call uses the
 `std::error_code` overload — `std::filesystem::directory_iterator(dir, ec)`,
