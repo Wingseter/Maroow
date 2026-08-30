@@ -1017,13 +1017,29 @@ void test_generate_exact_half_tie(TestSuite& suite) {
     const GenerateHarness harness = fixture_harness(suite);
     const auto candidates = candidates_by_name(suite, skeleton, {"spine", "arm_l"});
 
-    // Vertex 2 sits past `spine`'s segment end and behind `arm_l`'s segment
-    // start, and by construction those are the SAME double pair -- `arm_l`'s
-    // segment starts at its parent `spine`'s world origin. Both distances
-    // therefore evaluate the identical expression on identical operands, so
-    // they are equal bit for bit whatever the origin happens to be and whatever
-    // the compiler does about contraction. This is the one acceptance value in
-    // MAR-176 that is immune to the float32 setup-pose error.
+    // Vertex 2 sits past `spine`'s segment end (t = 2.6, clamped to 1) and
+    // behind `arm_l`'s segment start (t = -1.12, clamped to 0), and the two
+    // clamped closest points come out bit-identical. Why they do is worth
+    // stating precisely, because the two expressions are NOT the same one:
+    //
+    //   arm_l: `start + ab * 0.0`, where start IS `spine`'s world origin --
+    //          exact for any origin, since `x + 0 == x`.
+    //   spine: `start + ab * 1.0`, where start is `root`'s world origin. This
+    //          recovers `spine`'s origin exactly because root's origin is
+    //          exactly (0, 0), so the subtraction is exact and adding it back
+    //          to zero round-trips.
+    //
+    // The second step is the fixture-dependent one: `start + (end - start)`
+    // does not round-trip in general (measured: about 18% of random origin
+    // pairs in this coordinate range do not). So the coincidence rests on
+    // root's exactly-zero origin, NOT on the two expressions being identical.
+    //
+    // Once the closest points DO coincide bit for bit, the rest is general:
+    // both distances then evaluate `(V - c).x^2 + (V - c).y^2` on identical
+    // operands, so they are equal whatever the compiler does about contraction
+    // -- it does the same thing to both -- and `r / (r + r)` is exactly 0.5.
+    // That last part is what makes this the one acceptance value in MAR-176
+    // immune to the float32 setup-pose error and to FP contraction.
     const Vertex result = generate_or_report(
         suite, skeleton, harness, candidates, fixture_weight_vertices()[2], "exact half tie");
     suite.expect(result.influences.size() == 2U, "the tie must keep both candidates");

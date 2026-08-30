@@ -8538,10 +8538,16 @@ bool validate_mar176_automatic_weights(
         std::cerr << "MAR-176 unscoped generate must report all four vertices ascending.\n";
         return false;
     }
-    // Vertex 2's tie is the acceptance value: both distances clamp to spine's
-    // world origin, so they evaluate the identical expression on identical
-    // operands and the weights are exactly one half each, whatever the float32
-    // setup-pose error and whatever the compiler does about contraction.
+    // Vertex 2's tie is the acceptance value. Both candidates' clamped closest
+    // points land on spine's world origin bit for bit: arm_l's is its segment
+    // start (`start + ab * 0.0`, exact for any origin), and spine's is
+    // `start + ab * 1.0` from root's origin, which recovers spine's origin
+    // exactly because root's origin is exactly (0, 0). That second step is
+    // fixture-dependent -- `start + (end - start)` does not round-trip in
+    // general. Once the closest points coincide, both distances evaluate the
+    // same expression on the same operands, so the weights are exactly one half
+    // each whatever the float32 setup-pose error and whatever the compiler does
+    // about contraction.
     {
         const auto* edit = weight_edit(unscoped);
         const auto& influences = edit->vertices[2].influences;
