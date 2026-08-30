@@ -938,6 +938,13 @@ Current editor mesh-authoring payload:
 
 This stores per-skin, per-slot, per-attachment mesh weight overrides.
 
+Since MAR-175 every vertex Marrow writes here is canonical: no non-positive
+weight, no repeated bone, at most four influences, sorted by descending weight
+then skeleton order, and summing to one. The schema is unchanged -- the field
+names, shapes, and types are exactly what they were, and the accepted value
+range is narrower than what the loader admits, so every project Marrow can write
+after MAR-175 is one it could already load before it.
+
 ### `constraint_edits`
 
 Current editor constraint-authoring payload:

@@ -1,4 +1,6 @@
 #include "marrow/editor/project.hpp"
+
+#include "mesh_weight_model.hpp"
 #include "atlas_packer.hpp"
 // The curve-mode and driver tokens have exactly one definition, shared by this
 // parser/serializer, the Agent handler, and the shell.
@@ -2120,7 +2122,8 @@ std::optional<LoadError> parse_mesh_weight_vertices(
                 vertex_path,
                 "mesh weight edit vertices must preserve at least one bone influence");
         }
-        if (vertex_value.as_array().size() > 4U) {
+        if (vertex_value.as_array().size() >
+            mesh_weight_model::kMaxMeshWeightInfluences) {
             return validation_error(
                 document,
                 vertex_value.location(),
@@ -5529,7 +5532,8 @@ bool validate_project_for_save(const ProjectData& project, ProjectSaveError* err
                     "mesh weight edit vertices must contain at least one influence";
                 return false;
             }
-            if (vertex.influences.size() > 4U) {
+            if (vertex.influences.size() >
+                mesh_weight_model::kMaxMeshWeightInfluences) {
                 error_out->message =
                     "mesh weight edit vertices must not exceed four influences";
                 return false;

@@ -1070,6 +1070,8 @@ void draw_viewport_window(ShellState* state) {
     const bool weight_mode_ready =
         state->weight_paint.mode == WeightPaintMode::Smooth ||
         weight_selection.influence_bone_index.has_value();
+    // Replace joins Paint and Erase in needing an active influence bone; only
+    // Smooth does not.
     const bool weight_tool_ready =
         state->weight_paint.enabled &&
         paint_target.has_value() &&
@@ -1907,6 +1909,15 @@ void draw_viewport_settings(ShellState* state) {
         if (icon_button(state->icons, Icon::WeightSmooth, "Smooth weights", mode_smooth)) {
             state->weight_paint.mode = WeightPaintMode::Smooth;
         }
+        ImGui::SameLine(0.0f, 4.0f);
+        const bool mode_replace = state->weight_paint.mode == WeightPaintMode::Replace;
+        if (icon_button(
+                state->icons,
+                Icon::WeightBrush,
+                "Replace weights (assign the stamp value)",
+                mode_replace)) {
+            state->weight_paint.mode = WeightPaintMode::Replace;
+        }
 
         ImGui::SliderFloat(
             "Radius##weight_paint", &state->weight_paint.radius_pixels,
@@ -1915,6 +1926,28 @@ void draw_viewport_settings(ShellState* state) {
             "Strength##weight_paint", &state->weight_paint.strength,
             0.05f, 1.0f, "%.2f");
         ImGui::Checkbox("Show Heat Map##weight_paint", &state->weight_paint.show_heatmap);
+
+        // MAR-175: selected-scope Normalize and setup-pose Rebind. Both act on
+        // the FFD vertex selection when it resolves against this attachment and
+        // on every vertex otherwise, which is the shipped agent behaviour.
+        ImGui::BeginDisabled(!paint_target.has_value());
+        {
+            const std::vector<std::size_t> scope = weight_command_scope(*state);
+            if (ImGui::Button("Normalize##weight_paint")) {
+                normalize_weights_command(state);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Rebind##weight_paint")) {
+                rebind_weights_command(state);
+            }
+            ImGui::SameLine();
+            if (scope.empty()) {
+                ImGui::TextDisabled("scope: every vertex");
+            } else {
+                ImGui::TextDisabled("scope: %zu selected", scope.size());
+            }
+        }
+        ImGui::EndDisabled();
 
         if (paint_target.has_value()) {
             ImGui::Text("Preview mesh: %s", paint_target->display_attachment_name.c_str());

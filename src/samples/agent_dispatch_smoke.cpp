@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 60> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 61> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -81,6 +81,7 @@ constexpr std::array<OperationExpectation, 60> kExpectedOperations{{
     {"remove_deform_keyframe", "edit", true, false, false},
     {"set_vertex_weights", "edit", true, false, true},
     {"normalize_weights", "edit", true, false, true},
+    {"mesh.rebind_weights", "edit", true, false, true},
     {"edit_ik_constraint", "edit", true, false, true},
     {"edit_path_constraint", "edit", true, false, true},
     {"edit_transform_constraint", "edit", true, false, true},
@@ -156,6 +157,25 @@ public:
     void set_project(MarrowProject* project) {
         project_ = project;
         last_activity_id_ = 0U;
+    }
+
+    /// Dispatches a command WITHOUT the harness's own JSON pre-parse, so a
+    /// payload the parser itself refuses can still be asserted on.
+    bool dispatch_rejects(std::string_view command) {
+        MarrowStringView result{};
+        const std::string command_copy(command);
+        const MarrowStatusCode status =
+            marrow_editor_agent_dispatch(project_, command_copy.c_str(), &result);
+        if (status != MARROW_STATUS_OK || result.data == nullptr) {
+            return true;
+        }
+        const json::LoadResult parsed =
+            json::parse_document(std::string_view(result.data, result.size));
+        if (!parsed || !parsed.document->root.is_object()) {
+            return true;
+        }
+        const json::Value* ok = json::find_member(parsed.document->root, "ok");
+        return ok == nullptr || !ok->is_boolean() || !ok->as_boolean();
     }
 
     void expect(bool condition, std::string_view label, std::string_view detail) {
@@ -1163,7 +1183,10 @@ int main(int argc, char** argv) {
     harness.invoke(
         "set_vertex_weights dry-run",
         "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
-        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"dry_run\":true}}");
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":1,\"influences\":[{\"bone\":\"spine\",\"x\":60,\"y\":0,"
+        "\"weight\":0.5},{\"bone\":\"arm_l\",\"x\":20,\"y\":0,\"weight\":0.5}]}],"
+        "\"dry_run\":true}}");
     harness.invoke(
         "normalize_weights dry-run",
         "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
@@ -2970,6 +2993,279 @@ int main(int argc, char** argv) {
             normalize_weights_idempotent.scene_delta()->is_null(),
         "normalize_weights idempotent",
         "idempotent normalize success contract changed");
+
+    // ── MAR-175: the canonical rules, asserted on the AGENT surface ────────
+    //
+    // Every rule below is also covered by the shell smoke and the unit tests.
+    // It is asserted here too because a rule enforced only in the GUI is a rule
+    // a script can walk straight past.
+    const auto weight_rows = [&](std::string_view label) -> const json::Value* {
+        static DispatchObservation described;
+        described = harness.invoke(
+            label,
+            "{\"op\":\"mesh.describe\",\"args\":{\"skin\":\"mesh_base\","
+            "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+        return member(described.scene_delta(), "weights");
+    };
+    const auto influence_count =
+        [&](const json::Value* rows, std::size_t vertex) -> std::optional<std::size_t> {
+        if (rows == nullptr || !rows->is_array() || vertex >= rows->as_array().size() ||
+            !rows->as_array()[vertex].is_array()) {
+            return std::nullopt;
+        }
+        return rows->as_array()[vertex].as_array().size();
+    };
+    const auto influence_of =
+        [&](const json::Value* rows, std::size_t vertex, std::size_t slot) -> const json::Value* {
+        if (rows == nullptr || !rows->is_array() || vertex >= rows->as_array().size() ||
+            !rows->as_array()[vertex].is_array() ||
+            slot >= rows->as_array()[vertex].as_array().size()) {
+            return nullptr;
+        }
+        return &rows->as_array()[vertex].as_array()[slot];
+    };
+    const auto serialize_rows = [&](const json::Value* rows, std::size_t vertex) -> std::string {
+        if (rows == nullptr || !rows->is_array() || vertex >= rows->as_array().size()) {
+            return "<missing>";
+        }
+        return json::serialize_pretty_round_trip(rows->as_array()[vertex]);
+    };
+
+    // A duplicate bone used to commit `ok: true` and then make the project
+    // unsavable -- validate_project_for_save refuses a repeated bone. It now
+    // merges, and the merged weight is the sum.
+    harness.invoke(
+        "set_vertex_weights duplicate bone merges",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":2,\"influences\":[{\"bone\":\"spine\",\"x\":10,\"y\":0,"
+        "\"weight\":0.5},{\"bone\":\"spine\",\"x\":30,\"y\":0,\"weight\":0.5}]}]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after duplicate merge");
+        harness.expect(
+            influence_count(rows, 2U) == std::optional<std::size_t>(1U),
+            "set_vertex_weights duplicate bone merges",
+            "a repeated bone must merge into one influence");
+        harness.expect(
+            number_member(influence_of(rows, 2U, 0U), "weight") == std::optional<double>(1.0) &&
+                number_member(influence_of(rows, 2U, 0U), "x") == std::optional<double>(20.0),
+            "set_vertex_weights duplicate bone merges",
+            "the merged influence must carry the summed weight and the weight-weighted mean bind");
+    }
+
+    // A zero weight used to survive to save and be refused there.
+    const std::string vertex3_before_zero_drop =
+        serialize_rows(weight_rows("mesh.describe before zero drop"), 3U);
+    harness.invoke(
+        "set_vertex_weights drops a zero influence",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":1,\"influences\":[{\"bone\":\"spine\",\"x\":60,\"y\":0,"
+        "\"weight\":0.8},{\"bone\":\"arm_l\",\"x\":20,\"y\":0,\"weight\":0}]}]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after zero drop");
+        harness.expect(
+            influence_count(rows, 1U) == std::optional<std::size_t>(1U) &&
+                number_member(influence_of(rows, 1U, 0U), "weight") ==
+                    std::optional<double>(1.0),
+            "set_vertex_weights drops a zero influence",
+            "a zero-weight influence must be dropped and the survivor normalized");
+        // Survival: the vertex this call did not name is byte-identical.
+        harness.expect(
+            serialize_rows(rows, 3U) == vertex3_before_zero_drop,
+            "set_vertex_weights drops a zero influence",
+            "an unnamed vertex must be byte-identical after a scoped weight write");
+    }
+
+    // D6 -- non-finite weights. `NaN <= 1e-6` is false, so a NaN survived both
+    // guards of the two normalizers this story deletes and then poisoned every
+    // influence on the vertex. On the AGENT surface that defect was never
+    // actually reachable: JSON has no NaN or Infinity literal, and the parser
+    // refuses a numeric literal that overflows to infinity ("invalid numeric
+    // value"), so the payload dies before the operation runs. Asserted here so
+    // nobody later "fixes" the guard away on the grounds that no agent test
+    // exercises it; the reachable paths -- the brush and any in-process caller
+    // of the primitive -- are covered by marrow_mesh_weight_model_tests and
+    // marrow_project_smoke.
+    harness.expect(
+        harness.dispatch_rejects(
+            "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+            "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+            "{\"index\":1,\"influences\":[{\"bone\":\"spine\",\"x\":60,\"y\":0,"
+            "\"weight\":1e400}]}]}}"),
+        "set_vertex_weights rejects a non-finite weight",
+        "an overflowing weight literal must never reach the project");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after non-finite rejection");
+        harness.expect(
+            influence_count(rows, 1U) == std::optional<std::size_t>(1U) &&
+                number_member(influence_of(rows, 1U, 0U), "weight") ==
+                    std::optional<double>(1.0),
+            "set_vertex_weights rejects a non-finite weight",
+            "a rejected weight write must leave the vertex untouched");
+    }
+
+    // MAR-175 C1: canonicalization is unconditional, so an explicit
+    // "normalize": false has no implementable meaning and rejects loudly.
+    harness.invoke(
+        "set_vertex_weights rejects normalize:false",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"normalize\":false,"
+        "\"vertices\":[{\"index\":1,\"influences\":[{\"bone\":\"spine\","
+        "\"x\":60,\"y\":0,\"weight\":0.5}]}]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "set_vertex_weights still accepts normalize:true",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"normalize\":true,"
+        "\"vertices\":[{\"index\":1,\"influences\":[{\"bone\":\"spine\","
+        "\"x\":60,\"y\":0,\"weight\":0.4},{\"bone\":\"arm_l\",\"x\":20,"
+        "\"y\":0,\"weight\":0.4}]}]}}");
+    harness.invoke(
+        "set_vertex_weights rejects five influences",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":1,\"influences\":[{\"bone\":\"root\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"spine\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"arm_l\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"ik_upper\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"ik_lower\",\"x\":0,\"y\":0,\"weight\":0.2}]}]}}",
+        false);
+
+    // MAR-175: normalize_weights gains an optional vertex scope. Absent means
+    // every vertex, which is the shipped behaviour.
+    const std::string vertex0_before_scope =
+        serialize_rows(weight_rows("mesh.describe before scoped normalize"), 0U);
+    const std::string vertex3_before_scope =
+        serialize_rows(weight_rows("mesh.describe before scoped normalize 3"), 3U);
+    const DispatchObservation scoped_dry_run = harness.invoke(
+        "normalize_weights scoped dry-run",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1],"
+        "\"dry_run\":true}}");
+    harness.expect(
+        number_member(scoped_dry_run.scene_delta(), "vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(scoped_dry_run.scene_delta(), "scoped_vertex_count") ==
+                std::optional<double>(1.0),
+        "normalize_weights scoped dry-run",
+        "a scoped normalize must report the attachment size and the vertices it addressed");
+    const DispatchObservation scoped_normalize = harness.invoke(
+        "normalize_weights scoped to one vertex",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1]}}");
+    harness.expect(
+        string_member(&scoped_normalize.root, "message") ==
+            std::optional<std::string_view>("Mesh weights already normalized."),
+        "normalize_weights scoped to one vertex",
+        "normalizing an already-canonical vertex must keep the shipped no_change message");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after scoped normalize");
+        harness.expect(
+            serialize_rows(rows, 0U) == vertex0_before_scope &&
+                serialize_rows(rows, 3U) == vertex3_before_scope,
+            "normalize_weights scoped to one vertex",
+            "vertices outside the scope must be byte-identical");
+    }
+    harness.invoke(
+        "normalize_weights rejects an empty scope",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[]}}",
+        false);
+    harness.invoke(
+        "normalize_weights rejects an out-of-range vertex",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[99]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "normalize_weights rejects a repeated vertex",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1,1]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "normalize_weights rejects a fractional vertex index",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1.5]}}",
+        false);
+
+    // ── MAR-175: mesh.rebind_weights ──────────────────────────────────────
+    const DispatchObservation rebind_dry_run = harness.invoke(
+        "mesh.rebind_weights dry-run",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"dry_run\":true}}");
+    harness.expect(
+        bool_member(rebind_dry_run.scene_delta(), "dry_run") == std::optional<bool>(true) &&
+            number_member(rebind_dry_run.scene_delta(), "vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(rebind_dry_run.scene_delta(), "scoped_vertex_count") ==
+                std::optional<double>(4.0),
+        "mesh.rebind_weights dry-run",
+        "the dry run must report the attachment and scope sizes");
+    const std::string vertex0_before_rebind =
+        serialize_rows(weight_rows("mesh.describe before rebind"), 0U);
+    harness.invoke(
+        "mesh.rebind_weights live",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after rebind");
+        // Rebind changes bind offsets only: every weight must be untouched.
+        bool weights_held = true;
+        for (std::size_t vertex = 0; vertex < 4U; ++vertex) {
+            const auto count = influence_count(rows, vertex);
+            if (!count.has_value()) {
+                weights_held = false;
+                break;
+            }
+            for (std::size_t slot = 0; slot < *count; ++slot) {
+                if (!number_member(influence_of(rows, vertex, slot), "weight").has_value()) {
+                    weights_held = false;
+                }
+            }
+        }
+        harness.expect(
+            weights_held, "mesh.rebind_weights live", "rebind must keep every influence readable");
+    }
+    const DispatchObservation rebind_again = harness.invoke(
+        "mesh.rebind_weights idempotent",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+    harness.expect(
+        string_member(&rebind_again.root, "message") ==
+            std::optional<std::string_view>("Mesh weights already bound to the setup pose."),
+        "mesh.rebind_weights idempotent",
+        "a rebind that moves nothing must report no_change with its documented message");
+    harness.invoke("undo mesh.rebind_weights", "{\"op\":\"undo\"}");
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after rebind undo"), 0U) ==
+            vertex0_before_rebind,
+        "undo mesh.rebind_weights",
+        "undo must restore the pre-rebind bind offsets bit-exactly");
+    harness.invoke(
+        "mesh.rebind_weights rejects a missing attachment",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"no_such_mesh\"}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "mesh.rebind_weights requires a target",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\"}}",
+        false);
+    harness.invoke(
+        "mesh.rebind_weights rejects an out-of-range vertex",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[99]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "mesh.rebind_weights rejects an empty scope",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[]}}",
+        false);
+
     harness.invoke(
         "set_slot_color_keyframe",
         "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","

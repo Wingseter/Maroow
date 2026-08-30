@@ -244,6 +244,7 @@ enum class WeightPaintMode {
     Paint,
     Erase,
     Smooth,
+    Replace,
 };
 
 enum class ShellMode {
@@ -357,6 +358,10 @@ struct MeshWeightStrokeState {
     std::string group;
     ImVec2 last_sample_position{};
     bool has_last_sample{false};
+    /// Setup-pose bone transforms, resolved once per stroke rather than per
+    /// sample. A newly painted influence binds against these, so its offset
+    /// does not depend on where the playhead happens to be.
+    std::vector<marrow::runtime::BoneWorldTransform> setup_transforms;
 };
 
 enum class EditActionKind {

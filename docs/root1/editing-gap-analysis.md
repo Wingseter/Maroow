@@ -20,7 +20,7 @@ Maroow 에디터의 강점은 **"이미 존재하는 리그 위에서의 애니�
 편집 P0 이후에는 트랜스폼 auto-key, 본/IK 타깃 이동 기즈모, 슬롯/디폼/이벤트/드로우오더 키잉,
 다중 키 선택·리타임·복사/잘라내기/붙여넣기, 애니메이션 CRUD, 4종 제약 저작, 웨이트 페인팅,
 어니언 스킨, 트랜잭션 기반 언두를 제공한다. MAR-122~128 이후에는 typed parameter/group/shape/deformer,
-ArtPath, expression/lip-sync, Parameter Modeling mode와 60개 에이전트 오퍼레이션까지 제공한다.
+ArtPath, expression/lip-sync, Parameter Modeling mode와 61개 에이전트 오퍼레이션까지 제공한다.
 
 현재 Spine/Live2D 대비 가장 큰 **미해결** 격차는 세 가지다:
 
@@ -66,7 +66,7 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 
 | 영역 | 내용 | 위치 |
 |---|---|---|
-| 웨이트 페인팅 | Paint/Erase/Smooth 브러시, 반경/강도, 히트맵, 기존 자동 바인딩, 브러시별 top-4 정규화, 스트로크 단위 언두 | `shell_weight_paint.cpp` |
+| 웨이트 페인팅 | Paint/Erase/Smooth/Replace 브러시, 반경/강도, 히트맵, active-vertex 수치 influence 편집, selected-scope Normalize, setup-pose Rebind, 모든 경로가 공유하는 canonical 정규화, 스트로크 단위 언두 | `mesh_weight_model.cpp`, `authoring.cpp`, `shell_weight_paint.cpp` |
 | 키프레임 편집 | 본 R/T/S/shear, 슬롯 light RGBA/attachment, 메시 디폼, 드로우오더, 이벤트 — 추가/삭제/시간·값·보간 수정 | `timeline_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp` |
 | 보간 | 키별 Linear/Stepped/Bezier + 베지어 제어점 4개 숫자 입력 | `timeline_controller.cpp`, `shell_timeline.cpp` |
 | 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `timeline_controller.cpp`, `shell_timeline.cpp` |
@@ -82,8 +82,8 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 | 어니언 스킨 | 프레임/키프레임 모드, 전후 개수, 스텝, 앵커 | `shell_viewport_ui.cpp` |
 | 임포트/익스포트 | PSD→리그 생성, Spine JSON/atlas 임포트, 아틀라스 패킹, `.mskl`/`.mbin`/`.matl` 익스포트 | `psd_import.cpp` 등 |
 | Parameter modeling | raw direct/final preview, 1D shape, 2D warp/rotation, full lattice·pivot gesture, expression/lip-sync, ArtPath runtime/render | `shell_parameters.cpp`, `parameter_project_model.cpp`, `parameter_model.cpp` |
-| 에이전트 표면 | 60개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 35). Animation CRUD·duration·atomic timeline retime·timeline interpolation·timeline curve mode·timeline loop sync·timeline key time scaling·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
-| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 60-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
+| 에이전트 표면 | 61개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 36). Animation CRUD·duration·atomic timeline retime·timeline interpolation·timeline curve mode·timeline loop sync·timeline key time scaling·mesh weight rebind·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
+| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 61-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
 
 ### 남아 있는 의도적 제한/부분 구현
 
@@ -158,12 +158,12 @@ Agent/MCP dry-run을 연결했다. 키 생성·오른쪽 이동은 명시 경계
 | 메시 지오메트리 편집 (버텍스 추가/이동/삭제, 엣지/헐) | Mesh 편집 [CORE] | 수동 메시 편집 [CORE] |
 | 오토메시 (이미지 알파에서 자동 생성) | 4.3 다중 트레이스+균일 슬라이더 [CORE] | 자동 메시 생성기 (5.0 개선) [CORE] |
 | 명시적 candidate 목록 기반 결정적 오토 웨이트 | Bind+auto weights [CORE] | 스키닝 자동화 |
-| 웨이트 Replace 모드·수치 직접 편집·명시적 정규화 버튼 | 웨이트 툴 | — |
 | 웨이트 복사/붙여넣기, Weld(메시 간 이음새) | [+] | Glue [CORE] |
 
-현재 brush와 agent 경로에는 서로 중복된 weight 정규화가 있고 기존 자동 바인딩은 P1의 명시적 candidate·결정성 계약을
-제공하지 않는다. MAR-175는 수동 도구와 agent를 하나의 canonical domain primitive로 합치고, MAR-176은 setup pose에서
-결정적인 top-4 auto-weight를 추가한다. 이 작업은 기존 `mesh_edits.weights` overlay 안에서 끝난다.
+MAR-175가 brush와 agent의 중복 정규화를 `mesh_weight_model`의 canonical primitive 하나로 합쳤고 Replace brush,
+active-vertex 수치 influence 표, selected-scope Normalize, setup-pose Rebind를 추가했다. 기존 자동 바인딩은 아직 P1의
+명시적 candidate·결정성 계약을 제공하지 않으며, MAR-176이 setup pose에서 결정적인 top-4 auto-weight를 추가한다.
+이 작업은 기존 `mesh_edits.weights` overlay 안에서 끝났다.
 
 반면 메시 지오메트리는 오버레이 모델상 편집 불가(베이스 문서 소유)다. `mesh_edits`를 지오메트리 override로 확장할지,
 베이스 문서 편집을 허용할지는 canonical authoring graph 설계가 선행되어야 하며 P1에는 포함하지 않는다.
@@ -189,7 +189,7 @@ Agent/MCP dry-run을 연결했다. 키 생성·오른쪽 이동은 명시 경계
 | Runtime | finite raw direct와 final composed buffer, discrete round/optional clamp, 1D endpoint/linear shape, bilinear warp, rotation pivot/influence, one-level deformer chain과 dependency cache |
 | Renderer | attachment-local final mesh offset, skeleton scale/mirror를 반영한 ArtPath root overlay, deterministic cap/join tessellation, atlas-free preparation과 cache 실패 원자성 |
 | Project/Editor | 일곱 optional parameter family의 typed·lossless save/reload/export, transient non-dirty preview, CRUD, 3×3 full lattice/pivot gesture, confirmed atomic keyform capture |
-| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration, MAR-169 timeline interpolation, MAR-171 timeline curve mode, MAR-172 timeline loop sync와 MAR-173 timeline key time scaling operation 포함 현재 60-op parity |
+| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration, MAR-169 timeline interpolation, MAR-171 timeline curve mode, MAR-172 timeline loop sync, MAR-173 timeline key time scaling과 MAR-175 `mesh.rebind_weights` operation 포함 현재 61-op parity |
 | Compatibility/성능 | `.mskl` v1, `.mbin` v2, C ABI v1 유지. CTest 11/11, runtime 4/4, editor 5/5, 200 skeleton `frame_ms=4.45`/`score=100`, parameter `0.07us`/deformer `0.51us` |
 
 MAR-122~128 checkpoint 당시 29개 runtime/renderer unit, parameter project save/reload와 JSON↔MBIN compare,
@@ -408,7 +408,7 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 | MAR-178 | Constraint rename/delete surfaces | IK/Path/Transform/Physics GUI·confirmation·undo·dry-run·agent/MCP를 추가하고 root arrays, `skins[].constraints`, upsert, `SelectionSet`을 원자적으로 cascade한다. |
 | MAR-179 | Complete constraint widgets | IK softness/compress/stretch와 Physics step/x/y/rotate/scaleX/shearX/limit/massInverse UI를 추가하고 IK MCP 누락 필드를 보완한다. |
 
-모든 weight 결과는 non-positive 제거, duplicate bone 병합, weight 내림차순+skeleton order 정렬, top-4 제한, 합계 1 정규화를 동일하게 적용한다.
+모든 weight 결과는 non-positive 제거, duplicate bone 병합, weight 내림차순+skeleton order 정렬, top-4 제한, 합계 1 정규화를 동일하게 적용한다. MAR-175부터 이 규칙은 `src/editor/mesh_weight_model.hpp`의 `canonicalize_mesh_weight_vertex()` 하나가 소유하며 brush·수치 편집·agent가 모두 그것을 호출한다.
 
 #### 파일·inherit 워크플로
 
@@ -452,7 +452,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 
 ### 참고: 에이전트(MCP) 표면과의 비대칭
 
-에이전트 표면은 MAR-155 duration, MAR-169 `timeline.set_interpolation`, MAR-171 `timeline.set_curve_mode`, MAR-172 `timeline.set_loop_sync`와 MAR-173 `timeline.scale_key_times` operation을 포함해 현재 60 ops다. MAR-170은 operation을 추가하지 않고 그 operation의 `interpolation` 인자에 preset token 4개만 더했다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
+에이전트 표면은 MAR-155 duration, MAR-169 `timeline.set_interpolation`, MAR-171 `timeline.set_curve_mode`, MAR-172 `timeline.set_loop_sync`, MAR-173 `timeline.scale_key_times`와 MAR-175 `mesh.rebind_weights` operation을 포함해 현재 61 ops다. MAR-170은 operation을 추가하지 않고 그 operation의 `interpolation` 인자에 preset token 4개만 더했다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
 `parameters.list`, `parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`을
 C++ registry와 Python MCP 도구에 함께 노출했다. Transform/slot/parameter authoring은 GUI와 agent가 base materialization
 또는 candidate runtime build를 포함한 UI-free mutation을 공유한다. GUI는 의도적으로 더 넓은 parameter/group/shape lifecycle과

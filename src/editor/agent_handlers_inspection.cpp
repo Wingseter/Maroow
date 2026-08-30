@@ -311,6 +311,31 @@ AgentDispatchResult handle_inspection_operation(
         mesh.emplace(
             "weighted_vertex_count",
             number_value(attachment->mesh_geometry->weights.size()));
+        // MAR-175: the per-vertex influence values, so a headless smoke can
+        // assert what a weight mutation actually wrote and -- more importantly
+        // -- that the vertices it did NOT name are untouched. Additive: every
+        // shipped field keeps its name, type, and position.
+        json::Value::Array weight_rows;
+        weight_rows.reserve(attachment->mesh_geometry->weights.size());
+        for (const auto& runtime_vertex : attachment->mesh_geometry->weights) {
+            json::Value::Array influences;
+            influences.reserve(runtime_vertex.influences.size());
+            for (const auto& influence : runtime_vertex.influences) {
+                json::Value::Object entry;
+                entry.emplace(
+                    "bone",
+                    string_value(
+                        influence.bone_index < skeleton.bones().size()
+                            ? skeleton.bones()[influence.bone_index].name
+                            : std::string{}));
+                entry.emplace("x", number_value(influence.x));
+                entry.emplace("y", number_value(influence.y));
+                entry.emplace("weight", number_value(influence.weight));
+                influences.push_back(object_value(std::move(entry)));
+            }
+            weight_rows.push_back(array_value(std::move(influences)));
+        }
+        mesh.emplace("weights", array_value(std::move(weight_rows)));
         return make_success("Mesh described", op, spec, object_value(std::move(mesh)));
     }
 

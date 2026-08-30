@@ -1,5 +1,8 @@
 #include "shell_inspector.hpp"
 
+#include "mesh_weight_model.hpp"
+#include "shell_weight_paint.hpp"
+
 #include "shell_derived_cache.hpp"
 #include "timeline_controller.hpp"
 
@@ -31,9 +34,15 @@ const char* yes_no(bool value);
 const char* attachment_kind_name(marrow::runtime::AttachmentKind kind);
 const char* sequence_playback_mode_name(
     marrow::runtime::SequencePlaybackMode mode);
+void draw_active_vertex_weight_editor(
+    ShellState* state,
+    const MeshWeightVertexRow& row,
+    std::size_t vertex_index);
+
 void draw_attachment_details(
-    const ShellState& state,
+    ShellState* state_ptr,
     const SlotAttachmentReference& reference) {
+    ShellState& state = *state_ptr;
     const auto& skeleton = *state.load_result.skeleton_data;
     const auto& slot = skeleton.slots()[reference.slot_index];
     const auto& attachment = *reference.attachment;
@@ -90,6 +99,16 @@ void draw_attachment_details(
             ImGui::TreeNodeEx("Mesh Weights", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextUnformatted(
                 "Vertex-local positions and per-bone bind offsets mirror the exported weighted mesh.");
+            std::string weight_edit_reason;
+            const std::optional<std::size_t> active_weight_vertex =
+                inspector_active_weight_vertex(state, &weight_edit_reason);
+            if (active_weight_vertex.has_value() &&
+                *active_weight_vertex < weight_rows.size()) {
+                draw_active_vertex_weight_editor(
+                    state_ptr, weight_rows[*active_weight_vertex], *active_weight_vertex);
+            } else {
+                ImGui::TextDisabled("%s", weight_edit_reason.c_str());
+            }
             ImGui::BeginChild("mesh_weight_rows", ImVec2(0.0f, 180.0f), true);
             for (const MeshWeightVertexRow& row : weight_rows) {
                 const std::string header = "Vertex " + std::to_string(row.vertex_index) +
@@ -303,6 +322,168 @@ std::vector<MeshWeightVertexRow> build_mesh_weight_rows(
     }
 
     return rows;
+}
+
+std::optional<std::size_t> inspector_active_weight_vertex(
+    const ShellState& state,
+    std::string* reason_out) {
+    const auto set_reason = [&](const char* reason) {
+        if (reason_out != nullptr) {
+            *reason_out = reason;
+        }
+    };
+    if (!state.load_result) {
+        set_reason("Open a project to edit mesh weights.");
+        return std::nullopt;
+    }
+    const std::optional<MeshWeightPaintTarget> target =
+        current_mesh_weight_paint_target(state);
+    if (!target.has_value()) {
+        set_reason("Select a weighted mesh attachment to edit its influences.");
+        return std::nullopt;
+    }
+    if (!state.viewport_ffd_selection.has_value() ||
+        state.viewport_ffd_selection->vertex_indices.size() != 1U) {
+        set_reason("Select exactly one vertex to edit its influences numerically.");
+        return std::nullopt;
+    }
+    if (state.viewport_ffd_selection->scope.slot_index != target->slot_index ||
+        state.viewport_ffd_selection->scope.deform_attachment_name !=
+            target->source_attachment_name) {
+        set_reason("The selected vertex belongs to a different attachment.");
+        return std::nullopt;
+    }
+    if (reason_out != nullptr) {
+        reason_out->clear();
+    }
+    return state.viewport_ffd_selection->vertex_indices.front();
+}
+
+/// The one editable numeric influence table (MAR-175 AC3).
+///
+/// Bind offsets stay read-only: they are geometry, and a hand-typed offset in
+/// one bone's frame with no matching change in the others' is exactly the
+/// inconsistency Rebind exists to repair. The weight a user types is the
+/// PRE-normalization value, so the field redisplays the canonical one and a
+/// running total makes the renormalization visible rather than surprising.
+void draw_active_vertex_weight_editor(
+    ShellState* state,
+    const MeshWeightVertexRow& row,
+    std::size_t vertex_index) {
+    ImGui::Separator();
+    ImGui::Text("Vertex %zu influences", vertex_index);
+
+    const auto commit = [&](std::vector<marrow::editor::MeshWeightInfluenceEdit> influences) {
+        set_active_vertex_weights_command(state, vertex_index, influences);
+    };
+    const auto current_influences = [&]() {
+        std::vector<marrow::editor::MeshWeightInfluenceEdit> influences;
+        influences.reserve(row.influences.size());
+        for (const MeshWeightInfluenceRow& influence : row.influences) {
+            influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
+                influence.bone_name, influence.bind_x, influence.bind_y, influence.weight});
+        }
+        return influences;
+    };
+
+    double total = 0.0;
+    for (std::size_t index = 0; index < row.influences.size(); ++index) {
+        const MeshWeightInfluenceRow& influence = row.influences[index];
+        total += influence.weight;
+        ImGui::PushID(static_cast<int>(index));
+        double weight = influence.weight;
+        ImGui::SetNextItemWidth(110.0f);
+        const std::string field_label = influence.bone_name + "##weight";
+        ImGui::InputDouble(field_label.c_str(), &weight, 0.0, 0.0, "%.4f");
+        if (ImGui::IsItemDeactivatedAfterEdit() && weight != influence.weight) {
+            auto influences = current_influences();
+            influences[index].weight = weight;
+            commit(std::move(influences));
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("bind(%.1f, %.1f)", influence.bind_x, influence.bind_y);
+        ImGui::SameLine();
+        // Removing the last influence would leave a vertex both file formats
+        // refuse, so it is not offered rather than offered and then rejected.
+        ImGui::BeginDisabled(row.influences.size() <= 1U);
+        if (ImGui::SmallButton("Remove")) {
+            auto influences = current_influences();
+            influences.erase(influences.begin() + static_cast<std::ptrdiff_t>(index));
+            commit(std::move(influences));
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+    ImGui::Text("Sum %.3f", total);
+
+    const bool at_cap =
+        row.influences.size() >= mesh_weight_model::kMaxMeshWeightInfluences;
+    ImGui::BeginDisabled(at_cap || !state->load_result);
+    if (ImGui::BeginCombo("Add influence##mesh_weight", at_cap ? "At four influences" : "Select bone")) {
+        const auto& bones = state->load_result.skeleton_data->bones();
+        for (std::size_t bone_index = 0; bone_index < bones.size(); ++bone_index) {
+            const std::string& bone_name = bones[bone_index].name;
+            const bool already_present = std::any_of(
+                row.influences.begin(),
+                row.influences.end(),
+                [&](const MeshWeightInfluenceRow& influence) {
+                    return influence.bone_name == bone_name;
+                });
+            if (already_present) {
+                continue;
+            }
+            if (ImGui::Selectable(bone_name.c_str())) {
+                auto influences = current_influences();
+                // A new influence binds against the setup pose, like the brush.
+                const auto setup_transforms =
+                    mesh_weight_model::setup_pose_bone_world_transforms(
+                        state->load_result.skeleton_data);
+                double world_x = 0.0;
+                double world_y = 0.0;
+                double weight_total = 0.0;
+                bool resolved = bone_index < setup_transforms.size();
+                for (const auto& existing : influences) {
+                    const auto existing_index =
+                        state->load_result.skeleton_data->find_bone_index(existing.bone_name);
+                    if (!existing_index.has_value() ||
+                        *existing_index >= setup_transforms.size()) {
+                        resolved = false;
+                        break;
+                    }
+                    const auto& transform = setup_transforms[*existing_index];
+                    world_x += (((existing.x * static_cast<double>(transform.a)) +
+                                 (existing.y * static_cast<double>(transform.b)) +
+                                 static_cast<double>(transform.world_x)) *
+                                existing.weight);
+                    world_y += (((existing.x * static_cast<double>(transform.c)) +
+                                 (existing.y * static_cast<double>(transform.d)) +
+                                 static_cast<double>(transform.world_y)) *
+                                existing.weight);
+                    weight_total += existing.weight;
+                }
+                if (resolved && weight_total > 0.0) {
+                    if (std::abs(weight_total - 1.0) >
+                        mesh_weight_model::kMeshWeightSumTolerance) {
+                        world_x /= weight_total;
+                        world_y /= weight_total;
+                    }
+                    const auto bind = mesh_weight_model::inverse_transform_point_safe(
+                        setup_transforms[bone_index], world_x, world_y);
+                    if (bind.has_value()) {
+                        influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
+                            bone_name, bind->x, bind->y, 0.25});
+                        commit(std::move(influences));
+                    } else {
+                        state->status_message =
+                            "Bone '" + bone_name + "' has a singular setup transform.";
+                    }
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    ImGui::Separator();
 }
 
 bool inspector_bone_pose_editable(const ShellState& state) noexcept {
@@ -933,7 +1114,7 @@ void draw_inspector_window(ShellState* state) {
 
             if (attachment_reference.has_value()) {
                 ImGui::Separator();
-                draw_attachment_details(*state, *attachment_reference);
+                draw_attachment_details(state, *attachment_reference);
             } else if (!attachments.empty()) {
                 ImGui::Spacing();
                 ImGui::TextUnformatted("Select an attachment to inspect its data.");

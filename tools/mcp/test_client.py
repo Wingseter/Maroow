@@ -40,15 +40,16 @@ async def test(parameter_only=False):
         "timeline.set_curve_mode",
         "timeline.set_loop_sync",
         "timeline.scale_key_times",
+        "mesh.rebind_weights",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 60
+    assert len(registry_names) == 61
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 60
+    assert len(mcp_names) == 61
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -98,6 +99,13 @@ async def test(parameter_only=False):
     }
     assert registry_by_name["timeline.scale_key_times"] == {
         "name": "timeline.scale_key_times",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["mesh.rebind_weights"] == {
+        "name": "mesh.rebind_weights",
         "category": "edit",
         "mutating": True,
         "requires_review": False,
@@ -1292,6 +1300,169 @@ async def test(parameter_only=False):
         )
     )
     assert import_review["review"]["kind"] == "import_or_pack"
+
+    # MAR-175: the weight family. set_vertex_weights and normalize_weights keep
+    # their names, arguments and messages; normalize_weights gains an optional
+    # vertex scope and mesh.rebind_weights is the 61st operation.
+    weight_target = {"skin": "mesh_base", "slot": "body", "attachment": "body_mesh"}
+    rebind_dry = require_ok(
+        "mesh.rebind_weights dry-run",
+        await client.send_command("mesh.rebind_weights", {**weight_target, "dry_run": True}),
+    )
+    assert rebind_dry["scene_delta"]["dry_run"] is True
+    assert rebind_dry["scene_delta"]["vertex_count"] == 4
+    assert rebind_dry["scene_delta"]["scoped_vertex_count"] == 4
+    assert isinstance(rebind_dry["scene_delta"]["affected_vertices"], list)
+
+    def mesh_weights():
+        return describe["scene_delta"]["weights"]
+
+    describe = require_ok(
+        "mesh.describe before rebind",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_before_rebind = json.dumps(describe["scene_delta"]["weights"])
+    require_ok(
+        "mesh.rebind_weights live",
+        await client.send_command("mesh.rebind_weights", weight_target),
+    )
+    describe = require_ok(
+        "mesh.describe after rebind",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_after_rebind = json.dumps(describe["scene_delta"]["weights"])
+    assert weights_after_rebind != weights_before_rebind
+    # Rebind is deterministic but NOT bit-exactly idempotent: BoneWorldTransform
+    # is six float32s while bind offsets are double, so a second application can
+    # move an offset in its last bits. Assert the property that is true --
+    # stability -- rather than a no_change disposition that is not guaranteed.
+    weights_first_rebind = json.loads(weights_after_rebind)
+    rebind_again = require_ok(
+        "mesh.rebind_weights second application",
+        await client.send_command("mesh.rebind_weights", weight_target),
+    )
+    describe = require_ok(
+        "mesh.describe after the second rebind",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_second_rebind = describe["scene_delta"]["weights"]
+    if rebind_again["message"] != "Mesh weights already bound to the setup pose.":
+        max_delta = 0.0
+        for first_vertex, second_vertex in zip(weights_first_rebind, weights_second_rebind):
+            for first, second in zip(first_vertex, second_vertex):
+                assert first["bone"] == second["bone"]
+                assert first["weight"] == second["weight"], "rebind must not change a weight"
+                max_delta = max(
+                    max_delta, abs(first["x"] - second["x"]), abs(first["y"] - second["y"])
+                )
+        assert max_delta <= 1e-9, f"second rebind moved an offset by {max_delta}"
+        print(f"  mesh.rebind_weights: second application stable to {max_delta:.3e} "
+              "(not bit-exact -- the transform is float32, the offsets are double)")
+        require_ok("undo the second rebind", await client.send_command("undo"))
+    require_ok("undo mesh.rebind_weights", await client.send_command("undo"))
+    describe = require_ok(
+        "mesh.describe after rebind undo",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_rebind
+
+    require_ok(
+        "normalize_weights without a scope",
+        await client.send_command("normalize_weights", weight_target),
+    )
+    scoped = require_ok(
+        "normalize_weights with a scope",
+        await client.send_command(
+            "normalize_weights", {**weight_target, "vertices": [1], "dry_run": True}
+        ),
+    )
+    assert scoped["scene_delta"]["scoped_vertex_count"] == 1
+    assert scoped["scene_delta"]["vertex_count"] == 4
+
+    # MAR-175 C1: an explicit "normalize": false is rejected rather than
+    # silently ignored, because canonicalization is unconditional.
+    normalize_false = require_rejected(
+        "set_vertex_weights rejects normalize:false",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "normalize": False,
+                "vertices": [
+                    {
+                        "index": 1,
+                        "influences": [{"bone": "spine", "x": 60, "y": 0, "weight": 0.5}],
+                    }
+                ],
+            },
+        ),
+    )
+    assert normalize_false["error"]["code"] == "invalid_request"
+    require_ok(
+        "set_vertex_weights accepts normalize:true",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "normalize": True,
+                "vertices": [
+                    {
+                        "index": 1,
+                        "influences": [
+                            {"bone": "spine", "x": 60, "y": 0, "weight": 0.5},
+                            {"bone": "arm_l", "x": 20, "y": 0, "weight": 0.5},
+                        ],
+                    }
+                ],
+            },
+        ),
+    )
+    # The advisory maxItems: 4 in the JSON schema did not loosen the C++ gate.
+    require_rejected(
+        "set_vertex_weights rejects five influences",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "vertices": [
+                    {
+                        "index": 1,
+                        "influences": [
+                            {"bone": "root", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "spine", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "arm_l", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "ik_upper", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "ik_lower", "x": 0, "y": 0, "weight": 0.2},
+                        ],
+                    }
+                ],
+            },
+        ),
+    )
+    require_rejected(
+        "normalize_weights rejects a non-integer vertex index",
+        await client.send_command(
+            "normalize_weights", {**weight_target, "vertices": [1.5]}
+        ),
+    )
+    require_rejected(
+        "normalize_weights rejects an out-of-range vertex",
+        await client.send_command("normalize_weights", {**weight_target, "vertices": [99]}),
+    )
+    require_rejected(
+        "normalize_weights rejects an empty vertex scope",
+        await client.send_command("normalize_weights", {**weight_target, "vertices": []}),
+    )
+    require_rejected(
+        "mesh.rebind_weights rejects a missing attachment",
+        await client.send_command(
+            "mesh.rebind_weights",
+            {"skin": "mesh_base", "slot": "body", "attachment": "no_such_mesh"},
+        ),
+    )
+    require_ok("undo MAR-175 weight edits", await client.send_command("undo"))
+    require_ok("undo MAR-175 weight edits again", await client.send_command("undo"))
+
     require_ok("agent.permissions.describe", await client.send_command("agent.permissions.describe"))
     require_ok("agent.pause", await client.send_command("agent.pause"))
     require_rejected(

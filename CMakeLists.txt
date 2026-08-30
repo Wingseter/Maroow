@@ -505,6 +505,7 @@ add_library(marrow_editor STATIC
     src/editor/project.cpp
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
+    src/editor/mesh_weight_model.cpp
     src/editor/curve_auto.cpp
     src/editor/session.cpp
     src/editor/agent_dispatch.cpp
@@ -638,6 +639,20 @@ target_include_directories(marrow_timeline_model_tests
 )
 
 target_link_libraries(marrow_timeline_model_tests
+    PRIVATE
+        marrow_editor
+)
+
+add_executable(marrow_mesh_weight_model_tests
+    src/tests/mesh_weight_model_tests.cpp
+)
+
+target_include_directories(marrow_mesh_weight_model_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_mesh_weight_model_tests
     PRIVATE
         marrow_editor
 )
@@ -792,6 +807,11 @@ target_link_libraries(marrow_spine_import_smoke
 
 add_executable(marrow_project_smoke
     src/samples/editor_project_smoke.cpp
+)
+
+target_include_directories(marrow_project_smoke
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
 )
 
 target_link_libraries(marrow_project_smoke
@@ -1183,6 +1203,15 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.timeline_graph_model PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;timeline;graph;unit;noninteractive"
+    )
+
+    add_test(
+        NAME marrow.mesh_weight_model
+        COMMAND marrow_mesh_weight_model_tests
+    )
+    set_tests_properties(marrow.mesh_weight_model PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;mesh;weights;unit;noninteractive"
     )
 
     add_test(

@@ -1043,7 +1043,14 @@ def get_tools() -> list[types.Tool]:
                             "required": ["index", "influences"]
                         }
                     },
-                    "normalize": {"type": "boolean"},
+                    "normalize": {
+                        "type": "boolean",
+                        "description": (
+                            "Deprecated. Weight writes are always canonicalized, so "
+                            "true and omission behave as before and an explicit false "
+                            "is rejected with invalid_request."
+                        )
+                    },
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["skin", "slot", "attachment", "vertices"]
@@ -1051,13 +1058,45 @@ def get_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="normalize_weights",
-            description="Normalize all weighted-mesh influences for an attachment.",
+            description=(
+                "Canonicalize weighted-mesh influences for an attachment: drop "
+                "non-positive weights, merge duplicate bones, sort by descending "
+                "weight then skeleton order, cap at four, and normalize the sum."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "skin": {"type": "string"},
                     "slot": {"type": "string"},
                     "attachment": {"type": "string"},
+                    "vertices": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "description": "Vertex indices to normalize. Absent means every vertex."
+                    },
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["skin", "slot", "attachment"]
+            }
+        ),
+        types.Tool(
+            name="mesh.rebind_weights",
+            description=(
+                "Re-express weighted-mesh bind offsets in each bone's setup frame "
+                "without changing which bones influence a vertex, any weight, or "
+                "mesh topology."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skin": {"type": "string"},
+                    "slot": {"type": "string"},
+                    "attachment": {"type": "string"},
+                    "vertices": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "description": "Vertex indices to rebind. Absent means every vertex."
+                    },
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["skin", "slot", "attachment"]

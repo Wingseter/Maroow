@@ -32,6 +32,7 @@
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
+#include "mesh_weight_model.hpp"
 #include "shell_viewport_ui.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
@@ -2041,6 +2042,606 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             std::cerr << "Weight paint smoke could not restore the baseline state after export validation.\n";
             return false;
         }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // ── MAR-175: a newly painted influence binds against the SETUP pose ──
+        //
+        // Everything above paints `spine` onto vertices that already carry
+        // `spine`, so the shipped block never exercised the branch that adds a
+        // brand-new influence and never asserted a bind offset at all. That is
+        // what hid the defect: the new-influence bind was inverted from the
+        // *current preview pose*, so painting a new bone off setup pose wrote a
+        // pose-dependent offset straight into `.marrow`. Here the playhead is
+        // still parked on attack@0.2, and the assertion is against the setup
+        // pose, so the shipped behaviour fails it.
+        const auto arm_bone_index =
+            shell_state.load_result.skeleton_data->find_bone_index("arm_l");
+        if (!arm_bone_index.has_value()) {
+            std::cerr << "Setup-pose bind smoke could not resolve arm_l.\n";
+            return false;
+        }
+        const auto setup_transforms =
+            marrow::editor::mesh_weight_model::setup_pose_bone_world_transforms(
+                shell_state.load_result.skeleton_data);
+        if (setup_transforms.size() !=
+            shell_state.load_result.skeleton_data->bones().size()) {
+            std::cerr << "Setup-pose bind smoke could not build setup transforms.\n";
+            return false;
+        }
+        // The preview must actually be off setup pose, or the assertion proves
+        // nothing.
+        const auto& live_spine_transform =
+            shell_state.preview_skeleton->bone_world_transforms()[*paint_bone_index];
+        const auto& setup_spine_transform = setup_transforms[*paint_bone_index];
+        const auto& live_arm_transform =
+            shell_state.preview_skeleton->bone_world_transforms()[*arm_bone_index];
+        const auto& setup_arm_transform = setup_transforms[*arm_bone_index];
+        std::cout << "  MAR-175 setup-pose bind check: the playhead is off setup pose (arm_l "
+                     "scale a=" << live_arm_transform.a << " live vs " << setup_arm_transform.a
+                  << " at setup), so a current-pose bind is distinguishable from a setup one.\n";
+        const bool pose_differs_from_setup =
+            live_spine_transform.a != setup_spine_transform.a ||
+            live_spine_transform.b != setup_spine_transform.b ||
+            live_spine_transform.world_x != setup_spine_transform.world_x ||
+            live_spine_transform.world_y != setup_spine_transform.world_y ||
+            live_arm_transform.a != setup_arm_transform.a ||
+            live_arm_transform.b != setup_arm_transform.b ||
+            live_arm_transform.world_x != setup_arm_transform.world_x ||
+            live_arm_transform.world_y != setup_arm_transform.world_y;
+        if (!pose_differs_from_setup) {
+            std::cerr << "Setup-pose bind smoke needs a preview pose that differs from setup.\n";
+            return false;
+        }
+
+        // Vertex 0 carries only `spine`, so its setup-world position is that one
+        // bone's setup transform applied to its own bind offset.
+        // Resolve the attachment freshly: the runtime has been rebuilt several
+        // times above, so any pointer captured earlier is stale.
+        const std::optional<MeshWeightPaintTarget> setup_bind_target = current_weight_target();
+        if (!setup_bind_target.has_value() ||
+            setup_bind_target->source_attachment == nullptr ||
+            setup_bind_target->source_attachment->mesh_geometry == nullptr ||
+            setup_bind_target->source_attachment->mesh_geometry->weights.empty() ||
+            setup_bind_target->source_attachment->mesh_geometry->weights[0].influences.size() != 1U) {
+            std::cerr << "Setup-pose bind smoke expected a single-influence vertex 0.\n";
+            return false;
+        }
+        const auto& vertex0_bind =
+            setup_bind_target->source_attachment->mesh_geometry->weights[0].influences[0];
+        const double setup_world_x =
+            (vertex0_bind.x * static_cast<double>(setup_spine_transform.a)) +
+            (vertex0_bind.y * static_cast<double>(setup_spine_transform.b)) +
+            static_cast<double>(setup_spine_transform.world_x);
+        const double setup_world_y =
+            (vertex0_bind.x * static_cast<double>(setup_spine_transform.c)) +
+            (vertex0_bind.y * static_cast<double>(setup_spine_transform.d)) +
+            static_cast<double>(setup_spine_transform.world_y);
+        const auto expected_arm_bind =
+            marrow::editor::mesh_weight_model::inverse_transform_point_safe(
+                setup_transforms[*arm_bone_index], setup_world_x, setup_world_y);
+        if (!expected_arm_bind.has_value()) {
+            std::cerr << "Setup-pose bind smoke could not invert the arm_l setup transform.\n";
+            return false;
+        }
+
+        // Keep the body slot selected so the paint target resolves, and make
+        // arm_l the active influence bone.
+        shell_state.selection.toggle(marrow::editor::BoneSelection{"arm_l"});
+        shell_state.weight_paint.mode = WeightPaintMode::Paint;
+        shell_state.weight_paint.strength = 1.0f;
+        const std::optional<MeshWeightOverlay> new_bone_overlay = build_weight_overlay();
+        if (!new_bone_overlay.has_value() ||
+            new_bone_overlay->target.source_attachment_name != "body_mesh") {
+            std::cerr << "Setup-pose bind smoke could not build the new-influence overlay.\n";
+            return false;
+        }
+        begin_weight_paint_stroke(&shell_state, new_bone_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *new_bone_overlay,
+                new_bone_overlay->vertices[0].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Setup-pose bind smoke could not paint a new bone influence.\n";
+            return false;
+        }
+
+        const marrow::editor::MeshWeightAttachmentEdit* painted_edit =
+            shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                "mesh_base", "body", "body_mesh");
+        if (painted_edit == nullptr || painted_edit->vertices.empty()) {
+            std::cerr << "Setup-pose bind smoke did not author a mesh weight edit.\n";
+            return false;
+        }
+        const marrow::editor::MeshWeightInfluenceEdit* painted_arm = nullptr;
+        for (const auto& influence : painted_edit->vertices[0].influences) {
+            if (influence.bone_name == "arm_l") {
+                painted_arm = &influence;
+            }
+        }
+        if (painted_arm == nullptr) {
+            std::cerr << "Setup-pose bind smoke did not add the arm_l influence to vertex 0.\n";
+            return false;
+        }
+        if (std::abs(painted_arm->x - expected_arm_bind->x) > 1e-9 ||
+            std::abs(painted_arm->y - expected_arm_bind->y) > 1e-9) {
+            std::cerr << "A newly painted influence must bind against the setup pose. Expected ("
+                      << expected_arm_bind->x << ", " << expected_arm_bind->y << ") but wrote ("
+                      << painted_arm->x << ", " << painted_arm->y << ").\n";
+            return false;
+        }
+        // Canonical order: spine and arm_l tie at 0.5, broken on skeleton index.
+        if (painted_edit->vertices[0].influences.size() != 2U ||
+            painted_edit->vertices[0].influences[0].bone_name != "spine" ||
+            painted_edit->vertices[0].influences[1].bone_name != "arm_l" ||
+            !require_weight_near(painted_edit->vertices[0].influences[0].weight, 0.5, 1e-12, "new-influence spine weight") ||
+            !require_weight_near(painted_edit->vertices[0].influences[1].weight, 0.5, 1e-12, "new-influence arm_l weight")) {
+            std::cerr << "Setup-pose bind smoke did not canonicalize the painted vertex.\n";
+            return false;
+        }
+
+        // ── MAR-175: Replace assigns a target weight where Paint accumulates ──
+        if (!undo_project_change(&shell_state)) {
+            std::cerr << "Setup-pose bind smoke could not undo the new-influence stroke.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        const auto replace_active_weight = [&]() -> std::optional<double> {
+            const std::optional<MeshWeightPaintTarget> target = current_weight_target();
+            if (!target.has_value() || target->source_attachment == nullptr ||
+                target->source_attachment->mesh_geometry == nullptr ||
+                target->source_attachment->mesh_geometry->weights.size() < 2U) {
+                return std::nullopt;
+            }
+            return weight_for_bone(
+                target->source_attachment->mesh_geometry->weights[1], *arm_bone_index);
+        };
+
+        shell_state.weight_paint.mode = WeightPaintMode::Replace;
+        shell_state.weight_paint.strength = 1.0f;
+        const std::optional<MeshWeightOverlay> replace_overlay = build_weight_overlay();
+        if (!replace_overlay.has_value()) {
+            std::cerr << "Replace smoke could not build the overlay.\n";
+            return false;
+        }
+        begin_weight_paint_stroke(&shell_state, replace_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *replace_overlay,
+                replace_overlay->vertices[1].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Replace smoke could not apply a full-strength replace stroke.\n";
+            return false;
+        }
+        const std::optional<double> replaced_full = replace_active_weight();
+        if (shell_state.session.undo_count() != 1U ||
+            !replaced_full.has_value() ||
+            !require_weight_near(*replaced_full, 1.0, 1e-9, "replace at strength 1.0")) {
+            std::cerr << "Replace at strength 1.0 must drive the active bone to a full 1.0 in one pass.\n";
+            return false;
+        }
+
+        if (!undo_project_change(&shell_state)) {
+            std::cerr << "Replace smoke could not undo the full-strength stroke.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // Replace is a target, not a rate: a 0.4 stamp leaves the active bone at
+        // exactly 0.4 and scales the remaining influences to fill the other 0.6.
+        shell_state.weight_paint.strength = 0.4f;
+        const std::optional<MeshWeightOverlay> partial_overlay = build_weight_overlay();
+        if (!partial_overlay.has_value()) {
+            std::cerr << "Replace smoke could not build the partial overlay.\n";
+            return false;
+        }
+        begin_weight_paint_stroke(&shell_state, partial_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *partial_overlay,
+                partial_overlay->vertices[1].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Replace smoke could not apply a 0.4 replace stroke.\n";
+            return false;
+        }
+        const std::optional<double> replaced_partial = replace_active_weight();
+        // The slider is a float, so the exact target is 0.4f widened, not 0.4.
+        const double expected_partial =
+            static_cast<double>(shell_state.weight_paint.strength);
+        if (!replaced_partial.has_value() ||
+            !require_weight_near(*replaced_partial, expected_partial, 1e-9, "replace at strength 0.4")) {
+            std::cerr << "Replace must assign the stamp value and let canonicalization renormalize.\n";
+            return false;
+        }
+
+
+        // ── MAR-175: selected-scope Normalize, setup-pose Rebind, numeric edits ──
+        const auto weight_edit_snapshot = [&]() -> std::string {
+            const marrow::editor::MeshWeightAttachmentEdit* edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (edit == nullptr) {
+                return "<none>";
+            }
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (std::size_t vertex = 0; vertex < edit->vertices.size(); ++vertex) {
+                stream << 'v' << vertex << ':';
+                for (const auto& influence : edit->vertices[vertex].influences) {
+                    stream << influence.bone_name << '=' << influence.weight << '@'
+                           << influence.x << ',' << influence.y << ';';
+                }
+                stream << '|';
+            }
+            return stream.str();
+        };
+        const auto vertex_snapshot = [&](std::size_t vertex) -> std::string {
+            const marrow::editor::MeshWeightAttachmentEdit* edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (edit == nullptr || vertex >= edit->vertices.size()) {
+                return "<none>";
+            }
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (const auto& influence : edit->vertices[vertex].influences) {
+                stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                       << ',' << influence.y << ';';
+            }
+            return stream.str();
+        };
+
+        // Materialize the overlay once so the commands below have something to
+        // compare against, then clear history so the counts start from zero.
+        if (!normalize_weights_command(&shell_state)) {
+            std::cerr << "MAR-175 Normalize command failed on the unscoped attachment.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // Normalize is now a no-op: it must add no history and not dirty.
+        const std::string normalized_state = weight_edit_snapshot();
+        if (!normalize_weights_command(&shell_state) ||
+            shell_state.session.undo_count() != 0U ||
+            weight_edit_snapshot() != normalized_state) {
+            std::cerr << "A Normalize that changes nothing must add no history entry.\n";
+            return false;
+        }
+
+        // Rebind, both branches.
+        //
+        // Note the fixture's own offsets are NOT a fixed point of rebind: they
+        // were authored as round numbers against transforms that are (0,+50)
+        // and (-30,+60) by intent, but the runtime composes bone world
+        // transforms in float32, so the setup pose it reports carries ~1e-6 of
+        // error and a double-precision rebind moves the offsets by about that
+        // much. The no-change branch is therefore asserted below on rebind's
+        // own output, which is where it genuinely holds.
+        //
+        // Author a vertex whose offsets disagree about where it is -- the shape
+        // the paint path used to produce for a newly added bone -- and prove
+        // Rebind repairs it.
+        if (!set_active_vertex_weights_command(
+                &shell_state,
+                2U,
+                {{"spine", 64.0, 80.0, 0.5}, {"arm_l", 300.0, 250.0, 0.5}})) {
+            std::cerr << "MAR-175 Rebind smoke could not author an inconsistent vertex.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        const marrow::editor::MeshWeightAttachmentEdit* pre_rebind_edit =
+            shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                "mesh_base", "body", "body_mesh");
+        if (pre_rebind_edit == nullptr) {
+            std::cerr << "MAR-175 Rebind smoke could not find the weight edit.\n";
+            return false;
+        }
+        std::vector<std::vector<double>> pre_rebind_weights;
+        for (const auto& vertex : pre_rebind_edit->vertices) {
+            std::vector<double> row;
+            for (const auto& influence : vertex.influences) {
+                row.push_back(influence.weight);
+            }
+            pre_rebind_weights.push_back(std::move(row));
+        }
+        const std::optional<MeshWeightPaintTarget> rebind_target = current_weight_target();
+        if (!rebind_target.has_value() || rebind_target->source_attachment == nullptr ||
+            rebind_target->source_attachment->mesh_geometry == nullptr) {
+            std::cerr << "MAR-175 Rebind smoke could not resolve the target mesh.\n";
+            return false;
+        }
+        const std::vector<double> pre_rebind_vertices =
+            rebind_target->source_attachment->mesh_geometry->vertices;
+        const std::vector<std::size_t> pre_rebind_triangles =
+            rebind_target->source_attachment->mesh_geometry->triangles;
+        const std::vector<double> pre_rebind_uvs =
+            rebind_target->source_attachment->mesh_geometry->uvs;
+        const std::string pre_rebind_snapshot = weight_edit_snapshot();
+
+        if (!rebind_weights_command(&shell_state) ||
+            shell_state.session.undo_count() != 1U) {
+            std::cerr << "MAR-175 Rebind must run as exactly one history entry.\n";
+            return false;
+        }
+        const marrow::editor::MeshWeightAttachmentEdit* post_rebind_edit =
+            shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                "mesh_base", "body", "body_mesh");
+        if (post_rebind_edit == nullptr ||
+            post_rebind_edit->vertices.size() != pre_rebind_weights.size()) {
+            std::cerr << "MAR-175 Rebind changed the vertex count.\n";
+            return false;
+        }
+        for (std::size_t vertex = 0; vertex < post_rebind_edit->vertices.size(); ++vertex) {
+            const auto& influences = post_rebind_edit->vertices[vertex].influences;
+            if (influences.size() != pre_rebind_weights[vertex].size()) {
+                std::cerr << "MAR-175 Rebind changed which bones influence a vertex.\n";
+                return false;
+            }
+            for (std::size_t index = 0; index < influences.size(); ++index) {
+                if (influences[index].weight != pre_rebind_weights[vertex][index]) {
+                    std::cerr << "MAR-175 Rebind must not change any weight.\n";
+                    return false;
+                }
+            }
+        }
+        // The repaired vertex's influences must now name one setup-world point.
+        {
+            const auto setup = marrow::editor::mesh_weight_model::
+                setup_pose_bone_world_transforms(shell_state.load_result.skeleton_data);
+            const auto& repaired = post_rebind_edit->vertices[2].influences;
+            std::optional<double> shared_x;
+            std::optional<double> shared_y;
+            for (const auto& influence : repaired) {
+                const auto bone = shell_state.load_result.skeleton_data->find_bone_index(
+                    influence.bone_name);
+                if (!bone.has_value() || *bone >= setup.size()) {
+                    std::cerr << "MAR-175 Rebind smoke could not resolve a repaired bone.\n";
+                    return false;
+                }
+                const auto& transform = setup[*bone];
+                const double world_x = (influence.x * static_cast<double>(transform.a)) +
+                    (influence.y * static_cast<double>(transform.b)) +
+                    static_cast<double>(transform.world_x);
+                const double world_y = (influence.x * static_cast<double>(transform.c)) +
+                    (influence.y * static_cast<double>(transform.d)) +
+                    static_cast<double>(transform.world_y);
+                if (!shared_x.has_value()) {
+                    shared_x = world_x;
+                    shared_y = world_y;
+                } else if (std::abs(*shared_x - world_x) > 1e-9 ||
+                           std::abs(*shared_y - world_y) > 1e-9) {
+                    std::cerr << std::setprecision(17)
+                              << "After Rebind every influence must name the same setup-world point. "
+                              << influence.bone_name << " offset(" << influence.x << ", "
+                              << influence.y << ") -> world(" << world_x << ", " << world_y
+                              << ") vs (" << *shared_x << ", " << *shared_y << ") delta("
+                              << (world_x - *shared_x) << ", " << (world_y - *shared_y) << ")\n";
+                    return false;
+                }
+            }
+        }
+        // The no-change branch: rebinding rebind's own output records nothing.
+        if (!rebind_weights_command(&shell_state) ||
+            shell_state.session.undo_count() != 1U) {
+            std::cerr << "A Rebind that changes nothing must add no history entry.\n";
+            return false;
+        }
+
+        // Topology never moves.
+        const std::optional<MeshWeightPaintTarget> post_rebind_target = current_weight_target();
+        if (!post_rebind_target.has_value() ||
+            post_rebind_target->source_attachment == nullptr ||
+            post_rebind_target->source_attachment->mesh_geometry == nullptr ||
+            post_rebind_target->source_attachment->mesh_geometry->vertices !=
+                pre_rebind_vertices ||
+            post_rebind_target->source_attachment->mesh_geometry->triangles !=
+                pre_rebind_triangles ||
+            post_rebind_target->source_attachment->mesh_geometry->uvs != pre_rebind_uvs) {
+            std::cerr << "MAR-175 Rebind must not touch mesh topology.\n";
+            return false;
+        }
+        if (!undo_project_change(&shell_state) ||
+            weight_edit_snapshot() != pre_rebind_snapshot) {
+            std::cerr << "Undoing a Rebind must restore the bind offsets bit-exactly.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // Numeric influence edits: one transaction, one history entry, and the
+        // untouched vertices survive byte-identical.
+        const std::string numeric_vertex0_before = vertex_snapshot(0U);
+        const std::string numeric_vertex3_before = vertex_snapshot(3U);
+        if (!set_active_vertex_weights_command(
+                &shell_state,
+                1U,
+                {{"spine", 60.0, 0.0, 3.0}, {"arm_l", 20.0, 0.0, 1.0}}) ||
+            shell_state.session.undo_count() != 1U) {
+            std::cerr << "A numeric influence commit must be exactly one history entry.\n";
+            return false;
+        }
+        if (vertex_snapshot(0U) != numeric_vertex0_before ||
+            vertex_snapshot(3U) != numeric_vertex3_before) {
+            std::cerr << "A numeric influence commit must leave every other vertex byte-identical.\n";
+            return false;
+        }
+        {
+            const marrow::editor::MeshWeightAttachmentEdit* edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (edit == nullptr || edit->vertices[1].influences.size() != 2U ||
+                !require_weight_near(edit->vertices[1].influences[0].weight, 0.75, 1e-12, "numeric spine weight") ||
+                !require_weight_near(edit->vertices[1].influences[1].weight, 0.25, 1e-12, "numeric arm_l weight")) {
+                std::cerr << "A numeric influence commit must redisplay the renormalized weight.\n";
+                return false;
+            }
+        }
+
+        // AC4 rejections: each leaves the project byte-identical and adds no
+        // history. serialize_project() is the project-wide statement of that.
+        const std::string project_before_rejections =
+            marrow::editor::serialize_project(*shell_state.load_result.project);
+        const std::size_t undo_before_rejections = shell_state.session.undo_count();
+        const std::vector<std::vector<marrow::editor::MeshWeightInfluenceEdit>> rejected_inputs{
+            {{"no_such_bone", 0.0, 0.0, 1.0}},
+            {{"spine", std::numeric_limits<double>::quiet_NaN(), 0.0, 1.0}},
+            {{"spine", 0.0, 0.0, std::numeric_limits<double>::infinity()}},
+            {{"spine", 0.0, 0.0, 0.0}, {"arm_l", 0.0, 0.0, -1.0}},
+            {},
+        };
+        for (const auto& rejected : rejected_inputs) {
+            if (set_active_vertex_weights_command(&shell_state, 1U, rejected)) {
+                std::cerr << "An invalid numeric influence commit must be refused.\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*shell_state.load_result.project) !=
+                    project_before_rejections ||
+                shell_state.session.undo_count() != undo_before_rejections) {
+                std::cerr << "A refused weight edit must leave the project byte-identical.\n";
+                return false;
+            }
+        }
+
+        // AC1/AC6 cross-path identity: the brush, the numeric table, and the
+        // project primitive driven to the same intended influence set must
+        // produce a bit-identical vertex. This is the assertion that proves the
+        // paths share one implementation rather than merely agreeing today.
+        if (!set_active_vertex_weights_command(
+                &shell_state,
+                2U,
+                {{"spine", 11.0, 22.0, 0.6}, {"arm_l", 33.0, 44.0, 0.2}})) {
+            std::cerr << "Cross-path identity setup failed on the numeric path.\n";
+            return false;
+        }
+        const std::string numeric_path_vertex = vertex_snapshot(2U);
+        {
+            marrow::editor::ProjectData primitive_project = *shell_state.load_result.project;
+            const std::optional<MeshWeightPaintTarget> identity_target = current_weight_target();
+            if (!identity_target.has_value() || identity_target->source_attachment == nullptr) {
+                std::cerr << "Cross-path identity could not resolve the target.\n";
+                return false;
+            }
+            marrow::editor::MeshWeightVertexEdit intended;
+            intended.influences = {{"spine", 11.0, 22.0, 0.6}, {"arm_l", 33.0, 44.0, 0.2}};
+            const auto primitive_result = marrow::editor::set_mesh_vertex_weights(
+                &primitive_project,
+                *shell_state.load_result.skeleton_data,
+                *identity_target->source_attachment,
+                marrow::editor::MeshWeightTarget{"mesh_base", "body", "body_mesh"},
+                {{2U, intended}});
+            if (!primitive_result) {
+                std::cerr << "Cross-path identity failed on the primitive path.\n";
+                return false;
+            }
+            const marrow::editor::MeshWeightAttachmentEdit* primitive_edit =
+                primitive_project.find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (const auto& influence : primitive_edit->vertices[2].influences) {
+                stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                       << ',' << influence.y << ';';
+            }
+            if (stream.str() != numeric_path_vertex) {
+                std::cerr << "The numeric table and the project primitive disagreed: \""
+                          << numeric_path_vertex << "\" vs \"" << stream.str() << "\".\n";
+                return false;
+            }
+        }
+        // The brush drives the same vertex to the same intended set through the
+        // pure layer only, with no ProjectData transaction at all.
+        {
+            marrow::editor::MeshWeightVertexEdit brush_vertex;
+            brush_vertex.influences = {{"spine", 11.0, 22.0, 0.6}, {"arm_l", 33.0, 44.0, 0.2}};
+            if (!marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+                     *shell_state.load_result.skeleton_data, &brush_vertex)
+                     .empty()) {
+                std::cerr << "Cross-path identity failed on the brush's pure layer.\n";
+                return false;
+            }
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (const auto& influence : brush_vertex.influences) {
+                stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                       << ',' << influence.y << ';';
+            }
+            if (stream.str() != numeric_path_vertex) {
+                std::cerr << "The brush's canonical layer and the numeric table disagreed.\n";
+                return false;
+            }
+        }
+        std::cout << "  MAR-175 cross-path identity: brush, numeric table, and the project "
+                     "primitive all produced " << numeric_path_vertex << '\n';
+
+        // Save/reload round trip: canonical output is a fixed point of the
+        // .marrow loader, and -- the V1/V2 regression guard -- an accepted
+        // weight write always produces a SAVABLE project.
+        {
+            marrow::editor::ProjectData round_trip = *shell_state.load_result.project;
+            round_trip.source_path = "/tmp/marrow_mar175_weight_round_trip.marrow";
+            materialize_temp_project_runtime_assets(shell_state, &round_trip);
+            const auto saved =
+                marrow::editor::save_project(round_trip, round_trip.source_path);
+            if (!saved) {
+                std::cerr << "An accepted weight edit produced an UNSAVABLE project: "
+                          << saved.error->format() << '\n';
+                return false;
+            }
+            const auto reloaded = marrow::editor::load_project(round_trip.source_path);
+            if (!reloaded) {
+                std::cerr << "The saved weight project failed to reload.\n";
+                return false;
+            }
+            const marrow::editor::MeshWeightAttachmentEdit* saved_edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            const marrow::editor::MeshWeightAttachmentEdit* loaded_edit =
+                reloaded.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (saved_edit == nullptr || loaded_edit == nullptr ||
+                saved_edit->vertices.size() != loaded_edit->vertices.size()) {
+                std::cerr << "The reloaded project lost the weight overlay.\n";
+                return false;
+            }
+            for (std::size_t vertex = 0; vertex < saved_edit->vertices.size(); ++vertex) {
+                const auto& before = saved_edit->vertices[vertex].influences;
+                const auto& after = loaded_edit->vertices[vertex].influences;
+                if (before.size() != after.size()) {
+                    std::cerr << "The reloaded project changed an influence count.\n";
+                    return false;
+                }
+                for (std::size_t index = 0; index < before.size(); ++index) {
+                    // .marrow serializes at 15 significant digits, so identity
+                    // here is decimal-round-trip identity, not bit identity.
+                    if (before[index].bone_name != after[index].bone_name ||
+                        !require_weight_near(after[index].weight, before[index].weight, 1e-12, "reloaded weight")) {
+                        std::cerr << "The reloaded weight vertex did not round-trip.\n";
+                        return false;
+                    }
+                }
+            }
+            std::remove(round_trip.source_path.c_str());
+        }
+
+        if (!apply_history_snapshot(&shell_state, weight_paint_baseline) ||
+            !apply_current_animation_state_to_preview(&shell_state)) {
+            std::cerr << "Weight paint smoke could not restore the baseline after MAR-175 coverage.\n";
+            return false;
+        }
+        shell_state.weight_paint.strength = 1.0f;
+        shell_state.weight_paint.mode = WeightPaintMode::Paint;
         reset_weight_paint_stroke(&shell_state);
         shell_state.weight_paint.enabled = false;
         shell_state.session.clear_history();
@@ -2815,8 +3416,8 @@ bool validate_preview_playback_speed_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 60U) {
-        std::cerr << "Preview speed shell smoke requires the exact 60-operation registry.\n";
+    if (operation_count_before != 61U) {
+        std::cerr << "Preview speed shell smoke requires the exact 61-operation registry.\n";
         return false;
     }
     state.session.clear_history();
@@ -3092,7 +3693,12 @@ bool validate_preview_playback_speed_shell_smoke(
     }
 
     // --- Pause is timeline_playing, at every speed --------------------------
-    advance_timeline_playback(&state, 0.25);
+    // 0.05 at 8x would reach 0.7, matching the resume case below. A 0.25 delta
+    // reaches exactly two periods of the 1.0s clip, so a broken pause guard
+    // would land on fmod(2.3, 1.0) == 0.2999999999999998 and this exact
+    // comparison would bite by 1.67e-16 of floating-point residue rather than
+    // by design.
+    advance_timeline_playback(&state, 0.05);
     if (state.timeline_time_seconds != 0.3) {
         std::cerr << "A paused transport must not advance at any speed.\n";
         return false;
@@ -3179,9 +3785,15 @@ bool validate_preview_playback_speed_shell_smoke(
     const std::uint64_t preview_revision_before = state.session.preview_revision();
     const std::size_t operations_before =
         marrow::editor::agent_operation_descriptor_count();
-    // The revision counters only move when a session setter actually changes a
-    // value, so the preview state itself is captured too: that catches a stray
-    // session call whose argument happened to match on the day.
+    // Only some session setters are change-gated, so the preview state itself
+    // is captured too. The unconditional bumpers -- select_animation,
+    // select_setup_pose, seek, advance, set_queue -- are caught by the revision
+    // comparison alone. Of the change-gated ones, set_playing, set_loop, and
+    // set_reverse write exactly the fields this PreviewState capture compares,
+    // and clear_queue is provably a no-op from the settled pre-capture state,
+    // so every observable stray session call is caught. Note the gate
+    // short-circuits at the revision comparison, so in practice that is the
+    // witness that reports.
     const marrow::editor::PreviewState preview_before = state.session.preview_state();
 
     // Replay every accepted and every rejected request, with no advance

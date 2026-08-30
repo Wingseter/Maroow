@@ -211,13 +211,6 @@ const marrow::runtime::AttachmentData* find_mesh_attachment(
     std::string_view slot_name,
     std::string_view attachment_name,
     std::optional<std::size_t>* slot_index_out = nullptr);
-MeshWeightAttachmentEdit mesh_weight_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view skin_name,
-    std::string_view slot_name,
-    std::string_view attachment_name,
-    const marrow::runtime::AttachmentData& attachment);
-void normalize_weight_vertex(MeshWeightVertexEdit* vertex);
 MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
     ProjectData& project,
     const marrow::runtime::SkeletonData& skeleton,

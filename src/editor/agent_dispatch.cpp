@@ -14,6 +14,7 @@
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/session.hpp"
 #include "agent_dispatch_internal.hpp"
+#include "mesh_weight_model.hpp"
 #include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor {
@@ -70,6 +71,7 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"remove_deform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_vertex_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"normalize_weights", "edit", true, false, true, true, &handle_editing_operation},
+    {"mesh.rebind_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"edit_ik_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_path_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_transform_constraint", "edit", true, false, true, true, &handle_constraint_operation},
@@ -971,54 +973,6 @@ const marrow::runtime::AttachmentData* find_mesh_attachment(
     return attachment;
 }
 
-marrow::editor::MeshWeightAttachmentEdit mesh_weight_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view skin_name,
-    std::string_view slot_name,
-    std::string_view attachment_name,
-    const marrow::runtime::AttachmentData& attachment) {
-    marrow::editor::MeshWeightAttachmentEdit edit;
-    edit.skin_name = std::string(skin_name);
-    edit.slot_name = std::string(slot_name);
-    edit.attachment_name = std::string(attachment_name);
-    if (attachment.mesh_geometry == nullptr) {
-        return edit;
-    }
-    edit.vertices.reserve(attachment.mesh_geometry->weights.size());
-    for (const auto& runtime_vertex : attachment.mesh_geometry->weights) {
-        marrow::editor::MeshWeightVertexEdit vertex;
-        vertex.influences.reserve(runtime_vertex.influences.size());
-        for (const auto& influence : runtime_vertex.influences) {
-            if (influence.bone_index >= skeleton.bones().size()) {
-                continue;
-            }
-            vertex.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
-                skeleton.bones()[influence.bone_index].name,
-                influence.x,
-                influence.y,
-                influence.weight});
-        }
-        edit.vertices.push_back(std::move(vertex));
-    }
-    return edit;
-}
-
-void normalize_weight_vertex(marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (vertex == nullptr) {
-        return;
-    }
-    double total = 0.0;
-    for (const auto& influence : vertex->influences) {
-        total += std::max(0.0, influence.weight);
-    }
-    if (total <= 0.0) {
-        return;
-    }
-    for (auto& influence : vertex->influences) {
-        influence.weight = std::max(0.0, influence.weight) / total;
-    }
-}
-
 marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
     marrow::editor::ProjectData& project,
     const marrow::runtime::SkeletonData& skeleton,
@@ -1031,7 +985,8 @@ marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
         return existing;
     }
     project.mesh_weight_attachment_edits.push_back(
-        mesh_weight_edit_from_runtime(skeleton, skin_name, slot_name, attachment_name, attachment));
+        mesh_weight_model::mesh_weight_edit_from_runtime(
+            skeleton, skin_name, slot_name, attachment_name, attachment));
     return &project.mesh_weight_attachment_edits.back();
 }
 

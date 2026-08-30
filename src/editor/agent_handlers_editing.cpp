@@ -1,4 +1,5 @@
 #include "agent_dispatch_internal.hpp"
+#include "mesh_weight_model.hpp"
 
 #include "timeline_model.hpp"
 #include "marrow/editor/authoring.hpp"
@@ -2519,7 +2520,8 @@ AgentDispatchResult handle_timeline_editing_operation(
         return make_success("Removed deform keyframe successfully.", op, spec);
     }
 
-    if (op == "set_vertex_weights" || op == "normalize_weights") {
+    if (op == "set_vertex_weights" || op == "normalize_weights" ||
+        op == "mesh.rebind_weights") {
         const json::Value* args = command_args(cmd);
         if (args == nullptr) {
             return make_error(std::string(op) + " requires 'args' object.", op, spec);
@@ -2535,26 +2537,31 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (attachment == nullptr) {
             return make_error("Mesh attachment not found.", op, spec, "not_found");
         }
-        if (bool_arg(args, "dry_run")) {
-            json::Value::Object preview;
-            preview.emplace("dry_run", bool_value(true));
-            preview.emplace("vertex_count", number_value(attachment->mesh_geometry->weights.size()));
-            return make_success("Mesh weight edit validated.", op, spec, object_value(std::move(preview)));
-        }
-        auto transaction = session.begin_edit({
-            EditKind::EditProperty,
-            "Edit mesh weights via Agent",
-            "Agent",
-            false,
-            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
-        if (!transaction) {
-            return make_error(transaction.error()->format(), op, spec, "transaction_active");
-        }
-        ProjectData& project = *transaction.project();
-        MeshWeightAttachmentEdit* edit = ensure_mesh_weight_edit(
-            project, skeleton, *skin_name, *slot_name, *attachment_name, *attachment);
+        const MeshWeightTarget target{
+            std::string(*skin_name), std::string(*slot_name), std::string(*attachment_name)};
 
+        // Preflight everything into locals BEFORE opening a transaction. The
+        // shipped handler wrote `edit->vertices[i]` for earlier entries and
+        // could then reject on a later one, relying on the transaction
+        // destructor to unwind; parsing first makes the atomicity local and
+        // visible instead.
+        std::vector<std::pair<std::size_t, MeshWeightVertexEdit>> requested_vertices;
+        std::vector<std::size_t> requested_scope;
         if (op == "set_vertex_weights") {
+            // MAR-175 C1: canonicalization is unconditional, so "normalize":
+            // false has no implementable meaning. Honouring it re-opens the
+            // defects where a committed write could not be saved; ignoring it
+            // would report success for a request that was not carried out.
+            if (const json::Value* normalize_flag = json::find_member(*args, "normalize");
+                normalize_flag != nullptr && normalize_flag->is_boolean() &&
+                !normalize_flag->as_boolean()) {
+                return make_error(
+                    "normalize:false is no longer supported; weight writes are always "
+                    "canonicalized.",
+                    op,
+                    spec,
+                    "invalid_request");
+            }
             const json::Value* vertices = json::find_member(*args, "vertices");
             if (vertices == nullptr || !vertices->is_array()) {
                 return make_error("set_vertex_weights requires vertices array.", op, spec);
@@ -2569,12 +2576,11 @@ AgentDispatchResult handle_timeline_editing_operation(
                     return make_error("vertex index must be a non-negative integer.", op, spec);
                 }
                 const std::size_t vertex_index = static_cast<std::size_t>(std::round(*index_number));
-                if (vertex_index >= edit->vertices.size()) {
-                    return make_error("vertex index is outside the target mesh.", op, spec);
-                }
                 const json::Value* influences = json::find_member(vertex_value, "influences");
                 if (influences == nullptr || !influences->is_array() ||
-                    influences->as_array().empty() || influences->as_array().size() > 4U) {
+                    influences->as_array().empty() ||
+                    influences->as_array().size() >
+                        mesh_weight_model::kMaxMeshWeightInfluences) {
                     return make_error("vertex influences must contain 1 to 4 entries.", op, spec);
                 }
                 MeshWeightVertexEdit next_vertex;
@@ -2596,15 +2602,90 @@ AgentDispatchResult handle_timeline_editing_operation(
                     next_vertex.influences.push_back(
                         MeshWeightInfluenceEdit{std::string(*bone_name), *x, *y, *weight});
                 }
-                if (bool_arg(args, "normalize", true)) {
-                    normalize_weight_vertex(&next_vertex);
+                requested_vertices.emplace_back(vertex_index, std::move(next_vertex));
+            }
+        } else if (const json::Value* scope = json::find_member(*args, "vertices");
+                   scope != nullptr) {
+            if (!scope->is_array()) {
+                return make_error("vertices must be an array of vertex indices.", op, spec);
+            }
+            if (scope->as_array().empty()) {
+                return make_error(
+                    std::string(op) + " requires at least one vertex when 'vertices' is given.",
+                    op,
+                    spec);
+            }
+            for (const json::Value& index_value : scope->as_array()) {
+                if (!index_value.is_number() || index_value.as_number() < 0.0 ||
+                    std::abs(index_value.as_number() - std::round(index_value.as_number())) > 1e-6) {
+                    return make_error("vertex index must be a non-negative integer.", op, spec);
                 }
-                edit->vertices[vertex_index] = std::move(next_vertex);
+                requested_scope.push_back(
+                    static_cast<std::size_t>(std::round(index_value.as_number())));
             }
-        } else {
-            for (auto& vertex : edit->vertices) {
-                normalize_weight_vertex(&vertex);
+        }
+
+        // Run the identical preflight a live call runs, against a copy. A dry
+        // run therefore validates exactly what a live call validates and can
+        // report the same affected-vertex payload, without touching
+        // project_revision(), undo_count(), or dirty().
+        const auto apply_weight_edit = [&](ProjectData* into) -> MeshWeightResult {
+            if (op == "set_vertex_weights") {
+                return set_mesh_vertex_weights(
+                    into, skeleton, *attachment, target, requested_vertices);
             }
+            if (op == "normalize_weights") {
+                return normalize_mesh_weights(
+                    into, skeleton, *attachment, target, requested_scope);
+            }
+            return rebind_mesh_weights(
+                into, skeleton, *attachment, target, requested_scope);
+        };
+
+        ProjectData preview_project = *session.project();
+        const MeshWeightResult preview_result = apply_weight_edit(&preview_project);
+        if (!preview_result) {
+            return make_error(preview_result.error, op, spec, "invalid_request");
+        }
+
+        const auto build_payload = [&](bool dry_run) {
+            json::Value::Object payload;
+            payload.emplace("dry_run", bool_value(dry_run));
+            payload.emplace("vertex_count", number_value(preview_result.vertex_count));
+            payload.emplace(
+                "scoped_vertex_count", number_value(preview_result.scoped_vertex_count));
+            json::Value::Array affected;
+            affected.reserve(preview_result.affected_vertices.size());
+            for (const std::size_t index : preview_result.affected_vertices) {
+                affected.push_back(number_value(index));
+            }
+            payload.emplace("affected_vertices", array_value(std::move(affected)));
+            payload.emplace("changed", bool_value(preview_result.changed));
+            return object_value(std::move(payload));
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            return make_success(
+                op == "mesh.rebind_weights" ? "Mesh weight rebind validated."
+                                            : "Mesh weight edit validated.",
+                op,
+                spec,
+                build_payload(true));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "Edit mesh weights via Agent",
+            "Agent",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const MeshWeightResult live_result = apply_weight_edit(transaction.project());
+        if (!live_result) {
+            transaction.cancel();
+            return make_error(live_result.error, op, spec, "invalid_request");
         }
 
         const CommitPolicy commit_policy = op == "normalize_weights"
@@ -2614,12 +2695,24 @@ AgentDispatchResult handle_timeline_editing_operation(
                   NoChangeResult::Success,
                   "Mesh weights already normalized.",
                   {}}
-            : CommitPolicy{"Failed to apply mesh weights: "};
+            : (op == "mesh.rebind_weights"
+                   ? CommitPolicy{
+                         "Failed to apply mesh weights: ",
+                         "invalid_request",
+                         NoChangeResult::Success,
+                         "Mesh weights already bound to the setup pose.",
+                         {}}
+                   : CommitPolicy{"Failed to apply mesh weights: "});
         if (auto result = commit_or_error(
                 transaction, op, spec, commit_policy)) {
             return std::move(*result);
         }
-        return make_success("Edited mesh weights successfully.", op, spec);
+        return make_success(
+            op == "mesh.rebind_weights" ? "Rebound mesh weights successfully."
+                                        : "Edited mesh weights successfully.",
+            op,
+            spec,
+            build_payload(false));
     }
 
     if (op == "set_slot_color_keyframe") {

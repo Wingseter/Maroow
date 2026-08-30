@@ -3,9 +3,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "marrow/editor/preferences.hpp"
@@ -559,5 +561,75 @@ TimelineScaleResult scale_keyframe_times(
     const std::vector<TimelineKeySelector>& selectors,
     TimelineScalePivot pivot,
     double scale);
+
+// ── Mesh vertex weights ────────────────────────────────────────────────────
+//
+// The canonical rules themselves live in `src/editor/mesh_weight_model.hpp`,
+// which is UI-free and unit-tested. These three primitives are the
+// `ProjectData` transactions built on top of them, and are what the numeric
+// influence table, the Normalize and Rebind commands, and the agent weight
+// operations all call. The brush deliberately calls only the pure layer: it
+// cannot afford a `ProjectData` copy per sample.
+
+/** @brief Names one weighted mesh attachment inside a skin. */
+struct MeshWeightTarget {
+    std::string skin_name;
+    std::string slot_name;
+    std::string attachment_name;
+};
+
+struct MeshWeightResult : AuthoringResult {
+    /// Vertices in the target attachment.
+    std::size_t vertex_count{0U};
+    /// Vertices this call addressed.
+    std::size_t scoped_vertex_count{0U};
+    /// Ascending indices whose canonical form differs from what was stored.
+    std::vector<std::size_t> affected_vertices;
+};
+
+/**
+ * @brief Replaces the named vertices' influence lists.
+ *
+ * `vertices` maps a vertex index to its intended, pre-canonical influence list.
+ * Every entry is validated and canonicalized against a candidate copy before
+ * anything is written, so one rejection rejects the whole call and leaves the
+ * project byte-identical.
+ */
+MeshWeightResult set_mesh_vertex_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::pair<std::size_t, MeshWeightVertexEdit>>& vertices);
+
+/**
+ * @brief Canonicalizes existing vertices in place. An empty `scope` means every
+ *        vertex.
+ *
+ * This is the explicit repair operation for weights Marrow did not author.
+ * Materializing an imported attachment deliberately does not canonicalize, so a
+ * runtime document carrying a non-canonical weight list keeps it until
+ * something writes; this is what makes it canonical on demand.
+ */
+MeshWeightResult normalize_mesh_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::size_t>& scope);
+
+/**
+ * @brief Re-expresses bind offsets in each bone's setup frame.
+ *
+ * An empty `scope` means every vertex. Never changes which bones influence a
+ * vertex, never changes a weight, and never touches `vertices`, `triangles`, or
+ * `uvs` -- it is a repair for bind offsets alone.
+ */
+MeshWeightResult rebind_mesh_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::size_t>& scope);
 
 } // namespace marrow::editor

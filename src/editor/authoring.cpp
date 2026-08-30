@@ -1,6 +1,7 @@
 #include "marrow/editor/authoring.hpp"
 
 #include "curve_auto.hpp"
+#include "mesh_weight_model.hpp"
 #include "timeline_model.hpp"
 
 #include <algorithm>
@@ -4126,6 +4127,249 @@ TimelineLoopSyncResult set_timeline_loop_sync(
     }
     *project = std::move(candidate);
     result.changed = true;
+    return result;
+}
+
+// ── Mesh vertex weights ────────────────────────────────────────────────────
+
+namespace {
+
+MeshWeightResult mesh_weight_failure(std::string message) {
+    MeshWeightResult result;
+    result.error = std::move(message);
+    return result;
+}
+
+/// Materializes the attachment's weight overlay on first mutation. Deliberately
+/// not canonicalized: opening a project must not silently rewrite weights the
+/// user never touched.
+MeshWeightAttachmentEdit& ensure_weight_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& skeleton,
+    const MeshWeightTarget& target,
+    const runtime::AttachmentData& attachment) {
+    if (auto* existing = project.find_mesh_weight_attachment_edit(
+            target.skin_name, target.slot_name, target.attachment_name)) {
+        return *existing;
+    }
+    project.mesh_weight_attachment_edits.push_back(
+        mesh_weight_model::mesh_weight_edit_from_runtime(
+            skeleton,
+            target.skin_name,
+            target.slot_name,
+            target.attachment_name,
+            attachment));
+    return project.mesh_weight_attachment_edits.back();
+}
+
+bool weight_vertices_equal(
+    const MeshWeightVertexEdit& left,
+    const MeshWeightVertexEdit& right) {
+    if (left.influences.size() != right.influences.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.influences.size(); ++index) {
+        const MeshWeightInfluenceEdit& lhs = left.influences[index];
+        const MeshWeightInfluenceEdit& rhs = right.influences[index];
+        if (lhs.bone_name != rhs.bone_name || lhs.x != rhs.x || lhs.y != rhs.y ||
+            lhs.weight != rhs.weight) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Validates an explicit vertex scope against the materialized edit. An empty
+/// scope means every vertex, which is the shipped `normalize_weights` behaviour.
+std::string resolve_weight_scope(
+    const std::vector<std::size_t>& scope,
+    std::size_t vertex_count,
+    std::vector<std::size_t>* resolved_out) {
+    resolved_out->clear();
+    if (scope.empty()) {
+        resolved_out->reserve(vertex_count);
+        for (std::size_t index = 0; index < vertex_count; ++index) {
+            resolved_out->push_back(index);
+        }
+        return {};
+    }
+    for (const std::size_t index : scope) {
+        if (index >= vertex_count) {
+            return "vertex index is outside the target mesh.";
+        }
+        if (std::find(resolved_out->begin(), resolved_out->end(), index) !=
+            resolved_out->end()) {
+            return "A vertex was selected more than once.";
+        }
+        resolved_out->push_back(index);
+    }
+    std::sort(resolved_out->begin(), resolved_out->end());
+    return {};
+}
+
+} // namespace
+
+MeshWeightResult set_mesh_vertex_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::pair<std::size_t, MeshWeightVertexEdit>>& vertices) {
+    if (project == nullptr) {
+        return mesh_weight_failure("Mesh weight authoring requires an open project.");
+    }
+    if (vertices.empty()) {
+        return mesh_weight_failure("set_vertex_weights requires at least one vertex.");
+    }
+
+    ProjectData candidate = *project;
+    MeshWeightAttachmentEdit& edit =
+        ensure_weight_edit(candidate, skeleton, target, attachment);
+
+    MeshWeightResult result;
+    result.vertex_count = edit.vertices.size();
+
+    // Preflight: validate and canonicalize every entry before writing any of
+    // them, so a rejection on the last entry cannot leave the earlier ones
+    // applied.
+    std::vector<std::size_t> seen;
+    std::vector<std::pair<std::size_t, MeshWeightVertexEdit>> staged;
+    staged.reserve(vertices.size());
+    for (const auto& [vertex_index, requested] : vertices) {
+        if (vertex_index >= edit.vertices.size()) {
+            return mesh_weight_failure("vertex index is outside the target mesh.");
+        }
+        if (std::find(seen.begin(), seen.end(), vertex_index) != seen.end()) {
+            return mesh_weight_failure("A vertex was selected more than once.");
+        }
+        seen.push_back(vertex_index);
+        MeshWeightVertexEdit canonical = requested;
+        if (const std::string error =
+                mesh_weight_model::canonicalize_mesh_weight_vertex(skeleton, &canonical);
+            !error.empty()) {
+            return mesh_weight_failure(error);
+        }
+        staged.emplace_back(vertex_index, std::move(canonical));
+    }
+
+    result.scoped_vertex_count = staged.size();
+    for (auto& [vertex_index, canonical] : staged) {
+        if (!weight_vertices_equal(edit.vertices[vertex_index], canonical)) {
+            result.affected_vertices.push_back(vertex_index);
+            edit.vertices[vertex_index] = std::move(canonical);
+        }
+    }
+    std::sort(result.affected_vertices.begin(), result.affected_vertices.end());
+    result.changed = !result.affected_vertices.empty();
+    if (result.changed) {
+        *project = std::move(candidate);
+    }
+    return result;
+}
+
+MeshWeightResult normalize_mesh_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::size_t>& scope) {
+    if (project == nullptr) {
+        return mesh_weight_failure("Mesh weight authoring requires an open project.");
+    }
+
+    ProjectData candidate = *project;
+    MeshWeightAttachmentEdit& edit =
+        ensure_weight_edit(candidate, skeleton, target, attachment);
+
+    MeshWeightResult result;
+    result.vertex_count = edit.vertices.size();
+    std::vector<std::size_t> resolved;
+    if (const std::string error =
+            resolve_weight_scope(scope, edit.vertices.size(), &resolved);
+        !error.empty()) {
+        return mesh_weight_failure(error);
+    }
+    result.scoped_vertex_count = resolved.size();
+
+    std::vector<std::pair<std::size_t, MeshWeightVertexEdit>> staged;
+    staged.reserve(resolved.size());
+    for (const std::size_t vertex_index : resolved) {
+        MeshWeightVertexEdit canonical = edit.vertices[vertex_index];
+        if (const std::string error =
+                mesh_weight_model::canonicalize_mesh_weight_vertex(skeleton, &canonical);
+            !error.empty()) {
+            return mesh_weight_failure(error);
+        }
+        staged.emplace_back(vertex_index, std::move(canonical));
+    }
+
+    for (auto& [vertex_index, canonical] : staged) {
+        if (!weight_vertices_equal(edit.vertices[vertex_index], canonical)) {
+            result.affected_vertices.push_back(vertex_index);
+            edit.vertices[vertex_index] = std::move(canonical);
+        }
+    }
+    result.changed = !result.affected_vertices.empty();
+    // Materialization alone is a change worth keeping only when a vertex moved;
+    // otherwise the overlay the candidate grew is discarded with the candidate.
+    if (result.changed) {
+        *project = std::move(candidate);
+    }
+    return result;
+}
+
+MeshWeightResult rebind_mesh_weights(
+    ProjectData* project,
+    const runtime::SkeletonData& skeleton,
+    const runtime::AttachmentData& attachment,
+    const MeshWeightTarget& target,
+    const std::vector<std::size_t>& scope) {
+    if (project == nullptr) {
+        return mesh_weight_failure("Mesh weight authoring requires an open project.");
+    }
+
+    const std::vector<runtime::BoneWorldTransform> setup_transforms =
+        mesh_weight_model::setup_pose_bone_world_transforms(skeleton);
+    if (setup_transforms.empty()) {
+        return mesh_weight_failure("The skeleton has no bones to rebind against.");
+    }
+
+    ProjectData candidate = *project;
+    MeshWeightAttachmentEdit& edit =
+        ensure_weight_edit(candidate, skeleton, target, attachment);
+
+    MeshWeightResult result;
+    result.vertex_count = edit.vertices.size();
+    std::vector<std::size_t> resolved;
+    if (const std::string error =
+            resolve_weight_scope(scope, edit.vertices.size(), &resolved);
+        !error.empty()) {
+        return mesh_weight_failure(error);
+    }
+    result.scoped_vertex_count = resolved.size();
+
+    std::vector<std::pair<std::size_t, MeshWeightVertexEdit>> staged;
+    staged.reserve(resolved.size());
+    for (const std::size_t vertex_index : resolved) {
+        MeshWeightVertexEdit rebound = edit.vertices[vertex_index];
+        if (const std::string error = mesh_weight_model::rebind_mesh_weight_vertex(
+                skeleton, setup_transforms, &rebound);
+            !error.empty()) {
+            return mesh_weight_failure(error);
+        }
+        staged.emplace_back(vertex_index, std::move(rebound));
+    }
+
+    for (auto& [vertex_index, rebound] : staged) {
+        if (!weight_vertices_equal(edit.vertices[vertex_index], rebound)) {
+            result.affected_vertices.push_back(vertex_index);
+            edit.vertices[vertex_index] = std::move(rebound);
+        }
+    }
+    result.changed = !result.affected_vertices.empty();
+    if (result.changed) {
+        *project = std::move(candidate);
+    }
     return result;
 }
 

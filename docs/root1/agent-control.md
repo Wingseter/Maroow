@@ -33,7 +33,8 @@ The current dispatcher implements edit ops: `animation.create`,
 `remove_transform_keyframe`, `set_draw_order_keyframe`,
 `remove_draw_order_keyframe`, `set_event_keyframe`,
 `remove_event_keyframe`, `set_deform_keyframe`, `remove_deform_keyframe`,
-`set_vertex_weights`, `normalize_weights`, `set_slot_color_keyframe`,
+`set_vertex_weights`, `normalize_weights`, `mesh.rebind_weights`,
+`set_slot_color_keyframe`,
 `remove_slot_color_keyframe`, `set_attachment_keyframe`,
 `remove_attachment_keyframe`, `edit_ik_constraint`, `edit_path_constraint`,
 `edit_transform_constraint`, `edit_physics_constraint`, `undo`, and `redo`.
@@ -89,6 +90,24 @@ There is no separate `move_bone` op - bone motion is expressed as
 - `set_event_keyframe` / `remove_event_keyframe`: Edits event timelines.
 - `set_deform_keyframe` / `remove_deform_keyframe`: Edits mesh deform timelines.
 - `set_vertex_weights` / `normalize_weights`: Edits weighted mesh influences.
+  Every accepted write is canonicalized: non-positive influences are dropped,
+  duplicate bones are merged, influences are sorted by descending weight then
+  skeleton order, capped at four, and normalized. `normalize_weights` takes an
+  optional `vertices` array of indices; absent means every vertex.
+  **MAR-175 behaviour change (C1):** `set_vertex_weights` now rejects an
+  explicit `"normalize": false` with `invalid_request`. Canonicalization is
+  unconditional, so the flag has no implementable meaning -- honouring it
+  re-opens the two defects where a committed write could not be saved, and
+  ignoring it would report success for a request that was not carried out.
+  Omitting the flag and passing `true` are unaffected.
+  **MAR-175 behaviour change (C2):** `normalize_weights` now also drops, merges,
+  sorts, and caps rather than only rescaling, because the narrow version could
+  leave a project `save_project()` refuses. Its name, arguments, `no_change`
+  disposition, and the message `Mesh weights already normalized.` are unchanged.
+- `mesh.rebind_weights`: Re-expresses weighted-mesh bind offsets in each bone's
+  setup frame. Takes the same `skin`/`slot`/`attachment` triple plus an optional
+  `vertices` scope. Never changes which bones influence a vertex, never changes
+  a weight, and never touches mesh topology.
 - `set_slot_color_keyframe` / `remove_slot_color_keyframe`: Edits slot RGBA timelines.
 - `set_attachment_keyframe` / `remove_attachment_keyframe`: Edits attachment timelines.
 - `edit_ik_constraint`: Modifies IK constraint properties.
