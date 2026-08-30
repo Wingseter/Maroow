@@ -1,6 +1,8 @@
 #include "agent_dispatch_internal.hpp"
 #include "shell_constraints.hpp"
 
+#include "marrow/editor/constraint_catalog.hpp"
+
 #include <algorithm>
 #include <set>
 #include <string>
@@ -806,6 +808,159 @@ AgentDispatchResult handle_constraint_operation(
     }
     if (op == "edit_physics_constraint") {
         return handle_constraint_edit<PhysicsConstraintTraits>(session, cmd, op, spec);
+    }
+
+    if (op == "constraint.rename" || op == "constraint.delete") {
+        const bool is_rename = op == "constraint.rename";
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                std::string(op) + " requires 'args' object.", op, spec);
+        }
+
+        const auto family_key = string_arg(*args, "family");
+        if (!family_key.has_value()) {
+            return make_error(
+                std::string(op) + " requires 'family' string.", op, spec);
+        }
+        const auto family = parse_constraint_family(*family_key);
+        if (!family.has_value()) {
+            return make_error(
+                "Unknown constraint family '" + std::string(*family_key) +
+                    "'; expected ik, path, transform, or physics.",
+                op,
+                spec);
+        }
+
+        const std::string_view source_key = is_rename ? "from" : "name";
+        const auto source = string_arg(*args, source_key);
+        if (!source.has_value()) {
+            return make_error(
+                std::string(op) + " requires '" + std::string(source_key) +
+                    "' string.",
+                op,
+                spec);
+        }
+        std::string destination;
+        if (is_rename) {
+            const auto target = string_arg(*args, "to");
+            if (!target.has_value()) {
+                return make_error(
+                    std::string(op) + " requires 'to' string.", op, spec);
+            }
+            destination = std::string(*target);
+        }
+        const std::string source_name(*source);
+
+        // Captured from the pre-mutation runtime by both paths, so the dry-run
+        // and live payloads report the same skins.
+        const std::vector<std::string> affected_skins =
+            constraint_affected_skins(skeleton, *family, source_name);
+
+        // One builder for both payloads, so they cannot diverge; the equality
+        // assertion in the smoke is then meaningful rather than tautological.
+        const auto catalog_delta = [&](bool dry_run,
+                                       bool used_operation,
+                                       bool changed_upsert) {
+            json::Value::Object delta;
+            if (dry_run) {
+                delta.emplace("dry_run", bool_value(true));
+            }
+            delta.emplace(
+                "family", string_value(std::string(constraint_family_key(*family))));
+            if (is_rename) {
+                delta.emplace("from", string_value(source_name));
+                delta.emplace("to", string_value(destination));
+            } else {
+                delta.emplace("name", string_value(source_name));
+            }
+            const char* ownership = used_operation
+                ? (changed_upsert ? "shadowed" : "base")
+                : "project";
+            delta.emplace("ownership", string_value(std::string(ownership)));
+            delta.emplace("used_operation", bool_value(used_operation));
+            delta.emplace("changed_upsert", bool_value(changed_upsert));
+            delta.emplace("skins", string_array_value(affected_skins));
+            delta.emplace("skin_reference_count", number_value(affected_skins.size()));
+            return object_value(std::move(delta));
+        };
+
+        // `make_error`'s default code applies only when none is supplied, so a
+        // coded rejection must take the four-argument overload.
+        //
+        // Spec §4.2: an atlas-free project is `invalid_project`, never
+        // `not_found`. A caller retrying a `not_found` re-sends with a different
+        // name and fails identically forever; the name was never the problem.
+        const auto reject = [&](const std::string& message) {
+            if (message == "at least one atlas path is required") {
+                return make_error(message, op, spec, "invalid_project");
+            }
+            return message.find("does not exist") != std::string::npos
+                ? make_error(message, op, spec, "not_found")
+                : make_error(message, op, spec);
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            // The dry run copies the project and runs the SAME primitive, so a
+            // rejection message cannot drift from the live call's.
+            ProjectData candidate = *session.project();
+            const ConstraintLifecycleResult preview = is_rename
+                ? rename_constraint(
+                      &candidate,
+                      *session.base_skeleton_document(),
+                      *family,
+                      source_name,
+                      destination)
+                : delete_constraint(
+                      &candidate,
+                      *session.base_skeleton_document(),
+                      *family,
+                      source_name);
+            if (!preview.ok) {
+                return reject(preview.message);
+            }
+            return make_success(
+                is_rename ? "Constraint rename validated."
+                          : "Constraint delete validated.",
+                op,
+                spec,
+                catalog_delta(true, preview.used_operation, preview.changed_upsert));
+        }
+
+        // `shell::constraint_kind_label()` lives in the shell target, which the
+        // editor library does not link, so the label uses the wire family key --
+        // the same spelling the payload reports.
+        const std::string family_label(constraint_family_key(*family));
+        const std::string label = is_rename
+            ? "Renamed " + family_label + " constraint " + source_name + " to " +
+                destination + " via Agent"
+            : "Deleted " + family_label + " constraint " + source_name + " via Agent";
+
+        // The agent owns no SelectionSet -- `AgentCommandContext` is exactly
+        // `{session, control}` -- so it passes nullptr and the cascade is a
+        // no-op here by construction, not by omission.
+        const ConstraintCatalogResult result = apply_constraint_catalog_edit(
+            session,
+            {is_rename ? ConstraintCatalogEditKind::Rename
+                       : ConstraintCatalogEditKind::Delete,
+             *family,
+             source_name,
+             destination},
+            nullptr,
+            {EditKind::EditProperty,
+             label,
+             "constraint-catalog",
+             false,
+             EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!result.ok) {
+            return reject(result.message);
+        }
+        return make_success(
+            is_rename ? "Renamed constraint successfully."
+                      : "Deleted constraint successfully.",
+            op,
+            spec,
+            catalog_delta(false, result.used_operation, result.changed_upsert));
     }
 
     return make_error(

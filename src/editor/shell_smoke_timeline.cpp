@@ -3694,8 +3694,8 @@ bool validate_preview_playback_speed_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 62U) {
-        std::cerr << "Preview speed shell smoke requires the exact 62-operation registry.\n";
+    if (operation_count_before != 64U) {
+        std::cerr << "Preview speed shell smoke requires the exact 64-operation registry.\n";
         return false;
     }
     state.session.clear_history();

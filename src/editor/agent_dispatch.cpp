@@ -77,6 +77,8 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"edit_path_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_transform_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_physics_constraint", "edit", true, false, true, true, &handle_constraint_operation},
+    {"constraint.rename", "edit", true, false, true, true, &handle_constraint_operation},
+    {"constraint.delete", "edit", true, false, true, true, &handle_constraint_operation},
     {"set_slot_color_keyframe", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_slot_color_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_attachment_keyframe", "edit", true, false, true, true, &handle_editing_operation},

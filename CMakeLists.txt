@@ -508,6 +508,7 @@ add_library(marrow_editor STATIC
     src/editor/mesh_weight_model.cpp
     src/editor/curve_auto.cpp
     src/editor/session.cpp
+    src/editor/constraint_catalog.cpp
     src/editor/agent_dispatch.cpp
     src/editor/agent_handlers_inspection.cpp
     src/editor/agent_handlers_editing.cpp
@@ -897,6 +898,7 @@ add_executable(marrow_editor_shell
     src/editor/shell_smoke_ffd.cpp
     src/editor/shell_smoke_graph.cpp
     src/editor/shell_smoke_timeline.cpp
+    src/editor/shell_smoke_constraints.cpp
     src/editor/shell_smoke_frames.cpp
     src/editor/shell_smoke_parameters.cpp
     src/editor/shell_widgets.cpp

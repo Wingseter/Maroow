@@ -9,6 +9,7 @@
 
 #include "imgui.h"
 
+#include "shell_constraints.hpp"
 #include "shell_selection.hpp"
 #include "viewport_ffd_controller.hpp"
 #include "shell_state.hpp"
@@ -164,6 +165,7 @@ bool undo_project_change(ShellState* state) {
         return false;
     }
     viewport_ffd::reconcile_selection(state);
+    reconcile_constraint_selection(state);
 
     update_project_dirty_state(state);
     state->status_message = "Undid " + label;
@@ -193,6 +195,7 @@ bool redo_project_change(ShellState* state) {
         return false;
     }
     viewport_ffd::reconcile_selection(state);
+    reconcile_constraint_selection(state);
 
     update_project_dirty_state(state);
     state->status_message = "Redid " + label;

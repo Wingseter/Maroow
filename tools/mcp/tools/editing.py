@@ -951,6 +951,41 @@ def get_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="constraint.rename",
+            description="Rename one constraint and cascade its skin references.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "family": {
+                        "type": "string",
+                        "enum": ["ik", "path", "transform", "physics"]
+                    },
+                    "from": {"type": "string", "minLength": 1},
+                    "to": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["family", "from", "to"],
+                "additionalProperties": False
+            }
+        ),
+        types.Tool(
+            name="constraint.delete",
+            description="Delete one constraint and prune it from every skin that names it.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "family": {
+                        "type": "string",
+                        "enum": ["ik", "path", "transform", "physics"]
+                    },
+                    "name": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["family", "name"],
+                "additionalProperties": False
+            }
+        ),
+        types.Tool(
             name="set_event_keyframe",
             description="Create or replace an event keyframe.",
             inputSchema={

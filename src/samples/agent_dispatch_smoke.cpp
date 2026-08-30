@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 62> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 64> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -87,6 +87,8 @@ constexpr std::array<OperationExpectation, 62> kExpectedOperations{{
     {"edit_path_constraint", "edit", true, false, true},
     {"edit_transform_constraint", "edit", true, false, true},
     {"edit_physics_constraint", "edit", true, false, true},
+    {"constraint.rename", "edit", true, false, true},
+    {"constraint.delete", "edit", true, false, true},
     {"set_slot_color_keyframe", "edit", true, false, true},
     {"remove_slot_color_keyframe", "edit", true, false, false},
     {"set_attachment_keyframe", "edit", true, false, true},
@@ -3482,6 +3484,172 @@ int main(int argc, char** argv) {
             vertex2_before_generate,
         "mesh.generate_weights rejections",
         "no rejected generate may change the project");
+
+    // ── MAR-178: constraint.rename / constraint.delete ─────────────────────
+    //
+    // Read back the SURVIVORS by name from `constraints.list` rather than the
+    // return code: the worst lifecycle failure lands on load, not on save.
+    const auto constraint_names = [&](std::string_view label) {
+        const DispatchObservation listed =
+            harness.invoke(label, "{\"op\":\"constraints.list\"}");
+        return compact_scene_delta(listed);
+    };
+
+    const std::string constraints_before_dry_run =
+        constraint_names("constraints.list before constraint dry run");
+
+    const DispatchObservation rename_dry_run = harness.invoke(
+        "constraint.rename dry-run",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"transform\","
+        "\"from\":\"editor_transform_follow\",\"to\":\"transform_follow_v2\","
+        "\"dry_run\":true}}");
+    harness.expect(
+        bool_member(rename_dry_run.scene_delta(), "dry_run") ==
+                std::optional<bool>(true) &&
+            string_member(rename_dry_run.scene_delta(), "ownership") ==
+                std::optional<std::string_view>("project") &&
+            number_member(rename_dry_run.scene_delta(), "skin_reference_count") ==
+                std::optional<double>(0.0),
+        "constraint.rename dry-run",
+        "the dry run must report ownership and the pre-mutation skin summary");
+    harness.expect(
+        constraint_names("constraints.list after constraint dry run") ==
+            constraints_before_dry_run,
+        "constraint.rename dry-run",
+        "a dry run must leave constraints.list byte-identical");
+
+    const DispatchObservation rename_live = harness.invoke(
+        "constraint.rename live",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"transform\","
+        "\"from\":\"editor_transform_follow\",\"to\":\"transform_follow_v2\"}}");
+    {
+        // The dry-run payload must equal the live payload apart from `dry_run`,
+        // which is the cheapest proof that both ran the same primitive.
+        std::string dry = compact_scene_delta(rename_dry_run);
+        const std::string marker = "\"dry_run\":true,";
+        const auto position = dry.find(marker);
+        if (position != std::string::npos) {
+            dry.erase(position, marker.size());
+        }
+        harness.expect(
+            dry == compact_scene_delta(rename_live),
+            "constraint.rename live",
+            "the dry-run and live scene_delta must differ only by \"dry_run\": " +
+                compact_scene_delta(rename_live));
+    }
+    const std::string constraints_after_rename =
+        constraint_names("constraints.list after rename");
+    harness.expect(
+        constraints_after_rename.find("transform_follow_v2") != std::string::npos &&
+            constraints_after_rename.find("editor_transform_follow") ==
+                std::string::npos,
+        "constraint.rename live",
+        "the renamed constraint must read back under its new name only");
+
+    harness.invoke("undo constraint.rename", "{\"op\":\"undo\"}");
+    harness.expect(
+        constraint_names("constraints.list after rename undo") ==
+            constraints_before_dry_run,
+        "undo constraint.rename",
+        "undo must restore the exact pre-rename constraint list");
+
+    // --- Delete, asserted on the survivors. --------------------------------
+    harness.invoke(
+        "constraint.delete live",
+        "{\"op\":\"constraint.delete\",\"args\":{\"family\":\"physics\","
+        "\"name\":\"editor_ribbon_secondary\"}}");
+    {
+        const std::string survivors =
+            constraint_names("constraints.list after delete");
+        harness.expect(
+            survivors.find("editor_ribbon_secondary") == std::string::npos &&
+                survivors.find("editor_arm_reach") != std::string::npos &&
+                survivors.find("editor_guide_follow") != std::string::npos &&
+                survivors.find("editor_transform_follow") != std::string::npos,
+            "constraint.delete live",
+            "the delete must remove exactly its own target and leave the other "
+            "three families' constraints readable");
+    }
+    harness.invoke("undo constraint.delete", "{\"op\":\"undo\"}");
+    harness.expect(
+        constraint_names("constraints.list after delete undo") ==
+            constraints_before_dry_run,
+        "undo constraint.delete",
+        "undo must restore the deleted constraint");
+
+    // --- Dry-run and live must reject identically, message for message. -----
+    {
+        const DispatchObservation rejected_dry = harness.invoke(
+            "constraint.rename dry-run rejects an unchanged target",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"ik\","
+            "\"from\":\"editor_arm_reach\",\"to\":\"editor_arm_reach\","
+            "\"dry_run\":true}}",
+            false);
+        const DispatchObservation rejected_live = harness.invoke(
+            "constraint.rename live rejects an unchanged target",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"ik\","
+            "\"from\":\"editor_arm_reach\",\"to\":\"editor_arm_reach\"}}",
+            false);
+        const auto dry_message = string_member(&rejected_dry.root, "message");
+        const auto live_message = string_member(&rejected_live.root, "message");
+        harness.expect(
+            dry_message.has_value() && live_message.has_value() &&
+                *dry_message == *live_message,
+            "constraint.rename dry-run/live message parity",
+            "a hand-written dry-run check drifts from the primitive's message; "
+            "measured dry='" +
+                std::string(dry_message.value_or("")) + "' live='" +
+                std::string(live_message.value_or("")) + "'");
+    }
+
+    // --- Family validation. -------------------------------------------------
+    harness.invoke(
+        "constraint.rename rejects an unknown family",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"bone\","
+        "\"from\":\"editor_arm_reach\",\"to\":\"arm_v2\"}}",
+        false);
+    harness.invoke(
+        "constraint.rename requires a family",
+        "{\"op\":\"constraint.rename\",\"args\":{"
+        "\"from\":\"editor_arm_reach\",\"to\":\"arm_v2\"}}",
+        false);
+    harness.invoke(
+        "constraint.rename rejects a right name in the wrong family",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"ik\","
+        "\"from\":\"editor_ribbon_secondary\",\"to\":\"arm_v2\"}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "constraint.delete requires a name",
+        "{\"op\":\"constraint.delete\",\"args\":{\"family\":\"physics\"}}",
+        false);
+    harness.invoke(
+        "constraint.delete rejects a missing constraint",
+        "{\"op\":\"constraint.delete\",\"args\":{\"family\":\"physics\","
+        "\"name\":\"never_existed\"}}",
+        false,
+        "not_found");
+
+    // --- A rejection leaves the history clean: the next undo must reverse the
+    //     PREVIOUS edit, not the rejected one.
+    {
+        harness.invoke(
+            "constraint.rename seeds a history entry",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"path\","
+            "\"from\":\"editor_guide_follow\",\"to\":\"guide_follow_v2\"}}");
+        harness.invoke(
+            "constraint.rename rejected after a real edit",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"path\","
+            "\"from\":\"guide_follow_v2\",\"to\":\"guide_follow_v2\"}}",
+            false);
+        harness.invoke("undo after a rejected constraint.rename", "{\"op\":\"undo\"}");
+        harness.expect(
+            constraint_names("constraints.list after the rejected rename undo") ==
+                constraints_before_dry_run,
+            "undo after a rejected constraint.rename",
+            "a rejected edit must leave no history entry, so undo reverses the "
+            "previous one");
+    }
 
     harness.invoke(
         "set_slot_color_keyframe",

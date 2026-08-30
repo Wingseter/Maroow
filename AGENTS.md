@@ -158,7 +158,7 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (62 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, timeline key-time scaling, mesh weight rebind, and deterministic automatic weight generation authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (64 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, timeline key-time scaling, mesh weight rebind, deterministic automatic weight generation, and constraint rename/delete authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
@@ -226,6 +226,119 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-178 Constraint Rename and Delete Surfaces Validation Results
+
+Validated 2026-08-30. MAR-177 built `rename_constraint()` and
+`delete_constraint()` and proved they cannot leave an unsavable or unopenable
+project. **Nothing called them.** MAR-178 is the surface layer: four
+`Rename... / Delete...` rows with a collision preview and a skin-reference
+preview, one UI-free undoable command, the `SelectionSet` cascade MAR-177
+explicitly deferred, and two agent/MCP operations. It adds **no** `.marrow`
+field, **no** runtime behaviour and **no** new numeric constant, so
+`docs/root1/format-spec.md` is byte-identical.
+
+**The selection design rests on two facts that were measured, not assumed.**
+`rebuild_project_runtime()` (`shell_core.cpp:498-533`) does **not** call
+`reconcile_selection_to_runtime()` — only `reload_project()`
+(`shell_core.cpp:629`) and the runtime asset watch (`shell_asset_watch.cpp:189`)
+do. So an ordinary edit reconciles nothing: a rename without an explicit remap
+silently loses the selection, and a delete leaves a ghost that inflates the
+user-visible *"; N selected"* count (`shell_selection.cpp:241`). And `prune`
+(`selection.cpp:155-159`) and `remap` (`:195-199`) choose the **same**
+last-survivor active fallback, so a delete's remap and a later reconcile cannot
+disagree. Rename remaps the identity, delete remaps to `nullopt`, the cascade
+runs **only after a successful commit**, and no neighbour is auto-selected.
+
+**Undo and redo deliberately do not restore the selection.**
+`EditorHistorySnapshot` carries no `SelectionSet` and `history_snapshots_equal()`
+compares three fields, so adding one reproduces MAR-174's Ctrl+Z bounce. Instead
+each path gains one call to a new narrow `reconcile_constraint_selection()` that
+prunes only stale `ConstraintSelection`s. Widening it to
+`reconcile_selection_to_runtime()` would prune bone, slot and attachment
+selections after **every** undo in the editor; that inversion is gated below.
+
+| Area | Evidence | Result |
+| --- | --- | --- |
+| One transaction per accepted edit, and a rejection changes nothing | `apply_constraint_catalog_edit()` guards, summarises, transacts, commits, then cascades — in that order. Scenario A asserts `undo_count()` **+1** per accepted edit; scenario D runs **6** rejections (taken name, unchanged target, empty source, missing rename source, missing delete source, right name in the wrong family) and asserts after each that `serialize_project()` is the **identical string** and `undo_count()` is unchanged | PASS |
+| Ownership, on all three live rows | Project-only → `!used_operation && changed_upsert`, `ownership == "project"`, `constraint_lifecycle_operations` stays **empty** (A). Base-backed → `used_operation && !changed_upsert`, `"base"` (B1/B2). Shadowing → **both** flags, `"shadowed"`, and the base does not resurrect (B3). Inherited by construction, because the command calls MAR-177's primitives and never writes a record itself | PASS |
+| The affected-skin summary is exhaustive, and captured pre-mutation | `constraint_affected_skins()` reads `SkinData::<family>_constraint_indices` from the live parsed runtime **before** the transaction, because the skin arrays no longer name the constraint afterwards. Reports `["cape"]` for `cape_pull` and `[]` for every `player_idle` constraint. Skins are the **complete** referential-integrity surface, established by enumerating `parse_animations`'s member keys (`animations, attachment, bones, color, deform, default, drawOrder, events, inherit, rotate, scale, shear, slots, translate` — no constraint family among them) rather than by grepping, which upgrades the preview from best-effort to exhaustive. Proved by inversion: moving the capture after `commit()` makes B1 fail with *"the affected-skin summary must be captured from the PRE-mutation runtime and report exactly [cape]; measured 0 entries."* Restored | PASS |
+| The cascade runs only after a successful commit | Proved by inversion: moving the `remap` to before the primitive call makes project scenario C fail with *"a rejected edit must leave the selection, the history, and the byte serialization exactly as they were."* Restored. The rejection deliberately names the **selected** identity — a rejection of some other constraint could not detect the ordering at all, and the first version of this test could not | PASS |
+| Rename follows, delete prunes | Shell case 2 asserts `active_constraint()->constraint_name` is the new name with `items().size()` unchanged; case 3 asserts the count drops by one with the co-selected bone intact and order preserved; project scenario C asserts the new active member after a delete is the **last** survivor. Proved by inversion twice: dropping the rename remap fails case 2 (*"the selection did not follow the rename"*), dropping the delete remap fails case 3 (*"the deleted constraint left a ghost … measured 2 against 2"*). Restored | PASS |
+| The narrow reconcile is narrow, and load-bearing | Shell case 4 renames a selected constraint, undoes, and asserts the ghost is gone **and** that a co-selected `phantom_bone` — a bone selection that does not resolve — survives. Proved by inversion: swapping in `reconcile_selection_to_runtime()` fails with *"the undo-path reconcile pruned a bone selection … which is a behaviour change far outside this story."* Restored | PASS |
+| Confirmation begins no transaction | Shell case 1 requests a delete, cancels, and asserts `undo_count()` and `serialize_project()` are unchanged, then that a confirm after a cancel refuses the abandoned request. Proved by inversion: making cancel fall through to confirm fails with *"cancelling the delete confirmation must begin no transaction; undo_count 0 -> 1."* Restored | PASS |
+| Both surfaces reject identically | These operations are **single-target** — `(family, name)` names exactly one constraint — so the batch skip-vs-reject asymmetry does not apply and both surfaces reject with the same message from the same primitive. The GUI's only differences are presentational: it pre-disables Apply on a name it can already see is taken, and keeps the modal open on a rejection | PASS |
+| The dry run runs the live preflight | It copies the project and runs the **same** primitive, and one `catalog_delta()` builder produces both payloads. The agent smoke asserts the dry-run and live `scene_delta` are byte-identical apart from `"dry_run"`, and that a rejection's `message` is byte-identical between them. Proved by inversion: substituting a hand-written `constraint_exists`-style check fails with *"a hand-written dry-run check drifts from the primitive's message; measured dry='Constraint is not renameable.' live='ik constraint rename target 'editor_arm_reach' must differ from its source'"*. Restored | PASS |
+| Save → reload survival; a successful save is never the assertion (§10.5) | `validate_project_for_save(const ProjectData&, ProjectSaveError*)` (`project.cpp:5502`) takes **no base document** and so structurally cannot resolve a skin reference against a skeleton — a passing `save()` proves nothing about the unopenable-project failure. `load_project(path)` → `load_project(Document)` → `build_project_runtime()` (`project.cpp:7495`) is what re-materializes and calls `load_skeleton_data`, verified as a Task 0 hard stop. **Every** delete branch therefore ends in a reload: project scenario A saves and `load_project()`s after its delete; B1/B2/B3 each do the same; shell case 8 does `save_project_file()` → `reload_project()` and asserts the reload succeeded with zero transform constraints and no `skins.cape` transform indices; F1/F2 re-parse the export through `load_skeleton_document()` + `load_skeleton_data()`. Shell case 5's four-family deletes assert on the rebuilt runtime, which §10.5 explicitly allows as the same code the reload runs. Demonstrated empirically: a `.marrow` carrying every required member and a valid atlas — i.e. one every save-side check accepts — that references a root-only-renamed skeleton fails to open with `$.skins.cape.transform[0]: skin references unknown transform constraint 'cape_pull'` | PASS |
+| Export, over the command path | After a command-path rename `cape_pull → cape_drag`, the exported `.mskl` names `cape_pull` **0** times and `cape_drag` exactly **2** (root `transform[0].name` and `skins.cape.transform[0]`), and the reloaded skin `cape` resolves one transform-constraint index pointing at `cape_drag`. After a command-path delete, the export carries **no** root `transform` key and **no** `skins.cape.transform` key, reloads with zero transform constraints, and `skins.cape` still holds `cape_target`. The `2` was re-counted from the export, not carried from MAR-177's spec | PASS |
+| No last-constraint gate | A family may legitimately be empty — which is why an emptied family array erases its key. Shell case 5 renames **and** deletes one constraint in each of IK, path, transform and physics from `player_idle`, driving each family to empty, and asserts the other three families' constraints survive each time | PASS |
+| `unique_constraint_name()` is not on the rename path | It is the **create** path's allocator. A collision is refused, never auto-suffixed, because quietly giving the user a different name than they typed is worse than declining. The rename modal seeds with the current name and previews the collision instead | PASS |
+| The atlas gate stays blunt; MAR-178 owns only the message (§4.2) | The gate is unchanged and `constraint_catalog.cpp` adds no narrower check. `load_project()` refuses an atlas-free **document** outright with `$.runtime.atlases: array must not be empty`, so no project on disk is in this state; the only way in is emptying the list in memory, and scenario E and shell case 9 both do exactly that and assert the refusal changes neither `serialize_project()` nor `undo_count()`. The command passes the validator's sentence through **verbatim** — a surface that paraphrases a validator drifts from it — and the GUI adds a clause in front, matched on the **message text** rather than on a re-derived atlas check so it cannot fire on a state the validator would have accepted. Rendered: `Cannot rename: the project must reference at least one atlas before it can be saved. at least one atlas path is required`. Both modal buttons stay enabled, because the user's next action is fixing the atlas list, not retyping the name. The agent codes it `"invalid_project"`, never `"not_found"` — a caller retrying a `not_found` re-sends a different name and fails identically forever | PASS |
+| The family spelling cannot drift | `constraint_family_key()` is declared in the new header rather than exporting `project.cpp`'s file-local `constraint_family_json_key()`. Scenario G closes the duplication with a test rather than by construction: for each of the four families it appends a lifecycle record, serializes, and asserts the emitted `"family"` string equals `constraint_family_key(family)`; it also asserts `parse_constraint_family` rejects `"bone"`, `"IK"`, `""` and `"transforms"` | PASS |
+| Registry 62 → 64 | `kOperationSpecs` → **64** (inspection 12, validation 3, management 10, **edit 39**), with `constraint.rename` and `constraint.delete` immediately after the four `edit_*_constraint` rows as (`edit`, mutating, not review, dry-run supported, project required). The sweep ran under a patch that asserts the before-count is 62 and the after-count is 64 and aborts otherwise: **16** code sites moved (7 comparisons + 7 messages in `shell_smoke_graph.cpp`, 1 + 1 in `shell_smoke_timeline.cpp`), plus `agent_dispatch_smoke.cpp`'s array size and 2 rows, 2 new `types.Tool` in `tools/mcp/tools/editing.py`, and `test_client.py`'s 2 assertions. The sweep greps for `62`, never `64`, because `(51, 56, 64)` and `rgb(54,57,64)` contain the new number; all 7 protected literals are untouched in the diff | PASS |
+| Compatibility | `.mskl` v1, `.mbin` v2, C ABI v1 and `editor-settings.json` v1 unchanged, with a zero-byte `git diff` on `src/runtime/**`, `include/marrow/runtime/**`, `include/marrow/marrow_c.h`, `src/c_api/**`, `src/editor/preferences.cpp` and `include/marrow/editor/preferences.hpp`. Zero-byte diff on `src/editor/project.cpp`, `include/marrow/editor/project.hpp`, `src/editor/session.cpp`, `include/marrow/editor/session.hpp`, `src/editor/selection.cpp`, `include/marrow/editor/selection.hpp` — MAR-178 calls MAR-177's primitives and changes none of them. `.marrow` gains no field, so `docs/root1/format-spec.md` is byte-identical. `ProjectData` gains no member and no new tunable numeric constant ships | PASS |
+
+Errors found in this story's own governing documents, all corrected here:
+
+- **The design's §8.6 claim that "a blind `62` → `64` substitution is safe" is
+  false.** `AGENTS.md:1005` contains `t = 0.62`, a timeline time in an MAR-170
+  checkpoint, and `AGENTS.md:659` contains "62 lines", a line count — both match
+  a `\b62\b` grep and both would be corrupted. The claim is true only of the
+  three narrow patterns the counting patch actually matches (`!= 62U`,
+  `exact 62-operation registry`, `== 62`), which is what shipped; the general
+  statement is wrong and the protected-literal list should carry these two.
+- **Task 0's prose grep omits `docs/root1/discription.md`.** It has two `62`
+  hits (`:56`, `:57`), both correctly historical, but the plan's classification
+  step never inspected the file it then tells you to append to.
+- **`tools/mcp/test_client.py:1484` says "the 62nd operation"** and is in neither
+  the live nor the historical list. It is an ordinal, not a total, so it stays —
+  but the enumeration claimed to be exhaustive and was not.
+- **Inverted gate 8 as specified cannot bite, and the design says why without
+  noticing.** It asks for the `tx.cancel()` on a primitive rejection to be
+  removed. But `EditTransaction`'s destructor already cancels, and the primitives
+  are preflight-then-mutate, so an explicit `commit()` on a rejection finds
+  nothing changed and creates no history entry — the assertion passes either way.
+  §5.3 itself states `cancel()` is there "so that the failure path is visible in
+  the code rather than in RAII", i.e. for visibility, not correctness. The
+  property the gate was meant to protect was inverted instead by removing the
+  `!applied.ok` early return entirely, which fails three agent cases.
+- **The plan's gate 9 recipe ("temporarily passing a project-only-looking family
+  key") is not available**, because MAR-178 may not touch `project.cpp`. It was
+  inverted at MAR-178's own layer instead — discarding the tombstone the
+  primitive appended, keeping the upsert erase — which is exactly the
+  "go around the primitives" mistake the plan's global constraint 2 forbids, and
+  it fails B3 with *"the base constraint resurrected after the shadowing
+  delete"*.
+- **Minor drift**: `reconcile_selection_to_runtime()` is called at
+  `shell_core.cpp:629`, not `:628`; `agent_dispatch_smoke.cpp`'s array size is at
+  `:39`, not `:38`. `shell::constraint_kind_label()` lives in the shell target,
+  which `marrow_editor` does not link, so the agent's history label uses the wire
+  family key — the same spelling its payload reports — rather than §10's
+  `constraint_kind_label()`.
+
+Not independently covered: the agent's `"invalid_project"` code is implemented and
+reviewed but not asserted by an automated case, because no agent operation can
+empty a project's atlas list and the dispatch smoke therefore cannot reach an
+atlas-free project; the message half of §4.2 is asserted at the project and
+shell levels. Also, the ImGui modals are exercised through the same
+UI-free helpers the buttons call (`request_/confirm_/cancel_constraint_*`), not
+through synthesized mouse events, so the widget wiring itself — button placement,
+`BeginDisabled` state, keyboard focus — is asserted by construction and by the
+headless frame render, not by a click. MAR-192 through MAR-210 remain the
+qualification authority.
+
+Current validation:
+
+- Task 0's two added gates both pass. **4b (hard stop)**: `build_project_runtime(*project_ptr, …)` is at `project.cpp:7495`, reached from the path overload at `:7517-7526`, so a reload is a full materialization plus `load_skeleton_data`; had it moved, every delete assertion in Tasks 5 and 7 would have stopped proving anything and needed redesign before any code. **4c**: `parse_animations` (`skeleton_parse.cpp:5214-5500`) enumerates exactly `animations, attachment, bones, color, deform, default, drawOrder, events, inherit, rotate, scale, shear, slots, translate` — no `ik`/`path`/`transform`/`physics` — so skins are the complete referrer set
+- `cmake -S . -B build && cmake --build build` -> configured and built with **zero** new warnings
+- `./build/marrow_project_smoke assets/fixtures/player_idle.marrow` -> passed, reporting all seven MAR-178 scenarios: `Scenario A` (project-only rename/delete, one transaction each, save+reload, byte-exact undo), `Scenario B` (`base`/`shadowed` ownership, `[cape]` captured pre-mutation, every result saves AND reopens), `Scenario C` (rename remaps, delete promotes the last survivor, rejection moves nothing), `MAR-178 Scenario D: 6 rejections each leave the project's serialization byte-identical and the history untouched`, `Scenario E` (the atlas gate, refused with `at least one atlas path is required`), `Scenario F` (export: 0 x `cape_pull`, exactly 2 x `cape_drag`, and both exports RELOAD), `Scenario G` (family spelling anti-drift); `--create` -> passed
+- `./build/marrow_agent_dispatch_smoke` -> `agent_dispatch_smoke: PASSED` over **404** `[ OK ]` cases (up from 382) against the exact **64**-operation registry
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2` -> `Headless editor shell smoke rendered 2 frame(s).`, including the new `validate_constraint_lifecycle_shell_smoke` scenario, which reported that a delete **saves and reloads** with `skins.cape` carrying no transform indices, that a refused rename says `transform constraint rename target 'cape_drag' must differ from its source`, and that an atlas-free rename says `Cannot rename: the project must reference at least one atlas before it can be saved. at least one atlas path is required`; `--project assets/fixtures/parameter_face_basic.marrow --auto-close 2` -> passed
+- `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --agent-port 9876` with `tools/mcp/venv/bin/python tools/mcp/test_client.py` -> `mcp test_client: PASSED` with **64/64** exact C++/Python name parity, explicit registry-metadata rows for both new operations, and a dry-run -> live -> `constraints.list` read-back -> `export.preview`/`export_runtime` -> undo -> read-back sequence reporting `a refused rename reports 'ik constraint rename target 'editor_arm_reach' must differ from its source'`; `--parameter-only` against `parameter_face_basic.marrow` -> `mcp parameter test_client: PASSED`; `python -m py_compile` over all four MCP files -> clean
+- **Eleven inversions run, each failing the case it should and each restored.** 1 post-commit skin capture -> B1 measures 0 entries. 2 cascade before commit -> C's rejection assertion fails. 3 widened reconcile -> shell case 4's `phantom_bone` is pruned. 4 no rename remap -> shell case 2's active name is wrong. 5 no delete remap -> shell case 3 measures 2 against 2. 6 cancel falls through to confirm -> `undo_count 0 -> 1`. 7 hand-written dry-run check -> message parity fails. 8 (**as specified, does not bite** — see the document errors above) the `!applied.ok` early return removed instead -> three agent cases fail. 9 tombstone discarded on the shadowing row -> B3's base resurrects. 10 one `types.Tool` removed -> `assert len(mcp_names) == 64 -- measured 63`, restored. 11 root-only rename -> **1** occurrence instead of 2 and `$.skins.cape.transform[0]: skin references unknown transform constraint 'cape_pull'`. Two more for the revised requirements: 12 the GUI's surface clause dropped -> shell case 9 fails with *"the surface's clause must sit in FRONT of the validator's sentence … measured 'at least one atlas path is required'"*; 13 §10.5's premise shown empirically -> a `.marrow` with every required member and a valid atlas, referencing a root-only-renamed skeleton, is accepted by every save-side check and still fails to open
+- `ctest --test-dir build --output-on-failure` -> `100% tests passed, 0 tests failed out of 22`; no target added
+- `./build/marrow_unit_tests`, `./build/marrow_fixture_smoke assets/fixtures/player_idle.mskl assets/fixtures/player_idle.matl` -> passed; `./build/marrow_inspect --compare` on the exported `.mbin`/`.mskl` pair -> `matches`
+- Preference isolation proof: `$HOME/Library/Application Support/Marrow` did **not** exist before the run and still did not exist after it; every shell invocation ran under an isolated `MARROW_CONFIG_HOME`, and no scratch file was left in the shared scratchpad
 
 ## MAR-177 Constraint Lifecycle Project Operations Validation Results
 

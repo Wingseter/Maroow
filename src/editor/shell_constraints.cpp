@@ -4,17 +4,22 @@
 #include "shell_selection.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <array>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "imgui.h"
 
 #include "shell_coalesced_edit.hpp"
 #include "shell_state.hpp"
+#include "shell_theme.hpp"
+#include "marrow/editor/constraint_catalog.hpp"
 #include "shell_widgets.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 
@@ -620,6 +625,339 @@ bool draw_string_combo(
 }
 
 
+namespace {
+
+// `validate_project_for_save()`'s own sentence, matched verbatim so the surface
+// clause below can never be attached to a different refusal.
+constexpr char kAtlasRequiredMessage[] = "at least one atlas path is required";
+constexpr char kAtlasRefusalPrefix[] =
+    "Cannot rename: the project must reference at least one atlas before it can "
+    "be saved. ";
+
+constexpr char kConstraintRenamePopup[] = "Rename Constraint##constraint_catalog";
+constexpr char kConstraintDeletePopup[] = "Delete Constraint##constraint_catalog";
+
+// One popup state for all four family branches, so the dialogs survive a tab
+// switch and are drawn once rather than four times.
+struct ConstraintCatalogPopupState {
+    ConstraintCatalogAction action{ConstraintCatalogAction::Rename};
+    ConstraintKind family{ConstraintKind::Ik};
+    std::string source;
+    std::array<char, 128> name{};
+    std::vector<std::string> affected_skins;
+};
+
+ConstraintCatalogPopupState g_constraint_catalog_popup;
+
+/** @brief Renders the shared "N skin(s): a, b" clause, or an empty string. */
+std::string constraint_skin_clause(const std::vector<std::string>& skins) {
+    if (skins.empty()) {
+        return {};
+    }
+    std::ostringstream stream;
+    stream << skins.size() << (skins.size() == 1U ? " skin: " : " skins: ");
+    for (std::size_t index = 0U; index < skins.size(); ++index) {
+        if (index != 0U) stream << ", ";
+        stream << skins[index];
+    }
+    return stream.str();
+}
+
+void seed_constraint_catalog_popup(
+    ShellState* state,
+    ConstraintCatalogAction action,
+    ConstraintKind family,
+    std::string source) {
+    g_constraint_catalog_popup.action = action;
+    g_constraint_catalog_popup.family = family;
+    g_constraint_catalog_popup.source = std::move(source);
+    g_constraint_catalog_popup.affected_skins.clear();
+    if (state != nullptr && state->load_result &&
+        state->load_result.skeleton_data != nullptr) {
+        g_constraint_catalog_popup.affected_skins =
+            marrow::editor::constraint_affected_skins(
+                *state->load_result.skeleton_data,
+                family,
+                g_constraint_catalog_popup.source);
+    }
+    // The rename buffer is re-seeded from the current name on every open, so a
+    // half-typed abandoned name never reappears.
+    std::snprintf(
+        g_constraint_catalog_popup.name.data(),
+        g_constraint_catalog_popup.name.size(),
+        "%s",
+        g_constraint_catalog_popup.source.c_str());
+}
+
+} // namespace
+
+const std::vector<std::string>& pending_constraint_affected_skins() noexcept {
+    return g_constraint_catalog_popup.affected_skins;
+}
+
+void request_constraint_rename(
+    ShellState* state,
+    ConstraintKind family,
+    std::string source) {
+    seed_constraint_catalog_popup(
+        state, ConstraintCatalogAction::Rename, family, std::move(source));
+}
+
+void request_constraint_delete(
+    ShellState* state,
+    ConstraintKind family,
+    std::string name) {
+    seed_constraint_catalog_popup(
+        state, ConstraintCatalogAction::Delete, family, std::move(name));
+}
+
+void cancel_constraint_catalog(ShellState* state) {
+    // Cancel never reaches the command, so no transaction is begun and the
+    // project serialization and history are untouched.
+    g_constraint_catalog_popup.source.clear();
+    g_constraint_catalog_popup.affected_skins.clear();
+    g_constraint_catalog_popup.name[0] = '\0';
+    if (state != nullptr) {
+        state->error_message.clear();
+    }
+}
+
+bool confirm_constraint_rename(ShellState* state, std::string_view destination) {
+    if (g_constraint_catalog_popup.source.empty()) {
+        return false;
+    }
+    return apply_constraint_catalog_action(
+        state,
+        ConstraintCatalogAction::Rename,
+        g_constraint_catalog_popup.family,
+        g_constraint_catalog_popup.source,
+        destination);
+}
+
+bool confirm_constraint_delete(ShellState* state) {
+    if (g_constraint_catalog_popup.source.empty()) {
+        return false;
+    }
+    return apply_constraint_catalog_action(
+        state,
+        ConstraintCatalogAction::Delete,
+        g_constraint_catalog_popup.family,
+        g_constraint_catalog_popup.source,
+        {});
+}
+
+bool apply_constraint_catalog_action(
+    ShellState* state,
+    ConstraintCatalogAction action,
+    ConstraintKind family,
+    std::string_view source,
+    std::string_view destination) {
+    if (state == nullptr || !state->session.has_project() ||
+        state->session.base_skeleton_document() == nullptr) {
+        return false;
+    }
+    if (authoring_gesture_active(*state) || state->session.transaction_active()) {
+        state->status_message = "Finish the active edit before editing constraints";
+        return false;
+    }
+
+    const std::string source_name(source);
+    const std::string destination_name(destination);
+    const std::string family_label = constraint_kind_label(family);
+    const std::string label = action == ConstraintCatalogAction::Rename
+        ? "Renamed " + family_label + " constraint " + source_name + " to " +
+            destination_name
+        : "Deleted " + family_label + " constraint " + source_name;
+
+    const marrow::editor::ConstraintCatalogEdit edit{
+        action == ConstraintCatalogAction::Rename
+            ? marrow::editor::ConstraintCatalogEditKind::Rename
+            : marrow::editor::ConstraintCatalogEditKind::Delete,
+        family,
+        source_name,
+        destination_name};
+
+    const marrow::editor::ConstraintCatalogResult result =
+        marrow::editor::apply_constraint_catalog_edit(
+            state->session,
+            edit,
+            &state->selection,
+            {marrow::editor::EditKind::EditProperty,
+             label,
+             "constraint-catalog",
+             false,
+             marrow::editor::EditImpact::Project |
+                 marrow::editor::EditImpact::Runtime |
+                 marrow::editor::EditImpact::Preview});
+    if (!result.ok) {
+        // Spec §4.2: the validator's own sentence is passed through verbatim --
+        // a surface must never paraphrase a validator or the two drift -- and
+        // the clause in front of it says which action was refused and why the
+        // two are connected. Matched on the message TEXT rather than on a
+        // re-derived atlas check, so the prefix cannot fire on a state
+        // `validate_project_for_save()` would have accepted.
+        state->error_message = result.message == kAtlasRequiredMessage
+            ? std::string(kAtlasRefusalPrefix) + result.message
+            : result.message;
+        state->status_message = "Constraint edit failed";
+        sync_shell_from_editor_session(state);
+        return false;
+    }
+
+    sync_shell_from_editor_session(state);
+    state->selected_timeline_track_id.reset();
+    state->error_message.clear();
+    state->status_message = label;
+    return true;
+}
+
+bool reconcile_constraint_selection(ShellState* state) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.skeleton_data == nullptr) {
+        return false;
+    }
+    const marrow::runtime::SkeletonData& skeleton = *state->load_result.skeleton_data;
+    return state->selection.prune(
+        [&](const marrow::editor::SelectionItem& item) {
+            const auto* constraint =
+                std::get_if<marrow::editor::ConstraintSelection>(&item);
+            return constraint == nullptr ||
+                marrow::editor::selection_item_exists(item, skeleton);
+        });
+}
+
+namespace {
+
+void draw_constraint_catalog_buttons(
+    ShellState* state,
+    ConstraintKind family,
+    const std::string& selected_name) {
+    // The same gate the animation catalog uses, and the same one
+    // `apply_project_command_change` already enforces at the seam below.
+    const bool catalog_blocked =
+        authoring_gesture_active(*state) || state->session.transaction_active();
+    ImGui::BeginDisabled(catalog_blocked || selected_name.empty());
+    if (ImGui::Button("Rename...")) {
+        state->error_message.clear();
+        request_constraint_rename(state, family, selected_name);
+        ImGui::OpenPopup(kConstraintRenamePopup);
+    }
+    ImGui::SameLine();
+    // There is deliberately no last-constraint gate: a family may legitimately
+    // be empty, which is why an emptied family array erases its key.
+    if (ImGui::Button("Delete...")) {
+        state->error_message.clear();
+        request_constraint_delete(state, family, selected_name);
+        ImGui::OpenPopup(kConstraintDeletePopup);
+    }
+    ImGui::EndDisabled();
+}
+
+void draw_constraint_catalog_popups(ShellState* state) {
+    const bool catalog_blocked =
+        authoring_gesture_active(*state) || state->session.transaction_active();
+    const char* family_label =
+        constraint_kind_label(g_constraint_catalog_popup.family);
+
+    if (ImGui::BeginPopupModal(
+            kConstraintRenamePopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(
+            "Rename %s constraint '%s'.",
+            family_label,
+            g_constraint_catalog_popup.source.c_str());
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        const bool enter_pressed = ImGui::InputText(
+            "Name",
+            g_constraint_catalog_popup.name.data(),
+            g_constraint_catalog_popup.name.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        const std::string candidate(g_constraint_catalog_popup.name.data());
+
+        // A preview of the primitive's rejection, never a substitute for it:
+        // the primitive still runs and is still authoritative. A collision is
+        // refused rather than auto-suffixed, so `unique_constraint_name()` --
+        // the create path's allocator -- is deliberately not called here.
+        const bool taken = !candidate.empty() &&
+            candidate != g_constraint_catalog_popup.source &&
+            state->load_result && state->load_result.skeleton_data != nullptr &&
+            constraint_exists(
+                *state->load_result.skeleton_data,
+                g_constraint_catalog_popup.family,
+                candidate);
+        if (taken) {
+            ImGui::Text(
+                "'%s' is already taken by another %s constraint.",
+                candidate.c_str(),
+                family_label);
+        } else {
+            const std::string clause = constraint_skin_clause(
+                g_constraint_catalog_popup.affected_skins);
+            if (!clause.empty()) {
+                ImGui::Text("Referenced by %s", clause.c_str());
+            }
+        }
+
+        if (!state->error_message.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kStateErr);
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        const bool can_apply = !candidate.empty() && !taken &&
+            candidate != g_constraint_catalog_popup.source && !catalog_blocked;
+        ImGui::BeginDisabled(!can_apply);
+        const bool apply_pressed = ImGui::Button("Rename") || enter_pressed;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            cancel_constraint_catalog(state);
+            ImGui::CloseCurrentPopup();
+        } else if (apply_pressed && can_apply &&
+                   confirm_constraint_rename(state, candidate)) {
+            ImGui::CloseCurrentPopup();
+        }
+        // On a rejection the modal stays open with the primitive's message, so
+        // the user can correct the name in place.
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal(
+            kConstraintDeletePopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(
+            "Delete %s constraint '%s'?",
+            family_label,
+            g_constraint_catalog_popup.source.c_str());
+        const std::string clause =
+            constraint_skin_clause(g_constraint_catalog_popup.affected_skins);
+        if (!clause.empty()) {
+            ImGui::Text("Also removes it from %s", clause.c_str());
+        }
+        ImGui::TextDisabled("This action can be undone.");
+        if (!state->error_message.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kStateErr);
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::Spacing();
+        ImGui::BeginDisabled(catalog_blocked);
+        const bool delete_pressed = ImGui::Button("Delete");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            cancel_constraint_catalog(state);
+            ImGui::CloseCurrentPopup();
+        } else if (delete_pressed && !catalog_blocked &&
+                   confirm_constraint_delete(state)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+} // namespace
+
 void draw_constraints_window(ShellState* state) {
     ImGui::Begin(kConstraintsWindowTitle);
     widgets::panel_head(state->icons, Icon::ConstraintIk, "Constraints");
@@ -737,6 +1075,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Ik, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted("Select an IK constraint to edit it.");
             } else {
@@ -904,6 +1243,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Path, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted("Select a path constraint to edit it.");
             } else {
@@ -1156,6 +1496,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Transform, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted(
                     "Select a transform constraint to edit it.");
@@ -1435,6 +1776,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Physics, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted(
                     "Select a physics constraint to edit it.");
@@ -1628,6 +1970,7 @@ void draw_constraints_window(ShellState* state) {
         }
     }
 
+    draw_constraint_catalog_popups(state);
     ImGui::End();
 }
 

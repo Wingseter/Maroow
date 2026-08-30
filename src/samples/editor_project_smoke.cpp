@@ -15,6 +15,7 @@
 #include <system_error>
 #include <vector>
 
+#include "marrow/editor/constraint_catalog.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/authoring.hpp"
 #include "mesh_weight_model.hpp"
@@ -11066,6 +11067,1327 @@ bool validate_mar177_scenario_e() {
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// MAR-178 -- constraint rename and delete surfaces.
+//
+// These scenarios exercise the UI-free command `apply_constraint_catalog_edit()`
+// rather than MAR-177's primitives directly. The primitives are already covered
+// by the MAR-177 scenarios above; what is new here is the transaction wrapper,
+// the pre-mutation skin summary, and the selection cascade.
+// ---------------------------------------------------------------------------
+
+/** @brief The four `(family, name)` pairs `player_idle` declares as upserts. */
+struct Mar178ProjectConstraint {
+    marrow::editor::ConstraintKind family;
+    const char* name;
+};
+
+constexpr std::array<Mar178ProjectConstraint, 4> kMar178PlayerIdleConstraints{{
+    {marrow::editor::ConstraintKind::Ik, "editor_arm_reach"},
+    {marrow::editor::ConstraintKind::Path, "editor_guide_follow"},
+    {marrow::editor::ConstraintKind::Transform, "editor_transform_follow"},
+    {marrow::editor::ConstraintKind::Physics, "editor_ribbon_secondary"},
+}};
+
+marrow::editor::EditDescriptor mar178_descriptor(std::string label) {
+    return marrow::editor::EditDescriptor{
+        marrow::editor::EditKind::EditProperty,
+        std::move(label),
+        "constraint-catalog",
+        false,
+        marrow::editor::EditImpact::Project | marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview};
+}
+
+/** @brief The ownership spelling the two primitive flags imply. */
+std::string mar178_ownership(const marrow::editor::ConstraintCatalogResult& result) {
+    if (result.used_operation && result.changed_upsert) return "shadowed";
+    if (result.used_operation) return "base";
+    if (result.changed_upsert) return "project";
+    return "none";
+}
+
+bool mar178_constraint_present(
+    const marrow::runtime::SkeletonData& skeleton,
+    marrow::editor::ConstraintKind family,
+    std::string_view name) {
+    const auto named = [&](const auto& constraints) {
+        return std::find_if(
+                   constraints.begin(),
+                   constraints.end(),
+                   [&](const auto& constraint) { return constraint.name == name; }) !=
+            constraints.end();
+    };
+    switch (family) {
+    case marrow::editor::ConstraintKind::Ik:
+        return named(skeleton.ik_constraints());
+    case marrow::editor::ConstraintKind::Path:
+        return named(skeleton.path_constraints());
+    case marrow::editor::ConstraintKind::Transform:
+        return named(skeleton.transform_constraints());
+    case marrow::editor::ConstraintKind::Physics:
+        return named(skeleton.physics_constraints());
+    }
+    return false;
+}
+
+bool validate_mar178_scenario_a(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    if (project_result.project == nullptr) {
+        std::cerr << "MAR-178 Scenario A requires a loaded editor project.\n";
+        return false;
+    }
+
+    marrow::editor::EditorSession session;
+    const auto opened = session.open(project_result.project->source_path);
+    if (!opened || session.project() == nullptr || session.runtime_data() == nullptr) {
+        std::cerr << "MAR-178 Scenario A could not open the smoke project.\n";
+        return false;
+    }
+
+    const std::string before_rename =
+        marrow::editor::serialize_project(*session.project());
+    const std::size_t undo_before = session.undo_count();
+
+    // --- Rename a project-only IK constraint through the command. -----------
+    const marrow::editor::ConstraintCatalogEdit rename_edit{
+        marrow::editor::ConstraintCatalogEditKind::Rename,
+        marrow::editor::ConstraintKind::Ik,
+        "editor_arm_reach",
+        "arm_reach_v2"};
+    const marrow::editor::ConstraintCatalogResult renamed =
+        marrow::editor::apply_constraint_catalog_edit(
+            session, rename_edit, nullptr,
+            mar178_descriptor("Renamed IK constraint editor_arm_reach to arm_reach_v2"));
+    if (!renamed.ok || !renamed.changed) {
+        std::cerr << "MAR-178 A: the command refused a legal project-only rename: "
+                  << renamed.message << '\n';
+        return false;
+    }
+    if (renamed.used_operation || !renamed.changed_upsert ||
+        mar178_ownership(renamed) != "project") {
+        std::cerr << "MAR-178 A: a project-only rename must rewrite the upsert and "
+                     "append no ordered record; measured used_operation="
+                  << renamed.used_operation
+                  << " changed_upsert=" << renamed.changed_upsert << '\n';
+        return false;
+    }
+    if (!renamed.affected_skins.empty()) {
+        std::cerr << "MAR-178 A: no `player_idle` skin names a constraint, so the "
+                     "affected-skin summary must be empty; measured "
+                  << renamed.affected_skins.size() << " entries.\n";
+        return false;
+    }
+    if (renamed.selection_changed) {
+        std::cerr << "MAR-178 A: a null SelectionSet cannot have changed.\n";
+        return false;
+    }
+    if (session.undo_count() != undo_before + 1U) {
+        std::cerr << "MAR-178 A: one accepted rename must produce exactly one history "
+                     "entry; measured "
+                  << session.undo_count() << " against " << undo_before << ".\n";
+        return false;
+    }
+    if (!session.project()->constraint_lifecycle_operations.empty()) {
+        std::cerr << "MAR-178 A: a project-only rename must append no ordered record.\n";
+        return false;
+    }
+
+    const marrow::runtime::SkeletonData& renamed_skeleton = *session.runtime_data();
+    if (!mar178_constraint_present(
+            renamed_skeleton, marrow::editor::ConstraintKind::Ik, "arm_reach_v2") ||
+        mar178_constraint_present(
+            renamed_skeleton, marrow::editor::ConstraintKind::Ik, "editor_arm_reach")) {
+        std::cerr << "MAR-178 A: the renamed IK constraint must resolve under its new "
+                     "name and not under its old one.\n";
+        return false;
+    }
+    for (std::size_t index = 1U; index < kMar178PlayerIdleConstraints.size(); ++index) {
+        const auto& survivor = kMar178PlayerIdleConstraints[index];
+        if (!mar178_constraint_present(
+                renamed_skeleton, survivor.family, survivor.name)) {
+            std::cerr << "MAR-178 A: renaming one constraint dropped the unrelated "
+                      << survivor.name << ".\n";
+            return false;
+        }
+    }
+    if (session.project()->transform_timeline_edits.size() !=
+            project_result.project->transform_timeline_edits.size() ||
+        session.project()->animation_edits.size() !=
+            project_result.project->animation_edits.size() ||
+        session.project()->editor_metadata.active_animation !=
+            project_result.project->editor_metadata.active_animation ||
+        session.project()->snap_settings.has_value() !=
+            project_result.project->snap_settings.has_value()) {
+        std::cerr << "MAR-178 A: a constraint rename must not touch timeline edits, "
+                     "snap settings, or editor metadata.\n";
+        return false;
+    }
+
+    // --- Save and reload the renamed project. -------------------------------
+    const auto save_path =
+        std::filesystem::temp_directory_path() / "marrow_mar178_scenario_a.marrow";
+    std::error_code ignored;
+    std::filesystem::remove(save_path, ignored);
+    // `player_idle.marrow` references its skeleton and atlas relatively, so a
+    // save into a different directory must carry absolute paths for the reload
+    // to resolve them. That is orthogonal to the rename under test.
+    marrow::editor::ProjectData portable = *session.project();
+    portable.runtime_assets.skeleton_path = std::filesystem::absolute(
+        session.project()->resolved_skeleton_path());
+    portable.runtime_assets.atlas_paths.clear();
+    for (const auto& atlas : session.project()->resolved_atlas_paths()) {
+        portable.runtime_assets.atlas_paths.push_back(
+            std::filesystem::absolute(atlas));
+    }
+    const auto saved = marrow::editor::save_project(portable, save_path);
+    if (!saved) {
+        std::cerr << "MAR-178 A: the renamed project failed to save.\n";
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(save_path);
+    if (!reloaded || reloaded.project == nullptr) {
+        std::cerr << "MAR-178 A: the renamed project failed to reload: "
+                  << (reloaded.error.has_value() ? reloaded.error->format()
+                                                 : std::string("(no error)"))
+                  << '\n';
+        return false;
+    }
+    if (!mar178_constraint_present(
+            *reloaded.skeleton_data, marrow::editor::ConstraintKind::Ik,
+            "arm_reach_v2")) {
+        std::cerr << "MAR-178 A: the reloaded project lost the renamed constraint.\n";
+        return false;
+    }
+    std::filesystem::remove(save_path, ignored);
+
+    // --- Delete a project-only physics constraint. --------------------------
+    const std::string before_delete =
+        marrow::editor::serialize_project(*session.project());
+    const marrow::editor::ConstraintCatalogEdit delete_edit{
+        marrow::editor::ConstraintCatalogEditKind::Delete,
+        marrow::editor::ConstraintKind::Physics,
+        "editor_ribbon_secondary",
+        {}};
+    const marrow::editor::ConstraintCatalogResult deleted =
+        marrow::editor::apply_constraint_catalog_edit(
+            session, delete_edit, nullptr,
+            mar178_descriptor("Deleted Physics constraint editor_ribbon_secondary"));
+    if (!deleted.ok || !deleted.changed) {
+        std::cerr << "MAR-178 A: the command refused a legal project-only delete: "
+                  << deleted.message << '\n';
+        return false;
+    }
+    if (deleted.used_operation || !deleted.changed_upsert ||
+        mar178_ownership(deleted) != "project") {
+        std::cerr << "MAR-178 A: a project-only delete must erase the upsert and append "
+                     "no ordered record.\n";
+        return false;
+    }
+    if (!session.project()->constraint_lifecycle_operations.empty()) {
+        std::cerr << "MAR-178 A: a project-only delete must leave "
+                     "constraint_lifecycle_operations empty.\n";
+        return false;
+    }
+    if (session.project()->find_physics_constraint_edit("editor_ribbon_secondary") !=
+        nullptr) {
+        std::cerr << "MAR-178 A: the physics upsert survived its own delete.\n";
+        return false;
+    }
+    if (mar178_constraint_present(
+            *session.runtime_data(), marrow::editor::ConstraintKind::Physics,
+            "editor_ribbon_secondary")) {
+        std::cerr << "MAR-178 A: the deleted physics constraint still materializes.\n";
+        return false;
+    }
+    for (std::size_t index = 1U; index + 1U < kMar178PlayerIdleConstraints.size();
+         ++index) {
+        const auto& survivor = kMar178PlayerIdleConstraints[index];
+        if (!mar178_constraint_present(
+                *session.runtime_data(), survivor.family, survivor.name)) {
+            std::cerr << "MAR-178 A: deleting one constraint dropped the unrelated "
+                      << survivor.name << ".\n";
+            return false;
+        }
+    }
+
+    // §10.5: a successful save proves nothing here. `validate_project_for_save()`
+    // takes no base document (`project.cpp:5502`+) and so cannot resolve a skin
+    // reference against a skeleton; only `load_project()`, which calls
+    // `build_project_runtime()` at `project.cpp:7495`, re-materializes and
+    // re-parses. The RELOAD is the assertion.
+    {
+        const auto delete_reload_path =
+            std::filesystem::temp_directory_path() /
+            "marrow_mar178_scenario_a_deleted.marrow";
+        std::filesystem::remove(delete_reload_path, ignored);
+        marrow::editor::ProjectData deleted_portable = *session.project();
+        deleted_portable.runtime_assets.skeleton_path = std::filesystem::absolute(
+            session.project()->resolved_skeleton_path());
+        deleted_portable.runtime_assets.atlas_paths.clear();
+        for (const auto& atlas : session.project()->resolved_atlas_paths()) {
+            deleted_portable.runtime_assets.atlas_paths.push_back(
+                std::filesystem::absolute(atlas));
+        }
+        const auto deleted_saved =
+            marrow::editor::save_project(deleted_portable, delete_reload_path);
+        if (!deleted_saved) {
+            std::cerr << "MAR-178 A: the project failed to save after the delete.\n";
+            return false;
+        }
+        const auto deleted_reloaded =
+            marrow::editor::load_project(delete_reload_path);
+        if (!deleted_reloaded || deleted_reloaded.skeleton_data == nullptr) {
+            std::cerr << "MAR-178 A: the deleted project saved but could NOT be "
+                         "reopened: "
+                      << (deleted_reloaded.error.has_value()
+                              ? deleted_reloaded.error->format()
+                              : std::string("(no error)"))
+                      << '\n';
+            return false;
+        }
+        if (mar178_constraint_present(
+                *deleted_reloaded.skeleton_data,
+                marrow::editor::ConstraintKind::Physics,
+                "editor_ribbon_secondary")) {
+            std::cerr << "MAR-178 A: the reloaded project resurrected the deleted "
+                         "physics constraint.\n";
+            return false;
+        }
+        std::filesystem::remove(delete_reload_path, ignored);
+    }
+
+    // --- Undo and redo restore and re-apply, compared as strings. -----------
+    if (!session.undo() ||
+        marrow::editor::serialize_project(*session.project()) != before_delete) {
+        std::cerr << "MAR-178 A: undoing the delete did not restore the exact "
+                     "pre-delete serialization.\n";
+        return false;
+    }
+    if (!session.redo() ||
+        mar178_constraint_present(
+            *session.runtime_data(), marrow::editor::ConstraintKind::Physics,
+            "editor_ribbon_secondary")) {
+        std::cerr << "MAR-178 A: redoing the delete did not remove the constraint "
+                     "again.\n";
+        return false;
+    }
+    if (!session.undo() || !session.undo() ||
+        marrow::editor::serialize_project(*session.project()) != before_rename) {
+        std::cerr << "MAR-178 A: undoing both edits did not restore the exact original "
+                     "serialization.\n";
+        return false;
+    }
+
+    std::cout << "MAR-178 Scenario A: the catalog command renames and deletes "
+                 "project-only constraints through one transaction each, reports "
+                 "`project` ownership with an empty skin summary, saves and reloads, "
+                 "and undo restores the byte-exact serialization.\n";
+    return true;
+}
+
+bool validate_mar178_scenario_c(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    if (project_result.project == nullptr) {
+        std::cerr << "MAR-178 Scenario C requires a loaded editor project.\n";
+        return false;
+    }
+
+    const auto open_session = [&](marrow::editor::EditorSession* session) {
+        const auto opened = session->open(project_result.project->source_path);
+        return static_cast<bool>(opened) && session->runtime_data() != nullptr;
+    };
+
+    // --- Rename: the selected constraint follows its own identity. ----------
+    {
+        marrow::editor::EditorSession session;
+        if (!open_session(&session)) {
+            std::cerr << "MAR-178 C could not open the smoke project.\n";
+            return false;
+        }
+        marrow::editor::SelectionSet selection;
+        selection.replace(marrow::editor::BoneSelection{"root"});
+        selection.toggle(marrow::editor::ConstraintSelection{
+            marrow::editor::ConstraintKind::Ik, "editor_arm_reach"});
+
+        const marrow::editor::ConstraintCatalogResult renamed =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Rename,
+                 marrow::editor::ConstraintKind::Ik, "editor_arm_reach",
+                 "arm_reach_v2"},
+                &selection,
+                mar178_descriptor("Renamed IK constraint"));
+        if (!renamed.ok || !renamed.selection_changed) {
+            std::cerr << "MAR-178 C: renaming a selected constraint must report a "
+                         "selection change; ok="
+                      << renamed.ok << " selection_changed=" << renamed.selection_changed
+                      << " message=" << renamed.message << '\n';
+            return false;
+        }
+        if (selection.items().size() != 2U) {
+            std::cerr << "MAR-178 C: a rename must not change the selection size; "
+                         "measured "
+                      << selection.items().size() << ".\n";
+            return false;
+        }
+        const auto* active = selection.active_constraint();
+        if (active == nullptr || active->constraint_name != "arm_reach_v2" ||
+            active->kind != marrow::editor::ConstraintKind::Ik) {
+            std::cerr << "MAR-178 C: the active constraint selection did not follow "
+                         "the rename. Without the remap, reconcile can only prune, so "
+                         "the panel loses the constraint it is editing.\n";
+            return false;
+        }
+        const auto* bone =
+            std::get_if<marrow::editor::BoneSelection>(&selection.items()[0]);
+        if (bone == nullptr || bone->bone_name != "root") {
+            std::cerr << "MAR-178 C: the co-selected bone must be untouched by a "
+                         "constraint rename.\n";
+            return false;
+        }
+    }
+
+    // --- Delete: the identity is pruned and the last survivor becomes active. --
+    {
+        marrow::editor::EditorSession session;
+        if (!open_session(&session)) {
+            std::cerr << "MAR-178 C could not open the smoke project.\n";
+            return false;
+        }
+        marrow::editor::SelectionSet selection;
+        selection.replace(marrow::editor::BoneSelection{"root"});
+        selection.toggle(marrow::editor::ConstraintSelection{
+            marrow::editor::ConstraintKind::Ik, "editor_arm_reach"});
+        selection.toggle(marrow::editor::ConstraintSelection{
+            marrow::editor::ConstraintKind::Path, "editor_guide_follow"});
+        if (selection.items().size() != 3U ||
+            selection.active_constraint() == nullptr ||
+            selection.active_constraint()->constraint_name != "editor_guide_follow") {
+            std::cerr << "MAR-178 C: the three-member fixture selection did not build "
+                         "as expected.\n";
+            return false;
+        }
+
+        const marrow::editor::ConstraintCatalogResult deleted =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Delete,
+                 marrow::editor::ConstraintKind::Path, "editor_guide_follow", {}},
+                &selection,
+                mar178_descriptor("Deleted Path constraint"));
+        if (!deleted.ok || !deleted.selection_changed) {
+            std::cerr << "MAR-178 C: deleting a selected constraint must prune it from "
+                         "the selection; ok="
+                      << deleted.ok << " message=" << deleted.message << '\n';
+            return false;
+        }
+        if (selection.items().size() != 2U) {
+            std::cerr << "MAR-178 C: the deleted constraint left a ghost member. The "
+                         "status line reports items().size() as \"; N selected\", so a "
+                         "ghost is user-visible; measured "
+                      << selection.items().size() << ".\n";
+            return false;
+        }
+        const auto* first =
+            std::get_if<marrow::editor::BoneSelection>(&selection.items()[0]);
+        const auto* second =
+            std::get_if<marrow::editor::ConstraintSelection>(&selection.items()[1]);
+        if (first == nullptr || first->bone_name != "root" || second == nullptr ||
+            second->constraint_name != "editor_arm_reach") {
+            std::cerr << "MAR-178 C: a delete must preserve the order of the "
+                         "survivors.\n";
+            return false;
+        }
+        const auto* active = selection.active_constraint();
+        if (active == nullptr || active->constraint_name != "editor_arm_reach") {
+            std::cerr << "MAR-178 C: removing the active member must promote the LAST "
+                         "survivor, which is what a later "
+                         "reconcile_selection_to_runtime() would also choose.\n";
+            return false;
+        }
+    }
+
+    // --- Deleting an unselected constraint leaves the set untouched. --------
+    {
+        marrow::editor::EditorSession session;
+        if (!open_session(&session)) {
+            std::cerr << "MAR-178 C could not open the smoke project.\n";
+            return false;
+        }
+        marrow::editor::SelectionSet selection;
+        selection.replace(marrow::editor::ConstraintSelection{
+            marrow::editor::ConstraintKind::Ik, "editor_arm_reach"});
+        const std::vector<marrow::editor::SelectionItem> before = selection.items();
+
+        const marrow::editor::ConstraintCatalogResult deleted =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Delete,
+                 marrow::editor::ConstraintKind::Physics, "editor_ribbon_secondary",
+                 {}},
+                &selection,
+                mar178_descriptor("Deleted Physics constraint"));
+        if (!deleted.ok) {
+            std::cerr << "MAR-178 C: deleting an unselected constraint must still "
+                         "apply: "
+                      << deleted.message << '\n';
+            return false;
+        }
+        if (deleted.selection_changed || selection.items() != before) {
+            std::cerr << "MAR-178 C: deleting an unselected constraint must leave the "
+                         "selection identical and report selection_changed == false.\n";
+            return false;
+        }
+    }
+
+    // --- A rejection must not move the selection. ---------------------------
+    {
+        marrow::editor::EditorSession session;
+        if (!open_session(&session)) {
+            std::cerr << "MAR-178 C could not open the smoke project.\n";
+            return false;
+        }
+        {
+            auto seed = session.begin_edit(mar178_descriptor("Seeded sibling"));
+            if (!seed) {
+                std::cerr << "MAR-178 C could not seed a sibling IK constraint.\n";
+                return false;
+            }
+            marrow::editor::IkConstraintEdit sibling =
+                seed.project()->ik_constraint_edits.front();
+            sibling.name = "arm_reach_sibling";
+            seed.project()->ik_constraint_edits.push_back(std::move(sibling));
+            if (!seed.commit()) {
+                std::cerr << "MAR-178 C could not commit the sibling IK constraint.\n";
+                return false;
+            }
+        }
+
+        marrow::editor::SelectionSet selection;
+        selection.replace(marrow::editor::ConstraintSelection{
+            marrow::editor::ConstraintKind::Ik, "editor_arm_reach"});
+        const std::vector<marrow::editor::SelectionItem> before = selection.items();
+        const std::size_t undo_before = session.undo_count();
+        const std::string serialized_before =
+            marrow::editor::serialize_project(*session.project());
+
+        // The rejection must name the SELECTED identity, or the cascade could
+        // not have moved it even if it ran in the wrong order. A second IK
+        // constraint gives the selected one a real collision target.
+        const marrow::editor::ConstraintCatalogResult rejected =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Rename,
+                 marrow::editor::ConstraintKind::Ik, "editor_arm_reach",
+                 "arm_reach_sibling"},
+                &selection,
+                mar178_descriptor("Renamed IK constraint"));
+        if (rejected.ok || rejected.message.empty()) {
+            std::cerr << "MAR-178 C: a rename of a name absent from the family must be "
+                         "rejected with a message.\n";
+            return false;
+        }
+        if (rejected.selection_changed || selection.items() != before ||
+            session.undo_count() != undo_before ||
+            marrow::editor::serialize_project(*session.project()) !=
+                serialized_before) {
+            std::cerr << "MAR-178 C: a rejected edit must leave the selection, the "
+                         "history, and the byte serialization exactly as they were.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-178 Scenario C: rename remaps the selected identity and leaves "
+                 "co-selected bones alone, delete prunes it and promotes the last "
+                 "survivor, an unselected target reports no selection change, and a "
+                 "rejection moves neither the selection nor the history.\n";
+    return true;
+}
+
+/** @brief Opens a session over a `.marrow` written across a constraint fixture. */
+bool mar178_open_skin_session(
+    const std::filesystem::path& project_path,
+    marrow::editor::EditorSession* session) {
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/skin_inherit_constraints.mskl");
+    // `skin_inherit_constraints.mskl` ships no atlas and `load_project()`
+    // requires at least one, so the project borrows `player_idle.matl`. Nothing
+    // cross-validates an atlas against a skeleton.
+    options.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    options.name = "mar178_skin";
+    const marrow::editor::ProjectData project =
+        marrow::editor::create_minimal_project(options);
+    const auto saved = marrow::editor::save_project(project, project_path);
+    if (!saved) {
+        std::cerr << "MAR-178 could not write " << project_path << ": "
+                  << saved.error->message << '\n';
+        return false;
+    }
+    const auto opened = session->open(project_path);
+    if (!opened || session->runtime_data() == nullptr) {
+        std::cerr << "MAR-178 could not open " << project_path << ".\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Saves a session's project and reloads it from disk.
+ *
+ * The save is not the assertion. `load_project()` runs `build_project_runtime()`
+ * and the typed skeleton parse, and a lifecycle edit that fails to rewrite
+ * `skins[*].<family>` produces a project that still SAVES and can never be
+ * OPENED, so only the reload catches it.
+ */
+bool mar178_save_and_reload(
+    const marrow::editor::EditorSession& session,
+    const std::filesystem::path& path,
+    marrow::editor::ProjectLoadResult* reloaded_out,
+    std::string_view label) {
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    const auto saved = marrow::editor::save_project(*session.project(), path);
+    if (!saved) {
+        std::cerr << label << ": the project failed to save: " << saved.error->message
+                  << '\n';
+        return false;
+    }
+    *reloaded_out = marrow::editor::load_project(path);
+    if (!*reloaded_out || reloaded_out->skeleton_data == nullptr) {
+        std::cerr << label << ": the saved project could NOT be reopened: "
+                  << (reloaded_out->error.has_value()
+                          ? reloaded_out->error->format()
+                          : std::string("(no error)"))
+                  << '\n';
+        return false;
+    }
+    return true;
+}
+
+bool validate_mar178_scenario_b() {
+    const auto project_path =
+        std::filesystem::temp_directory_path() / "marrow_mar178_scenario_b.marrow";
+    const auto reload_path =
+        std::filesystem::temp_directory_path() / "marrow_mar178_scenario_b_out.marrow";
+    std::error_code ignored;
+
+    // --- B1: a base-backed rename appends one record and rewrites the skin. --
+    {
+        marrow::editor::EditorSession session;
+        if (!mar178_open_skin_session(project_path, &session)) {
+            return false;
+        }
+        const marrow::editor::ConstraintCatalogResult renamed =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Rename,
+                 marrow::editor::ConstraintKind::Transform, "cape_pull", "cape_drag"},
+                nullptr,
+                mar178_descriptor("Renamed Transform constraint cape_pull"));
+        if (!renamed.ok || !renamed.used_operation || renamed.changed_upsert ||
+            mar178_ownership(renamed) != "base") {
+            std::cerr << "MAR-178 B1: a base-backed rename must append exactly one "
+                         "ordered record and touch no upsert; ok="
+                      << renamed.ok << " used_operation=" << renamed.used_operation
+                      << " changed_upsert=" << renamed.changed_upsert
+                      << " message=" << renamed.message << '\n';
+            return false;
+        }
+        if (renamed.affected_skins.size() != 1U ||
+            renamed.affected_skins.front() != "cape") {
+            std::cerr << "MAR-178 B1: the affected-skin summary must be captured from "
+                         "the PRE-mutation runtime and report exactly [cape]; measured "
+                      << renamed.affected_skins.size() << " entries.\n";
+            return false;
+        }
+        if (session.project()->constraint_lifecycle_operations.size() != 1U) {
+            std::cerr << "MAR-178 B1: exactly one lifecycle record must be appended.\n";
+            return false;
+        }
+
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar178_save_and_reload(session, reload_path, &reloaded, "MAR-178 B1")) {
+            return false;
+        }
+        const auto& transforms = reloaded.skeleton_data->transform_constraints();
+        if (transforms.size() != 1U || transforms.front().name != "cape_drag") {
+            std::cerr << "MAR-178 B1: the reloaded rig did not carry the renamed "
+                         "constraint.\n";
+            return false;
+        }
+        const auto skin = std::find_if(
+            reloaded.skeleton_data->skins().begin(),
+            reloaded.skeleton_data->skins().end(),
+            [](const marrow::runtime::SkinData& candidate) {
+                return candidate.name == "cape";
+            });
+        if (skin == reloaded.skeleton_data->skins().end() ||
+            skin->transform_constraint_indices.size() != 1U ||
+            skin->transform_constraint_indices.front() != 0U) {
+            std::cerr << "MAR-178 B1: skin `cape` must still resolve the renamed "
+                         "constraint. A root-only rewrite makes the project "
+                         "unopenable, which is why this asserts on the RELOAD.\n";
+            return false;
+        }
+    }
+
+    // --- B2: a base-backed delete tombstones and prunes the skin. -----------
+    {
+        marrow::editor::EditorSession session;
+        if (!mar178_open_skin_session(project_path, &session)) {
+            return false;
+        }
+        const marrow::editor::ConstraintCatalogResult deleted =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Delete,
+                 marrow::editor::ConstraintKind::Transform, "cape_pull", {}},
+                nullptr,
+                mar178_descriptor("Deleted Transform constraint cape_pull"));
+        if (!deleted.ok || !deleted.used_operation || deleted.changed_upsert ||
+            mar178_ownership(deleted) != "base" ||
+            deleted.affected_skins != std::vector<std::string>{"cape"}) {
+            std::cerr << "MAR-178 B2: a base-backed delete must emit one tombstone and "
+                         "report skin `cape`; message=" << deleted.message << '\n';
+            return false;
+        }
+
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar178_save_and_reload(session, reload_path, &reloaded, "MAR-178 B2")) {
+            return false;
+        }
+        if (!reloaded.skeleton_data->transform_constraints().empty()) {
+            std::cerr << "MAR-178 B2: the reloaded rig still carries a transform "
+                         "constraint.\n";
+            return false;
+        }
+        const auto skin = std::find_if(
+            reloaded.skeleton_data->skins().begin(),
+            reloaded.skeleton_data->skins().end(),
+            [](const marrow::runtime::SkinData& candidate) {
+                return candidate.name == "cape";
+            });
+        if (skin == reloaded.skeleton_data->skins().end() ||
+            !skin->transform_constraint_indices.empty()) {
+            std::cerr << "MAR-178 B2: skin `cape` must survive with no transform "
+                         "constraint reference.\n";
+            return false;
+        }
+        // The adjacent scope must survive: MAR-172 shipped data loss by
+        // destroying a neighbouring key while reporting ok.
+        const auto cape_target =
+            reloaded.skeleton_data->find_bone_index("cape_target");
+        if (!cape_target.has_value() ||
+            std::find(
+                skin->bone_indices.begin(), skin->bone_indices.end(), *cape_target) ==
+                skin->bone_indices.end()) {
+            std::cerr << "MAR-178 B2: skin `cape` lost its `cape_target` bone to an "
+                         "unrelated constraint delete.\n";
+            return false;
+        }
+    }
+
+    // --- B3: a shadowing delete needs BOTH representations. -----------------
+    {
+        marrow::editor::EditorSession session;
+        if (!mar178_open_skin_session(project_path, &session)) {
+            return false;
+        }
+        {
+            auto seed = session.begin_edit(mar178_descriptor("Seeded shadowing upsert"));
+            if (!seed) {
+                std::cerr << "MAR-178 B3 could not open a seeding transaction.\n";
+                return false;
+            }
+            marrow::editor::TransformConstraintEdit shadow;
+            shadow.name = "cape_pull";
+            shadow.source_bone_name = "controller";
+            shadow.bone_names = {"constrained"};
+            shadow.rotate_mix = 0.5;
+            seed.project()->transform_constraint_edits.push_back(std::move(shadow));
+            if (!seed.commit()) {
+                std::cerr << "MAR-178 B3 could not commit the shadowing upsert.\n";
+                return false;
+            }
+        }
+
+        const marrow::editor::ConstraintCatalogResult deleted =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Delete,
+                 marrow::editor::ConstraintKind::Transform, "cape_pull", {}},
+                nullptr,
+                mar178_descriptor("Deleted Transform constraint cape_pull"));
+        if (!deleted.ok || !deleted.used_operation || !deleted.changed_upsert ||
+            mar178_ownership(deleted) != "shadowed") {
+            std::cerr << "MAR-178 B3: a shadowing delete must emit BOTH a tombstone and "
+                         "an upsert erase; used_operation=" << deleted.used_operation
+                      << " changed_upsert=" << deleted.changed_upsert
+                      << " message=" << deleted.message << '\n';
+            return false;
+        }
+        if (!session.project()->transform_constraint_edits.empty()) {
+            std::cerr << "MAR-178 B3: the shadowing upsert survived its own delete.\n";
+            return false;
+        }
+
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar178_save_and_reload(session, reload_path, &reloaded, "MAR-178 B3")) {
+            return false;
+        }
+        if (!reloaded.skeleton_data->transform_constraints().empty()) {
+            std::cerr << "MAR-178 B3: the base constraint resurrected after the "
+                         "shadowing delete -- erasing only the upsert reads to the "
+                         "user as \"delete did nothing\".\n";
+            return false;
+        }
+    }
+
+    std::filesystem::remove(project_path, ignored);
+    std::filesystem::remove(reload_path, ignored);
+    std::cout << "MAR-178 Scenario B: the command reports `base` for a base-backed "
+                 "edit and `shadowed` when an upsert covers it, captures [cape] from "
+                 "the pre-mutation runtime, and every result saves AND reopens with "
+                 "skins.cape and cape_target intact.\n";
+    return true;
+}
+
+bool validate_mar178_scenario_d(
+    const marrow::editor::ProjectLoadResult& project_result) {
+    if (project_result.project == nullptr) {
+        std::cerr << "MAR-178 Scenario D requires a loaded editor project.\n";
+        return false;
+    }
+
+    marrow::editor::EditorSession session;
+    const auto opened = session.open(project_result.project->source_path);
+    if (!opened || session.runtime_data() == nullptr) {
+        std::cerr << "MAR-178 Scenario D could not open the smoke project.\n";
+        return false;
+    }
+    // A sibling gives the IK family a real collision target.
+    {
+        auto seed = session.begin_edit(mar178_descriptor("Seeded sibling"));
+        if (!seed) {
+            std::cerr << "MAR-178 D could not seed a sibling IK constraint.\n";
+            return false;
+        }
+        marrow::editor::IkConstraintEdit sibling =
+            seed.project()->ik_constraint_edits.front();
+        sibling.name = "arm_reach_sibling";
+        seed.project()->ik_constraint_edits.push_back(std::move(sibling));
+        if (!seed.commit()) {
+            std::cerr << "MAR-178 D could not commit the sibling IK constraint.\n";
+            return false;
+        }
+    }
+
+    struct Rejection {
+        const char* label;
+        marrow::editor::ConstraintCatalogEditKind kind;
+        marrow::editor::ConstraintKind family;
+        const char* source;
+        const char* destination;
+        const char* message_must_contain;
+    };
+    const std::array<Rejection, 6> kRejections{{
+        {"a rename onto a name the family already carries",
+         marrow::editor::ConstraintCatalogEditKind::Rename,
+         marrow::editor::ConstraintKind::Ik, "editor_arm_reach", "arm_reach_sibling",
+         "already taken"},
+        {"a rename onto the source's own name",
+         marrow::editor::ConstraintCatalogEditKind::Rename,
+         marrow::editor::ConstraintKind::Ik, "editor_arm_reach", "editor_arm_reach",
+         "must differ"},
+        {"a rename from an empty source",
+         marrow::editor::ConstraintCatalogEditKind::Rename,
+         marrow::editor::ConstraintKind::Ik, "", "arm_reach_v2", "must not be empty"},
+        {"a rename of a name that does not exist",
+         marrow::editor::ConstraintCatalogEditKind::Rename,
+         marrow::editor::ConstraintKind::Ik, "never_existed", "arm_reach_v2",
+         "does not exist"},
+        {"a delete of a name that does not exist",
+         marrow::editor::ConstraintCatalogEditKind::Delete,
+         marrow::editor::ConstraintKind::Physics, "never_existed", "",
+         "does not exist"},
+        // The identity is `(family, name)`: a real physics constraint named
+        // through the IK family is not found, and the message says which family
+        // it looked in.
+        {"a delete of a real name in the wrong family",
+         marrow::editor::ConstraintCatalogEditKind::Delete,
+         marrow::editor::ConstraintKind::Ik, "editor_ribbon_secondary", "", "ik"},
+    }};
+
+    for (const Rejection& rejection : kRejections) {
+        const std::string serialized_before =
+            marrow::editor::serialize_project(*session.project());
+        const std::size_t undo_before = session.undo_count();
+
+        const marrow::editor::ConstraintCatalogResult result =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {rejection.kind, rejection.family, rejection.source,
+                 rejection.destination},
+                nullptr,
+                mar178_descriptor("Rejected constraint edit"));
+        if (result.ok || result.changed) {
+            std::cerr << "MAR-178 D: " << rejection.label << " must be refused.\n";
+            return false;
+        }
+        if (result.message.find(rejection.message_must_contain) == std::string::npos) {
+            std::cerr << "MAR-178 D: " << rejection.label
+                      << " must report a message containing '"
+                      << rejection.message_must_contain << "'; measured '"
+                      << result.message << "'.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(*session.project()) !=
+            serialized_before) {
+            std::cerr << "MAR-178 D: " << rejection.label
+                      << " changed the project's byte serialization.\n";
+            return false;
+        }
+        if (session.undo_count() != undo_before) {
+            std::cerr << "MAR-178 D: " << rejection.label
+                      << " left a history entry behind; undo_count " << undo_before
+                      << " -> " << session.undo_count() << ".\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-178 Scenario D: " << kRejections.size()
+              << " rejections each leave the project's serialization byte-identical "
+                 "and the history untouched, and the wrong-family case names the "
+                 "family it searched.\n";
+    return true;
+}
+
+bool validate_mar178_scenario_e() {
+    // §4's decision, pinned rather than inherited silently.
+    //
+    // MAR-177's step 5 runs `validate_project_for_save()`, which requires at
+    // least one atlas path. Keeping that blunt gate costs nothing REACHABLE:
+    // `load_project()` already refuses an atlas-free document, and the shell's
+    // only entry into a `ProjectData` is `reload_project()` -> `EditorSession::
+    // open()` -> `load_project()`. The refusal therefore reports a blocker the
+    // user already has rather than creating one.
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = "mar178_atlas_free.marrow";
+    options.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/skin_inherit_constraints.mskl");
+    options.atlas_paths = {};
+    options.name = "mar178_atlas_free";
+    marrow::editor::ProjectData project =
+        marrow::editor::create_minimal_project(options);
+
+    const auto base = marrow::runtime::load_skeleton_document(
+        std::filesystem::absolute("assets/fixtures/skin_inherit_constraints.mskl"));
+    if (!base) {
+        std::cerr << "MAR-178 E could not load the skin fixture skeleton.\n";
+        return false;
+    }
+
+    const std::string before = marrow::editor::serialize_project(project);
+    const auto renamed = marrow::editor::rename_constraint(
+        &project, *base.document, marrow::editor::ConstraintKind::Transform,
+        "cape_pull", "cape_drag");
+    if (renamed.ok) {
+        std::cerr << "MAR-178 E: the primitive returned ok for a project "
+                     "save_project() refuses -- step 5's validator has been "
+                     "narrowed.\n";
+        return false;
+    }
+    if (renamed.message != "at least one atlas path is required") {
+        std::cerr << "MAR-178 E: expected the save validator's atlas message, got: "
+                  << renamed.message << '\n';
+        return false;
+    }
+    if (marrow::editor::serialize_project(project) != before) {
+        std::cerr << "MAR-178 E: the refusal mutated the project.\n";
+        return false;
+    }
+
+    // The same refusal through the COMMAND, on the one path that reaches this
+    // state: a loadable project whose atlas list is emptied in memory. The
+    // command must pass the validator's sentence through unchanged -- a surface
+    // that paraphrases a validator drifts from it -- and must change nothing.
+    {
+        const auto session_path =
+            std::filesystem::temp_directory_path() / "marrow_mar178_scenario_e.marrow";
+        marrow::editor::EditorSession session;
+        if (!mar178_open_skin_session(session_path, &session)) {
+            return false;
+        }
+        {
+            auto strip = session.begin_edit(mar178_descriptor("Emptied atlas list"));
+            if (!strip) {
+                std::cerr << "MAR-178 E could not open a transaction to empty the "
+                             "atlas list.\n";
+                return false;
+            }
+            strip.project()->runtime_assets.atlas_paths.clear();
+            if (!strip.commit()) {
+                std::cerr << "MAR-178 E could not commit the emptied atlas list.\n";
+                return false;
+            }
+        }
+
+        const std::string serialized_before =
+            marrow::editor::serialize_project(*session.project());
+        const std::size_t undo_before = session.undo_count();
+        const marrow::editor::ConstraintCatalogResult refused =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Rename,
+                 marrow::editor::ConstraintKind::Transform, "cape_pull", "cape_drag"},
+                nullptr,
+                mar178_descriptor("Renamed Transform constraint cape_pull"));
+        if (refused.ok) {
+            std::cerr << "MAR-178 E: the command accepted a rename on a project "
+                         "save_project() refuses.\n";
+            return false;
+        }
+        if (refused.message.find("at least one atlas path is required") ==
+            std::string::npos) {
+            std::cerr << "MAR-178 E: the command must carry the validator's sentence "
+                         "VERBATIM; measured '"
+                      << refused.message << "'.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(*session.project()) !=
+                serialized_before ||
+            session.undo_count() != undo_before) {
+            std::cerr << "MAR-178 E: the atlas refusal changed the project or the "
+                         "history.\n";
+            return false;
+        }
+        std::error_code session_cleanup;
+        std::filesystem::remove(session_path, session_cleanup);
+    }
+
+    // The other half of the decision: no project on DISK can be in this state,
+    // because the loader refuses an atlas-free document before a session exists.
+    // The in-memory path above is the only way in, which is why the gate costs
+    // nothing reachable and why §4.2 is about the message rather than the check.
+    const auto atlas_free_path =
+        std::filesystem::temp_directory_path() / "marrow_mar178_atlas_free.marrow";
+    std::error_code ignored;
+    std::filesystem::remove(atlas_free_path, ignored);
+    {
+        std::ofstream out(atlas_free_path);
+        out << "{\"marrow\":\"1.0\",\"name\":\"mar178_atlas_free\",\"runtime\":{"
+            << "\"skeleton\":\""
+            << std::filesystem::absolute(
+                   "assets/fixtures/skin_inherit_constraints.mskl")
+                   .string()
+            << "\",\"atlases\":[]}}\n";
+    }
+    const auto loaded = marrow::editor::load_project(atlas_free_path);
+    if (loaded) {
+        std::cerr << "MAR-178 E: load_project() accepted an atlas-free project, so "
+                     "the gate IS reachable and the decision must be revisited.\n";
+        return false;
+    }
+    const std::string load_message = loaded.error->format();
+    if (load_message.find("$.runtime.atlases") == std::string::npos ||
+        load_message.find("array must not be empty") == std::string::npos) {
+        std::cerr << "MAR-178 E: expected the loader's `$.runtime.atlases` refusal, "
+                     "got: "
+                  << load_message << '\n';
+        return false;
+    }
+    std::filesystem::remove(atlas_free_path, ignored);
+
+    std::cout << "MAR-178 Scenario E: the blunt atlas gate is kept deliberately. "
+                 "The primitive refuses an atlas-free rename with \""
+              << renamed.message
+              << "\" and changes nothing; the command carries that sentence through "
+                 "VERBATIM and leaves the project and history untouched; and "
+                 "load_project() refuses an atlas-free document outright, so the "
+                 "state is reachable only by emptying the list in memory -- never "
+                 "by opening a project.\n";
+    return true;
+}
+
+/** @brief Whether a JSON object carries `key` at all. */
+bool mar178_has_key(
+    const marrow::runtime::json::Value& object,
+    std::string_view key) {
+    return object.is_object() && object.as_object().find(key) != object.as_object().end();
+}
+
+bool validate_mar178_scenario_f() {
+    // MAR-177 owns the byte deltas of this fixture and asserts them on the
+    // PRIMITIVE path. MAR-178 asserts a different property -- occurrence counts
+    // and, above all, the save -> reload cycle -- over the COMMAND path.
+    std::error_code ignored;
+    const auto directory =
+        std::filesystem::temp_directory_path() / "marrow_mar178_export";
+    std::filesystem::remove_all(directory, ignored);
+    std::filesystem::create_directories(directory, ignored);
+
+    const auto project_path = directory / "project.marrow";
+    const auto rename_export = directory / "rename.mskl";
+    const auto delete_export = directory / "delete.mskl";
+
+    const auto reload_export = [](const std::filesystem::path& path,
+                                  marrow::runtime::json::Document* document_out,
+                                  marrow::runtime::SkeletonDataResult* parsed_out) {
+        const auto document = marrow::runtime::load_skeleton_document(path);
+        if (!document) {
+            std::cerr << "MAR-178 F: the exported document did not load: "
+                      << document.error->format() << '\n';
+            return false;
+        }
+        *document_out = *document.document;
+        *parsed_out = marrow::runtime::load_skeleton_data(*document_out);
+        if (!*parsed_out) {
+            std::cerr << "MAR-178 F: the exported document did not TYPED-parse: "
+                      << parsed_out->error->format()
+                      << "\n           This is the assertion that catches the "
+                         "unopenable-project failure: it lands on load, not on save, "
+                         "so no save-only check can see it.\n";
+            return false;
+        }
+        return true;
+    };
+
+    // --- F1: a command-path rename rewrites BOTH occurrences. --------------
+    {
+        marrow::editor::EditorSession session;
+        if (!mar178_open_skin_session(project_path, &session)) {
+            return false;
+        }
+        const marrow::editor::ConstraintCatalogResult renamed =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Rename,
+                 marrow::editor::ConstraintKind::Transform, "cape_pull", "cape_drag"},
+                nullptr,
+                mar178_descriptor("Renamed Transform constraint cape_pull"));
+        if (!renamed.ok) {
+            std::cerr << "MAR-178 F1: the rename was refused: " << renamed.message
+                      << '\n';
+            return false;
+        }
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = rename_export;
+        const auto exported = session.export_runtime(options);
+        if (!exported) {
+            std::cerr << "MAR-178 F1: the export failed: " << exported.error->format()
+                      << '\n';
+            return false;
+        }
+
+        const std::string text = mar177_read_file(rename_export);
+        const std::size_t old_occurrences = mar177_count_quoted(text, "cape_pull");
+        const std::size_t new_occurrences = mar177_count_quoted(text, "cape_drag");
+        if (old_occurrences != 0U || new_occurrences != 2U) {
+            std::cerr << "MAR-178 F1: the exported skeleton names `cape_pull` "
+                      << old_occurrences << " times and `cape_drag` "
+                      << new_occurrences
+                      << " times; expected 0 and 2 (root.transform[0].name and "
+                         "root.skins.cape.transform[0]). A root-only rewrite gives 1 "
+                         "and fails the reload below.\n";
+            return false;
+        }
+
+        marrow::runtime::json::Document document;
+        marrow::runtime::SkeletonDataResult parsed;
+        if (!reload_export(rename_export, &document, &parsed)) {
+            return false;
+        }
+        const auto& skins = parsed.skeleton_data->skins();
+        const auto cape = std::find_if(
+            skins.begin(), skins.end(),
+            [](const marrow::runtime::SkinData& candidate) {
+                return candidate.name == "cape";
+            });
+        if (cape == skins.end() || cape->transform_constraint_indices.size() != 1U) {
+            std::cerr << "MAR-178 F1: the reloaded skin `cape` must resolve exactly "
+                         "one transform constraint.\n";
+            return false;
+        }
+        const std::size_t index = cape->transform_constraint_indices.front();
+        if (index >= parsed.skeleton_data->transform_constraints().size() ||
+            parsed.skeleton_data->transform_constraints()[index].name != "cape_drag") {
+            std::cerr << "MAR-178 F1: the reloaded skin `cape` does not point at the "
+                         "renamed constraint.\n";
+            return false;
+        }
+    }
+
+    // --- F2: a command-path delete erases the keys rather than emptying them.
+    {
+        marrow::editor::EditorSession session;
+        if (!mar178_open_skin_session(project_path, &session)) {
+            return false;
+        }
+        const marrow::editor::ConstraintCatalogResult deleted =
+            marrow::editor::apply_constraint_catalog_edit(
+                session,
+                {marrow::editor::ConstraintCatalogEditKind::Delete,
+                 marrow::editor::ConstraintKind::Transform, "cape_pull", {}},
+                nullptr,
+                mar178_descriptor("Deleted Transform constraint cape_pull"));
+        if (!deleted.ok) {
+            std::cerr << "MAR-178 F2: the delete was refused: " << deleted.message
+                      << '\n';
+            return false;
+        }
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = delete_export;
+        const auto exported = session.export_runtime(options);
+        if (!exported) {
+            std::cerr << "MAR-178 F2: the export failed: " << exported.error->format()
+                      << '\n';
+            return false;
+        }
+
+        const std::string text = mar177_read_file(delete_export);
+        if (mar177_count_quoted(text, "cape_pull") != 0U) {
+            std::cerr << "MAR-178 F2: the deleted name still occurs in the export.\n";
+            return false;
+        }
+
+        marrow::runtime::json::Document document;
+        marrow::runtime::SkeletonDataResult parsed;
+        if (!reload_export(delete_export, &document, &parsed)) {
+            return false;
+        }
+        // The last delete in a family must ERASE the key, not leave `[]`: the
+        // runtime refuses an empty family array with "transform constraints must
+        // not be empty when provided", so an emptied array fails the reload.
+        if (mar178_has_key(document.root, "transform")) {
+            std::cerr << "MAR-178 F2: the export kept a root `transform` key after "
+                         "deleting the family's only constraint.\n";
+            return false;
+        }
+        const auto skins_member = document.root.as_object().find("skins");
+        if (skins_member == document.root.as_object().end()) {
+            std::cerr << "MAR-178 F2: the export lost its `skins` object.\n";
+            return false;
+        }
+        const auto cape_member = skins_member->second.as_object().find("cape");
+        if (cape_member == skins_member->second.as_object().end()) {
+            std::cerr << "MAR-178 F2: the export lost `skins.cape`.\n";
+            return false;
+        }
+        if (mar178_has_key(cape_member->second, "transform")) {
+            std::cerr << "MAR-178 F2: `skins.cape` kept a `transform` key after the "
+                         "delete pruned its only reference.\n";
+            return false;
+        }
+        if (!parsed.skeleton_data->transform_constraints().empty()) {
+            std::cerr << "MAR-178 F2: the reloaded rig still carries a transform "
+                         "constraint.\n";
+            return false;
+        }
+        const auto& skins = parsed.skeleton_data->skins();
+        const auto cape = std::find_if(
+            skins.begin(), skins.end(),
+            [](const marrow::runtime::SkinData& candidate) {
+                return candidate.name == "cape";
+            });
+        const auto cape_target = parsed.skeleton_data->find_bone_index("cape_target");
+        if (cape == skins.end() || !cape_target.has_value() ||
+            std::find(
+                cape->bone_indices.begin(), cape->bone_indices.end(), *cape_target) ==
+                cape->bone_indices.end()) {
+            std::cerr << "MAR-178 F2: skin `cape` must survive the delete with its "
+                         "`cape_target` bone intact -- the adjacent-scope survival "
+                         "assertion MAR-172's failure shape demands.\n";
+            return false;
+        }
+    }
+
+    std::filesystem::remove_all(directory, ignored);
+    std::cout << "MAR-178 Scenario F: a command-path rename exports 0 x `cape_pull` "
+                 "and exactly 2 x `cape_drag` and RELOADS with skins.cape resolving "
+                 "the new name; a command-path delete erases both the root "
+                 "`transform` key and `skins.cape.transform`, RELOADS with zero "
+                 "transform constraints, and keeps `cape_target`.\n";
+    return true;
+}
+
+bool validate_mar178_scenario_g() {
+    // The family spelling lives twice: `constraint_family_json_key()` inside
+    // `project.cpp` writes the serialized records, and `constraint_family_key()`
+    // in the new header is what the surfaces parse and emit. Nothing makes them
+    // agree by construction, so this asserts the agreement instead.
+    struct Case {
+        marrow::editor::ConstraintKind family;
+        const char* expected;
+    };
+    constexpr std::array<Case, 4> kCases{{
+        {marrow::editor::ConstraintKind::Ik, "ik"},
+        {marrow::editor::ConstraintKind::Path, "path"},
+        {marrow::editor::ConstraintKind::Transform, "transform"},
+        {marrow::editor::ConstraintKind::Physics, "physics"},
+    }};
+
+    for (const auto& test_case : kCases) {
+        if (marrow::editor::constraint_family_key(test_case.family) !=
+            test_case.expected) {
+            std::cerr << "MAR-178 G: constraint_family_key() spells the family "
+                         "expected to be '"
+                      << test_case.expected << "' unexpectedly.\n";
+            return false;
+        }
+        const auto parsed =
+            marrow::editor::parse_constraint_family(test_case.expected);
+        if (!parsed.has_value() || *parsed != test_case.family) {
+            std::cerr << "MAR-178 G: parse_constraint_family('" << test_case.expected
+                      << "') did not round-trip.\n";
+            return false;
+        }
+
+        marrow::editor::MinimalProjectOptions options;
+        options.project_path = "mar178_family_probe.marrow";
+        options.skeleton_path =
+            std::filesystem::absolute("assets/fixtures/player_idle.mskl");
+        options.atlas_paths = {
+            std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+        options.name = "mar178";
+        marrow::editor::ProjectData project =
+            marrow::editor::create_minimal_project(options);
+        project.constraint_lifecycle_operations.push_back(
+            {marrow::editor::ConstraintLifecycleKind::Rename,
+             test_case.family,
+             "probe_source",
+             "probe_target"});
+
+        const std::string serialized = marrow::editor::serialize_project(project);
+        const std::string needle =
+            std::string("\"family\": \"") + test_case.expected + "\"";
+        if (serialized.find(needle) == std::string::npos) {
+            std::cerr << "MAR-178 G: serialize_project() did not emit " << needle
+                      << " for the family constraint_family_key() spells '"
+                      << test_case.expected
+                      << "'. The two spellings have drifted.\n";
+            return false;
+        }
+    }
+
+    for (const char* rejected : {"bone", "IK", "", "transforms"}) {
+        if (marrow::editor::parse_constraint_family(rejected).has_value()) {
+            std::cerr << "MAR-178 G: parse_constraint_family accepted '" << rejected
+                      << "'.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-178 Scenario G: the header's family spelling matches the "
+                 "`\"family\"` string serialize_project() writes for all four "
+                 "families, and nothing else parses.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -11159,6 +12481,27 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar177_scenario_f()) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_a(result)) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_c(result)) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_b()) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_d(result)) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_e()) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_f()) {
+            return 1;
+        }
+        if (!validate_mar178_scenario_g()) {
             return 1;
         }
     }

@@ -42,15 +42,17 @@ async def test(parameter_only=False):
         "timeline.scale_key_times",
         "mesh.rebind_weights",
         "mesh.generate_weights",
+        "constraint.rename",
+        "constraint.delete",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 62
+    assert len(registry_names) == 64
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 62
+    assert len(mcp_names) == 64
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 
@@ -70,6 +72,14 @@ async def test(parameter_only=False):
         "lip_sync.map",
     }
     for name in parameter_mutations:
+        assert registry_by_name[name] == {
+            "name": name,
+            "category": "edit",
+            "mutating": True,
+            "requires_review": False,
+            "dry_run_supported": True,
+        }
+    for name in ("constraint.rename", "constraint.delete"):
         assert registry_by_name[name] == {
             "name": name,
             "category": "edit",
@@ -1633,6 +1643,146 @@ async def test(parameter_only=False):
     )
     assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_generate
     require_ok("undo the fixture weight restore", await client.send_command("undo"))
+
+    # MAR-178: constraint.rename / constraint.delete, the 63rd and 64th
+    # operations. Read the SURVIVORS back from constraints.list rather than the
+    # return code -- the worst lifecycle failure lands on load, not on save.
+    constraints_before = json.dumps(
+        require_ok("constraints.list before MAR-178", await client.send_command("constraints.list"))[
+            "scene_delta"
+        ]
+    )
+    rename_dry = require_ok(
+        "constraint.rename dry-run",
+        await client.send_command(
+            "constraint.rename",
+            {
+                "family": "transform",
+                "from": "editor_transform_follow",
+                "to": "transform_follow_v2",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert rename_dry["scene_delta"]["dry_run"] is True
+    assert rename_dry["scene_delta"]["ownership"] == "project"
+    assert rename_dry["scene_delta"]["skins"] == []
+    assert rename_dry["scene_delta"]["skin_reference_count"] == 0
+    assert json.dumps(
+        require_ok(
+            "constraints.list after the dry run", await client.send_command("constraints.list")
+        )["scene_delta"]
+    ) == constraints_before
+
+    rename_live = require_ok(
+        "constraint.rename live",
+        await client.send_command(
+            "constraint.rename",
+            {
+                "family": "transform",
+                "from": "editor_transform_follow",
+                "to": "transform_follow_v2",
+            },
+        ),
+    )
+    # The dry-run payload must equal the live payload apart from `dry_run`.
+    dry_delta = dict(rename_dry["scene_delta"])
+    del dry_delta["dry_run"]
+    assert dry_delta == rename_live["scene_delta"], (
+        f"dry-run and live scene_delta diverged: {dry_delta} vs {rename_live['scene_delta']}"
+    )
+    after_rename = json.dumps(
+        require_ok(
+            "constraints.list after the rename", await client.send_command("constraints.list")
+        )["scene_delta"]
+    )
+    assert "transform_follow_v2" in after_rename
+    assert "editor_transform_follow" not in after_rename
+
+    # AC5's export-preview leg: the export must no longer name the old
+    # constraint, and it must still be produced at all.
+    export_after_rename = require_ok(
+        "export.preview after the rename",
+        await client.send_command("export.preview", {"binary": True}),
+    )
+    assert "editor_transform_follow" not in json.dumps(export_after_rename["scene_delta"])
+    require_ok(
+        "export_runtime after the rename",
+        await client.send_command("export_runtime", {"binary": True}),
+    )
+
+    require_ok("undo constraint.rename", await client.send_command("undo"))
+    assert json.dumps(
+        require_ok(
+            "constraints.list after the rename undo",
+            await client.send_command("constraints.list"),
+        )["scene_delta"]
+    ) == constraints_before
+
+    require_ok(
+        "constraint.delete live",
+        await client.send_command(
+            "constraint.delete", {"family": "physics", "name": "editor_ribbon_secondary"}
+        ),
+    )
+    survivors = json.dumps(
+        require_ok(
+            "constraints.list after the delete", await client.send_command("constraints.list")
+        )["scene_delta"]
+    )
+    assert "editor_ribbon_secondary" not in survivors
+    for survivor in ("editor_arm_reach", "editor_guide_follow", "editor_transform_follow"):
+        assert survivor in survivors, f"the delete dropped the unrelated {survivor}"
+    require_ok("undo constraint.delete", await client.send_command("undo"))
+    assert json.dumps(
+        require_ok(
+            "constraints.list after the delete undo",
+            await client.send_command("constraints.list"),
+        )["scene_delta"]
+    ) == constraints_before
+
+    # Both surfaces reject identically; the dry run runs the live preflight.
+    rejected_dry = require_rejected(
+        "constraint.rename dry-run rejects an unchanged target",
+        await client.send_command(
+            "constraint.rename",
+            {
+                "family": "ik",
+                "from": "editor_arm_reach",
+                "to": "editor_arm_reach",
+                "dry_run": True,
+            },
+        ),
+    )
+    rejected_live = require_rejected(
+        "constraint.rename live rejects an unchanged target",
+        await client.send_command(
+            "constraint.rename",
+            {"family": "ik", "from": "editor_arm_reach", "to": "editor_arm_reach"},
+        ),
+    )
+    assert rejected_dry["message"] == rejected_live["message"], (
+        "a hand-written dry-run check drifts from the primitive's message"
+    )
+    require_rejected(
+        "constraint.rename rejects an unknown family",
+        await client.send_command(
+            "constraint.rename",
+            {"family": "bone", "from": "editor_arm_reach", "to": "arm_v2"},
+        ),
+    )
+    wrong_family = require_rejected(
+        "constraint.rename rejects a right name in the wrong family",
+        await client.send_command(
+            "constraint.rename",
+            {"family": "ik", "from": "editor_ribbon_secondary", "to": "arm_v2"},
+        ),
+    )
+    assert wrong_family["error"]["code"] == "not_found"
+    print(
+        "  MAR-178: constraint.rename/delete round-tripped through dry run, live, "
+        f"read-back, undo and export; a refused rename reports '{rejected_live['message']}'."
+    )
 
     require_ok("agent.permissions.describe", await client.send_command("agent.permissions.describe"))
     require_ok("agent.pause", await client.send_command("agent.pause"))
