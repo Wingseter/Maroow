@@ -500,6 +500,7 @@ add_library(marrow_editor STATIC
     src/editor/module.cpp
     src/editor/selection.cpp
     src/editor/preferences.cpp
+    src/editor/atomic_file_write.cpp
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp

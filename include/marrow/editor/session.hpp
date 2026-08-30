@@ -155,6 +155,27 @@ public:
     EditorSession& operator=(const EditorSession&) = delete;
 
     /**
+     * @brief Builds a new in-memory project around an existing rig and adopts it.
+     *
+     * Writes nothing: the session becomes dirty immediately, so the caller must
+     * save before the project exists on disk. The referenced skeleton and atlases
+     * must already exist and load -- this adopts an existing rig and never authors
+     * one. A failure leaves any current session entirely unchanged.
+     *
+     * @return The attempted load result, carrying the load error on failure.
+     */
+    ProjectLoadResult create(const MinimalProjectOptions& options);
+    /**
+     * @brief Discards the session's project, runtime, preview and history.
+     *
+     * Bumps all three revisions rather than resetting them, so an observer
+     * comparing a cached revision cannot mistake a closed session for an
+     * unchanged one. The session stays reusable: a later `open` succeeds.
+     *
+     * @return `false` when an edit transaction is active; the session is then unchanged.
+     */
+    bool close();
+    /**
      * @brief Opens a project and replaces the session atomically on success.
      * @return The attempted load result. A failed open leaves current state unchanged.
      */
@@ -165,7 +186,29 @@ public:
      */
     ProjectLoadResult reload();
     /**
+     * @brief Reloads the project's runtime sources from disk and swaps them atomically.
+     *
+     * Loads the skeleton document and every atlas, rebuilds runtime data and
+     * rebinds the preview entirely into locals; the session is mutated only after
+     * all of them have succeeded. A failure leaves the session unchanged --
+     * including the invariant that `runtime_data()` is derived from
+     * `base_skeleton_document()`, which a swap-then-roll-back can violate without
+     * any return code revealing it.
+     *
+     * Bumps the runtime and preview revisions on success. The authored project is
+     * untouched, so `project_revision()` does not move and history stays valid.
+     *
+     * @return Failure when no project is open, an edit transaction is active, a
+     *         source fails to load, the runtime fails to build, or the preview
+     *         fails to rebind.
+     */
+    SessionResult adopt_runtime_sources();
+    /**
      * @brief Saves the project, using its source path when `path` is empty.
+     *
+     * Writes through a temporary file and an atomic rename, and rebases every
+     * project-relative reference so a Save As into another directory produces a
+     * project that still opens. See `rebase_project_paths`.
      */
     ProjectSaveResult save(const std::filesystem::path& path = {});
     /**

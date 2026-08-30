@@ -937,6 +937,45 @@ struct MinimalProjectOptions {
  */
 ProjectData create_minimal_project(const MinimalProjectOptions& options);
 /**
+ * @brief Rewrites project-relative references so they resolve identically from a
+ *        new project-file location.
+ *
+ * Every path a `.marrow` stores is project-relative by design, and `resolve_path`
+ * resolves it against the project file's own directory. Moving the project file
+ * without rewriting its references therefore changes what they point at, and the
+ * written project stops opening. This is the single place that rewrites them.
+ *
+ * Five families are rebased, and they are exactly the five that are serialized
+ * from struct fields: `runtime_assets.skeleton_path`,
+ * `runtime_assets.atlas_paths`, `editor_metadata.export_directory`, and every
+ * `atlas_pack_definitions` entry's `atlas_path` and sprite `image_path`. Rebasing
+ * only some of them is worse than rebasing none: `find_atlas_pack_definition`
+ * matches an atlas pack to a runtime atlas by RESOLVED path, so a partial rebase
+ * makes the lookup miss and `export_runtime_assets` silently stops packing.
+ *
+ * The rule is identity-preserving: each reference resolves afterwards to the same
+ * absolute file it resolved to before. Empty and absolute references are returned
+ * unchanged. `export_directory` rebases by identity like the rest, so exports
+ * keep landing where they landed; whether a Save As should instead carry exports
+ * along is a UI question owned by MAR-181.
+ *
+ * Relativization goes through `make_project_relative_path`, the house rule, which
+ * returns an ABSOLUTE path whenever the relative form would need `../`. So a Save
+ * As into a sibling or subdirectory turns relative references absolute. The
+ * project opens either way; the result is simply no longer portable as a folder.
+ *
+ * Paths stored inside `preserved_root` are round-tripped opaquely and cannot be
+ * reached from here. When MAR-188 adds `$.editor.import_sources.psd` as a real
+ * project-relative field, it must be registered in this function.
+ *
+ * @param project Project whose references resolve against its current `source_path`.
+ * @param new_project_path Location the project file is about to be written to.
+ * @return A copy carrying rebased references and `source_path = new_project_path`.
+ */
+ProjectData rebase_project_paths(
+    const ProjectData& project,
+    const std::filesystem::path& new_project_path);
+/**
  * @brief Loads an editor project from an already parsed document.
  * @param document Parsed `.marrow` document.
  * @return Loaded project plus resolved runtime dependencies or an error.

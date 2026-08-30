@@ -495,6 +495,26 @@ void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
     }
 }
 
+void sync_shell_preview_aliases_to_runtime(ShellState* state) {
+    if (state == nullptr || state->load_result.skeleton_data == nullptr) {
+        return;
+    }
+    // The shell caches RAW pointers into the session's preview. Any path that
+    // replaces the session's runtime data must re-fetch them here or they dangle.
+    state->preview_skeleton =
+        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
+    state->animation_state =
+        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
+    state->preview_skin_names = normalize_preview_skin_names(
+        *state->load_result.skeleton_data,
+        state->preview_skin_names);
+    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
+    if (!state->selected_animation_name.empty() &&
+        state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
+        state->selected_animation_name.clear();
+    }
+}
+
 bool rebuild_project_runtime(ShellState* state) {
     if (!state->load_result || state->load_result.project == nullptr ||
         state->load_result.base_skeleton_document == nullptr) {
@@ -513,21 +533,9 @@ bool rebuild_project_runtime(ShellState* state) {
         state->error_message = runtime_result.error->format();
         return false;
     }
-    state->preview_skeleton =
-        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
-    state->animation_state =
-        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
+    sync_shell_preview_aliases_to_runtime(state);
     if (playback_snapshot.has_value() && state->animation_state != nullptr) {
         state->animation_state->restore_state(*playback_snapshot);
-    }
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->preview_skin_names);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    if (!state->selected_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
-        state->selected_animation_name.clear();
     }
 
     return true;

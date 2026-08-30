@@ -26,7 +26,7 @@ ArtPath, expression/lip-sync, Parameter Modeling mode와 64개 에이전트 오�
 
 1. **고급 타임라인 저작 UX 미구현** — P0 도프시트와 MAR-167 읽기 전용 scalar graph view는 완성됐지만 graph point/Bezier handle 편집, 리타임 스케일, 커브 프리셋/자동 핸들/루프 동기화는 P1이다.
 2. **리그/메시 저작 불가** — 본·슬롯·스킨·어태치먼트·메시 지오메트리를 에디터에서 생성/삭제/편집할 수 없다(임포트 전용). 이는 오버레이 아키텍처의 의도된 결과지만, "에디터"로서는 결정적 제약.
-3. **파일·복구 UX 미완성** — atomic open/save-as, external-conflict workflow, structured Problems, staged/atomic PSD re-import가 남아 있다.
+3. **파일·복구 UX 미완성** — MAR-180이 그 아래의 primitive를 끝냈다: project 저장은 대상 디렉터리 temp+rename으로 원자적이 됐고(write·flush·close 오류를 모두 검사하므로 잘린 파일 위에서 성공을 보고하던 close-time 실패가 사라졌다), Save As는 다섯 경로 family를 identity 보존으로 rebase하며, `EditorSession::create`/`close`/`adopt_runtime_sources`가 all-or-nothing으로 동작한다. 남은 것은 그 위의 UX다 — file path modal(MAR-181), dirty intent state machine(MAR-182), Recent Projects(MAR-183), external-conflict workflow, structured Problems, staged/atomic PSD re-import.
 
 이전의 네 번째 핵심 gap이던 **Live2D식 파라미터 모델링 레이어는 해소됐다**. MAR-121은 MAR-122에 통합됐고,
 MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoint가 2026-07-16에 검증됐다.
@@ -204,7 +204,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 | 부재 기능 | 참조 | 심각도 |
 |---|---|---|
 | 전역 entity 멀티 셀렉트/박스 셀렉트 (도프시트 키 선택은 P0에서 구현) | 양쪽 다 [CORE] | 🟡 — P1은 selection/gesture와 active item 편집까지만 포함; group transform 제외 |
-| File 메뉴: New/Open/Save/Save As/Recent Projects | 양쪽 다 [CORE] | 🟡 — Save가 툴바에만 있음 |
+| File 메뉴: New/Open/Save/Save As/Recent Projects | 양쪽 다 [CORE] | 🟡 — Save가 툴바에만 있음. MAR-180이 원자적 저장·Save As rebase·`create`/`close` primitive를 끝냈으므로 남은 것은 메뉴와 modal(MAR-181~183)이다 |
 | 대칭 편집 — 반전 붙여넣기/미러 | Live2D 5.2 반전 형상 붙여넣기, Spine flip | 🟢 |
 | Problems 뷰 (경고 목록 + 클릭 이동 + allowlist 수정) | Spine 4.3 [+] | 🟢 — 기존 summary 위에 MAR-186 structured collector를 추가한 뒤 MAR-187 UI 연결 |
 | 숫자 필드 수식 입력 (`10 + v * 8`) | Spine 4.3 [+] | 🟢 |
@@ -414,7 +414,7 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
-| MAR-180 | Atomic project I/O | 같은 디렉터리 temp+rename 저장, Save As 상대 asset/export/atlas-pack/PSD 경로 rebase, `EditorSession::create/close`와 atomic runtime-source adoption을 구현한다. |
+| MAR-180 (완료, 2026-08-30) | Atomic project I/O | 같은 디렉터리 temp+rename 저장, Save As 상대 asset/export/atlas-pack 경로 rebase, `EditorSession::create`/`close`/`adopt_runtime_sources`를 구현했다. `write_atomically`는 `preferences.cpp`에서 복사가 아니라 **추출**해 `src/editor/atomic_file_write.{hpp,cpp}`로 옮겼고, 설정 writer와 project writer가 같은 primitive와 같은 rename test seam을 공유한다. Rebase 대상은 struct에서 직렬화되는 다섯 family(`runtime.skeleton`, `runtime.atlases[]`, `editor.export_directory`, `atlas_packs[].atlas`, `atlas_packs[].sprites[].image`)이며 empty·absolute 참조는 그대로 둔다. `export_directory`는 acceptance criterion의 문자 그대로 identity rebase라서 Save As 후에도 export는 원래 폴더로 간다 — 다른 선택지는 MAR-181의 UI 문제다. **PSD provenance 경로는 rebase하지 않는다**: `.marrow.editor.import_sources.psd`는 아직 schema에 없고 MAR-188 범위다. 대신 `rebase_project_paths`가 새 project-relative field를 등록하는 단일 지점이 되고 doc comment가 MAR-188을 지목한다. `fsync`는 명시적 non-goal이고, crash가 rename 직전에 나면 고아 `*.tmp.*` 하나가 남을 수 있다 — 처리된 실패는 모두 지운다. `.marrow` schema는 무변경. |
 | MAR-181 | File path UI | 외부 의존성 없는 ImGui directory/path modal과 New/Open/Save/Save As를 연결한다. New는 skeleton·최소 한 atlas·대상 `.marrow` 경로를 검증한 뒤 dirty in-memory session으로 시작한다. |
 | MAR-182 | Dirty intent state machine | New/Open/Reload/Quit/OS close를 Save/Discard/Cancel로 통합한다. Save 실패나 Cancel은 현재 session과 pending intent를 유지한다. |
 | MAR-183 | Recent Projects | 성공한 New-save/Open/Save As만 canonical absolute path로 최대 10개 저장한다. 사라진 경로는 disabled로 남겨 Remove/Clear Missing을 제공한다. |
@@ -427,7 +427,7 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 | --- | --- | --- |
 | MAR-186 | Structured diagnostics | stable code/severity/message/typed target/safe-fix ID collector를 만든다. `project.diagnostics`의 기존 summary를 보존하며 `issues`와 count를 추가한다. |
 | MAR-187 | Problems view | severity grouping/filter, target selection·panel focus, revision refresh와 allowlist safe fix를 제공한다. Inspection은 무변경이고 fix만 transaction+undo를 쓴다. |
-| MAR-188 | PSD reimport planning | `.marrow.editor.import_sources.psd`에 project-relative provenance와 layer mapping을 저장하고 exact name/group 기반 added/updated/missing staging diff를 계산한다. Rename은 추론하지 않는다. |
+| MAR-188 | PSD reimport planning | 이 field를 추가할 때 `rebase_project_paths`(`project.cpp`)에 여섯 번째 family로 등록해야 Save As가 따라간다 — MAR-180이 그 자리를 doc comment로 표시해 뒀다. `.marrow.editor.import_sources.psd`에 project-relative provenance와 layer mapping을 저장하고 exact name/group 기반 added/updated/missing staging diff를 계산한다. Rename은 추론하지 않는다. |
 | MAR-189 | Atomic PSD commit | 현재 overlay까지 staged bundle로 검증하고 layer directory/texture/atlas/skeleton을 journaled rename으로 교체한다. 모든 단계 rollback과 승인 agent import의 실제 경로 사용을 검증한다. |
 | MAR-190 | PSD reimport GUI | preview/confirmation과 missing-layer checklist를 연결한다. Missing은 기본 보존하고 명시 선택만 삭제하며 성공 시 unsaved overlay/history를 유지한 채 runtime source를 교체한다. |
 | MAR-191 | P1 E2E and docs | P1 상호작용, JSON/MBIN export, GUI/agent registry parity, save/reload, failpoint rollback을 종합 검증하고 roadmap·문서·AGENTS 명령을 최종 동기화한다. |

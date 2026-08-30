@@ -12,6 +12,8 @@ bool validate_parameter_mode_shell_smoke(
     ImGuiIO& io);
 
 bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state);
+bool validate_mar180_failed_hot_reload_shell_coherence(const ShellState& source_state);
+bool validate_mar180_failed_shell_save_preserves_file(const ShellState& source_state);
 bool validate_animation_catalog_smoke(const std::filesystem::path& project_path);
 bool validate_animation_duration_shell_smoke(
     const std::filesystem::path& project_path);

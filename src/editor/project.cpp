@@ -1,5 +1,6 @@
 #include "marrow/editor/project.hpp"
 
+#include "atomic_file_write.hpp"
 #include "mesh_weight_model.hpp"
 #include "atlas_packer.hpp"
 // The curve-mode and driver tokens have exactly one definition, shared by this
@@ -7335,6 +7336,44 @@ ProjectData create_minimal_project(const MinimalProjectOptions& options) {
     return project;
 }
 
+ProjectData rebase_project_paths(
+    const ProjectData& project,
+    const std::filesystem::path& new_project_path) {
+    ProjectData result = project;
+    result.source_path = new_project_path;
+
+    // Resolve against the OLD directory, then relativize against the new one.
+    // The composition is what makes the rewrite identity-preserving. An empty
+    // reference has nothing to resolve; an absolute one already names its file
+    // and is preserved verbatim, which is what "preserving absolute paths" means.
+    const auto rebase = [&project, &new_project_path](
+                            const std::filesystem::path& reference) {
+        if (reference.empty() || reference.is_absolute()) {
+            return reference;
+        }
+        return make_project_relative_path(
+            new_project_path,
+            project.resolve_path(reference));
+    };
+
+    result.runtime_assets.skeleton_path = rebase(project.runtime_assets.skeleton_path);
+    for (auto& atlas_path : result.runtime_assets.atlas_paths) {
+        atlas_path = rebase(atlas_path);
+    }
+    result.editor_metadata.export_directory =
+        rebase(project.editor_metadata.export_directory);
+    // Atlas packs must move with `runtime.atlases` or find_atlas_pack_definition
+    // stops matching them by resolved path and packed export silently degrades.
+    for (auto& definition : result.atlas_pack_definitions) {
+        definition.atlas_path = rebase(definition.atlas_path);
+        for (auto& sprite : definition.sprites) {
+            sprite.image_path = rebase(sprite.image_path);
+        }
+    }
+
+    return result;
+}
+
 ProjectLoadResult load_project(const Document& document) {
     ProjectLoadResult result;
     if (const auto error = marrow::runtime::json::require_type(
@@ -7847,7 +7886,14 @@ ProjectSaveResult save_project(const ProjectData& project, const std::filesystem
     ProjectSaveResult result;
     ProjectSaveError save_error;
     save_error.path = path;
-    if (!validate_project_for_save(project, &save_error)) {
+    // Rebase FIRST, so validation, serialization and the returned project all
+    // describe the same thing: the project as it will exist at `path`. Doing it
+    // here rather than in EditorSession::save is what gives every caller -- the
+    // session, the Agent save review path, the shell, and every smoke -- a Save
+    // As that produces an openable project. A same-path save is a no-op rebase by
+    // construction, since each reference relativizes against its own directory.
+    const ProjectData rebased = rebase_project_paths(project, path);
+    if (!validate_project_for_save(rebased, &save_error)) {
         result.error = std::move(save_error);
         return result;
     }
@@ -7863,21 +7909,28 @@ ProjectSaveResult save_project(const ProjectData& project, const std::filesystem
         }
     }
 
-    std::ofstream output(path);
-    if (!output) {
-        save_error.message = "failed to open the output file";
+    // Write through a temporary in the destination's own directory and replace
+    // the destination with one atomic rename. A direct `std::ofstream output(path)`
+    // TRUNCATES the destination before anything knows the new content is
+    // writable, and `if (!output)` runs BEFORE `~ofstream` flushes -- so a
+    // close-time write error (the ordinary shape of a full filesystem) was never
+    // observed and this function returned SUCCESS over a truncated file, after
+    // which EditorSession::save marked the session clean. This primitive checks
+    // write, flush AND close, and leaves the destination byte-for-byte unchanged
+    // on every handled failure. It does not fsync: durability across power loss
+    // is a stated non-goal, and a crash between the temporary's creation and the
+    // rename can leave one orphan `*.tmp.*` file beside the project.
+    const std::string write_error = detail::write_file_atomically(
+        path,
+        serialize_project(rebased),
+        "project");
+    if (!write_error.empty()) {
+        save_error.message = write_error;
         result.error = std::move(save_error);
         return result;
     }
 
-    output << serialize_project(project);
-    if (!output) {
-        save_error.message = "failed to write the serialized project";
-        result.error = std::move(save_error);
-        return result;
-    }
-
-    ProjectData saved_project = project;
+    ProjectData saved_project = rebased;
     saved_project.source_path = path;
     result.project = std::make_shared<ProjectData>(std::move(saved_project));
     return result;

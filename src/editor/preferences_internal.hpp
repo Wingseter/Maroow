@@ -1,5 +1,7 @@
 #pragma once
 
+#include "atomic_file_write.hpp"
+
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -33,17 +35,8 @@ PreferencePathResult resolve_preference_settings_path(
     PreferencePlatform platform,
     const PreferenceEnvironment& environment);
 
-using RenameCallback = std::function<std::error_code(
-    const std::filesystem::path& source,
-    const std::filesystem::path& destination)>;
-
-/**
- * @brief Installs a process-local atomic-rename failure seam for focused tests.
- *
- * Passing an empty callback restores the production platform replacement
- * operation (`rename` on POSIX and `MoveFileExW` on Windows).
- * This hook intentionally lives in a private source header.
- */
-void set_preference_rename_callback_for_testing(RenameCallback callback);
+// `RenameCallback` and `set_preference_rename_callback_for_testing` now live in
+// "atomic_file_write.hpp", which this header includes. The settings writer and
+// the project writer share the same primitive and the same test seam.
 
 } // namespace marrow::editor::detail

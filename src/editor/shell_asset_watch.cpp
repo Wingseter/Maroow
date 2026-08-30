@@ -1,6 +1,7 @@
 #include "shell_asset_watch.hpp"
 
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <system_error>
 #include <utility>
@@ -130,54 +131,44 @@ bool reload_runtime_source_assets(ShellState* state) {
         return false;
     }
 
+    // A source adoption can reorder or move bones, so an in-flight screen-space
+    // marquee is meaningless afterwards. These two are PRESENTATION state the
+    // session knows nothing about, so the shell still snapshots and restores them.
     const auto previous_ffd_selection = state->viewport_ffd_selection;
     const auto previous_ffd_box_selection = state->viewport_ffd_box_selection;
-    const auto document_result = marrow::runtime::load_skeleton_document(
-        state->load_result.project->resolved_skeleton_path());
-    if (!document_result) {
-        state->error_message = document_result.error->format();
+
+    // The shell used to load the new document and atlases, assign them into
+    // `state->load_result` -- which is a REFERENCE into the session -- and only
+    // then rebuild, undoing the assignment by hand when the rebuild failed. The
+    // second rollback even discarded its own rebuild result, so `skeleton_data`
+    // could be left derived from a different document than
+    // `base_skeleton_document`. The session now does all of it into locals and
+    // swaps once, so there is no model-layer rollback to keep in sync.
+    std::optional<marrow::runtime::AnimationStateSnapshot> playback_snapshot;
+    if (state->animation_state != nullptr) {
+        playback_snapshot = state->animation_state->capture_state();
+    }
+
+    const marrow::editor::SessionResult adoption =
+        marrow::editor::EditorSessionShellBinding::adopt_runtime_sources(state->session);
+    if (!adoption) {
+        state->error_message = adoption.error->format();
         state->status_message = "Runtime asset hot-reload failed";
-        return false;
-    }
-
-    std::vector<std::shared_ptr<const marrow::runtime::AtlasData>> atlas_data;
-    atlas_data.reserve(state->load_result.project->resolved_atlas_paths().size());
-    for (const auto& atlas_path : state->load_result.project->resolved_atlas_paths()) {
-        const auto atlas_result = marrow::runtime::AtlasLoader::load(atlas_path);
-        if (!atlas_result) {
-            state->error_message = atlas_result.error->format();
-            state->status_message = "Runtime asset hot-reload failed";
-            return false;
-        }
-        atlas_data.push_back(atlas_result.atlas_data);
-    }
-
-    const auto previous_document = state->load_result.base_skeleton_document;
-    const auto previous_atlas_data = state->load_result.atlas_data;
-    state->load_result.base_skeleton_document =
-        marrow::allocate_shared<marrow::runtime::json::Document>(
-            std::move(*document_result.document));
-    state->load_result.atlas_data = std::move(atlas_data);
-
-    if (!rebuild_project_runtime(state)) {
-        const std::string reload_error = state->error_message;
-        state->load_result.base_skeleton_document = previous_document;
-        state->load_result.atlas_data = previous_atlas_data;
         state->viewport_ffd_selection = previous_ffd_selection;
         state->viewport_ffd_box_selection = previous_ffd_box_selection;
-        state->error_message = reload_error;
-        state->status_message = "Runtime asset hot-reload failed";
         return false;
+    }
+
+    // The session replaced its runtime data, so the shell's cached raw preview
+    // pointers must be re-pointed before anything dereferences them.
+    sync_shell_preview_aliases_to_runtime(state);
+    if (playback_snapshot.has_value() && state->animation_state != nullptr) {
+        state->animation_state->restore_state(*playback_snapshot);
     }
     if (!apply_current_animation_state_to_preview(state)) {
-        const std::string reload_error = state->error_message;
-        state->load_result.base_skeleton_document = previous_document;
-        state->load_result.atlas_data = previous_atlas_data;
-        (void)rebuild_project_runtime(state);
+        state->status_message = "Runtime asset hot-reload failed";
         state->viewport_ffd_selection = previous_ffd_selection;
         state->viewport_ffd_box_selection = previous_ffd_box_selection;
-        state->error_message = reload_error;
-        state->status_message = "Runtime asset hot-reload failed";
         return false;
     }
 

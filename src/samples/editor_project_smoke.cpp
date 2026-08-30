@@ -19,6 +19,7 @@
 #include "marrow/editor/constraint_catalog.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/authoring.hpp"
+#include "atomic_file_write.hpp"
 #include "mesh_weight_model.hpp"
 #include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
@@ -12982,6 +12983,1048 @@ bool validate_mar179_constraint_parameters(
     return true;
 }
 
+
+// ===========================================================================
+// MAR-180 -- atomic project I/O and runtime-source adoption.
+//
+// Every assertion that a saved project is *good* goes through `load_project`,
+// never `json::load_document`. `validate_project_for_save` takes no base
+// document (project.cpp) and structurally cannot resolve a cross-reference, so
+// a successful `save()` proves nothing about whether the file it wrote OPENS.
+// `editor_project_smoke.cpp`'s pre-existing save assertion uses the raw JSON
+// parser and is exactly why the cross-directory Save As bug was invisible; it
+// is deliberately left in place, and these cases add the load-bearing checks.
+// ===========================================================================
+
+namespace mar180 {
+
+struct TemporaryDirectory {
+    std::filesystem::path path;
+
+    explicit TemporaryDirectory(std::string_view label) {
+        const auto unique_suffix =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path() /
+            ("marrow-mar180-" + std::string(label) + "-" +
+             std::to_string(unique_suffix));
+        std::error_code ignored;
+        std::filesystem::create_directories(path, ignored);
+    }
+
+    ~TemporaryDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path, ignored);
+    }
+
+    TemporaryDirectory(const TemporaryDirectory&) = delete;
+    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
+};
+
+/**
+ * @brief Scopes the process-global atomic-rename seam.
+ *
+ * HAZARD (design section 12.2): the seam is shared by the settings writer and
+ * the project writer. Never perform an unrelated atomic write inside the scope.
+ */
+class ScopedRenameCallback {
+public:
+    explicit ScopedRenameCallback(marrow::editor::detail::RenameCallback callback) {
+        marrow::editor::detail::set_preference_rename_callback_for_testing(
+            std::move(callback));
+    }
+
+    ~ScopedRenameCallback() {
+        marrow::editor::detail::set_preference_rename_callback_for_testing({});
+    }
+
+    ScopedRenameCallback(const ScopedRenameCallback&) = delete;
+    ScopedRenameCallback& operator=(const ScopedRenameCallback&) = delete;
+};
+
+std::optional<std::string> read_bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return std::nullopt;
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    if (!input && !input.eof()) {
+        return std::nullopt;
+    }
+    return buffer.str();
+}
+
+bool write_bytes(const std::filesystem::path& path, std::string_view text) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        return false;
+    }
+    output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    output.close();
+    return static_cast<bool>(output);
+}
+
+std::vector<std::string> directory_filenames(const std::filesystem::path& directory) {
+    std::vector<std::string> names;
+    std::error_code ignored;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, ignored)) {
+        names.push_back(entry.path().filename().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+/// @brief The asset filenames every seeded copy carries beside the `.marrow`.
+const std::array<const char*, 3>& fixture_asset_filenames() {
+    static const std::array<const char*, 3> names{
+        "player_idle.mskl", "player_idle.matl", "player_fixture.png"};
+    return names;
+}
+
+/**
+ * @brief Copies the fixture project and every asset it resolves into `directory`.
+ * @return The copied `.marrow` path, or an empty path when a copy failed.
+ */
+std::filesystem::path seed_fixture_copy(
+    const std::filesystem::path& fixture_project_path,
+    const std::filesystem::path& directory) {
+    const std::filesystem::path source_directory =
+        std::filesystem::absolute(fixture_project_path).parent_path();
+    std::error_code error;
+    const std::filesystem::path destination =
+        directory / fixture_project_path.filename();
+    std::filesystem::copy_file(
+        std::filesystem::absolute(fixture_project_path),
+        destination,
+        std::filesystem::copy_options::overwrite_existing,
+        error);
+    if (error) {
+        return {};
+    }
+    for (const char* name : fixture_asset_filenames()) {
+        std::filesystem::copy_file(
+            source_directory / name,
+            directory / name,
+            std::filesystem::copy_options::overwrite_existing,
+            error);
+        if (error) {
+            return {};
+        }
+    }
+    return destination;
+}
+
+} // namespace mar180
+
+/**
+ * @brief MAR-180 S1 -- a failed project save preserves the previous file exactly.
+ *
+ * Before MAR-180, `save_project` opened the destination with `std::ofstream
+ * output(path)`, which TRUNCATES it before anything knew the new content was
+ * writable, and checked `if (!output)` BEFORE `~ofstream` flushed -- so a
+ * close-time write error was never observed at all and `save_project` returned
+ * success over a truncated file. This case injects a rename failure at the last
+ * possible moment and asserts the destination survived byte-for-byte.
+ */
+bool validate_mar180_atomic_save_preserves_previous_file(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s1");
+    const std::filesystem::path destination =
+        mar180::seed_fixture_copy(fixture_project_path, temporary.path);
+    if (destination.empty()) {
+        std::cerr << "MAR-180 S1: failed to seed the fixture copy.\n";
+        return false;
+    }
+
+    const auto loaded = marrow::editor::load_project(destination);
+    if (!loaded) {
+        std::cerr << "MAR-180 S1: the seeded fixture copy did not load.\n";
+        return false;
+    }
+    marrow::editor::ProjectData project = *loaded.project;
+    project.editor_metadata.notes += " mar180-s1";
+
+    const auto previous_bytes = mar180::read_bytes(destination);
+    if (!previous_bytes.has_value()) {
+        std::cerr << "MAR-180 S1: failed to read the pre-save destination bytes.\n";
+        return false;
+    }
+
+    int rename_calls = 0;
+    std::filesystem::path observed_source;
+    std::filesystem::path observed_destination;
+    marrow::editor::ProjectSaveResult save_result;
+    {
+        const mar180::ScopedRenameCallback rename_failure(
+            [&](const std::filesystem::path& source,
+                const std::filesystem::path& target) {
+                ++rename_calls;
+                observed_source = source;
+                observed_destination = target;
+                return std::make_error_code(std::errc::permission_denied);
+            });
+        save_result = marrow::editor::save_project(project, destination);
+    }
+
+    if (static_cast<bool>(save_result)) {
+        std::cerr << "MAR-180 S1: an injected rename failure must fail the save.\n";
+        return false;
+    }
+    if (!save_result.error.has_value() || save_result.error->path != destination ||
+        save_result.error->message.empty()) {
+        std::cerr << "MAR-180 S1: the save failure must name the destination and a cause.\n";
+        return false;
+    }
+
+    const auto current_bytes = mar180::read_bytes(destination);
+    if (!current_bytes.has_value() || *current_bytes != *previous_bytes) {
+        std::cerr << "MAR-180 S1: a failed save must preserve the previous file "
+                     "byte-for-byte.\n";
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(destination);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-180 S1: the preserved project must still OPEN, not merely "
+                     "parse as JSON.\n";
+        return false;
+    }
+    if (rename_calls != 1) {
+        std::cerr << "MAR-180 S1: an atomic save must attempt exactly one final "
+                     "rename (observed " << rename_calls << ").\n";
+        return false;
+    }
+    if (observed_destination != destination) {
+        std::cerr << "MAR-180 S1: the rename destination must be the project path.\n";
+        return false;
+    }
+    if (observed_source.parent_path() != destination.parent_path() ||
+        observed_source == destination) {
+        std::cerr << "MAR-180 S1: the temporary must be unique and live in the "
+                     "destination directory so the rename never crosses a "
+                     "filesystem boundary.\n";
+        return false;
+    }
+    if (observed_source.empty() || std::filesystem::exists(observed_source)) {
+        std::cerr << "MAR-180 S1: a handled rename failure must remove the exact "
+                     "temporary file.\n";
+        return false;
+    }
+
+    std::vector<std::string> expected_names{destination.filename().string()};
+    for (const char* name : mar180::fixture_asset_filenames()) {
+        expected_names.emplace_back(name);
+    }
+    std::sort(expected_names.begin(), expected_names.end());
+    if (mar180::directory_filenames(temporary.path) != expected_names) {
+        std::cerr << "MAR-180 S1: a handled failure must leave no orphan temporary "
+                     "beside the project.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S1: an injected rename failure fails the save, preserves the "
+                 "destination byte-for-byte (which still OPENS via load_project, not "
+                 "merely parses), attempts exactly one rename from a unique temporary "
+                 "inside the destination directory, and leaves no orphan behind.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S2 -- a cross-directory Save As produces a project that OPENS.
+ *
+ * Every path a `.marrow` stores is project-relative by design and `resolve_path`
+ * resolves it against the project file's OWN directory. Before MAR-180,
+ * `save_project` changed only `source_path`, so saving the fixture (whose
+ * `runtime.skeleton` is the relative `player_idle.mskl`) into another directory
+ * wrote a project whose skeleton reference resolved to a file that does not
+ * exist. `validate_project_for_save` takes no base document and cannot see it,
+ * so the save reported success over an unopenable file.
+ *
+ * This case asserts through `load_project`, which materializes the references
+ * and reaches `build_project_runtime`. It also asserts that the raw JSON parser
+ * -- the assertion the pre-existing save case uses -- succeeds either way, which
+ * is the direct demonstration that the raw parse is NOT load-bearing.
+ */
+bool validate_mar180_save_as_rebases_relative_paths(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s2");
+
+    marrow::editor::EditorSession session;
+    const auto opened = session.open(fixture_project_path);
+    if (!opened || session.project() == nullptr) {
+        std::cerr << "MAR-180 S2: failed to open the fixture project.\n";
+        return false;
+    }
+
+    const std::filesystem::path original_skeleton =
+        std::filesystem::weakly_canonical(session.project()->resolved_skeleton_path());
+    std::vector<std::filesystem::path> original_atlases;
+    for (const auto& atlas_path : session.project()->resolved_atlas_paths()) {
+        original_atlases.push_back(std::filesystem::weakly_canonical(atlas_path));
+    }
+    const std::filesystem::path fixture_directory = std::filesystem::weakly_canonical(
+        std::filesystem::absolute(fixture_project_path).parent_path());
+
+    const std::filesystem::path moved = temporary.path / "moved.marrow";
+    const auto save_result = session.save(moved);
+    if (!save_result) {
+        std::cerr << "MAR-180 S2: the cross-directory Save As failed outright.\n";
+        return false;
+    }
+
+    // The pre-existing save assertion in this file is a raw JSON parse. It
+    // passes over an unopenable project, which is exactly why the Save As bug
+    // shipped. Asserted here so the contrast is recorded, not assumed.
+    if (!marrow::runtime::json::load_document(moved)) {
+        std::cerr << "MAR-180 S2: the written file is not even valid JSON.\n";
+        return false;
+    }
+
+    const auto reloaded = marrow::editor::load_project(moved);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-180 S2: a cross-directory Save As must write a project that "
+                     "OPENS -- load_project materializes the references the raw JSON "
+                     "parse above cannot see.\n";
+        return false;
+    }
+    if (std::filesystem::weakly_canonical(reloaded.project->resolved_skeleton_path()) !=
+        original_skeleton) {
+        std::cerr << "MAR-180 S2: the rebased skeleton must resolve to the same "
+                     "absolute file it resolved to before the Save As.\n";
+        return false;
+    }
+    std::vector<std::filesystem::path> reloaded_atlases;
+    for (const auto& atlas_path : reloaded.project->resolved_atlas_paths()) {
+        reloaded_atlases.push_back(std::filesystem::weakly_canonical(atlas_path));
+    }
+    if (reloaded_atlases != original_atlases) {
+        std::cerr << "MAR-180 S2: every rebased atlas must resolve to the same "
+                     "absolute file it resolved to before the Save As.\n";
+        return false;
+    }
+
+    // Design section 4.3: `export_directory` rebases by IDENTITY, the acceptance
+    // criterion's literal reading. Exports keep landing where they landed, which
+    // will surprise someone -- so it is asserted, not left emergent. A UI choice
+    // between the two readings belongs to MAR-181.
+    const std::filesystem::path reloaded_export = std::filesystem::weakly_canonical(
+        reloaded.project->resolved_export_skeleton_path());
+    const std::string export_text = reloaded_export.generic_string();
+    const std::string fixture_text = fixture_directory.generic_string() + "/";
+    if (export_text.rfind(fixture_text, 0) != 0) {
+        std::cerr << "MAR-180 S2: export_directory must rebase by identity, keeping "
+                     "exports under the ORIGINAL project directory (got "
+                  << export_text << ").\n";
+        return false;
+    }
+
+    if (session.project() == nullptr ||
+        std::filesystem::weakly_canonical(session.project()->resolved_skeleton_path()) !=
+            original_skeleton) {
+        std::cerr << "MAR-180 S2: the live session must track the rebased project it "
+                     "just wrote.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S2: a cross-directory Save As writes a project that OPENS via "
+                 "load_project with every runtime reference resolving to the SAME "
+                 "absolute file as before, export_directory rebased by identity under "
+                 "the original directory, and the live session tracking what was "
+                 "written -- while the raw json::load_document assertion the older "
+                 "save case uses passes either way.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S3 -- absolute references survive a Save As unchanged.
+ *
+ * The referenced asset is placed INSIDE the Save As destination directory on
+ * purpose: the relative form is then always representable, so removing the
+ * `is_absolute()` early return always changes the stored string and the
+ * inversion cannot be masked by temp-directory layout.
+ */
+bool validate_mar180_save_as_preserves_absolute_paths(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s3");
+    const std::filesystem::path seeded =
+        mar180::seed_fixture_copy(fixture_project_path, temporary.path);
+    if (seeded.empty()) {
+        std::cerr << "MAR-180 S3: failed to seed the fixture copy.\n";
+        return false;
+    }
+
+    const std::filesystem::path destination = temporary.path / "absolute.marrow";
+    const std::filesystem::path absolute_skeleton =
+        std::filesystem::absolute(temporary.path / "player_idle.mskl");
+    const std::filesystem::path absolute_atlas =
+        std::filesystem::absolute(temporary.path / "player_idle.matl");
+
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = destination;
+    options.skeleton_path = absolute_skeleton;
+    options.atlas_paths = {absolute_atlas};
+    options.name = "MAR-180 S3";
+    marrow::editor::ProjectData project =
+        marrow::editor::create_minimal_project(options);
+    // create_minimal_project relativizes; this case is about what happens when a
+    // project genuinely stores an absolute reference.
+    project.runtime_assets.skeleton_path = absolute_skeleton;
+    project.runtime_assets.atlas_paths = {absolute_atlas};
+
+    const auto save_result = marrow::editor::save_project(project, destination);
+    if (!save_result) {
+        std::cerr << "MAR-180 S3: saving the absolute-reference project failed.\n";
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(destination);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-180 S3: the absolute-reference project must still OPEN.\n";
+        return false;
+    }
+    if (!reloaded.project->runtime_assets.skeleton_path.is_absolute() ||
+        reloaded.project->runtime_assets.skeleton_path != absolute_skeleton) {
+        std::cerr << "MAR-180 S3: an absolute skeleton reference must survive a Save As "
+                     "unchanged (got "
+                  << reloaded.project->runtime_assets.skeleton_path.generic_string()
+                  << ").\n";
+        return false;
+    }
+    if (reloaded.project->runtime_assets.atlas_paths.size() != 1U ||
+        !reloaded.project->runtime_assets.atlas_paths.front().is_absolute() ||
+        reloaded.project->runtime_assets.atlas_paths.front() != absolute_atlas) {
+        std::cerr << "MAR-180 S3: an absolute atlas reference must survive a Save As "
+                     "unchanged.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S3: absolute runtime references survive a Save As "
+                 "string-identical even when the destination directory CONTAINS the "
+                 "referenced assets, so a representable relative form exists and is "
+                 "deliberately not taken.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S4 -- undo across a Save As still yields a project that OPENS.
+ *
+ * Every history snapshot holds a whole `ProjectData`, carrying the same relative
+ * references the live project does. Rebasing only `source_path` -- what
+ * `EditorSession::save` did before MAR-180 -- leaves each snapshot pairing the
+ * NEW directory with the OLD relative paths. Undo then restores an in-memory
+ * project that no longer resolves, and the next save writes a file that cannot
+ * be reopened. Only a reload from disk sees it; the save still returns success.
+ */
+bool validate_mar180_undo_across_save_as_still_opens(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s4");
+
+    marrow::editor::EditorSession session;
+    if (!session.open(fixture_project_path) || session.project() == nullptr) {
+        std::cerr << "MAR-180 S4: failed to open the fixture project.\n";
+        return false;
+    }
+    const std::filesystem::path original_skeleton =
+        std::filesystem::weakly_canonical(session.project()->resolved_skeleton_path());
+
+    auto transaction = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "MAR-180 S4 note",
+        "mar180-s4",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!transaction || transaction.project() == nullptr) {
+        std::cerr << "MAR-180 S4: failed to begin the seeding edit.\n";
+        return false;
+    }
+    transaction.project()->editor_metadata.notes += " mar180-s4";
+    if (!transaction.commit()) {
+        std::cerr << "MAR-180 S4: failed to commit the seeding edit.\n";
+        return false;
+    }
+
+    const std::filesystem::path moved = temporary.path / "moved.marrow";
+    if (!session.save(moved)) {
+        std::cerr << "MAR-180 S4: the cross-directory Save As failed.\n";
+        return false;
+    }
+    if (!session.undo()) {
+        std::cerr << "MAR-180 S4: undo after the Save As failed.\n";
+        return false;
+    }
+    // Same path, no argument: this writes the UNDONE project, which is the
+    // snapshot the history rebase is responsible for.
+    if (!session.save({})) {
+        std::cerr << "MAR-180 S4: saving the undone project failed.\n";
+        return false;
+    }
+
+    const auto reloaded = marrow::editor::load_project(moved);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-180 S4: a project saved after undoing across a Save As must "
+                     "still OPEN -- a history snapshot rebased only in source_path "
+                     "carries the OLD relative paths under the NEW directory.\n";
+        return false;
+    }
+    if (std::filesystem::weakly_canonical(reloaded.project->resolved_skeleton_path()) !=
+        original_skeleton) {
+        std::cerr << "MAR-180 S4: the undone project's skeleton must still resolve to "
+                     "the original file.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S4: an undo across a cross-directory Save As restores a "
+                 "project that saves and RELOADS with its skeleton still resolving to "
+                 "the original file -- caught by load_project and by nothing else.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S5 -- the history rebase's re-serialization is load-bearing.
+ *
+ * `HistorySnapshot::serialized_project` is the string `histories_equal` and
+ * `apply_history`'s change detection compare, and all five rebased fields are
+ * serialized. Rebasing a snapshot's `ProjectData` while leaving its cached string
+ * alone makes the cached string describe a project that no longer exists.
+ *
+ * MEASURED, and it corrects this story's own plan: the three `dirty()`
+ * assertions the design specified for this case do NOT catch that omission.
+ * `update_dirty` re-serializes the LIVE project every time and never reads a
+ * snapshot's cached string, so the dirty flag stays correct. With the
+ * re-serialization removed, the entire project smoke suite still passed. They are
+ * kept below because they DO catch the source_path-only rebase (S4's inversion).
+ *
+ * The clause that actually bites is the revision one. `apply_history` derives
+ * `project_changed` from the two cached strings and bumps `project_revision` when
+ * it is true. This case commits a PREVIEW-only edit, whose before and after
+ * snapshots hold identical project content, so a correct rebase leaves the two
+ * strings equal and an undo bumps no project revision. A stale cached string
+ * makes them differ, and the undo reports an authored-project change that never
+ * happened -- which the shell's `observed_project_revision` refresh believes.
+ */
+bool validate_mar180_history_reserialization_is_load_bearing(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s5");
+
+    marrow::editor::EditorSession session;
+    if (!session.open(fixture_project_path) || session.project() == nullptr) {
+        std::cerr << "MAR-180 S5: failed to open the fixture project.\n";
+        return false;
+    }
+
+    // A preview-only edit: the preview state changes, the authored project does
+    // not. The entry survives commit because commit compares preview state too.
+    if (!session.set_preview_skins({"default", "warrior"})) {
+        std::cerr << "MAR-180 S5: failed to commit the preview-only edit.\n";
+        return false;
+    }
+    if (session.undo_count() != 1U) {
+        std::cerr << "MAR-180 S5: the preview-only edit must produce exactly one "
+                     "history entry.\n";
+        return false;
+    }
+
+    const std::filesystem::path moved = temporary.path / "moved.marrow";
+    if (!session.save(moved)) {
+        std::cerr << "MAR-180 S5: the cross-directory Save As failed.\n";
+        return false;
+    }
+    if (session.dirty()) {
+        std::cerr << "MAR-180 S5: a completed Save As must leave the session clean.\n";
+        return false;
+    }
+
+    const std::uint64_t project_revision_after_save = session.project_revision();
+    if (!session.undo()) {
+        std::cerr << "MAR-180 S5: undo after the Save As failed.\n";
+        return false;
+    }
+    if (session.project_revision() != project_revision_after_save) {
+        std::cerr << "MAR-180 S5: undoing a PREVIEW-only edit must not bump "
+                     "project_revision. A history snapshot whose cached serialization "
+                     "was not refreshed after the rebase makes apply_history believe "
+                     "the authored project changed (observed "
+                  << session.project_revision() << ", expected "
+                  << project_revision_after_save << ").\n";
+        return false;
+    }
+    if (session.dirty()) {
+        std::cerr << "MAR-180 S5: undoing a preview-only edit must not dirty the "
+                     "authored project.\n";
+        return false;
+    }
+    if (!session.redo()) {
+        std::cerr << "MAR-180 S5: redo after the Save As failed.\n";
+        return false;
+    }
+    if (session.project_revision() != project_revision_after_save || session.dirty()) {
+        std::cerr << "MAR-180 S5: redoing a preview-only edit must not bump "
+                     "project_revision or dirty the project.\n";
+        return false;
+    }
+
+    // The dirty half. These clauses catch the source_path-only rebase, not the
+    // missing re-serialization -- see this function's comment.
+    marrow::editor::EditorSession authored;
+    if (!authored.open(fixture_project_path)) {
+        std::cerr << "MAR-180 S5: failed to open the fixture for the authored half.\n";
+        return false;
+    }
+    auto transaction = authored.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "MAR-180 S5 note",
+        "mar180-s5",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!transaction || transaction.project() == nullptr) {
+        std::cerr << "MAR-180 S5: failed to begin the authored edit.\n";
+        return false;
+    }
+    transaction.project()->editor_metadata.notes += " mar180-s5";
+    if (!transaction.commit()) {
+        std::cerr << "MAR-180 S5: failed to commit the authored edit.\n";
+        return false;
+    }
+    if (!authored.save(temporary.path / "authored.marrow") || authored.dirty()) {
+        std::cerr << "MAR-180 S5: the authored Save As must leave the session clean.\n";
+        return false;
+    }
+    if (!authored.undo() || !authored.dirty()) {
+        std::cerr << "MAR-180 S5: undoing an authored edit after a Save As must dirty "
+                     "the session.\n";
+        return false;
+    }
+    if (!authored.redo() || authored.dirty()) {
+        std::cerr << "MAR-180 S5: redoing back to the saved state after a Save As must "
+                     "leave the session clean -- a snapshot rebased only in source_path "
+                     "restores the OLD relative paths and never compares equal to the "
+                     "saved baseline again.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S5: after a cross-directory Save As, undoing and redoing a "
+                 "PREVIEW-only edit bumps no project_revision (the clause that catches "
+                 "a snapshot rebased without re-serializing its cached string -- the "
+                 "dirty flag does NOT, because update_dirty re-serializes the live "
+                 "project every time), and an authored edit's undo/redo still tracks "
+                 "the saved dirty baseline exactly.\n";
+    return true;
+}
+
+namespace mar180 {
+
+/// @brief The six values that totally describe a session's authoring state.
+struct SessionSnapshot {
+    std::string serialized_project;
+    std::uint64_t project_revision{0U};
+    std::uint64_t runtime_revision{0U};
+    std::uint64_t preview_revision{0U};
+    std::size_t undo_count{0U};
+    bool dirty{false};
+};
+
+SessionSnapshot capture(const marrow::editor::EditorSession& session) {
+    SessionSnapshot snapshot;
+    if (session.project() != nullptr) {
+        snapshot.serialized_project = marrow::editor::serialize_project(*session.project());
+    }
+    snapshot.project_revision = session.project_revision();
+    snapshot.runtime_revision = session.runtime_revision();
+    snapshot.preview_revision = session.preview_revision();
+    snapshot.undo_count = session.undo_count();
+    snapshot.dirty = session.dirty();
+    return snapshot;
+}
+
+bool snapshots_equal(const SessionSnapshot& left, const SessionSnapshot& right) {
+    return left.serialized_project == right.serialized_project &&
+        left.project_revision == right.project_revision &&
+        left.runtime_revision == right.runtime_revision &&
+        left.preview_revision == right.preview_revision &&
+        left.undo_count == right.undo_count &&
+        left.dirty == right.dirty;
+}
+
+/**
+ * @brief Rewrites a `.mskl` so it parses as JSON but fails to BUILD.
+ *
+ * A bone whose `parent` names a bone that does not exist passes the JSON parse
+ * and is rejected by `load_skeleton_data`, which is the F11 failure point: the
+ * one that only bites AFTER the document has been accepted.
+ */
+bool break_skeleton_document_build(const std::filesystem::path& skeleton_path) {
+    const auto text = read_bytes(skeleton_path);
+    if (!text.has_value()) {
+        return false;
+    }
+    const std::string marker = "\"bones\": [";
+    const std::size_t position = text->find(marker);
+    if (position == std::string::npos) {
+        return false;
+    }
+    std::string broken = *text;
+    broken.insert(
+        position + marker.size(),
+        "\n    {\"name\": \"mar180_orphan\", \"parent\": \"mar180_missing_parent\"},");
+    return write_bytes(skeleton_path, broken);
+}
+
+} // namespace mar180
+
+/**
+ * @brief MAR-180 S10 -- a failed runtime-source adoption leaves a COHERENT session.
+ *
+ * The shell's hot-reload path assigned the new skeleton document and atlases into
+ * the session -- `ShellState::load_result` is a reference into it -- and only then
+ * rebuilt. Its rollback restored the old document and re-ran the rebuild while
+ * DISCARDING the result, so `skeleton_data` could end up derived from a different
+ * document than `base_skeleton_document`. Nothing in the return code shows that.
+ *
+ * The coherence clause is the one that matters: rebuilding the runtime from the
+ * session's own project and its own base document must still succeed, which is
+ * only true when the two were never separated.
+ */
+bool validate_mar180_failed_adoption_keeps_session_coherent(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s10");
+    const std::filesystem::path project_copy =
+        mar180::seed_fixture_copy(fixture_project_path, temporary.path);
+    if (project_copy.empty()) {
+        std::cerr << "MAR-180 S10: failed to seed the fixture copy.\n";
+        return false;
+    }
+    const std::filesystem::path skeleton_copy = temporary.path / "player_idle.mskl";
+    const auto original_skeleton_bytes = mar180::read_bytes(skeleton_copy);
+    if (!original_skeleton_bytes.has_value()) {
+        std::cerr << "MAR-180 S10: failed to read the seeded skeleton.\n";
+        return false;
+    }
+
+    marrow::editor::EditorSession session;
+    if (!session.open(project_copy) || session.runtime_data() == nullptr) {
+        std::cerr << "MAR-180 S10: failed to open the seeded project copy.\n";
+        return false;
+    }
+    const mar180::SessionSnapshot before = mar180::capture(session);
+    const std::size_t bones_before = session.runtime_data()->bones().size();
+
+    if (!mar180::break_skeleton_document_build(skeleton_copy)) {
+        std::cerr << "MAR-180 S10: failed to write the build-breaking skeleton.\n";
+        return false;
+    }
+    // The broken document must still PARSE, or this case would be testing the
+    // JSON parser instead of the F11 window it exists for.
+    if (!marrow::runtime::json::load_document(skeleton_copy)) {
+        std::cerr << "MAR-180 S10: the build-breaking skeleton must still parse as "
+                     "JSON, or the adoption never reaches the runtime build.\n";
+        return false;
+    }
+
+    const auto adoption = session.adopt_runtime_sources();
+    if (static_cast<bool>(adoption)) {
+        std::cerr << "MAR-180 S10: adopting a skeleton that cannot build must fail.\n";
+        return false;
+    }
+    if (!adoption.error.has_value() ||
+        adoption.error->code != marrow::editor::SessionErrorCode::RuntimeBuildFailed) {
+        std::cerr << "MAR-180 S10: a failed runtime build must report "
+                     "RuntimeBuildFailed.\n";
+        return false;
+    }
+    if (!mar180::snapshots_equal(mar180::capture(session), before)) {
+        std::cerr << "MAR-180 S10: a failed adoption must leave the session's six-value "
+                     "authoring snapshot unchanged.\n";
+        return false;
+    }
+    if (session.runtime_data() == nullptr ||
+        session.runtime_data()->bones().size() != bones_before) {
+        std::cerr << "MAR-180 S10: a failed adoption must leave the previous runtime "
+                     "data in place.\n";
+        return false;
+    }
+    if (session.base_skeleton_document() == nullptr ||
+        !marrow::editor::build_project_runtime(
+            *session.project(),
+            *session.base_skeleton_document())) {
+        std::cerr << "MAR-180 S10: COHERENCE -- after a failed adoption the session's "
+                     "runtime data and base skeleton document must still be mutually "
+                     "derived. A swap-then-roll-back can separate them while still "
+                     "returning the right error code.\n";
+        return false;
+    }
+
+    if (!mar180::write_bytes(skeleton_copy, *original_skeleton_bytes)) {
+        std::cerr << "MAR-180 S10: failed to restore the skeleton bytes.\n";
+        return false;
+    }
+    const auto recovered = session.adopt_runtime_sources();
+    if (!recovered) {
+        std::cerr << "MAR-180 S10: adopting the restored sources must succeed.\n";
+        return false;
+    }
+    const mar180::SessionSnapshot after = mar180::capture(session);
+    if (after.runtime_revision <= before.runtime_revision ||
+        after.preview_revision <= before.preview_revision) {
+        std::cerr << "MAR-180 S10: a successful adoption must bump the runtime and "
+                     "preview revisions.\n";
+        return false;
+    }
+    if (after.project_revision != before.project_revision) {
+        std::cerr << "MAR-180 S10: adoption replaces runtime SOURCES, never the "
+                     "authored project, so project_revision must not move.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S10: an adoption whose skeleton parses but fails to BUILD "
+                 "fails with RuntimeBuildFailed, leaves the six-value session snapshot "
+                 "and the previous bone set untouched, and -- the clause the return "
+                 "code cannot give you -- keeps runtime data and base document "
+                 "mutually derived; the restored sources then adopt cleanly, bumping "
+                 "runtime and preview revisions only.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S6 -- `create` builds a dirty, unwritten, save-then-openable session.
+ *
+ * The dirty-from-birth clause is the load-bearing one. `update_dirty` compares
+ * the live serialization against `saved_serialized_project`; copying `open`'s
+ * baseline line would let a project that has never been written compare CLEAN,
+ * and the dirty flag is the only thing standing between the user and losing it.
+ */
+bool validate_mar180_create_starts_dirty_and_unwritten(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s6");
+    const std::filesystem::path fixture_directory =
+        std::filesystem::absolute(fixture_project_path).parent_path();
+    const std::filesystem::path project_path = temporary.path / "created.marrow";
+
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path = fixture_directory / "player_idle.mskl";
+    options.atlas_paths = {fixture_directory / "player_idle.matl"};
+    options.name = "MAR-180 S6";
+
+    marrow::editor::EditorSession session;
+    const auto created = session.create(options);
+    if (!created) {
+        std::cerr << "MAR-180 S6: create against an existing rig must succeed.\n";
+        return false;
+    }
+    if (!session.has_project() || session.project() == nullptr) {
+        std::cerr << "MAR-180 S6: create must leave a project open.\n";
+        return false;
+    }
+    if (!session.dirty()) {
+        std::cerr << "MAR-180 S6: a created project has never been written, so the "
+                     "session must be dirty from birth.\n";
+        return false;
+    }
+    if (session.undo_count() != 0U || session.redo_count() != 0U) {
+        std::cerr << "MAR-180 S6: create must start with an empty history.\n";
+        return false;
+    }
+    if (session.runtime_data() == nullptr || session.preview_skeleton() == nullptr) {
+        std::cerr << "MAR-180 S6: create must materialize runtime data and a preview.\n";
+        return false;
+    }
+    if (std::filesystem::exists(project_path)) {
+        std::cerr << "MAR-180 S6: create must write NOTHING until the user saves.\n";
+        return false;
+    }
+
+    if (!session.save({})) {
+        std::cerr << "MAR-180 S6: saving the created project failed.\n";
+        return false;
+    }
+    const auto reloaded = marrow::editor::load_project(project_path);
+    if (!reloaded || reloaded.skeleton_data == nullptr) {
+        std::cerr << "MAR-180 S6: the saved created project must OPEN.\n";
+        return false;
+    }
+    if (session.dirty()) {
+        std::cerr << "MAR-180 S6: saving a created project must clear the dirty flag.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S6: create adopts an existing rig into a session that is "
+                 "dirty from birth with an empty history and materialized runtime, "
+                 "writes NOTHING to the target path, and only after an explicit save "
+                 "produces a file that RELOADS.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S7 -- a `create` against a missing rig changes nothing.
+ */
+bool validate_mar180_failed_create_changes_nothing(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s7");
+    const std::filesystem::path fixture_directory =
+        std::filesystem::absolute(fixture_project_path).parent_path();
+
+    marrow::editor::EditorSession session;
+    if (!session.open(fixture_project_path) || session.project() == nullptr) {
+        std::cerr << "MAR-180 S7: failed to open the fixture project.\n";
+        return false;
+    }
+    const mar180::SessionSnapshot before = mar180::capture(session);
+    const std::filesystem::path source_path_before = session.project()->source_path;
+
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = temporary.path / "never_created.marrow";
+    options.skeleton_path = temporary.path / "does_not_exist.mskl";
+    options.atlas_paths = {fixture_directory / "player_idle.matl"};
+
+    const auto created = session.create(options);
+    if (static_cast<bool>(created)) {
+        std::cerr << "MAR-180 S7: create against a missing skeleton must fail.\n";
+        return false;
+    }
+    if (!created.error.has_value()) {
+        std::cerr << "MAR-180 S7: a failed create must carry a load error.\n";
+        return false;
+    }
+    if (!mar180::snapshots_equal(mar180::capture(session), before)) {
+        std::cerr << "MAR-180 S7: a failed create must leave the session's six-value "
+                     "authoring snapshot unchanged.\n";
+        return false;
+    }
+    if (session.project() == nullptr || session.project()->source_path != source_path_before) {
+        std::cerr << "MAR-180 S7: a failed create must leave the previous project in "
+                     "place -- assigning the session's project before the skeleton "
+                     "loads is exactly the mistake the shell hot-reload path made.\n";
+        return false;
+    }
+    if (std::filesystem::exists(options.project_path)) {
+        std::cerr << "MAR-180 S7: a failed create must write nothing.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S7: a create against a missing rig fails with a load error "
+                 "and leaves the open session's six-value snapshot, its project's "
+                 "source path, and the filesystem all untouched.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S8 -- `close` clears the session and BUMPS the three revisions.
+ *
+ * The "strictly greater" clauses are the point. Resetting the counters to zero
+ * would let a shell holding a stale `observed_*` value compare equal and skip the
+ * resync a close most needs.
+ */
+bool validate_mar180_close_clears_and_bumps_revisions(
+    const std::filesystem::path& fixture_project_path) {
+    marrow::editor::EditorSession session;
+    if (!session.open(fixture_project_path)) {
+        std::cerr << "MAR-180 S8: failed to open the fixture project.\n";
+        return false;
+    }
+    const std::uint64_t project_revision_before = session.project_revision();
+    const std::uint64_t runtime_revision_before = session.runtime_revision();
+    const std::uint64_t preview_revision_before = session.preview_revision();
+
+    if (!session.close()) {
+        std::cerr << "MAR-180 S8: close on an idle session must succeed.\n";
+        return false;
+    }
+    if (session.has_project() || session.project() != nullptr ||
+        session.runtime_data() != nullptr) {
+        std::cerr << "MAR-180 S8: close must discard the project and its runtime.\n";
+        return false;
+    }
+    if (session.can_undo() || session.can_redo() || session.dirty()) {
+        std::cerr << "MAR-180 S8: close must clear history and the dirty flag.\n";
+        return false;
+    }
+    if (session.project_revision() <= project_revision_before ||
+        session.runtime_revision() <= runtime_revision_before ||
+        session.preview_revision() <= preview_revision_before) {
+        std::cerr << "MAR-180 S8: close must BUMP all three revisions, never reset "
+                     "them -- a reset lets a stale observed value compare equal.\n";
+        return false;
+    }
+    if (!session.open(fixture_project_path) || session.project() == nullptr) {
+        std::cerr << "MAR-180 S8: a closed session must stay reusable.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S8: close discards the project, runtime, preview and history, "
+                 "leaves the dirty flag clear, bumps all three revisions strictly "
+                 "upward rather than resetting them, and leaves the session reusable.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 S9 -- `close` and `create` refuse an active edit transaction.
+ *
+ * Without either gate, the transaction's `project()` pointer would address a
+ * ProjectData that was replaced underneath it, and the commit would write into
+ * the wrong project.
+ */
+bool validate_mar180_lifecycle_refuses_active_transaction(
+    const std::filesystem::path& fixture_project_path) {
+    const mar180::TemporaryDirectory temporary("s9");
+    const std::filesystem::path fixture_directory =
+        std::filesystem::absolute(fixture_project_path).parent_path();
+
+    marrow::editor::EditorSession session;
+    if (!session.open(fixture_project_path) || session.project() == nullptr) {
+        std::cerr << "MAR-180 S9: failed to open the fixture project.\n";
+        return false;
+    }
+
+    auto transaction = session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "MAR-180 S9 note",
+        "mar180-s9",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!transaction || transaction.project() == nullptr) {
+        std::cerr << "MAR-180 S9: failed to begin the guarding transaction.\n";
+        return false;
+    }
+    const std::string sentinel = " mar180-s9-sentinel";
+    transaction.project()->editor_metadata.notes += sentinel;
+
+    if (session.close()) {
+        std::cerr << "MAR-180 S9: close must refuse while an edit transaction is "
+                     "active.\n";
+        return false;
+    }
+
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = temporary.path / "refused.marrow";
+    options.skeleton_path = fixture_directory / "player_idle.mskl";
+    options.atlas_paths = {fixture_directory / "player_idle.matl"};
+    if (static_cast<bool>(session.create(options))) {
+        std::cerr << "MAR-180 S9: create must refuse while an edit transaction is "
+                     "active.\n";
+        return false;
+    }
+
+    if (!transaction.commit()) {
+        std::cerr << "MAR-180 S9: the transaction must still commit after both "
+                     "refusals.\n";
+        return false;
+    }
+    if (session.project() == nullptr ||
+        session.project()->editor_metadata.notes.find(sentinel) == std::string::npos) {
+        std::cerr << "MAR-180 S9: the committed edit must be readable through the "
+                     "session -- a lifecycle call that replaced the project under an "
+                     "open transaction would commit into a different ProjectData.\n";
+        return false;
+    }
+    if (std::filesystem::exists(options.project_path)) {
+        std::cerr << "MAR-180 S9: a refused create must write nothing.\n";
+        return false;
+    }
+
+    std::cout << "MAR-180 S9: close and create both refuse an active edit transaction, "
+                 "the transaction stays usable, and its commit lands in the SAME "
+                 "project the session still holds.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -13120,6 +14163,46 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar179_constraint_parameters(result)) {
+            return 1;
+        }
+        if (!validate_mar180_atomic_save_preserves_previous_file(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_save_as_rebases_relative_paths(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_save_as_preserves_absolute_paths(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_undo_across_save_as_still_opens(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_history_reserialization_is_load_bearing(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_failed_adoption_keeps_session_coherent(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_create_starts_dirty_and_unwritten(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_failed_create_changes_nothing(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_close_clears_and_bumps_revisions(
+                parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar180_lifecycle_refuses_active_transaction(
+                parse_result.options.project_path)) {
             return 1;
         }
     }

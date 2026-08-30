@@ -59,6 +59,11 @@ public:
     static SessionResult rebuild_runtime_without_history(EditorSession& session) {
         return session.rebuild_runtime_without_history();
     }
+
+    /** Reloads and atomically swaps the project's runtime source assets. */
+    static SessionResult adopt_runtime_sources(EditorSession& session) {
+        return session.adopt_runtime_sources();
+    }
 };
 
 } // namespace marrow::editor

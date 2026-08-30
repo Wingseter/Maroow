@@ -995,6 +995,9 @@ bool record_action_from_snapshots(
         marrow::editor::EditImpact::Runtime |
         marrow::editor::EditImpact::Preview);
 void cancel_authoring_gestures(ShellState* state, std::string_view reason);
+/** Re-points the shell's cached preview aliases and shell-side composition at the
+ *  session's current runtime data. Every path that replaces that runtime must call it. */
+void sync_shell_preview_aliases_to_runtime(ShellState* state);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);
 bool save_project_file(ShellState* state, bool update_status_message);

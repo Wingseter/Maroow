@@ -17,6 +17,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include "atomic_file_write.hpp"
 #include "shell_constraints.hpp"
 #include "shell_asset_watch.hpp"
 #include "shell_agent_panel.hpp"
@@ -701,6 +702,352 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     return true;
 }
 
+namespace {
+
+/**
+ * @brief Scopes the process-global atomic-rename seam.
+ *
+ * HAZARD: the seam is shared by the settings writer and the project writer, and
+ * `marrow_editor_shell` drives both. Never save preferences inside this scope.
+ */
+class ScopedRenameCallback {
+public:
+    explicit ScopedRenameCallback(marrow::editor::detail::RenameCallback callback) {
+        marrow::editor::detail::set_preference_rename_callback_for_testing(
+            std::move(callback));
+    }
+
+    ~ScopedRenameCallback() {
+        marrow::editor::detail::set_preference_rename_callback_for_testing({});
+    }
+
+    ScopedRenameCallback(const ScopedRenameCallback&) = delete;
+    ScopedRenameCallback& operator=(const ScopedRenameCallback&) = delete;
+};
+
+/** @brief Rewrites a `.mskl` so it parses as JSON but fails `load_skeleton_data`. */
+bool break_skeleton_document_build(
+    const std::filesystem::path& skeleton_path,
+    std::string* error_out) {
+    std::string text;
+    if (!read_text_file(skeleton_path, &text, error_out)) {
+        return false;
+    }
+    const std::string marker = "\"bones\": [";
+    const std::size_t position = text.find(marker);
+    if (position == std::string::npos) {
+        if (error_out != nullptr) {
+            *error_out = "Could not find a bones array in " + skeleton_path.string();
+        }
+        return false;
+    }
+    text.insert(
+        position + marker.size(),
+        "\n    {\"name\": \"mar180_orphan\", \"parent\": \"mar180_missing_parent\"},");
+    return write_text_file(skeleton_path, text, error_out);
+}
+
+/** @brief Seeds a temp directory with the project and every asset it resolves. */
+bool seed_shell_project_copy(
+    const ShellState& source_state,
+    const std::filesystem::path& directory,
+    std::filesystem::path* project_out,
+    std::filesystem::path* skeleton_out) {
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    error.clear();
+    std::filesystem::create_directories(directory, error);
+    if (error) {
+        return false;
+    }
+
+    const std::filesystem::path source_skeleton =
+        source_state.load_result.project->resolved_skeleton_path();
+    const std::vector<std::filesystem::path> source_atlases =
+        source_state.load_result.project->resolved_atlas_paths();
+    if (source_atlases.empty()) {
+        return false;
+    }
+    const std::filesystem::path temp_skeleton = directory / source_skeleton.filename();
+    std::filesystem::copy_file(
+        source_skeleton,
+        temp_skeleton,
+        std::filesystem::copy_options::overwrite_existing,
+        error);
+    if (error) {
+        return false;
+    }
+    std::vector<std::filesystem::path> temp_atlases;
+    for (const std::filesystem::path& atlas : source_atlases) {
+        const std::filesystem::path temp_atlas = directory / atlas.filename();
+        error.clear();
+        std::filesystem::copy_file(
+            atlas,
+            temp_atlas,
+            std::filesystem::copy_options::overwrite_existing,
+            error);
+        if (error) {
+            return false;
+        }
+        temp_atlases.push_back(temp_atlas);
+        // The `.matl` names a texture beside it; copy it so the atlas resolves.
+        const std::filesystem::path source_texture =
+            atlas.parent_path() / "player_fixture.png";
+        error.clear();
+        std::filesystem::copy_file(
+            source_texture,
+            directory / source_texture.filename(),
+            std::filesystem::copy_options::overwrite_existing,
+            error);
+    }
+
+    const std::filesystem::path temp_project = directory / "mar180_shell.marrow";
+    marrow::editor::MinimalProjectOptions project_options;
+    project_options.project_path = temp_project;
+    project_options.skeleton_path = temp_skeleton;
+    project_options.atlas_paths = temp_atlases;
+    project_options.name = "MAR-180 Shell";
+    project_options.active_animation = "attack";
+    project_options.preview_skins = {"default"};
+    const marrow::editor::ProjectData temp_project_data =
+        marrow::editor::create_minimal_project(project_options);
+    if (!marrow::editor::save_project(temp_project_data, temp_project)) {
+        return false;
+    }
+
+    if (project_out != nullptr) {
+        *project_out = temp_project;
+    }
+    if (skeleton_out != nullptr) {
+        *skeleton_out = temp_skeleton;
+    }
+    return true;
+}
+
+} // namespace
+
+/**
+ * @brief MAR-180 C2 -- a failed hot reload preserves the shell's session AND its
+ *        cached preview pointers.
+ *
+ * The shell caches raw `preview_skeleton` / `animation_state` pointers into the
+ * session's preview. Only the shell holds them, so only a shell-layer case can
+ * prove a failed adoption left them usable rather than dangling. The model-layer
+ * coherence case never dereferences them.
+ */
+bool validate_mar180_failed_hot_reload_shell_coherence(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "MAR-180 C2 requires a loaded project.\n";
+        return false;
+    }
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar180_c2";
+    std::filesystem::path temp_project;
+    std::filesystem::path temp_skeleton;
+    if (!seed_shell_project_copy(source_state, temp_root, &temp_project, &temp_skeleton)) {
+        std::cerr << "MAR-180 C2 could not seed a project copy.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = temp_project;
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-180 C2 could not load the seeded project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+    reset_runtime_asset_watch(&state);
+
+    std::string skeleton_bytes;
+    std::string file_error;
+    if (!read_text_file(temp_skeleton, &skeleton_bytes, &file_error)) {
+        std::cerr << "MAR-180 C2: " << file_error << '\n';
+        return false;
+    }
+
+    const std::string serialized_before =
+        marrow::editor::serialize_project(*state.load_result.project);
+    const std::uint64_t project_revision_before = state.session.project_revision();
+    const std::uint64_t runtime_revision_before = state.session.runtime_revision();
+    const std::uint64_t preview_revision_before = state.session.preview_revision();
+    const std::string selected_animation_before = state.selected_animation_name;
+    const auto* document_before = state.load_result.base_skeleton_document.get();
+    const auto* runtime_before = state.load_result.skeleton_data.get();
+
+    if (!break_skeleton_document_build(temp_skeleton, &file_error)) {
+        std::cerr << "MAR-180 C2: " << file_error << '\n';
+        return false;
+    }
+    const RuntimeAssetPollOutcome outcome = poll_runtime_asset_changes(&state);
+    if (outcome != RuntimeAssetPollOutcome::Failed) {
+        std::cerr << "MAR-180 C2: a skeleton that parses but cannot build must fail "
+                     "the hot reload.\n";
+        return false;
+    }
+    if (state.error_message.empty() ||
+        state.status_message != "Runtime asset hot-reload failed") {
+        std::cerr << "MAR-180 C2: a failed hot reload must report an error and the "
+                     "hot-reload failure status.\n";
+        return false;
+    }
+    if (marrow::editor::serialize_project(*state.load_result.project) != serialized_before ||
+        state.session.project_revision() != project_revision_before ||
+        state.session.runtime_revision() != runtime_revision_before ||
+        state.session.preview_revision() != preview_revision_before ||
+        state.selected_animation_name != selected_animation_before ||
+        state.load_result.base_skeleton_document.get() != document_before ||
+        state.load_result.skeleton_data.get() != runtime_before) {
+        std::cerr << "MAR-180 C2: a failed hot reload must leave the shell's session "
+                     "exactly as it was.\n";
+        return false;
+    }
+    if (state.preview_skeleton == nullptr || state.animation_state == nullptr ||
+        state.animation_state->get_current(0) == nullptr) {
+        std::cerr << "MAR-180 C2: the shell's cached preview pointers must still be "
+                     "USABLE after a failed hot reload. Committing the session's "
+                     "runtime before the preview bind leaves them addressing freed "
+                     "data, which only the shell layer can observe.\n";
+        return false;
+    }
+
+    if (!write_text_file(temp_skeleton, skeleton_bytes, &file_error)) {
+        std::cerr << "MAR-180 C2: " << file_error << '\n';
+        return false;
+    }
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-180 C2: the shell must recover once the sources are valid "
+                     "again: " << state.error_message << '\n';
+        return false;
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(temp_root, ignored);
+    std::cout << "MAR-180 C2: a hot reload whose skeleton parses but cannot build "
+                 "fails, reports the hot-reload status, leaves the shell's project, "
+                 "three session revisions and source/runtime bundle untouched, keeps "
+                 "the shell's cached preview pointers usable, and recovers on the next "
+                 "reload.\n";
+    return true;
+}
+
+/**
+ * @brief MAR-180 C3 -- a failed save preserves the file, the dirty flag, and the
+ *        user's only warning.
+ *
+ * `save_project_file` returns early on failure without clearing `project_dirty`.
+ * Combined with the atomic write, "returned false" + "still dirty" + "bytes
+ * unchanged" is exactly what a save that reported success over a truncated file
+ * would fail. The rename seam is process-global, so it is RAII-scoped here and no
+ * preference save happens inside that scope.
+ */
+bool validate_mar180_failed_shell_save_preserves_file(const ShellState& source_state) {
+    if (!source_state.load_result || source_state.load_result.project == nullptr) {
+        std::cerr << "MAR-180 C3 requires a loaded project.\n";
+        return false;
+    }
+    const std::filesystem::path temp_root =
+        std::filesystem::temp_directory_path() / "marrow_mar180_c3";
+    std::filesystem::path temp_project;
+    std::filesystem::path temp_skeleton;
+    if (!seed_shell_project_copy(source_state, temp_root, &temp_project, &temp_skeleton)) {
+        std::cerr << "MAR-180 C3 could not seed a project copy.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = temp_project;
+    if (!reload_project(&state)) {
+        std::cerr << "MAR-180 C3 could not load the seeded project: "
+                  << state.error_message << '\n';
+        return false;
+    }
+
+    auto transaction = state.session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        "MAR-180 C3 note",
+        "mar180-c3",
+        false,
+        marrow::editor::EditImpact::Project});
+    if (!transaction || transaction.project() == nullptr) {
+        std::cerr << "MAR-180 C3 could not begin the seeding edit.\n";
+        return false;
+    }
+    transaction.project()->editor_metadata.notes += " mar180-c3";
+    if (!transaction.commit()) {
+        std::cerr << "MAR-180 C3 could not commit the seeding edit.\n";
+        return false;
+    }
+    update_project_dirty_state(&state);
+    if (!state.project_dirty || !state.session.dirty()) {
+        std::cerr << "MAR-180 C3 requires a dirty session before the save.\n";
+        return false;
+    }
+
+    std::string previous_bytes;
+    std::string file_error;
+    if (!read_text_file(temp_project, &previous_bytes, &file_error)) {
+        std::cerr << "MAR-180 C3: " << file_error << '\n';
+        return false;
+    }
+
+    {
+        const ScopedRenameCallback rename_failure(
+            [](const std::filesystem::path&, const std::filesystem::path&) {
+                return std::make_error_code(std::errc::permission_denied);
+            });
+        if (save_project_file(&state, true)) {
+            std::cerr << "MAR-180 C3: an injected rename failure must fail the shell "
+                         "save.\n";
+            return false;
+        }
+    }
+
+    if (state.error_message.empty() || state.status_message != "Project save failed") {
+        std::cerr << "MAR-180 C3: a failed save must report an error and the save "
+                     "failure status.\n";
+        return false;
+    }
+    if (!state.project_dirty || !state.session.dirty()) {
+        std::cerr << "MAR-180 C3: a failed save must leave the session dirty -- the "
+                     "dirty flag is the user's last warning that the work on screen is "
+                     "not on disk.\n";
+        return false;
+    }
+    std::string current_bytes;
+    if (!read_text_file(temp_project, &current_bytes, &file_error) ||
+        current_bytes != previous_bytes) {
+        std::cerr << "MAR-180 C3: a failed save must leave the project file "
+                     "byte-for-byte unchanged.\n";
+        return false;
+    }
+    if (!marrow::editor::load_project(temp_project)) {
+        std::cerr << "MAR-180 C3: the preserved project must still OPEN.\n";
+        return false;
+    }
+
+    if (!save_project_file(&state, true)) {
+        std::cerr << "MAR-180 C3: the save must succeed once the seam is released: "
+                  << state.error_message << '\n';
+        return false;
+    }
+    if (state.project_dirty || state.session.dirty()) {
+        std::cerr << "MAR-180 C3: a successful save must clear the dirty flag.\n";
+        return false;
+    }
+    if (!marrow::editor::load_project(temp_project)) {
+        std::cerr << "MAR-180 C3: the saved project must OPEN.\n";
+        return false;
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(temp_root, ignored);
+    std::cout << "MAR-180 C3: an injected rename failure fails the shell save, reports "
+                 "the save failure status, leaves the session dirty and the project "
+                 "file byte-for-byte unchanged (and still openable), and the retry "
+                 "after releasing the seam saves cleanly.\n";
+    return true;
+}
+
 bool validate_animation_catalog_smoke(const std::filesystem::path& project_path) {
     ShellState state;
     state.project_path = project_path;
@@ -1346,6 +1693,12 @@ bool validate_shell_foundation_smoke(
     }
 
     if (!validate_runtime_asset_hot_reload_smoke(shell_state)) {
+        return false;
+    }
+    if (!validate_mar180_failed_hot_reload_shell_coherence(shell_state)) {
+        return false;
+    }
+    if (!validate_mar180_failed_shell_save_preserves_file(shell_state)) {
         return false;
     }
     return true;

@@ -38,9 +38,6 @@ struct FileReadResult {
     std::string error;
 };
 
-std::mutex g_rename_callback_mutex;
-detail::RenameCallback g_rename_callback;
-
 #if defined(_WIN32)
 std::optional<std::string> environment_value(const wchar_t* name) {
     const DWORD required = GetEnvironmentVariableW(name, nullptr, 0U);
@@ -327,198 +324,6 @@ Value build_preferences_root(
     return Value(std::move(root), {});
 }
 
-std::error_code production_rename(
-    const std::filesystem::path& source,
-    const std::filesystem::path& destination) {
-#if defined(_WIN32)
-    if (MoveFileExW(
-            source.c_str(),
-            destination.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
-        return {};
-    }
-    return std::error_code(
-        static_cast<int>(GetLastError()),
-        std::system_category());
-#else
-    if (::rename(source.c_str(), destination.c_str()) == 0) {
-        return {};
-    }
-    return std::error_code(errno, std::generic_category());
-#endif
-}
-
-detail::RenameCallback rename_callback() {
-    std::lock_guard<std::mutex> lock(g_rename_callback_mutex);
-    return g_rename_callback;
-}
-
-PreferenceSaveResult write_atomically(
-    const std::filesystem::path& destination,
-    std::string_view text) {
-    PreferenceSaveResult result;
-    result.path = destination;
-
-    const std::filesystem::path parent = destination.parent_path().empty()
-        ? std::filesystem::path(".")
-        : destination.parent_path();
-    std::error_code filesystem_error;
-    std::filesystem::create_directories(parent, filesystem_error);
-    if (filesystem_error) {
-        result.error = "failed to create settings directory: " + filesystem_error.message();
-        return result;
-    }
-
-#if defined(_WIN32)
-    static std::atomic<unsigned long> temporary_sequence{0UL};
-    HANDLE output = INVALID_HANDLE_VALUE;
-    std::filesystem::path temporary_path;
-    for (unsigned int attempt = 0U; attempt < 100U; ++attempt) {
-        const unsigned long sequence = temporary_sequence.fetch_add(1UL);
-        temporary_path = parent /
-            (destination.filename().wstring() + L".tmp." +
-             std::to_wstring(GetCurrentProcessId()) + L"." +
-             std::to_wstring(sequence));
-        output = CreateFileW(
-            temporary_path.c_str(),
-            GENERIC_WRITE,
-            0,
-            nullptr,
-            CREATE_NEW,
-            FILE_ATTRIBUTE_TEMPORARY,
-            nullptr);
-        if (output != INVALID_HANDLE_VALUE) {
-            break;
-        }
-        const DWORD create_error = GetLastError();
-        if (create_error != ERROR_FILE_EXISTS &&
-            create_error != ERROR_ALREADY_EXISTS) {
-            break;
-        }
-    }
-    if (output == INVALID_HANDLE_VALUE) {
-        result.error = "failed to create temporary settings file: " +
-            std::error_code(
-                static_cast<int>(GetLastError()),
-                std::system_category()).message();
-        return result;
-    }
-#else
-    std::string temporary_template =
-        (parent / (destination.filename().string() + ".tmp.XXXXXX")).string();
-    std::vector<char> temporary_buffer(temporary_template.begin(), temporary_template.end());
-    temporary_buffer.push_back('\0');
-
-    const int descriptor = ::mkstemp(temporary_buffer.data());
-    if (descriptor < 0) {
-        result.error = "failed to create temporary settings file: " +
-            std::error_code(errno, std::generic_category()).message();
-        return result;
-    }
-    const std::filesystem::path temporary_path(temporary_buffer.data());
-#endif
-
-    const auto cleanup_temporary = [&temporary_path]() {
-        std::error_code ignored;
-        std::filesystem::remove(temporary_path, ignored);
-    };
-
-#if defined(_WIN32)
-    std::size_t write_offset = 0U;
-    while (write_offset < text.size()) {
-        const std::size_t remaining = text.size() - write_offset;
-        const DWORD requested = static_cast<DWORD>(std::min<std::size_t>(
-            remaining,
-            static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
-        DWORD written = 0U;
-        if (WriteFile(
-                output,
-                text.data() + write_offset,
-                requested,
-                &written,
-                nullptr) == 0 ||
-            written == 0U) {
-            const std::error_code write_error(
-                static_cast<int>(GetLastError()),
-                std::system_category());
-            CloseHandle(output);
-            cleanup_temporary();
-            result.error = "failed to write temporary settings file: " +
-                write_error.message();
-            return result;
-        }
-        write_offset += static_cast<std::size_t>(written);
-    }
-    if (FlushFileBuffers(output) == 0) {
-        const std::error_code flush_error(
-            static_cast<int>(GetLastError()),
-            std::system_category());
-        CloseHandle(output);
-        cleanup_temporary();
-        result.error = "failed to flush temporary settings file: " +
-            flush_error.message();
-        return result;
-    }
-    if (CloseHandle(output) == 0) {
-        const std::error_code close_error(
-            static_cast<int>(GetLastError()),
-            std::system_category());
-        cleanup_temporary();
-        result.error = "failed to close temporary settings file: " +
-            close_error.message();
-        return result;
-    }
-#else
-    std::FILE* output = ::fdopen(descriptor, "wb");
-    if (output == nullptr) {
-        const std::error_code open_error(errno, std::generic_category());
-        ::close(descriptor);
-        cleanup_temporary();
-        result.error = "failed to open temporary settings stream: " + open_error.message();
-        return result;
-    }
-
-    const std::size_t written =
-        text.empty() ? 0U : std::fwrite(text.data(), 1U, text.size(), output);
-    if (written != text.size() || std::ferror(output) != 0) {
-        const int write_errno = errno;
-        std::fclose(output);
-        cleanup_temporary();
-        result.error = "failed to write temporary settings file";
-        if (write_errno != 0) {
-            result.error += ": " +
-                std::error_code(write_errno, std::generic_category()).message();
-        }
-        return result;
-    }
-    if (std::fflush(output) != 0) {
-        const std::error_code flush_error(errno, std::generic_category());
-        std::fclose(output);
-        cleanup_temporary();
-        result.error = "failed to flush temporary settings file: " + flush_error.message();
-        return result;
-    }
-    if (std::fclose(output) != 0) {
-        const std::error_code close_error(errno, std::generic_category());
-        cleanup_temporary();
-        result.error = "failed to close temporary settings file: " + close_error.message();
-        return result;
-    }
-#endif
-
-    const detail::RenameCallback callback = rename_callback();
-    const std::error_code rename_error = callback
-        ? callback(temporary_path, destination)
-        : production_rename(temporary_path, destination);
-    if (rename_error) {
-        cleanup_temporary();
-        result.error = "failed to atomically replace settings file: " + rename_error.message();
-        return result;
-    }
-
-    return result;
-}
-
 } // namespace
 
 namespace detail {
@@ -581,11 +386,6 @@ PreferencePathResult resolve_preference_settings_path(
             {}};
     }
     return {*home / ".config" / "marrow" / "editor-settings.json", {}};
-}
-
-void set_preference_rename_callback_for_testing(RenameCallback callback) {
-    std::lock_guard<std::mutex> lock(g_rename_callback_mutex);
-    g_rename_callback = std::move(callback);
 }
 
 } // namespace detail
@@ -669,9 +469,11 @@ PreferenceSaveResult PreferenceStore::save(const EditorPreferences& preferences)
     }
 
     const Value root = build_preferences_root(preferences, preservation_root);
-    return write_atomically(
+    result.error = detail::write_file_atomically(
         settings_path_,
-        runtime::json::serialize_pretty_round_trip(root));
+        runtime::json::serialize_pretty_round_trip(root),
+        "settings");
+    return result;
 }
 
 } // namespace marrow::editor
