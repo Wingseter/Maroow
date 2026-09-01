@@ -100,6 +100,48 @@ std::filesystem::path agent_scratch_root() {
     return std::filesystem::path("/tmp") / ("mar189_agent-" + std::to_string(pid));
 }
 
+/**
+ * @brief Owns a scratch root: removes it on success, KEEPS it on failure.
+ *
+ * The per-process roots that fixed the concurrency flake also removed the thing
+ * that had been cleaning up by accident -- the fixed roots were REUSED, so each
+ * run's `remove_all` on entry disposed of the last one's tree. Making the names
+ * unique removed the reuse and therefore removed the disposal, and nothing
+ * replaced it: measured at **615 leaked roots, 299 MB**, growing by ~2 MB per
+ * `ctest` and per inversion, permanently.
+ *
+ * Keeping the tree on FAILURE is deliberate, not the same leak in a smaller form:
+ * a failing case is exactly when someone wants to look at the bundle it built, and
+ * the path is printed so they can. Leaking on failure by design is defensible;
+ * leaking on success is not.
+ */
+class ScratchRoot {
+public:
+    explicit ScratchRoot(std::filesystem::path path) : path_(std::move(path)) {}
+    ~ScratchRoot() {
+        std::error_code error;
+        if (!keep_) {
+            std::filesystem::remove_all(path_, error);
+            return;
+        }
+        std::cerr << "  scratch kept for inspection: " << path_.generic_string() << '\n';
+    }
+    ScratchRoot(const ScratchRoot&) = delete;
+    ScratchRoot& operator=(const ScratchRoot&) = delete;
+
+    const std::filesystem::path& path() const {
+        return path_;
+    }
+    /// @brief Do not dispose of this root; the run failed and the tree is evidence.
+    void keep() {
+        keep_ = true;
+    }
+
+private:
+    std::filesystem::path path_;
+    bool keep_{false};
+};
+
 marrow::runtime::json::Value make_number_value(double value) {
     return marrow::runtime::json::Value(value, {});
 }
@@ -4074,6 +4116,52 @@ bool validate_mar189_commit_rollback(const std::filesystem::path& scratch) {
             PsdCommitStep::OpenJournal,
             PsdCommitStep::AdoptRuntimeSources,
         };
+        // The list above is hand-maintained and, until this block existed, compared
+        // to NOTHING -- E17's lesson one level up. R3's table is checked against
+        // `kAllCommitSteps` BY IDENTITY precisely because a size check passes on a
+        // table with the right count and the wrong members; R6c had neither check,
+        // so a new `rollback_advance` call site would have been silently uncovered
+        // while the sweep still read complete.
+        //
+        // There is no product-side list of rollback-able steps to compare against,
+        // which is the honest reason it was written this way. But one is DERIVABLE:
+        // a commit that fails at the last step before `CleanJournal` rolls the whole
+        // journal back, and the ledger it produces IS the set of reachable steps.
+        // That turns the sweep's completeness from a reading of five call sites into
+        // a measurement.
+        {
+            Scenario probe;
+            if (!mar189::open_scenario(
+                    scratch, "r6c_reach", initial_tree, candidate_tree, &probe) ||
+                !mar189::plan_scenario(&probe, "R6c(reach)")) {
+                return false;
+            }
+            marrow::editor::PsdReimportCommitOptions probe_options;
+            probe_options.project_path = probe.project_path;
+            marrow::editor::PsdReimportCommitResult probe_result;
+            {
+                const mar189::ScopedCommitFailpoint commit_seam(
+                    mar189::fail_after(PsdCommitStep::UpdateProvenance));
+                probe_result = marrow::editor::commit_psd_reimport(
+                    probe.session, probe.plan, probe_options);
+            }
+            std::vector<std::string> reachable =
+                mar189::step_names(probe_result.steps_rolled_back);
+            std::sort(reachable.begin(), reachable.end());
+            reachable.erase(std::unique(reachable.begin(), reachable.end()), reachable.end());
+            std::vector<std::string> swept;
+            for (const PsdCommitStep step : rollback_steps) {
+                swept.emplace_back(marrow::editor::psd_commit_step_name(step));
+            }
+            std::sort(swept.begin(), swept.end());
+            if (!mar189::expect_steps(swept, reachable, "R6c(coverage)")) {
+                std::cerr << "  the sweep's step list must equal the set a full-journal "
+                             "rollback actually reaches; a step missing here is a step "
+                             "the sweep silently does not cover.\n";
+                return false;
+            }
+        }
+
         for (const PsdCommitStep step : rollback_steps) {
             const std::string name = marrow::editor::psd_commit_step_name(step);
             const std::string label = "R6c/" + name;
@@ -4687,6 +4775,8 @@ bool validate_mar189_agent_operation(const std::filesystem::path& scratch) {
     return true;
 }
 
+// ===================== MAR-190 -- the reimport review model =====================
+
 
 } // namespace
 
@@ -4700,14 +4790,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const std::filesystem::path temp_root =
-        scratch_root("marrow_psd_import_smoke");
+    // Spans the whole of main's import round trip, so it is a guard rather than a
+    // scoped block; every failing exit below calls keep() first.
+    ScratchRoot import_root(scratch_root("marrow_psd_import_smoke"));
+    const std::filesystem::path temp_root = import_root.path();
     std::error_code error;
     std::filesystem::remove_all(temp_root, error);
     error.clear();
     std::filesystem::create_directories(temp_root, error);
     if (error) {
         std::cerr << error.message() << '\n';
+        import_root.keep();
         return 1;
     }
 
@@ -4721,44 +4814,66 @@ int main(int argc, char** argv) {
     const auto import_result = marrow::editor::import_psd_to_runtime_bundle(import_options);
     if (!import_result) {
         std::cerr << import_result.error->format() << '\n';
+        import_root.keep();
         return 1;
     }
     // Q0 runs BEFORE every other MAR-188 case so a synthesiser regression is
     // attributed to the gate rather than to whichever case happens to notice.
-    if (!validate_mar188_q0(options.initial_psd,
-                            scratch_root("mar188_q0"))) {
-        return 1;
+    {
+        ScratchRoot root(scratch_root("mar188_q0"));
+        if (!validate_mar188_q0(options.initial_psd, root.path())) {
+            root.keep();
+            return 1;
+        }
     }
-    if (!validate_mar188_reimport_planning(
-            scratch_root("mar188_plan"))) {
-        return 1;
+    {
+        ScratchRoot root(scratch_root("mar188_plan"));
+        if (!validate_mar188_reimport_planning(root.path())) {
+            root.keep();
+            return 1;
+        }
     }
-    if (!validate_mar189_staged_naming(
-            scratch_root("mar189_naming"))) {
-        return 1;
+    {
+        ScratchRoot root(scratch_root("mar189_naming"));
+        if (!validate_mar189_staged_naming(root.path())) {
+            root.keep();
+            return 1;
+        }
     }
-    if (!validate_mar189_reimport_commit(
-            scratch_root("mar189_commit"))) {
-        return 1;
-    }
-    if (!validate_mar189_commit_rollback(
-            scratch_root("mar189_commit"))) {
-        return 1;
+    {
+        // One guard for both suites: they share a root deliberately, so disposal
+        // must not happen between them.
+        ScratchRoot root(scratch_root("mar189_commit"));
+        if (!validate_mar189_reimport_commit(root.path()) ||
+            !validate_mar189_commit_rollback(root.path())) {
+            root.keep();
+            return 1;
+        }
     }
     // Under `/tmp`, deliberately, and NOT `temp_directory_path()`. On macOS the
     // latter is `$TMPDIR` (`/var/folders/...`), which `agent_path_allowed`
     // (`agent_dispatch.cpp:626-629`) does not whitelist -- so an A-case sited there
     // is refused as a forbidden input path before it can test anything. The two
     // sets are disjoint, and the safety gate accepts both.
-    if (!validate_mar189_agent_operation(agent_scratch_root())) {
-        return 1;
+    // NOT wrapped in `ScratchRoot` yet: that class is MAR-189's UNCOMMITTED work
+    // and this story must not depend on code that is not in HEAD. The case
+    // disposes of its own root on success instead, and keeps it on failure, which
+    // is the same contract self-contained. Adopt the guard once it lands.
+    {
+        ScratchRoot root(agent_scratch_root());
+        if (!validate_mar189_agent_operation(root.path())) {
+            root.keep();
+            return 1;
+        }
     }
 
     if (!validate_initial_import(import_result, skeleton_path, atlas_path)) {
+        import_root.keep();
         return 1;
     }
 
     if (!patch_animation_for_reimport(skeleton_path)) {
+        import_root.keep();
         return 1;
     }
 
@@ -4767,9 +4882,11 @@ int main(int argc, char** argv) {
     const auto reimport_result = marrow::editor::import_psd_to_runtime_bundle(import_options);
     if (!reimport_result) {
         std::cerr << reimport_result.error->format() << '\n';
+        import_root.keep();
         return 1;
     }
     if (!validate_reimport(skeleton_path, atlas_path)) {
+        import_root.keep();
         return 1;
     }
 

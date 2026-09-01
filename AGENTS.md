@@ -838,6 +838,23 @@ suffix: **eight concurrent runs, eight passes.**
 > A recorded pass that depends on nobody else running the same binary is not a
 > result. Name every scratch root after the **process**, not after the story.
 
+**And the repair has a second half that is easy to drop, because it was never
+written down in the first place: the fixed roots were REUSED, so each run's
+`remove_all` on entry disposed of the previous run's tree.** Making the names
+unique removed the reuse and therefore removed the disposal -- and nothing
+replaced it. Measured before it was noticed: **615 leaked roots, 299 MB**, growing
+~2 MB per `ctest` and per inversion, permanently. *Removing reuse removes whatever
+was implicitly cleaning up.* Anyone applying "make it per-process" to another fixed
+path in this tree will reproduce this unless they add disposal in the same change.
+
+The disposal is an **RAII guard**, and its failure behaviour is a choice rather
+than an oversight: it removes the root on success and **keeps it on failure**,
+printing the path -- a failing case is exactly when someone wants the tree it
+built. *Leaking on failure by design is defensible; leaking on success is not.*
+Both directions were demonstrated: a passing run adds **0** roots across all six
+names, and a forced failure adds **1** and prints
+`scratch kept for inspection: …/mar189_commit-30142`.
+
 This is the sibling of the scratchpad rule already recorded above -- that one is
 about two *agents* colliding on a directory, this one about two *processes* -- and
 the same fix answers both.
@@ -1599,7 +1616,19 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   failing the commit at `UpdateProvenance` so the rollback walks the whole journal,
   and asserting the ledger **ends** at the injected step rather than merely
   containing it. *"Injectable per step" and "asserted at one step" are different
-  claims, and only the sweep makes the first one evidence.* It still cannot fail
+  claims, and only the sweep makes the first one evidence.*
+
+  **The sweep's own list was compared to nothing until review caught it** -- E17's
+  lesson one level up. R3's table is checked against `kAllCommitSteps` **by
+  identity** precisely because a size check passes on a table with the right count
+  and the wrong members; R6c's list was a hand-maintained literal with no such
+  check, so a new `rollback_advance` call site would have been silently uncovered
+  while the sweep still read complete. There is no product-side list to compare
+  against -- the honest reason it was written that way -- but one is **derivable**:
+  a commit failing at the last step before `CleanJournal` rolls the whole journal
+  back, and **the ledger it produces IS the set of reachable steps**. R6c now runs
+  that probe first and asserts its own list equals it, which turns completeness
+  from a reading of five call sites into a measurement. It still cannot fail
   the session call inside a rollback step.
   Until R6b existed the seam was declared and never fired and `rollback_error` was
   only ever asserted **empty**, which is a seam with no evidence behind it;
@@ -1656,7 +1685,12 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   > carries `project_path` and `update_provenance` and nothing else.
 
   It remains the right trade against silent unrecoverable loss, and it is a
-  consequence rather than a footnote. **The first version of the message then made
+  consequence rather than a footnote. **It is also CERTAIN, not merely reasoned:**
+  because `staged_skins` is always empty, every project carrying any hand-authored
+  skin is blocked **every time**, not occasionally. Only the size of that
+  population is unmeasured. The two framings license different follow-ups -- "we
+  reasoned it might be a problem" invites waiting for a report, "it is certain for
+  everyone in this population" does not -- and the weaker one was mine. **The first version of the message then made
   a second mistake, caught in review: the remedy it prescribed was itself
   destructive and it did not say so.** It told the user to *"first remove those
   attachments from the project's skeleton"* -- so a user following the instruction
@@ -1745,6 +1779,11 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   reviewer confirmed it bites in both directions -- reverting the production naming
   site reddens **A5**, reverting the committer's derivation reddens **R1** -- so
   the coverage exists; what does not exist is a single source for the rule.
+  **Deferral costs LOCALITY, not coverage**: a break surfaces in an agent-approval
+  case rather than beside the rule that broke. **Owner: MAR-191**, as part of its
+  validation sweep -- the fix is for `plan_scenario` to call
+  `plan_project_reimport`, and an unowned row about a hand-synced duplicate is the
+  kind that survives three stories.
 
 - **R1b's `image` clause is a witness for a structural reason, not for want of
   looking.** The earlier wording ("no mutation reddens it first") understated it.
