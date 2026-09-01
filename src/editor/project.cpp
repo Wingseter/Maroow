@@ -6867,6 +6867,40 @@ runtime::json::Document build_project_runtime_document(
     return build_runtime_document(project, base_skeleton_document);
 }
 
+std::vector<std::string> authored_animation_names(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document) {
+    // Reproduce exactly the state `build_runtime_document` is in after
+    // `apply_animation_edits` and BEFORE the overlay merge loops call
+    // `ensure_object_member(animations, edit.animation_name)`. Doing this by
+    // calling the shared fold, rather than re-deriving it, is deliberate: the
+    // fold is in this file's anonymous namespace and a second implementation
+    // would drift the first time an `AnimationEditKind` is added, with no
+    // compiler diagnostic to catch it.
+    //
+    // The whole root is copied, not just `animations`, because a `Rename` also
+    // rewrites `mixing` references.
+    Value root = base_skeleton_document.root;
+    apply_animation_edits(&root, project.animation_edits);
+
+    std::vector<std::string> names;
+    const Value* animations = marrow::runtime::json::find_member(root, "animations");
+    if (animations == nullptr || !animations->is_object()) {
+        return names;
+    }
+    // `Value::Object` is a `std::map<std::string, Value, std::less<>>`, so this
+    // walk is already in sorted key order; the sort below makes that a promise
+    // of this function rather than a property of the container it happens to use.
+    const auto& members = animations->as_object();
+    names.reserve(members.size());
+    for (const auto& entry : members) {
+        names.push_back(entry.first);
+    }
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
 std::string serialize_project(const ProjectData& project) {
     return serialize_project_snapshot(project);
 }

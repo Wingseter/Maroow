@@ -19,6 +19,7 @@
 #include "marrow/editor/constraint_catalog.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/authoring.hpp"
+#include "marrow/editor/diagnostics.hpp"
 #include "atomic_file_write.hpp"
 #include "mesh_weight_model.hpp"
 #include "timeline_model.hpp"
@@ -16096,6 +16097,1668 @@ bool validate_mar185_inherit_editing() {
     return true;
 }
 
+// ===========================================================================
+// MAR-186 -- structured project diagnostics.
+//
+// Every case builds its own throwaway project INSIDE the standing
+// `player_idle.marrow` invocation, over `player_idle.mskl`. Pointing
+// `marrow_project_smoke` at a project built over another skeleton would take
+// `main()`'s `markers.present.empty()` SKIP branch, run nothing at all, and
+// still exit 0.
+//
+// Two rules run over EVERY case, at the end of each:
+//   * identities are STRICTLY increasing -- one assertion covering both the
+//     deterministic order and the uniqueness of the identity;
+//   * every non-empty `safe_fix_id` is in the three-entry allowlist.
+//
+// No case asserts only a count. A count passes for the wrong reason: many
+// distinct causes produce "some issues", and the story's single most likely
+// implementation error -- resolving orphan animations against the MATERIALIZED
+// skeleton, which already contains the phantom animations -- makes the
+// collector report a clean project while every count-only assertion passes.
+// Mismatches are reported as a NAMED SET DIFFERENCE.
+// ===========================================================================
+
+namespace mar186 {
+
+using marrow::editor::DiagnosticCode;
+using marrow::editor::DiagnosticIssue;
+using marrow::editor::DiagnosticOverlayFamily;
+using marrow::editor::DiagnosticPanel;
+using marrow::editor::DiagnosticReport;
+using marrow::editor::DiagnosticSeverity;
+
+using TemporaryDirectory = mar180::TemporaryDirectory;
+
+/** @brief A minimal project over `player_idle.mskl`, ready to be mutated. */
+marrow::editor::ProjectData minimal_project(const std::filesystem::path& path) {
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = path;
+    options.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/player_idle.mskl");
+    options.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    options.name = "mar186_diagnostics";
+    return marrow::editor::create_minimal_project(options);
+}
+
+/** @brief Saves a project and reloads it through the real `load_project`. */
+bool save_and_reload(
+    const marrow::editor::ProjectData& project,
+    const std::filesystem::path& path,
+    std::string_view label,
+    marrow::editor::ProjectLoadResult* reloaded_out) {
+    const auto saved = marrow::editor::save_project(project, path);
+    if (!saved) {
+        std::cerr << label << ": save_project failed: " << saved.error->message
+                  << ".\n";
+        return false;
+    }
+    // Never a bare `save()`. `validate_project_for_save` takes no base document
+    // and materializes nothing, so a passing save proves nothing about what the
+    // runtime will do with the result.
+    *reloaded_out = marrow::editor::load_project(path);
+    if (!*reloaded_out) {
+        std::cerr << label << ": load_project failed: "
+                  << reloaded_out->error->format() << '\n';
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Loads a base skeleton + document once, for IN-MEMORY collection.
+ *
+ * Used by the one case that must NOT round-trip through a file: the `.marrow`
+ * format stores timeline overlays in a JSON object keyed by animation name, and
+ * `Value::Object` is a `std::map`, so a save/LOAD normalises the authored order
+ * of `transform_timeline_edits`. A case whose whole subject is a record's
+ * POSITION in that vector therefore has its distinguishing input destroyed
+ * before it ever reaches the assertion -- measured, not assumed.
+ */
+bool open_base(
+    const std::filesystem::path& path,
+    std::string_view label,
+    marrow::editor::ProjectLoadResult* loaded_out) {
+    return save_and_reload(minimal_project(path), path, label, loaded_out);
+}
+
+/** @brief Opens a scratch project and collects over it in one step. */
+bool collect_over(
+    const marrow::editor::ProjectData& project,
+    const std::filesystem::path& path,
+    std::string_view label,
+    DiagnosticReport* report_out) {
+    marrow::editor::ProjectLoadResult loaded;
+    if (!save_and_reload(project, path, label, &loaded)) {
+        return false;
+    }
+    *report_out = marrow::editor::collect_project_diagnostics(
+        *loaded.project, *loaded.skeleton_data, *loaded.base_skeleton_document);
+    return true;
+}
+
+std::vector<std::string> identity_list(const DiagnosticReport& report) {
+    std::vector<std::string> identities;
+    identities.reserve(report.issues.size());
+    for (const DiagnosticIssue& issue : report.issues) {
+        identities.push_back(issue.identity);
+    }
+    return identities;
+}
+
+std::string join_list(const std::vector<std::string>& values) {
+    if (values.empty()) {
+        return "<none>";
+    }
+    std::string joined;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0U) {
+            joined += ", ";
+        }
+        joined += values[index];
+    }
+    return joined;
+}
+
+/**
+ * @brief Compares the whole sorted identity list and names the difference.
+ *
+ * A count comparison is not enough and this is the function that makes that
+ * concrete: dropping one overlay family from the sweep leaves the other six
+ * firing, so only a comparison of the FULL list -- reported as the set of
+ * missing and unexpected identities -- says which one went.
+ */
+bool expect_identities(
+    std::string_view label,
+    const DiagnosticReport& report,
+    const std::vector<std::string>& expected) {
+    const std::vector<std::string> actual = identity_list(report);
+    if (actual == expected) {
+        return true;
+    }
+    std::vector<std::string> missing;
+    std::vector<std::string> unexpected;
+    for (const std::string& identity : expected) {
+        if (std::find(actual.begin(), actual.end(), identity) == actual.end()) {
+            missing.push_back(identity);
+        }
+    }
+    for (const std::string& identity : actual) {
+        if (std::find(expected.begin(), expected.end(), identity) ==
+            expected.end()) {
+            unexpected.push_back(identity);
+        }
+    }
+    std::cerr << label << ": collect_project_diagnostics returned "
+              << actual.size() << " issues, expected " << expected.size()
+              << ". Missing: " << join_list(missing)
+              << ". Unexpected: " << join_list(unexpected) << ".\n";
+    if (missing.empty() && unexpected.empty()) {
+        std::vector<std::string> sorted_actual = actual;
+        std::sort(sorted_actual.begin(), sorted_actual.end());
+        const bool has_duplicate =
+            std::adjacent_find(sorted_actual.begin(), sorted_actual.end()) !=
+            sorted_actual.end();
+        if (has_duplicate) {
+            std::cerr << label << ": the identity sets agree but an identity "
+                         "appears MORE THAN ONCE -- de-duplication did not "
+                         "collapse it. Actual: " << join_list(actual) << ".\n";
+        } else {
+            std::cerr << label << ": the identity SETS agree but the ORDER "
+                         "differs. Actual order: " << join_list(actual)
+                      << ". Collection order is not the contract; identity order "
+                         "is.\n";
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief The two invariants every case runs.
+ *
+ * Strictly increasing identities is one assertion covering two properties at
+ * once: the deterministic sort AND the uniqueness that de-duplication provides.
+ * The allowlist check is separate because a wrong-but-allowlisted id passes it.
+ */
+bool check_invariants(std::string_view label, const DiagnosticReport& report) {
+    for (std::size_t index = 1; index < report.issues.size(); ++index) {
+        const std::string& previous = report.issues[index - 1U].identity;
+        const std::string& current = report.issues[index].identity;
+        if (!(previous < current)) {
+            std::cerr << label << ": identities are not strictly increasing: '"
+                      << previous << "' is not < '" << current << "'.\n";
+            return false;
+        }
+    }
+    for (const DiagnosticIssue& issue : report.issues) {
+        if (!issue.safe_fix_id.empty() &&
+            !marrow::editor::is_allowlisted_safe_fix(issue.safe_fix_id)) {
+            std::cerr << label << ": issue '" << issue.identity
+                      << "' carries safe_fix_id '" << issue.safe_fix_id
+                      << "', which is not in the three-entry allowlist.\n";
+            return false;
+        }
+    }
+    std::size_t errors = 0;
+    std::size_t warnings = 0;
+    for (const DiagnosticIssue& issue : report.issues) {
+        if (issue.severity == DiagnosticSeverity::Error) {
+            ++errors;
+        } else {
+            ++warnings;
+        }
+    }
+    if (errors != report.error_count || warnings != report.warning_count) {
+        std::cerr << label << ": the report counts " << report.error_count
+                  << " errors and " << report.warning_count
+                  << " warnings, but its issue list holds " << errors << " and "
+                  << warnings << ".\n";
+        return false;
+    }
+    return true;
+}
+
+/** @brief The seven orphan overlays G1 authors, all naming animation `ghost`. */
+void add_seven_orphan_families(
+    marrow::editor::ProjectData* project,
+    const std::string& animation_name) {
+    marrow::editor::TransformTimelineEdit transform;
+    transform.animation_name = animation_name;
+    transform.bone_name = "arm_l";
+    transform.channel = marrow::editor::TransformTimelineChannel::Rotate;
+    transform.keyframes.push_back({});
+    project->transform_timeline_edits.push_back(transform);
+
+    marrow::editor::BoneInheritTimelineEdit inherit;
+    inherit.animation_name = animation_name;
+    inherit.bone_name = "arm_l";
+    inherit.keyframes.push_back({0.0, marrow::runtime::BoneInherit{}});
+    project->bone_inherit_timeline_edits.push_back(inherit);
+
+    marrow::editor::MeshDeformTimelineEdit deform;
+    deform.animation_name = animation_name;
+    deform.slot_name = "body";
+    deform.attachment_name = "body_mesh";
+    marrow::editor::DeformKeyframeEdit deform_key;
+    // `body_mesh` has four vertices, and both `validate_project_for_save` and
+    // the runtime parser require one x/y pair per vertex. A short list makes
+    // the project unsavable, which would fail this case for the wrong reason.
+    deform_key.vertex_offsets = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    deform.keyframes.push_back(deform_key);
+    project->mesh_deform_timeline_edits.push_back(deform);
+
+    marrow::editor::DrawOrderTimelineEdit draw_order;
+    draw_order.animation_name = animation_name;
+    marrow::editor::DrawOrderKeyframeEdit draw_order_key;
+    // The runtime parser requires a draw-order key to list EVERY slot exactly
+    // once, so this is `player_idle.mskl`'s full slot list. A short list makes
+    // the project unopenable and would fail the case for the wrong reason.
+    draw_order_key.slot_names = {
+        "body", "arm_l", "fx_mask", "spark_fx", "spawn_anchor", "hurtbox",
+        "guide"};
+    draw_order.keyframes.push_back(draw_order_key);
+    project->draw_order_timeline_edits.push_back(draw_order);
+
+    marrow::editor::EventTimelineEdit event;
+    event.animation_name = animation_name;
+    marrow::editor::EventKeyframeEdit event_key;
+    event_key.event_name = "footstep";
+    event.keyframes.push_back(event_key);
+    project->event_timeline_edits.push_back(event);
+
+    marrow::editor::SlotColorTimelineEdit slot_color;
+    slot_color.animation_name = animation_name;
+    slot_color.slot_name = "body";
+    slot_color.keyframes.push_back({});
+    project->slot_color_timeline_edits.push_back(slot_color);
+
+    marrow::editor::SlotAttachmentTimelineEdit slot_attachment;
+    slot_attachment.animation_name = animation_name;
+    slot_attachment.slot_name = "body";
+    marrow::editor::SlotAttachmentKeyframeEdit attachment_key;
+    attachment_key.attachment_name = "body_mesh";
+    slot_attachment.keyframes.push_back(attachment_key);
+    project->slot_attachment_timeline_edits.push_back(slot_attachment);
+}
+
+/** @brief The seven identities `add_seven_orphan_families` must produce. */
+std::vector<std::string> seven_orphan_identities() {
+    return {
+        "overlay.orphan_animation|deform|ghost|body|body_mesh",
+        "overlay.orphan_animation|draw_order|ghost",
+        "overlay.orphan_animation|event|ghost",
+        "overlay.orphan_animation|inherit|ghost|arm_l",
+        "overlay.orphan_animation|slot_attachment|ghost|body",
+        "overlay.orphan_animation|slot_color|ghost|body",
+        "overlay.orphan_animation|transform|ghost|arm_l|rotate",
+    };
+}
+
+}  // namespace mar186
+
+using mar186::DiagnosticCode;
+using mar186::DiagnosticIssue;
+using mar186::DiagnosticOverlayFamily;
+using mar186::DiagnosticPanel;
+using mar186::DiagnosticReport;
+using mar186::DiagnosticSeverity;
+
+bool validate_mar186_project_diagnostics(
+    const marrow::editor::ProjectLoadResult& result,
+    const std::filesystem::path& fixture_path) {
+    const mar186::TemporaryDirectory temporary("mar186");
+
+    // -- G0 -- the non-effect and zero-mutation witness. -------------------
+    //
+    // G0 is EXPECTED TO PASS ON ITS FIRST RUN. It is a witness, not a driver:
+    // its job is to prove `player_idle.marrow` is issue-free, which is what
+    // keeps every shipped `error_count`/`warning_count` assertion in
+    // `agent_dispatch_smoke.cpp` and `test_client.py` unedited. Its
+    // falsifiability comes from named inversions (a `const_cast` that seeks the
+    // preview; an inverted stale-skin test), never from a first-run failure.
+    {
+        const DiagnosticReport report = marrow::editor::collect_project_diagnostics(
+            *result.project, *result.skeleton_data, *result.base_skeleton_document);
+        if (!mar186::expect_identities("MAR-186 G0", report, {})) {
+            std::cerr << "MAR-186 G0: player_idle.marrow must be issue-free. It "
+                         "authors no mesh_edits, its only overlay animation "
+                         "('idle') is in the base catalog, active_animation "
+                         "'idle' and preview_skins ['default'] both resolve.\n";
+            return false;
+        }
+        if (report.error_count != 0U || report.warning_count != 0U) {
+            std::cerr << "MAR-186 G0: the pure collector reported error_count "
+                      << report.error_count << " warning_count "
+                      << report.warning_count << ", expected 0/0.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G0", report)) {
+            return false;
+        }
+
+        const std::string serialized =
+            marrow::editor::serialize_project(*result.project);
+        std::cout << "MAR-186 G0: collect_project_diagnostics over "
+                     "player_idle.marrow returned 0 issues; serialize_project = "
+                  << serialized.size() << " bytes, sha256 "
+                  << mar184::sha256_hex(serialized) << ".\n";
+
+        // The zero-mutation half, over a real session. All seven values CAN
+        // move -- `project_revision` moves on any edit, `preview_revision` on
+        // any seek -- so this is not a snapshot of state that sits at its
+        // default no matter what the collector does.
+        marrow::editor::EditorSession session;
+        if (!session.open(fixture_path)) {
+            std::cerr << "MAR-186 G0: the session failed to open the fixture.\n";
+            return false;
+        }
+        const std::string bytes_before =
+            marrow::editor::serialize_project(*session.project());
+        const bool dirty_before = session.dirty();
+        const std::size_t undo_before = session.undo_count();
+        const std::size_t redo_before = session.redo_count();
+        const std::uint64_t project_before = session.project_revision();
+        const std::uint64_t runtime_before = session.runtime_revision();
+        const std::uint64_t preview_before = session.preview_revision();
+
+        const auto session_report =
+            marrow::editor::collect_session_diagnostics(session);
+        if (!session_report.has_value()) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics returned "
+                         "std::nullopt for a normally opened session.\n";
+            return false;
+        }
+
+        if (marrow::editor::serialize_project(*session.project()) != bytes_before) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics changed the "
+                         "serialized project. Collection must not mutate.\n";
+            return false;
+        }
+        if (session.dirty() != dirty_before) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics changed dirty() "
+                         "from " << dirty_before << " to " << session.dirty()
+                      << ".\n";
+            return false;
+        }
+        if (session.undo_count() != undo_before ||
+            session.redo_count() != redo_before) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics changed history "
+                         "from " << undo_before << "/" << redo_before << " to "
+                      << session.undo_count() << "/" << session.redo_count()
+                      << ".\n";
+            return false;
+        }
+        if (session.project_revision() != project_before) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics advanced "
+                         "project_revision from " << project_before << " to "
+                      << session.project_revision()
+                      << ". Collection must not mutate the session.\n";
+            return false;
+        }
+        if (session.runtime_revision() != runtime_before) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics advanced "
+                         "runtime_revision from " << runtime_before << " to "
+                      << session.runtime_revision()
+                      << ". Collection must not mutate the session.\n";
+            return false;
+        }
+        if (session.preview_revision() != preview_before) {
+            std::cerr << "MAR-186 G0: collect_session_diagnostics advanced "
+                         "preview_revision from " << preview_before << " to "
+                      << session.preview_revision()
+                      << ". Collection must not mutate the session.\n";
+            return false;
+        }
+    }
+
+    // -- G1 -- all seven orphan overlay families. --------------------------
+    //
+    // One overlay in each of ProjectData's seven animation-scoped vectors, all
+    // naming `ghost`, which `player_idle.mskl` does not contain. The full
+    // sorted identity list is the assertion: under a dropped family the other
+    // six still fire, so only a set difference says which one went.
+    {
+        const std::filesystem::path path = temporary.path / "g1.marrow";
+        marrow::editor::ProjectData project = mar186::minimal_project(path);
+        mar186::add_seven_orphan_families(&project, "ghost");
+
+        DiagnosticReport report;
+        if (!mar186::collect_over(project, path, "MAR-186 G1", &report)) {
+            return false;
+        }
+        if (!mar186::expect_identities(
+                "MAR-186 G1", report, mar186::seven_orphan_identities())) {
+            return false;
+        }
+
+        struct FamilyExpectation {
+            const char* identity;
+            DiagnosticOverlayFamily family;
+        };
+        const FamilyExpectation families[] = {
+            {"overlay.orphan_animation|deform|ghost|body|body_mesh",
+             DiagnosticOverlayFamily::Deform},
+            {"overlay.orphan_animation|draw_order|ghost",
+             DiagnosticOverlayFamily::DrawOrder},
+            {"overlay.orphan_animation|event|ghost",
+             DiagnosticOverlayFamily::Event},
+            {"overlay.orphan_animation|inherit|ghost|arm_l",
+             DiagnosticOverlayFamily::Inherit},
+            {"overlay.orphan_animation|slot_attachment|ghost|body",
+             DiagnosticOverlayFamily::SlotAttachment},
+            {"overlay.orphan_animation|slot_color|ghost|body",
+             DiagnosticOverlayFamily::SlotColor},
+            {"overlay.orphan_animation|transform|ghost|arm_l|rotate",
+             DiagnosticOverlayFamily::Transform},
+        };
+        for (std::size_t index = 0; index < report.issues.size(); ++index) {
+            const DiagnosticIssue& issue = report.issues[index];
+            if (issue.code != DiagnosticCode::OverlayOrphanAnimation) {
+                std::cerr << "MAR-186 G1: issue '" << issue.identity
+                          << "' carries code '"
+                          << marrow::editor::diagnostic_code_name(issue.code)
+                          << "', expected 'overlay.orphan_animation'.\n";
+                return false;
+            }
+            if (issue.severity != DiagnosticSeverity::Error) {
+                std::cerr << "MAR-186 G1: issue '" << issue.identity
+                          << "' is a warning, expected an Error -- the phantom "
+                             "animation is written into every .mskl and .mbin "
+                             "export, which is shipped corruption.\n";
+                return false;
+            }
+            if (issue.safe_fix_id != marrow::editor::kSafeFixRemoveOrphanOverlay) {
+                std::cerr << "MAR-186 G1: issue '" << issue.identity
+                          << "' carries safe_fix_id '" << issue.safe_fix_id
+                          << "', expected 'remove_orphan_overlay'.\n";
+                return false;
+            }
+            // The typed family. MAR-187's `remove_orphan_overlay` handler
+            // cannot find which of the eight ProjectData vectors to erase from
+            // without it, and its only other route -- splitting `identity` on
+            // '|' -- is exactly what the escaping makes unsafe.
+            if (issue.family != families[index].family) {
+                std::cerr << "MAR-186 G1: the issue '" << issue.identity
+                          << "' carries family '"
+                          << marrow::editor::diagnostic_overlay_family_name(
+                                 issue.family)
+                          << "', expected '"
+                          << marrow::editor::diagnostic_overlay_family_name(
+                                 families[index].family)
+                          << "'. MAR-187's remove_orphan_overlay cannot find its "
+                             "ProjectData vector without it.\n";
+                return false;
+            }
+        }
+        if (report.error_count != 7U || report.warning_count != 0U) {
+            std::cerr << "MAR-186 G1: error_count " << report.error_count
+                      << " warning_count " << report.warning_count
+                      << ", expected 7/0.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G1", report)) {
+            return false;
+        }
+    }
+
+    // -- G2 -- `authored_animation_names` is the authority. -----------------
+    //
+    // The same seven overlays, plus an AnimationEdit{Create,"ghost"}: the
+    // project now legitimately declares the animation, so nothing is orphaned.
+    // This is what proves the authority is the animation_edits FOLD and not the
+    // raw base document -- G1's fixture has an empty `animation_edits`, so the
+    // two agree there and G1 cannot tell them apart.
+    {
+        const std::filesystem::path path = temporary.path / "g2.marrow";
+        marrow::editor::ProjectData project = mar186::minimal_project(path);
+        mar186::add_seven_orphan_families(&project, "ghost");
+        marrow::editor::AnimationEdit create;
+        create.kind = marrow::editor::AnimationEditKind::Create;
+        create.name = "ghost";
+        project.animation_edits.push_back(create);
+
+        DiagnosticReport report;
+        if (!mar186::collect_over(project, path, "MAR-186 G2 (create)", &report)) {
+            return false;
+        }
+        if (!mar186::expect_identities("MAR-186 G2 (create)", report, {})) {
+            std::cerr << "MAR-186 G2: with AnimationEdit{Create,\"ghost\"} "
+                         "present, a project-authored animation is not an "
+                         "orphan.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G2 (create)", report)) {
+            return false;
+        }
+
+        // Create then Delete: the fold cancels out and the seven return. A
+        // collector reading only the base document's `animations` object would
+        // report zero here as well, so this half is what pins the fold.
+        const std::filesystem::path deleted_path = temporary.path / "g2b.marrow";
+        marrow::editor::ProjectData deleted = project;
+        deleted.source_path = deleted_path;
+        marrow::editor::AnimationEdit erase;
+        erase.kind = marrow::editor::AnimationEditKind::Delete;
+        erase.name = "ghost";
+        deleted.animation_edits.push_back(erase);
+
+        DiagnosticReport deleted_report;
+        if (!mar186::collect_over(
+                deleted, deleted_path, "MAR-186 G2 (delete)", &deleted_report)) {
+            return false;
+        }
+        if (!mar186::expect_identities(
+                "MAR-186 G2 (delete)", deleted_report,
+                mar186::seven_orphan_identities())) {
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G2 (delete)", deleted_report)) {
+            return false;
+        }
+    }
+
+    // -- G3 -- identity is position-independent. ---------------------------
+    //
+    // The same single orphan transform overlay in two projects: first in
+    // `transform_timeline_edits`, and last after two legitimate overlays on
+    // `idle`. An identity derived from the record's index would move; one
+    // derived from coordinates does not.
+    {
+        const std::vector<std::string> expected = {
+            "overlay.orphan_animation|transform|ghost|arm_l|rotate"};
+
+        // MEASURED CORRECTION: this case collects IN MEMORY, deliberately.
+        // Every other case here round-trips through `save_project` ->
+        // `load_project`, and this one must not: `.marrow` stores overlays in a
+        // JSON object keyed by animation name, `Value::Object` is a
+        // `std::map`, and a reload therefore re-groups
+        // `transform_timeline_edits` in key order. The orphan lands at index 0
+        // in BOTH projects, the position the case exists to vary is gone, and
+        // an index-derived identity compares equal -- proven by running the
+        // index mutation against the round-tripping version, where G3 passed
+        // its own comparison and only the literal check caught it.
+        marrow::editor::ProjectLoadResult base;
+        if (!mar186::open_base(temporary.path / "g3_base.marrow", "MAR-186 G3", &base)) {
+            return false;
+        }
+
+        const auto build = [&](bool orphan_first) {
+            marrow::editor::ProjectData project = *base.project;
+            project.transform_timeline_edits.clear();
+            marrow::editor::TransformTimelineEdit orphan;
+            orphan.animation_name = "ghost";
+            orphan.bone_name = "arm_l";
+            orphan.channel = marrow::editor::TransformTimelineChannel::Rotate;
+            orphan.keyframes.push_back({});
+            // Two legitimate overlays on an animation the catalog DOES contain.
+            // They must produce no issue of their own, or this case would be
+            // measuring something else.
+            marrow::editor::TransformTimelineEdit legitimate_a;
+            legitimate_a.animation_name = "idle";
+            legitimate_a.bone_name = "spine";
+            legitimate_a.channel = marrow::editor::TransformTimelineChannel::Rotate;
+            legitimate_a.keyframes.push_back({});
+            marrow::editor::TransformTimelineEdit legitimate_b;
+            legitimate_b.animation_name = "idle";
+            legitimate_b.bone_name = "arm_l";
+            legitimate_b.channel =
+                marrow::editor::TransformTimelineChannel::Translate;
+            legitimate_b.keyframes.push_back({});
+            if (orphan_first) {
+                project.transform_timeline_edits = {
+                    orphan, legitimate_a, legitimate_b};
+            } else {
+                project.transform_timeline_edits = {
+                    legitimate_a, legitimate_b, orphan};
+            }
+            return project;
+        };
+
+        const marrow::editor::ProjectData first_project = build(true);
+        const marrow::editor::ProjectData last_project = build(false);
+        const DiagnosticReport first_report =
+            marrow::editor::collect_project_diagnostics(
+                first_project, *base.skeleton_data, *base.base_skeleton_document);
+        const DiagnosticReport last_report =
+            marrow::editor::collect_project_diagnostics(
+                last_project, *base.skeleton_data, *base.base_skeleton_document);
+        // The non-empty assertion is load-bearing: if the orphan sweep were
+        // resolving against the materialized skeleton, BOTH lists would be
+        // empty and equal, and a case that only compared them to each other
+        // would pass for the wrong reason.
+        if (first_report.issues.empty() || last_report.issues.empty()) {
+            std::cerr << "MAR-186 G3: both projects reported no issues at all. "
+                         "An empty list compares equal to an empty list; the "
+                         "orphan must actually be detected for this case to "
+                         "mean anything.\n";
+            return false;
+        }
+        // The position-independence comparison runs BEFORE the literal
+        // comparison, so G3 reports its OWN property rather than borrowing
+        // G1's. An index-derived identity is stable within one collection and
+        // only moves when an unrelated overlay is inserted before it, which is
+        // exactly what these two projects differ by.
+        if (mar186::identity_list(first_report) !=
+            mar186::identity_list(last_report)) {
+            std::cerr << "MAR-186 G3: the same overlay produced two identities: '"
+                      << first_report.issues.front().identity << "' and '"
+                      << last_report.issues.front().identity
+                      << "'. Identity must derive from coordinates, never from "
+                         "the record's position in its vector.\n";
+            return false;
+        }
+        if (!mar186::expect_identities(
+                "MAR-186 G3 (orphan first)", first_report, expected) ||
+            !mar186::expect_identities(
+                "MAR-186 G3 (orphan last)", last_report, expected)) {
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G3 (orphan first)", first_report) ||
+            !mar186::check_invariants("MAR-186 G3 (orphan last)", last_report)) {
+            return false;
+        }
+    }
+
+    // -- G4 -- identity across unchanged revisions. -------------------------
+    //
+    // G4 is a WITNESS with no story-owned inversion. There is no mutation of
+    // MAR-186's own code that makes two collections of an unchanged project
+    // differ without failing G1 far more loudly first. It exists because AC1
+    // names the property, not because a mutation is available.
+    {
+        const std::filesystem::path path = temporary.path / "g4.marrow";
+        marrow::editor::ProjectData project = mar186::minimal_project(path);
+        mar186::add_seven_orphan_families(&project, "ghost");
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar186::save_and_reload(project, path, "MAR-186 G4", &loaded)) {
+            return false;
+        }
+        const DiagnosticReport first = marrow::editor::collect_project_diagnostics(
+            *loaded.project, *loaded.skeleton_data, *loaded.base_skeleton_document);
+        const DiagnosticReport second = marrow::editor::collect_project_diagnostics(
+            *loaded.project, *loaded.skeleton_data, *loaded.base_skeleton_document);
+        if (first.issues.size() != second.issues.size()) {
+            std::cerr << "MAR-186 G4: two collections over one unchanged project "
+                         "returned " << first.issues.size() << " and "
+                      << second.issues.size() << " issues.\n";
+            return false;
+        }
+        if (first.issues.empty()) {
+            std::cerr << "MAR-186 G4: both collections were empty. Comparing two "
+                         "empty lists proves nothing.\n";
+            return false;
+        }
+        for (std::size_t index = 0; index < first.issues.size(); ++index) {
+            const DiagnosticIssue& left = first.issues[index];
+            const DiagnosticIssue& right = second.issues[index];
+            if (left.identity != right.identity || left.code != right.code ||
+                left.family != right.family || left.severity != right.severity ||
+                left.message != right.message ||
+                left.safe_fix_id != right.safe_fix_id ||
+                left.target.panel != right.target.panel ||
+                left.target.animation_name != right.target.animation_name ||
+                left.target.vertex_index != right.target.vertex_index ||
+                left.target.selection.has_value() !=
+                    right.target.selection.has_value() ||
+                (left.target.selection.has_value() &&
+                 left.target.selection->index() !=
+                     right.target.selection->index())) {
+                std::cerr << "MAR-186 G4: issue " << index
+                          << " differed between two collections of one unchanged "
+                             "project: '" << left.identity << "' vs '"
+                          << right.identity << "'.\n";
+                return false;
+            }
+        }
+        if (first.error_count != second.error_count ||
+            first.warning_count != second.warning_count) {
+            std::cerr << "MAR-186 G4: the severity counts moved between two "
+                         "collections of one unchanged project.\n";
+            return false;
+        }
+    }
+
+    // -- G5 -- the round trip, and the resurrection. ------------------------
+    //
+    // G5 is an INTEGRATION WITNESS with no story-owned inversion: it runs over
+    // `save_project`, `load_project` and `build_runtime_document`, none of
+    // which MAR-186 touches. Its value is proving the identities are computed
+    // from data that survives a round trip, and that the phantom animation is
+    // real -- which is the concrete reason this class is an Error and not a
+    // Warning.
+    {
+        const std::filesystem::path path = temporary.path / "g5.marrow";
+        marrow::editor::ProjectData project = mar186::minimal_project(path);
+        mar186::add_seven_orphan_families(&project, "ghost");
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar186::save_and_reload(project, path, "MAR-186 G5", &reloaded)) {
+            return false;
+        }
+        const DiagnosticReport report = marrow::editor::collect_project_diagnostics(
+            *reloaded.project, *reloaded.skeleton_data,
+            *reloaded.base_skeleton_document);
+        if (!mar186::expect_identities(
+                "MAR-186 G5", report, mar186::seven_orphan_identities())) {
+            return false;
+        }
+        if (reloaded.skeleton_data->find_animation("ghost") == nullptr) {
+            std::cerr << "MAR-186 G5: the materialized skeleton does NOT contain "
+                         "'ghost'. The resurrection is the whole reason this "
+                         "class is an Error: without it the phantom would not "
+                         "reach any export.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G5", report)) {
+            return false;
+        }
+    }
+
+    // -- G12a -- the escaping is applied, and it is observable. -------------
+    //
+    // MEASURED CORRECTION to what this case was planned to be. It was specified
+    // to construct an identity COLLISION in the orphan-animation families and
+    // assert a count of two, on the theory that de-duplication would delete one
+    // of the colliding issues. **No such collision is constructible there**, and
+    // the reason is structural rather than incidental:
+    //
+    //   * every family's identity has FIXED arity -- transform and deform 4
+    //     tokens, inherit / slot_color / slot_attachment 3, draw_order and
+    //     event 2 -- so absorbing a separator into a name changes the arity and
+    //     the two identities can no longer coincide;
+    //   * the family token is a literal and differs per family, so nothing
+    //     collides across families;
+    //   * of the remaining tokens only the ANIMATION name is unconstrained. A
+    //     bone or slot that does not resolve is a hard runtime load error, so
+    //     an overlay naming one cannot be opened at all, and the transform
+    //     channel is a closed enum.
+    //
+    // So this sub-case asserts what IS observable here: dropping the escaping
+    // changes the identity, by name. The DELETION half of the hazard is
+    // asserted in G12b, on `overlay.orphan_weight_target`, whose three tokens
+    // -- skin, slot, attachment -- are all unconstrained precisely because an
+    // orphan weight target resolves to nothing by definition. That is the one
+    // place in this story where a real collision can be built.
+    {
+        const std::filesystem::path path = temporary.path / "g12.marrow";
+        marrow::editor::ProjectData project = mar186::minimal_project(path);
+
+        // Animation `ghost|arm_l` on bone `spine` versus animation `ghost` on
+        // bone `arm_l`. Unescaped, the first joins to
+        // `...|transform|ghost|arm_l|spine|rotate`, where the pipe from the
+        // animation name is indistinguishable from a separator.
+        marrow::editor::TransformTimelineEdit piped;
+        piped.animation_name = "ghost|arm_l";
+        piped.bone_name = "spine";
+        piped.channel = marrow::editor::TransformTimelineChannel::Rotate;
+        piped.keyframes.push_back({});
+        project.transform_timeline_edits.push_back(piped);
+
+        marrow::editor::TransformTimelineEdit plain;
+        plain.animation_name = "ghost";
+        plain.bone_name = "arm_l";
+        plain.channel = marrow::editor::TransformTimelineChannel::Rotate;
+        plain.keyframes.push_back({});
+        project.transform_timeline_edits.push_back(plain);
+
+        DiagnosticReport report;
+        if (!mar186::collect_over(project, path, "MAR-186 G12", &report)) {
+            return false;
+        }
+        if (!mar186::expect_identities(
+                "MAR-186 G12a", report,
+                {"overlay.orphan_animation|transform|ghost\\|arm_l|spine|rotate",
+                 "overlay.orphan_animation|transform|ghost|arm_l|rotate"})) {
+            std::cerr << "MAR-186 G12a: the '|' inside the animation name "
+                         "'ghost|arm_l' must be escaped to '\\|' so it cannot be "
+                         "read as a token separator.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G12a", report)) {
+            return false;
+        }
+    }
+
+    // -- G7 -- non-canonical weights. ---------------------------------------
+    //
+    // Every sub-case collects IN MEMORY, and both halves of that are measured
+    // rather than assumed:
+    //
+    //   * `mesh_weight_edit_from_runtime` over mesh_base/body/body_mesh returns
+    //     a vertex 2 that is ALREADY non-canonical -- [spine=0.25, arm_l=0.75],
+    //     ascending, which canonicalization reorders. So the control sub-case
+    //     as originally specified ("the edit untouched -> zero issues") FAILS ON
+    //     CORRECT CODE. The baseline is canonicalized first, which is what makes
+    //     the control real and each perturbation's identity list minimal.
+    //   * `serialize_project` is not bit-exact for doubles needing 17
+    //     significant digits (0.74999999999999989 is read back as 0.75), so a
+    //     perturbation small enough to distinguish an exact `==` from a
+    //     tolerance does not survive a file at all.
+    {
+        marrow::editor::ProjectLoadResult base;
+        if (!mar186::open_base(temporary.path / "g7_base.marrow", "MAR-186 G7", &base)) {
+            return false;
+        }
+        const auto body_slot = base.skeleton_data->find_slot_index("body");
+        const auto* attachment = body_slot.has_value()
+            ? base.skeleton_data->find_attachment("mesh_base", *body_slot, "body_mesh")
+            : nullptr;
+        if (attachment == nullptr) {
+            std::cerr << "MAR-186 G7: the fixture lost mesh_base/body/body_mesh.\n";
+            return false;
+        }
+        marrow::editor::MeshWeightAttachmentEdit canonical_edit =
+            marrow::editor::mesh_weight_model::mesh_weight_edit_from_runtime(
+                *base.skeleton_data, "mesh_base", "body", "body_mesh", *attachment);
+        for (auto& vertex : canonical_edit.vertices) {
+            const std::string error =
+                marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+                    *base.skeleton_data, &vertex);
+            if (!error.empty()) {
+                std::cerr << "MAR-186 G7: the baseline vertex would not "
+                             "canonicalize: " << error << '\n';
+                return false;
+            }
+        }
+        if (canonical_edit.vertices.size() < 2U) {
+            std::cerr << "MAR-186 G7: body_mesh has fewer than two vertices; the "
+                         "sub-cases below need vertex 0 and vertex 1.\n";
+            return false;
+        }
+
+        const auto collect_with = [&](const marrow::editor::MeshWeightAttachmentEdit& edit) {
+            marrow::editor::ProjectData project = *base.project;
+            project.mesh_weight_attachment_edits = {edit};
+            return marrow::editor::collect_project_diagnostics(
+                project, *base.skeleton_data, *base.base_skeleton_document);
+        };
+
+        // 1/4 -- the CONTROL. Without it, a detector that fired on everything
+        // would pass sub-cases 2-4 and prove nothing.
+        {
+            const DiagnosticReport report = collect_with(canonical_edit);
+            if (!mar186::expect_identities("MAR-186 G7 (control)", report, {})) {
+                std::cerr << "MAR-186 G7 (control): a fully canonical weight edit "
+                             "must produce NO issue. Without this, sub-cases 2-4 "
+                             "would pass for a detector that fires on anything.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G7 (control)", report)) {
+                return false;
+            }
+        }
+
+        // 2/4 -- vertex 0's weights scaled to sum 0.7.
+        {
+            marrow::editor::MeshWeightAttachmentEdit edit = canonical_edit;
+            for (auto& influence : edit.vertices[0].influences) {
+                influence.weight *= 0.7;
+            }
+            const DiagnosticReport report = collect_with(edit);
+            if (!mar186::expect_identities(
+                    "MAR-186 G7 (sum 0.7)", report,
+                    {"weights.non_canonical|mesh_base|body|body_mesh|0"})) {
+                return false;
+            }
+            const DiagnosticIssue& issue = report.issues.front();
+            if (issue.severity != DiagnosticSeverity::Warning ||
+                issue.safe_fix_id != marrow::editor::kSafeFixNormalizeWeights ||
+                issue.code != DiagnosticCode::WeightsNonCanonical) {
+                std::cerr << "MAR-186 G7 (sum 0.7): expected a "
+                             "weights.non_canonical Warning carrying "
+                             "'normalize_weights', got code '"
+                          << marrow::editor::diagnostic_code_name(issue.code)
+                          << "' severity '"
+                          << marrow::editor::diagnostic_severity_name(issue.severity)
+                          << "' fix '" << issue.safe_fix_id << "'.\n";
+                return false;
+            }
+            if (issue.target.vertex_index != std::optional<std::size_t>(0U)) {
+                std::cerr << "MAR-186 G7 (sum 0.7): the target names no vertex "
+                             "index, or the wrong one.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G7 (sum 0.7)", report)) {
+                return false;
+            }
+
+            // A 0.7 sum is far enough from 1 that no serializer rounding can
+            // remove it, so this one sub-case also proves a non-canonical
+            // project is loadable and still reported after a real round trip.
+            marrow::editor::ProjectData project = *base.project;
+            project.mesh_weight_attachment_edits = {edit};
+            DiagnosticReport round_tripped;
+            if (!mar186::collect_over(
+                    project, temporary.path / "g7_sum.marrow",
+                    "MAR-186 G7 (sum 0.7 round trip)", &round_tripped)) {
+                return false;
+            }
+            if (!mar186::expect_identities(
+                    "MAR-186 G7 (sum 0.7 round trip)", round_tripped,
+                    {"weights.non_canonical|mesh_base|body|body_mesh|0"})) {
+                return false;
+            }
+        }
+
+        // 3/4 -- vertex 1's influences reversed into ascending weight order.
+        {
+            marrow::editor::MeshWeightAttachmentEdit edit = canonical_edit;
+            std::reverse(
+                edit.vertices[1].influences.begin(),
+                edit.vertices[1].influences.end());
+            const DiagnosticReport report = collect_with(edit);
+            if (!mar186::expect_identities(
+                    "MAR-186 G7 (reversed)", report,
+                    {"weights.non_canonical|mesh_base|body|body_mesh|1"})) {
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G7 (reversed)", report)) {
+                return false;
+            }
+        }
+
+        // 4/4 -- the sub-case that distinguishes an EXACT `==` from a tolerance,
+        // and the only reason this sub-case exists.
+        //
+        // MEASURED CORRECTION. This was specified as a ONE-ULP perturbation.
+        // One ULP does not work, and the reason is structural: one ULP of 1.0 is
+        // DBL_EPSILON/2 ~= 1.11e-16, while the canonicalizer's own
+        // kMeshWeightSumTolerance is 4*DBL_EPSILON ~= 8.88e-16. The perturbed
+        // sum is therefore ALREADY INSIDE tolerance, the canonicalizer skips the
+        // division -- that is exactly the documented fixed-point property -- and
+        // correct code emits NO issue. A one-ULP sub-case fails on a correct
+        // tree.
+        //
+        // The two tolerances are ~7 orders apart, so the drift must be sized
+        // into the gap (8.88e-16, 1e-9). Measured on this vertex:
+        //     scale 1-1e-15 -> max weight delta 7.77e-16   (on the boundary)
+        //     scale 1-1e-12 -> max weight delta 7.50e-13   <- chosen
+        //     scale 1-1e-10 -> max weight delta 7.50e-11
+        //     scale 0.7     -> max weight delta 2.25e-01   (both predicates fire)
+        // 1-1e-12 leaves three orders of headroom on each side.
+        {
+            marrow::editor::MeshWeightAttachmentEdit edit = canonical_edit;
+            for (auto& influence : edit.vertices[1].influences) {
+                influence.weight *= (1.0 - 1e-12);
+            }
+            const DiagnosticReport report = collect_with(edit);
+            if (!mar186::expect_identities(
+                    "MAR-186 G7 (sub-tolerance drift)", report,
+                    {"weights.non_canonical|mesh_base|body|body_mesh|1"})) {
+                std::cerr << "MAR-186 G7 (sub-tolerance drift): a sum drift of "
+                             "1e-12 moves every weight by ~7.5e-13 under "
+                             "canonicalization. An exact `==` sees that; a 1e-9 "
+                             "tolerance swallows exactly the drift "
+                             "canonicalization exists to remove.\n";
+                return false;
+            }
+            if (!mar186::check_invariants(
+                    "MAR-186 G7 (sub-tolerance drift)", report)) {
+                return false;
+            }
+        }
+    }
+
+    // -- G8 -- uncanonicalizable weights, and the ABSENT fix. ---------------
+    //
+    // Reachability from a file was measured before this case was written: the
+    // save succeeds, the load succeeds, and the 1e-9 weight survives verbatim,
+    // because `parse_mesh_weight_vertices` and `validate_project_for_save`
+    // require only `weight > 0` and the runtime normalizes at load. So
+    // assertion 4 is a real round trip rather than an in-memory stand-in.
+    {
+        marrow::editor::ProjectLoadResult base;
+        if (!mar186::open_base(temporary.path / "g8_base.marrow", "MAR-186 G8", &base)) {
+            return false;
+        }
+        const auto body_slot = base.skeleton_data->find_slot_index("body");
+        const auto* attachment = body_slot.has_value()
+            ? base.skeleton_data->find_attachment("mesh_base", *body_slot, "body_mesh")
+            : nullptr;
+        if (attachment == nullptr) {
+            std::cerr << "MAR-186 G8: the fixture lost mesh_base/body/body_mesh.\n";
+            return false;
+        }
+        marrow::editor::MeshWeightAttachmentEdit edit =
+            marrow::editor::mesh_weight_model::mesh_weight_edit_from_runtime(
+                *base.skeleton_data, "mesh_base", "body", "body_mesh", *attachment);
+        for (auto& vertex : edit.vertices) {
+            marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+                *base.skeleton_data, &vertex);
+        }
+        edit.vertices[0].influences = {{"spine", 0.0, 0.0, 1e-9}};
+
+        marrow::editor::ProjectData project = *base.project;
+        project.mesh_weight_attachment_edits = {edit};
+        DiagnosticReport report;
+        if (!mar186::collect_over(
+                project, temporary.path / "g8.marrow", "MAR-186 G8", &report)) {
+            return false;
+        }
+        if (!mar186::expect_identities(
+                "MAR-186 G8", report,
+                {"weights.uncanonicalizable|mesh_base|body|body_mesh|0"})) {
+            return false;
+        }
+        const DiagnosticIssue& issue = report.issues.front();
+        if (issue.severity != DiagnosticSeverity::Error) {
+            std::cerr << "MAR-186 G8: weights.uncanonicalizable is a '"
+                      << marrow::editor::diagnostic_severity_name(issue.severity)
+                      << "', expected an Error -- a vertex whose whole influence "
+                         "list is below kMeshWeightEpsilon has no meaningful "
+                         "binding.\n";
+            return false;
+        }
+        if (!issue.safe_fix_id.empty()) {
+            std::cerr << "MAR-186 G8: weights.uncanonicalizable carries "
+                         "safe_fix_id '" << issue.safe_fix_id
+                      << "', expected none. Normalization is precisely what "
+                         "cannot repair a vertex the canonicalizer rejects.\n";
+            return false;
+        }
+        static constexpr char kCanonicalizerText[] =
+            "A weighted vertex must keep at least one positive influence.";
+        if (issue.message.find(kCanonicalizerText) == std::string::npos) {
+            std::cerr << "MAR-186 G8: the message does not quote the "
+                         "canonicalizer's own text. Got: " << issue.message << '\n';
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G8", report)) {
+            return false;
+        }
+    }
+
+    // -- G9 -- stale preview references, and the supersession. --------------
+    //
+    // Both halves resolve against the MATERIALIZED skeleton, not against
+    // `authored_animation_names`. That asymmetry with the orphan sweep is
+    // deliberate and sub-case (b) is what proves it: the materialized skeleton
+    // is what the preview actually binds against, so if an orphan overlay has
+    // resurrected the animation the project points at, the preview genuinely
+    // works and there is nothing stale to report.
+    {
+        // (a) -- a stale active animation, with no overlay to resurrect it.
+        {
+            const std::filesystem::path path = temporary.path / "g9a.marrow";
+            marrow::editor::ProjectData project = mar186::minimal_project(path);
+            project.editor_metadata.active_animation = "ghost";
+            DiagnosticReport report;
+            if (!mar186::collect_over(project, path, "MAR-186 G9(a)", &report)) {
+                return false;
+            }
+            if (!mar186::expect_identities(
+                    "MAR-186 G9(a)", report, {"preview.stale_animation|ghost"})) {
+                return false;
+            }
+            const DiagnosticIssue& issue = report.issues.front();
+            if (issue.severity != DiagnosticSeverity::Warning ||
+                issue.safe_fix_id != marrow::editor::kSafeFixResetPreviewReference ||
+                issue.target.panel != DiagnosticPanel::Project ||
+                issue.target.animation_name != "ghost") {
+                std::cerr << "MAR-186 G9(a): expected a Warning carrying "
+                             "'reset_preview_reference' on panel 'project' naming "
+                             "animation 'ghost'; got fix '" << issue.safe_fix_id
+                          << "' panel '"
+                          << marrow::editor::diagnostic_panel_name(issue.target.panel)
+                          << "' animation '" << issue.target.animation_name << "'.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G9(a)", report)) {
+                return false;
+            }
+        }
+
+        // (b) -- the same stale reference, WITH the seven orphan overlays.
+        //
+        // The overlays resurrect `ghost` in the materialized skeleton, so the
+        // preview resolves and there is no stale-animation issue. This is a
+        // real, documented interaction rather than an accident: applying
+        // MAR-187's `remove_orphan_overlay` fix to the phantom animation will
+        // CREATE a `preview.stale_animation` issue, and MAR-187's
+        // revision-keyed refresh is what surfaces it.
+        {
+            const std::filesystem::path path = temporary.path / "g9b.marrow";
+            marrow::editor::ProjectData project = mar186::minimal_project(path);
+            project.editor_metadata.active_animation = "ghost";
+            mar186::add_seven_orphan_families(&project, "ghost");
+            DiagnosticReport report;
+            if (!mar186::collect_over(project, path, "MAR-186 G9(b)", &report)) {
+                return false;
+            }
+            if (!mar186::expect_identities(
+                    "MAR-186 G9(b)", report, mar186::seven_orphan_identities())) {
+                std::cerr << "MAR-186 G9(b): active_animation 'ghost' with the "
+                             "seven orphan overlays present must produce NO "
+                             "preview.stale_animation -- the overlays resurrect "
+                             "'ghost', so the preview genuinely resolves.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G9(b)", report)) {
+                return false;
+            }
+        }
+
+        // (c) -- a repeated stale skin. `preview_skins` is the one vector
+        // nothing de-duplicates, so this is the story's only natural duplicate
+        // and therefore the only case that can see the de-duplication.
+        //
+        // MEASURED CORRECTION: the repeat is deliberately NOT adjacent, and a
+        // second distinct stale skin sits between the two copies. With
+        // ["default","ghost_skin","ghost_skin"] the two issues are emitted
+        // CONSECUTIVELY -- `default` resolves and emits nothing -- so
+        // adjacent-unique de-duplication collapses them even with the sort
+        // deleted, and this case could not detect a missing sort at all.
+        // Interleaving `phantom_skin` is what makes G9(c) an independent
+        // detector of BOTH the de-duplication and the sort.
+        {
+            const std::filesystem::path path = temporary.path / "g9c.marrow";
+            marrow::editor::ProjectData project = mar186::minimal_project(path);
+            project.editor_metadata.preview_skins = {
+                "default", "ghost_skin", "phantom_skin", "ghost_skin"};
+            DiagnosticReport report;
+            if (!mar186::collect_over(project, path, "MAR-186 G9(c)", &report)) {
+                return false;
+            }
+            if (!mar186::expect_identities(
+                    "MAR-186 G9(c)", report,
+                    {"preview.stale_skin|ghost_skin",
+                     "preview.stale_skin|phantom_skin"})) {
+                std::cerr << "MAR-186 G9(c): preview_skins "
+                             "[\"default\",\"ghost_skin\",\"phantom_skin\","
+                             "\"ghost_skin\"] must produce TWO issues: 'default' "
+                             "resolves and emits nothing, and the non-adjacent "
+                             "repeat of 'ghost_skin' collapses to one.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G9(c)", report)) {
+                return false;
+            }
+        }
+
+        // (d) -- an empty active animation is the setup pose, not a stale
+        // reference. Without this the detector could fire on every project that
+        // has not chosen a preview animation.
+        {
+            const std::filesystem::path path = temporary.path / "g9d.marrow";
+            marrow::editor::ProjectData project = mar186::minimal_project(path);
+            project.editor_metadata.active_animation.clear();
+            DiagnosticReport report;
+            if (!mar186::collect_over(project, path, "MAR-186 G9(d)", &report)) {
+                return false;
+            }
+            if (!mar186::expect_identities("MAR-186 G9(d)", report, {})) {
+                std::cerr << "MAR-186 G9(d): an empty active_animation is the "
+                             "setup pose and must produce no issue.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G9(d)", report)) {
+                return false;
+            }
+        }
+
+        // (e) -- the supersession. An orphan weight target whose vertices are
+        // ALSO non-canonical yields ONE issue, not two: the weights are dead
+        // data the runtime never sees, and reporting them too would give the
+        // user a second row that MAR-187's `remove_orphan_overlay` would make
+        // vanish without them having addressed it.
+        {
+            marrow::editor::ProjectLoadResult base;
+            if (!mar186::open_base(
+                    temporary.path / "g9e_base.marrow", "MAR-186 G9(e)", &base)) {
+                return false;
+            }
+            marrow::editor::ProjectData project = *base.project;
+            marrow::editor::MeshWeightAttachmentEdit orphan;
+            orphan.skin_name = "mesh_base";
+            orphan.slot_name = "body";
+            orphan.attachment_name = "ghost_mesh";
+            marrow::editor::MeshWeightVertexEdit vertex;
+            // Ascending weights: non-canonical on purpose. If the supersession
+            // were missing this would produce a second, weights.non_canonical
+            // issue, and G7 and G8 cannot see that because both use a target
+            // that RESOLVES.
+            vertex.influences = {{"spine", 0.0, 0.0, 0.25}, {"arm_l", 0.0, 0.0, 0.75}};
+            orphan.vertices.push_back(vertex);
+            project.mesh_weight_attachment_edits = {orphan};
+
+            const DiagnosticReport report =
+                marrow::editor::collect_project_diagnostics(
+                    project, *base.skeleton_data, *base.base_skeleton_document);
+            if (!mar186::expect_identities(
+                    "MAR-186 G9(e)", report,
+                    {"overlay.orphan_weight_target|mesh_base|body|ghost_mesh"})) {
+                std::cerr << "MAR-186 G9(e): an orphan weight target with "
+                             "non-canonical vertices must produce exactly ONE "
+                             "issue. Its vertices are dead data.\n";
+                return false;
+            }
+            const DiagnosticIssue& issue = report.issues.front();
+            if (issue.severity != DiagnosticSeverity::Warning ||
+                issue.safe_fix_id != marrow::editor::kSafeFixRemoveOrphanOverlay ||
+                issue.code != DiagnosticCode::OverlayOrphanWeightTarget) {
+                std::cerr << "MAR-186 G9(e): expected an "
+                             "overlay.orphan_weight_target Warning carrying "
+                             "'remove_orphan_overlay'; got code '"
+                          << marrow::editor::diagnostic_code_name(issue.code)
+                          << "' fix '" << issue.safe_fix_id << "'.\n";
+                return false;
+            }
+            if (!mar186::check_invariants("MAR-186 G9(e)", report)) {
+                return false;
+            }
+        }
+    }
+
+    // -- G6 -- typed targets. -----------------------------------------------
+    //
+    // AC5's substantive half: every target must be expressible in
+    // `SelectionSet`'s own vocabulary, so MAR-187 navigates by calling
+    // `SelectionSet::replace` rather than re-deriving an identity. The
+    // AttachmentSelection fields are read BY NAME, because
+    // `AttachmentSelection` is {slot, skin, attachment} while
+    // `MeshWeightAttachmentEdit` is {skin, slot, attachment} -- aggregate
+    // initialization in the edit's field order silently transposes them and
+    // every count, code, severity and identity still comes out right.
+    {
+        marrow::editor::ProjectLoadResult base;
+        if (!mar186::open_base(temporary.path / "g6_base.marrow", "MAR-186 G6", &base)) {
+            return false;
+        }
+        marrow::editor::ProjectData project = *base.project;
+        mar186::add_seven_orphan_families(&project, "ghost");
+        marrow::editor::MeshWeightAttachmentEdit orphan;
+        orphan.skin_name = "mesh_base";
+        orphan.slot_name = "body";
+        orphan.attachment_name = "ghost_mesh";
+        project.mesh_weight_attachment_edits = {orphan};
+
+        const DiagnosticReport report = marrow::editor::collect_project_diagnostics(
+            project, *base.skeleton_data, *base.base_skeleton_document);
+        std::vector<std::string> expected = mar186::seven_orphan_identities();
+        expected.push_back("overlay.orphan_weight_target|mesh_base|body|ghost_mesh");
+        std::sort(expected.begin(), expected.end());
+        if (!mar186::expect_identities("MAR-186 G6", report, expected)) {
+            return false;
+        }
+
+        for (const DiagnosticIssue& issue : report.issues) {
+            const bool is_weight =
+                issue.code == DiagnosticCode::OverlayOrphanWeightTarget;
+            const DiagnosticPanel wanted =
+                is_weight ? DiagnosticPanel::Weights : DiagnosticPanel::Timeline;
+            if (issue.target.panel != wanted) {
+                std::cerr << "MAR-186 G6: " << issue.identity << " has panel '"
+                          << marrow::editor::diagnostic_panel_name(issue.target.panel)
+                          << "', expected '"
+                          << marrow::editor::diagnostic_panel_name(wanted) << "'.\n";
+                return false;
+            }
+            if (!is_weight && issue.target.animation_name != "ghost") {
+                std::cerr << "MAR-186 G6: " << issue.identity
+                          << " names animation '" << issue.target.animation_name
+                          << "', expected 'ghost'.\n";
+                return false;
+            }
+
+            // draw_order and event scope nothing selectable.
+            const bool scopes_nothing =
+                issue.family == DiagnosticOverlayFamily::DrawOrder ||
+                issue.family == DiagnosticOverlayFamily::Event;
+            if (scopes_nothing) {
+                if (issue.target.selection.has_value()) {
+                    std::cerr << "MAR-186 G6: " << issue.identity
+                              << " carries a selection, but draw-order and event "
+                                 "overlays scope nothing selectable.\n";
+                    return false;
+                }
+                continue;
+            }
+            if (!issue.target.selection.has_value()) {
+                std::cerr << "MAR-186 G6: " << issue.identity
+                          << " carries no selection.\n";
+                return false;
+            }
+
+            // Replay it through the real SelectionSet, then read it back.
+            marrow::editor::SelectionSet selection;
+            if (!selection.replace(*issue.target.selection)) {
+                std::cerr << "MAR-186 G6: SelectionSet::replace refused "
+                          << issue.identity << "'s target.\n";
+                return false;
+            }
+            if (issue.family == DiagnosticOverlayFamily::Transform ||
+                issue.family == DiagnosticOverlayFamily::Inherit) {
+                const auto* bone = selection.active_bone();
+                if (bone == nullptr || bone->bone_name != "arm_l") {
+                    std::cerr << "MAR-186 G6: " << issue.identity
+                              << " did not activate bone 'arm_l'.\n";
+                    return false;
+                }
+            } else if (issue.family == DiagnosticOverlayFamily::Deform ||
+                       issue.family == DiagnosticOverlayFamily::SlotColor ||
+                       issue.family == DiagnosticOverlayFamily::SlotAttachment) {
+                const auto* slot = selection.active_slot();
+                if (slot == nullptr || slot->slot_name != "body") {
+                    std::cerr << "MAR-186 G6: " << issue.identity
+                              << " did not activate slot 'body'.\n";
+                    return false;
+                }
+            } else if (is_weight) {
+                const auto* attachment = selection.active_attachment();
+                if (attachment == nullptr) {
+                    std::cerr << "MAR-186 G6: " << issue.identity
+                              << " did not activate an attachment.\n";
+                    return false;
+                }
+                if (attachment->slot_name != "body" ||
+                    attachment->skin_name != "mesh_base" ||
+                    attachment->attachment_name != "ghost_mesh") {
+                    std::cerr << "MAR-186 G6: the weight issue's "
+                                 "AttachmentSelection has slot_name '"
+                              << attachment->slot_name << "' and skin_name '"
+                              << attachment->skin_name
+                              << "', expected slot_name 'body' and skin_name "
+                                 "'mesh_base'. AttachmentSelection is {slot, "
+                                 "skin, attachment} while "
+                                 "MeshWeightAttachmentEdit is {skin, slot, "
+                                 "attachment}: the two structs are transposed.\n";
+                    return false;
+                }
+            }
+        }
+        if (!mar186::check_invariants("MAR-186 G6", report)) {
+            return false;
+        }
+    }
+
+    // -- G10 -- severity counts, revisions, and the unsaved-changes warning. -
+    //
+    // The fixture carries ONE Error and TWO Warnings, and the asymmetry is
+    // load-bearing: a symmetric one-of-each fixture makes a swap of the two
+    // accumulators completely invisible.
+    {
+        const std::filesystem::path path = temporary.path / "g10.marrow";
+        marrow::editor::ProjectLoadResult base;
+        if (!mar186::open_base(temporary.path / "g10_base.marrow", "MAR-186 G10", &base)) {
+            return false;
+        }
+        const auto body_slot = base.skeleton_data->find_slot_index("body");
+        const auto* attachment = body_slot.has_value()
+            ? base.skeleton_data->find_attachment("mesh_base", *body_slot, "body_mesh")
+            : nullptr;
+        if (attachment == nullptr) {
+            std::cerr << "MAR-186 G10: the fixture lost mesh_base/body/body_mesh.\n";
+            return false;
+        }
+        marrow::editor::ProjectData project = *base.project;
+        // 1 Error: an orphan transform overlay.
+        marrow::editor::TransformTimelineEdit orphan;
+        orphan.animation_name = "ghost";
+        orphan.bone_name = "arm_l";
+        orphan.channel = marrow::editor::TransformTimelineChannel::Rotate;
+        orphan.keyframes.push_back({});
+        project.transform_timeline_edits.push_back(orphan);
+        // 1 Warning: a non-canonical weight vertex.
+        marrow::editor::MeshWeightAttachmentEdit weights =
+            marrow::editor::mesh_weight_model::mesh_weight_edit_from_runtime(
+                *base.skeleton_data, "mesh_base", "body", "body_mesh", *attachment);
+        for (auto& vertex : weights.vertices) {
+            marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+                *base.skeleton_data, &vertex);
+        }
+        for (auto& influence : weights.vertices[0].influences) {
+            influence.weight *= 0.7;
+        }
+        project.mesh_weight_attachment_edits = {weights};
+        // 1 Warning: a stale preview skin.
+        project.editor_metadata.preview_skins = {"default", "ghost_skin"};
+
+        const std::vector<std::string> expected = {
+            "overlay.orphan_animation|transform|ghost|arm_l|rotate",
+            "preview.stale_skin|ghost_skin",
+            "weights.non_canonical|mesh_base|body|body_mesh|0",
+        };
+
+        DiagnosticReport pure;
+        if (!mar186::collect_over(project, path, "MAR-186 G10 (pure)", &pure)) {
+            return false;
+        }
+        if (!mar186::expect_identities("MAR-186 G10 (pure)", pure, expected)) {
+            return false;
+        }
+        if (pure.error_count != 1U || pure.warning_count != 2U) {
+            std::cerr << "MAR-186 G10 (pure): error_count " << pure.error_count
+                      << ", warning_count " << pure.warning_count
+                      << " -- expected error_count 1, warning_count 2. The "
+                         "fixture is asymmetric on purpose: a one-of-each "
+                         "fixture cannot see the two accumulators swapped.\n";
+            return false;
+        }
+        if (pure.project_dirty) {
+            std::cerr << "MAR-186 G10 (pure): the pure collector reported "
+                         "project_dirty -- it has no session and no notion of "
+                         "dirtiness.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G10 (pure)", pure)) {
+            return false;
+        }
+
+        // The session wrapper: revisions, dirtiness, and the legacy warning.
+        marrow::editor::EditorSession session;
+        if (!session.open(path)) {
+            std::cerr << "MAR-186 G10: the session failed to open " << path << ".\n";
+            return false;
+        }
+        auto clean = marrow::editor::collect_session_diagnostics(session);
+        if (!clean.has_value()) {
+            std::cerr << "MAR-186 G10: collect_session_diagnostics returned "
+                         "std::nullopt for a normally opened session.\n";
+            return false;
+        }
+        if (clean->project_revision != session.project_revision() ||
+            clean->runtime_revision != session.runtime_revision()) {
+            std::cerr << "MAR-186 G10: the report stamped project_revision "
+                      << clean->project_revision << " / runtime_revision "
+                      << clean->runtime_revision << ", but the session is at "
+                      << session.project_revision() << " / "
+                      << session.runtime_revision()
+                      << ". MAR-187 refreshes on exactly these two.\n";
+            return false;
+        }
+        if (clean->project_dirty != session.dirty()) {
+            std::cerr << "MAR-186 G10: report project_dirty disagrees with "
+                         "session.dirty().\n";
+            return false;
+        }
+        if (session.dirty()) {
+            std::cerr << "MAR-186 G10: a freshly opened session is already "
+                         "dirty; the clean half of this case cannot run.\n";
+            return false;
+        }
+        if (!mar186::expect_identities("MAR-186 G10 (clean session)", *clean, expected)) {
+            return false;
+        }
+        if (clean->error_count != 1U || clean->warning_count != 2U) {
+            std::cerr << "MAR-186 G10 (clean session): error_count "
+                      << clean->error_count << ", warning_count "
+                      << clean->warning_count << ", expected 1/2.\n";
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G10 (clean session)", *clean)) {
+            return false;
+        }
+
+        const std::uint64_t revision_before = session.project_revision();
+        {
+            auto edit = session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "MAR-186 G10 dirtying edit",
+                "mar186-g10",
+                false,
+                marrow::editor::EditImpact::Project});
+            edit.project()->editor_metadata.notes += " mar186";
+            if (!edit.commit()) {
+                std::cerr << "MAR-186 G10: the dirtying edit failed to commit.\n";
+                return false;
+            }
+        }
+        if (!session.dirty()) {
+            std::cerr << "MAR-186 G10: the edit did not dirty the session.\n";
+            return false;
+        }
+        const auto dirty = marrow::editor::collect_session_diagnostics(session);
+        if (!dirty.has_value()) {
+            std::cerr << "MAR-186 G10: collect_session_diagnostics returned "
+                         "std::nullopt after an edit.\n";
+            return false;
+        }
+        if (dirty->project_revision <= revision_before) {
+            std::cerr << "MAR-186 G10: project_revision did not advance across an "
+                         "edit -- it went " << revision_before << " -> "
+                      << dirty->project_revision << ".\n";
+            return false;
+        }
+        std::vector<std::string> dirty_expected = expected;
+        dirty_expected.push_back("project.unsaved_changes");
+        std::sort(dirty_expected.begin(), dirty_expected.end());
+        if (!mar186::expect_identities(
+                "MAR-186 G10 (dirty session)", *dirty, dirty_expected)) {
+            return false;
+        }
+        if (dirty->error_count != 1U || dirty->warning_count != 3U) {
+            std::cerr << "MAR-186 G10 (dirty session): reported error_count "
+                      << dirty->error_count << " warning_count "
+                      << dirty->warning_count
+                      << ", expected 1 and 3 -- the two project warnings plus the "
+                         "unsaved-changes warning. Counting severities BEFORE "
+                         "appending project.unsaved_changes leaves warning_count "
+                         "one short on every dirty project.\n";
+            return false;
+        }
+        for (const DiagnosticIssue& issue : dirty->issues) {
+            if (issue.code != DiagnosticCode::ProjectUnsavedChanges) {
+                continue;
+            }
+            if (!issue.safe_fix_id.empty()) {
+                std::cerr << "MAR-186 G10: project.unsaved_changes carries "
+                             "safe_fix_id '" << issue.safe_fix_id
+                          << "', expected none -- saving is a reviewed, "
+                             "user-initiated operation, never an automatic "
+                             "repair.\n";
+                return false;
+            }
+            if (issue.severity != DiagnosticSeverity::Warning ||
+                issue.target.panel != DiagnosticPanel::Project) {
+                std::cerr << "MAR-186 G10: project.unsaved_changes is not a "
+                             "Warning on panel 'project'.\n";
+                return false;
+            }
+        }
+        if (!mar186::check_invariants("MAR-186 G10 (dirty session)", *dirty)) {
+            return false;
+        }
+    }
+
+    // -- G11 -- a session that is not normally opened. ----------------------
+    //
+    // Unreachable through the agent: the dispatcher's `ensure_project_loaded`
+    // rejects first. G11 constructs the session directly and is the branch's
+    // only detector.
+    {
+        marrow::editor::EditorSession session;
+        const auto report = marrow::editor::collect_session_diagnostics(session);
+        if (report.has_value()) {
+            std::cerr << "MAR-186 G11: collect_session_diagnostics on a session "
+                         "with no project returned a report ("
+                      << report->issues.size()
+                      << " issues), expected std::nullopt. AC2 limits collection "
+                         "to normally opened sessions.\n";
+            return false;
+        }
+    }
+
+    // -- G12b -- the collision half of the escaping hazard. -----------------
+    //
+    // This is the ONE place in the story where a genuine identity collision is
+    // constructible (see G12a for why it is not, in the orphan-animation
+    // families): `overlay.orphan_weight_target`'s three tokens -- skin, slot
+    // and attachment -- are all unconstrained, precisely because an orphan
+    // weight target resolves to nothing by definition and so escapes the
+    // runtime parser's bone/slot rules entirely.
+    //
+    // Unescaped, skin `mesh_base`/slot `body|x`/attachment `ghost_mesh` and
+    // skin `mesh_base`/slot `body`/attachment `x|ghost_mesh` join to the SAME
+    // string. Asserting a COUNT OF TWO is load-bearing and separate from
+    // asserting the identities: the collision makes de-duplication DELETE one
+    // issue, so a case that only checked "both identities are present" would
+    // report a missing identity rather than the collision.
+    {
+        marrow::editor::ProjectLoadResult base;
+        if (!mar186::open_base(temporary.path / "g12b_base.marrow", "MAR-186 G12b", &base)) {
+            return false;
+        }
+        marrow::editor::ProjectData project = *base.project;
+        marrow::editor::MeshWeightAttachmentEdit left;
+        left.skin_name = "mesh_base";
+        left.slot_name = "body|x";
+        left.attachment_name = "ghost_mesh";
+        marrow::editor::MeshWeightAttachmentEdit right;
+        right.skin_name = "mesh_base";
+        right.slot_name = "body";
+        right.attachment_name = "x|ghost_mesh";
+        project.mesh_weight_attachment_edits = {left, right};
+
+        const DiagnosticReport report = marrow::editor::collect_project_diagnostics(
+            project, *base.skeleton_data, *base.base_skeleton_document);
+        if (report.issues.size() != 2U) {
+            std::cerr << "MAR-186 G12b: two distinct orphan weight targets "
+                         "collapsed to " << report.issues.size()
+                      << " issue(s). mesh_base/'body|x'/'ghost_mesh' and "
+                         "mesh_base/'body'/'x|ghost_mesh' join to ONE identity "
+                         "when the tokens are not escaped, and de-duplication "
+                         "then DELETES one of them.\n";
+            for (const DiagnosticIssue& issue : report.issues) {
+                std::cerr << "    surviving identity: " << issue.identity << '\n';
+            }
+            return false;
+        }
+        if (!mar186::expect_identities(
+                "MAR-186 G12b", report,
+                {"overlay.orphan_weight_target|mesh_base|body\\|x|ghost_mesh",
+                 "overlay.orphan_weight_target|mesh_base|body|x\\|ghost_mesh"})) {
+            return false;
+        }
+        if (!mar186::check_invariants("MAR-186 G12b", report)) {
+            return false;
+        }
+    }
+
+    std::cout << "MAR-186 G0-G12: player_idle.marrow is issue-free "
+                 "and collection moves none of a session's seven observable "
+                 "values; all seven orphan overlay families are reported by "
+                 "identity with their typed family; the animation-name authority "
+                 "is the animation_edits fold; identity is independent of a "
+                 "record's position, stable across two collections, and survives "
+                 "a real save/LOAD round trip that resurrects the phantom "
+                 "animation; a canonical weight edit produces nothing while a "
+                 "0.7 sum, a reversed order and a 1e-12 sub-tolerance drift each "
+                 "produce exactly one weights.non_canonical; a lone 1e-9 "
+                 "influence is an Error carrying NO safe fix and survives a real "
+                 "round trip; a stale preview animation and a repeated stale "
+                 "preview skin are each reported once while an empty active "
+                 "animation and a resurrected one are not; an orphan weight "
+                 "target supersedes its own vertices; and an unescaped '|' "
+                 "yields two identities rather than one deleted issue; every "
+                 "typed target replays through SelectionSet::replace with the "
+                 "AttachmentSelection fields read BY NAME; an asymmetric "
+                 "one-Error/two-Warning project counts 1/2 and a dirty session "
+                 "counts 1/3 with project.unsaved_changes appended, re-sorted "
+                 "and re-counted; and a session with no project yields "
+                 "std::nullopt.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -16280,6 +17943,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar185_inherit_editing()) {
+            return 1;
+        }
+        if (!validate_mar186_project_diagnostics(
+                result, parse_result.options.project_path)) {
             return 1;
         }
     }

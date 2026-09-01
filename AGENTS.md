@@ -57,6 +57,19 @@
   and a legal scale exact to 1e-12, duration auto-grow, and the rename/delete
   overlay cascade -- P1-P9, U1-U2):
   `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- MAR-186's structured project diagnostics: `player_idle.marrow` is issue-free
+  and collection moves none of a session's seven observable values; all seven
+  orphan overlay families are reported by identity with their typed family; the
+  animation-name authority is the `animation_edits` fold rather than the
+  materialized skeleton; identity is position-independent, stable across two
+  collections, and survives a real save/LOAD round trip that resurrects the
+  phantom animation; the weight predicate is the canonicalizer's own bit-exact
+  fixed point; stale preview references, the orphan-weight-target supersession,
+  the escaping collision, the typed targets replayed through
+  `SelectionSet::replace`, the asymmetric severity counts, the dirty session's
+  `project.unsaved_changes`, and the `std::nullopt` for a session with no
+  project (G0-G12):
+  `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - `marrow_project_smoke` asserts only what the project it is pointed at actually contains. The viewport debug-overlay gate keys on whether the document authors `editor.viewport.debug_overlay` (round-tripping it value for value when present, asserting the `DebugOverlaySettings` defaults when absent, plus an alternating-pattern round trip that catches two toggles wired to each other's key — which an all-`true` fixture cannot), and the `player_idle`-specific editing suites run only for a project carrying their markers (bones `spine`/`arm_l`, animations `attack`/`aim`, skin `mesh_base`). A project matching NONE of them prints a named skip and still runs the shape and export checks; a project matching SOME of them ABORTS, because a partial match is a corrupted fixture rather than a project to skip
 - Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Atomic project save, cross-directory Save As rebasing, history rebasing, session `create`/`close`, and failure-safe runtime-source adoption (S1-S10): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
@@ -423,6 +436,67 @@ that computes from `original_time`, decide which of the two you actually mean**
 — MAR-185's I13 is the inversion that demonstrates the difference is observable
 (`0.10000000149011612` and `1.299999974668026` against `0.1` and `1.3`).
 
+### `serialize_project` is NOT bit-exact for doubles that need 17 significant digits
+
+A `.marrow` round trip is **lossy for a double whose shortest round-trip
+decimal form needs the full 17 significant digits.** Measured in MAR-186, on
+`mesh_base`/`body`/`body_mesh`'s canonicalized weights:
+
+```
+saved    : spine=0.74999999999999989 arm_l=0.25
+reloaded : spine=0.75               arm_l=0.25
+```
+
+Three of the attachment's four vertices drifted this way across
+`save_project` -> `load_project`. A value needing fewer digits survives exactly:
+the same probe wrote `{spine, 1e-9}` and read back `1.0000000000000001e-09`,
+bit-identical, which is why MAR-186's `weights.uncanonicalizable` case is a real
+round trip and its sub-tolerance case is not.
+
+**The reassuring half, also measured:** the reloaded values are still
+*canonical* (`0.75 + 0.25` is an exact unit sum in descending order), so the
+round trip does **not** manufacture spurious `weights.non_canonical` issues.
+
+**The sharp consequence, which is the part that will save someone:** *any case
+that authors a 17-digit weight and round-trips it through a file is asserting on
+a different value than it wrote.* MAR-186 hit this twice — a one-ULP
+perturbation of `1.0` reads back as exactly `1`, and a canonical baseline drifts
+— and both would have produced a confidently passing test measuring nothing.
+Author such a value **in memory** and say so in the case, or pick a value whose
+short form is exact.
+
+MAR-186 did **not** fix this; it is a pre-existing serializer property, recorded
+here rather than in that story's section because the next person to hit it will
+not be reading about diagnostics.
+
+### An identity collision needs a token whose neighbours are unconstrained
+
+MAR-186 escapes `|` and `\` in every identity token, and the reason a collision
+is dangerous is that de-duplication cannot tell one from a duplicate and
+**deletes** an issue. But a collision is only *constructible* where the
+surrounding tokens are free, and that is rarer than it looks:
+
+- each of the seven orphan-animation families has **fixed arity** (transform and
+  deform 4 tokens, inherit/slot_color/slot_attachment 3, draw_order and event 2),
+  so absorbing a separator into a name changes the arity and the identities can
+  no longer coincide;
+- the family token is a literal and differs per family, so nothing collides
+  across families;
+- of what remains, only the **animation** name is unconstrained — a bone or slot
+  that does not resolve is a hard runtime load error (see the four
+  `skeleton_parse.cpp` rules), and the transform channel is a closed enum.
+
+The one place a genuine collision **can** be built is
+`overlay.orphan_weight_target|<skin>|<slot>|<attachment>`, whose three tokens
+are all free precisely because an orphan weight target resolves to nothing by
+definition and therefore escapes the parser's bone/slot rules entirely.
+MAR-186's G12b builds it (`mesh_base`/`body|x`/`ghost_mesh` against
+`mesh_base`/`body`/`x|ghost_mesh`) and measured the collapse from two issues to
+one. **If you add an identity scheme, ask which of its tokens are unconstrained
+before writing the case that proves the escaping works** — MAR-186's first
+attempt asserted a count of two on a fixture where the count could never have
+been anything else.
+
 ## MAR-192–210 Platform Program Local Implementation Checkpoint
 
 Validated locally on 2026-08-09 without closing any platform story. The source
@@ -456,6 +530,423 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-186 Collect Structured Project Diagnostics Validation Results
+
+Validated 2026-09-01 against a from-scratch `rm -rf build` tree at MAR-185's
+commit `68720d9`. MAR-186 gives the editor a **UI-free, read-only** function
+that walks an opened project and returns a deterministic, stably-identified list
+of problems — each with a typed code, a typed overlay family, a severity, a
+message, a typed navigation target, and, only where a repair is actually safe,
+an allowlisted fix identifier — and surfaces that list through
+`project.diagnostics` without disturbing the four members the operation already
+returned.
+
+**The title invites a correction worth making up front: "diagnostics" here is a
+UI-free model function and one JSON payload. MAR-186 draws nothing.** It focuses
+nothing, selects nothing, and repairs nothing; there is no mutating entry point
+at all, which is the strongest available form of AC2's "no automatic
+correction". MAR-187 builds the Problems view and the three fixes on top of it.
+
+**Nothing about the file format moved.** `.marrow` gains no key, `.mskl` stays
+version 1, `.mbin` stays version 2, the C ABI is untouched, no fixture was
+edited, no runtime file was touched, no shell file was touched, and neither the
+timeline model, the graph model, `authoring.cpp` nor `session.cpp` changed. The
+agent registry is **unchanged at 66** — MAR-186 adds no operation and no MCP
+tool, so the count sweep is a **non-effect** gate — and `ctest -N` is **22**
+before and after. `CMakeLists.txt` gains exactly one line, naming the new source
+inside the existing `marrow_editor` static library; no new target, no new test,
+no new include directory.
+
+### AC2's boundary is the runtime parser's, not this story's
+
+The single most consequential measurement in the story, because it deletes most
+of what "orphan overlay" sounds like it means. `build_project_runtime` parses the
+merged runtime document, and **four** rules there are hard load errors:
+
+| Rule | Site | Consequence |
+| --- | --- | --- |
+| `"animation references unknown bone '<name>'"` | `skeleton_parse.cpp:5270` | any `transform`/`inherit` overlay naming a missing bone makes `load_project` **fail** |
+| `"animation references unknown slot '<name>'"` — the `slots` walk | `:5373` | any `slot_color`/`slot_attachment` overlay naming a missing slot makes the load **fail** |
+| `"animation references unknown slot '<name>'"` — the separate `deform` walk | `:5430` | any `deform` overlay naming a missing slot makes the load **fail** |
+| `"mesh weight references unknown bone '<name>'"` | `:1616` | any weight influence naming a missing bone makes the load **fail** |
+
+All four are `return validation_error(...)`, re-verified at this commit. **Two of
+them emit the same message text from two different sites**, which is exactly how
+a grep on the message undercounts the number of *rules* — the governing
+documents said three, and a Task 0 gate written for three would have failed on a
+correct tree.
+
+So in every session the collector can ever see, an overlay's bone and slot
+resolve. AC2's *"limited to normally opened sessions"* is not a scoping
+convenience; it is the parser's own boundary, and MAR-186 adopts it. **This is a
+positive invariant, not only a restriction:** it is what lets an orphan-animation
+issue attach a `BoneSelection` or `SlotSelection` with confidence that the bone
+or slot still exists, so MAR-187 can select it without an existence check.
+
+Only two orphan classes survive a normal open: **orphan animations**, which
+`ensure_object_member` resurrects into every export, and **orphan weight
+targets**, which the merge loop silently skips. Anyone reading "the collector
+reports orphan overlays" should read this table for what that actually covers.
+
+### What the compiler does and does not police
+
+The story's incoming brief asserted that adding an enum value produces zero
+diagnostics at every switch site, inferring it from a grep of `CMakeLists.txt`
+for warning flags. **The flag premise is right and the conclusion is wrong.**
+Re-measured at this commit by compiling, not by inferring — Apple clang 21.0.0,
+`c++ -std=c++17 -c` with **no flags at all**:
+
+```
+wsw.cpp:2:19: warning: enumeration value 'C' not handled in switch [-Wswitch]
+```
+
+So the four enums MAR-186 introduces — `DiagnosticSeverity`, `DiagnosticPanel`,
+`DiagnosticCode`, `DiagnosticOverlayFamily` — are **compiler-policed at every
+exhaustive switch**, and two decisions follow from that rather than from taste:
+
+- the four `*_name` functions are switches with **no `default:` arm**, because a
+  `default:` silences exactly the diagnostic that makes them safe. Do not add one;
+- **every** switch over the four lives in `src/editor/diagnostics.cpp` (21 `case`
+  labels there, and `grep -rn "case Diagnostic"` finds none anywhere else), so
+  MAR-187's extension is a one-file sweep the compiler will hand it as a checklist.
+
+**What is NOT policed is a fixed-length list of calls, and MAR-186 has one.**
+`collect_orphan_animation_overlays` makes one call per overlay family. Adding an
+eighth vector to `ProjectData` and forgetting the eighth call produces no
+diagnostic, no failure from any shipped case, and a detector that silently
+under-reports — precisely the class MAR-185 shipped `clipboard_track_count` into.
+The mitigation is a `static_assert` on `kSweptOverlayFamilyCount` sitting beside
+the calls with a comment naming the hazard. **It is a guard, not a proof**: it
+cannot detect the omission on its own — nothing can, in C++17 without reflection
+— but it puts the number in the editor's path, and G1 asserts all seven
+identities so a changed number unmatched by a call fails loudly.
+
+`-Wswitch` **warns but does not stop the build**: MAR-186 does not promote it to
+`-Werror`. The recipe, deferred to whoever wants it, is
+`set_source_files_properties(src/editor/diagnostics.cpp PROPERTIES COMPILE_OPTIONS
+"$<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Werror=switch>")`.
+The compiler-id guard is not decoration: **GCC enables `-Wswitch` only under
+`-Wall`**, so a non-Clang build of this tree is silent about a missed arm.
+
+### What was measured before any code was written
+
+Task 0 ran thirteen gates and **paid for itself three times over** — three of its
+findings invalidated case specifications the plan had already written, and two of
+those were cases that would have **failed on correct code**.
+
+| Gate | Answer |
+| --- | --- |
+| Tip | **`68720d9`**, not the `380479a` the brief named nor the `5a56663` the documents named. MAR-185's commit had been amended at least twice; all three hashes still resolve |
+| `ctest -N` | **22**. From-scratch rebuild of ALL targets: **0 warnings** |
+| MAR-185 landed | Yes. `rename_all_timeline_edits` (`authoring.cpp:123`) and `erase_all_timeline_edits` (`:136`) both cover all **seven** vectors; `erase_all`'s own comment describes MAR-186's orphan-animation mechanism verbatim |
+| Vocabulary is new | `grep -rnw` on the six names → **0**. The `-w` is load-bearing: `SpineImportDiagnosticSeverity` has 25 uses, so an unanchored grep can never return zero |
+| Panel-focus vocabulary | **0 hits.** It does not exist repo-wide; MAR-186 introduces it, and deliberately names a **panel**, never a window title |
+| `-Wswitch` | **Fires with no flags** (above). Compiled, not inferred |
+| Registry | **66** rows / array bound **66** / **eleven** `!= 66U` guards / two Python `== 66`. The eleventh guard is `shell_smoke_timeline.cpp:4389` — that file has **two**, which no document named, and "the eleventh, unlisted" is precisely how a sweep site goes missing |
+| Fixture | `player_idle.marrow`: `active_animation "idle"`, `preview_skins ["default"]`, **no** `mesh_edits`, overlays only on `idle`, **no** `animation_edits`. `serialize_project` = **6111 bytes**, sha256 `c7d6c6de6a0badf8171772ebb75884785c1b203c86ff4fd4553344029953616b` |
+| Canonicalization is a bit-exact fixed point | **Confirmed.** Four vertices; first pass changes 1, second changes 0, no errors. Control: a 0.7-scaled vertex compares DIFFERENT afterwards, so the `==` predicate is live rather than trivially satisfied |
+| A lone `1e-9` influence is reachable from a file | **Confirmed.** Save OK, load OK, the value survives verbatim as `1.0000000000000001e-09`. The canonicalizer's message is exactly `A weighted vertex must keep at least one positive influence.` |
+| `apply_animation_edits` is out of reach | `project.cpp:5423`, inside the anonymous namespace spanning `:24-6862`. So `authored_animation_names` has to live in `project.cpp` |
+| The four parser rules | Present, all `return validation_error(...)` (table above) |
+| `AttachmentSelection` vs `MeshWeightAttachmentEdit` | **Transposed, confirmed.** `{slot, skin, attachment}` versus `{skin, slot, attachment}` |
+
+**Three Task 0 findings changed what got written**, and all three are the same
+defect class the story chain keeps rediscovering — *a gate or a case that fails
+on correct code*, which is worse than a wrong number because it sends the
+implementer hunting a regression that is not there:
+
+1. **`mesh_weight_edit_from_runtime` returns a vertex that is already
+   non-canonical.** Vertex 2 of `mesh_base`/`body`/`body_mesh` is
+   `[spine=0.25, arm_l=0.75]` — ascending — which canonicalization reorders. The
+   planned control sub-case ("the edit untouched → **zero** issues") is therefore
+   false, and the perturbation sub-cases would have produced **two** issues, not
+   one. Fixed by canonicalizing the whole edit into the baseline first, which is
+   what makes the control real and each sub-case's identity list minimal. This is
+   the story's own stated risk — *a fixture whose issue would fire for a different
+   reason* — landing on the **control**, the fixture whose entire job was to prove
+   there are no false positives.
+2. **A one-ULP perturbation cannot distinguish an exact `==` from a tolerance.**
+   One ULP of `1.0` is `DBL_EPSILON/2 ≈ 1.11e-16`, while the canonicalizer's own
+   `kMeshWeightSumTolerance` is `4·DBL_EPSILON ≈ 8.88e-16`. The perturbed sum is
+   **already inside** tolerance, so the canonicalizer skips the division — that is
+   exactly the documented fixed-point property — and **correct code emits no
+   issue at all**. The planned failure text described what correct code does. The
+   two tolerances are ~7 orders apart, so the drift has to be sized into the gap;
+   measured on the two-influence vertex:
+
+   | scale | max weight delta after canonicalization | exact `==` | `1e-9` tolerance | distinguishes |
+   | --- | ---: | --- | --- | --- |
+   | 1−1e-15 | 7.77e-16 | ISSUE | no | yes, but on the boundary |
+   | 1−1e-14 | 7.44e-15 | ISSUE | no | yes |
+   | **1−1e-12** | **7.50e-13** | **ISSUE** | **no** | **yes — three orders of headroom each side** |
+   | 1−1e-10 | 7.50e-11 | ISSUE | no | yes |
+   | 0.7 | 2.25e-01 | ISSUE | ISSUE | **no** |
+
+   G7 uses `1 − 1e-12`, **in memory only** — the perturbation does not survive a
+   file at all (see the serializer fact in *Repo facts that outlive their story*).
+3. **A fifth shipped assertion on the `project.diagnostics` payload, recorded
+   nowhere.** `agent_dispatch_smoke.cpp:1132` captures the **whole compacted
+   `scene_delta`** and `:1310-1314` asserts it byte-identical after a run of
+   dry-run operations. That binds AC3 far harder than "the four legacy members
+   survive" — it pins the entire payload — and it is simultaneously a **free
+   pre-existing detector for payload non-determinism**, which is a gain rather
+   than only a hazard. It passes unchanged.
+
+Two further corrections were found during implementation rather than at Task 0,
+both by running an inversion and reading what actually happened:
+
+4. **G3 could not detect an index-derived identity while it round-tripped
+   through a file.** `.marrow` stores overlays in a JSON object keyed by
+   animation name and `Value::Object` is a `std::map`, so a reload re-groups
+   `transform_timeline_edits` in key order; the orphan landed at index 0 in
+   **both** projects and the two index-derived identities compared equal. Found by
+   applying the index mutation and watching G3 pass its own comparison. G3 now
+   collects **in memory**, and the mutation then reports
+   `'…|rotate|0' and '…|rotate|2'` exactly as intended.
+5. **G9(c) could not detect a missing sort.** With
+   `["default","ghost_skin","ghost_skin"]` the two issues are emitted
+   *consecutively* — `default` resolves and emits nothing — so adjacent-unique
+   de-duplication collapses them even with the sort deleted. Interleaving a second
+   distinct stale skin (`["default","ghost_skin","phantom_skin","ghost_skin"]`) is
+   what makes the duplicates non-adjacent and makes G9(c) an independent detector
+   of **both** the de-duplication and the sort.
+
+### Result
+
+Every case runs **inside the standing `player_idle.marrow` invocation** and
+builds its own throwaway project there. Pointing `marrow_project_smoke` at a
+project over another skeleton takes `main()`'s `markers.present.empty()` **skip**
+branch, runs nothing, and still exits 0 — so a new command line would have been a
+suite that cannot fail. No new command line was added.
+
+**Two invariants run at the end of every case:** identities are **strictly
+increasing** (one assertion covering both the deterministic sort and the
+uniqueness de-duplication provides), and every non-empty `safe_fix_id` is in the
+three-entry allowlist. A third cross-check — the report's `error_count` and
+`warning_count` against its own issue list — was added during implementation and
+turned out to make a swapped-accumulator mutation detectable by *every* case that
+has issues.
+
+**No case asserts only a count.** Every one compares the **full sorted identity
+list** and reports a mismatch as a named set difference, distinguishing three
+distinct failures: a missing identity, an unexpected one, and — added after a
+duplicate was misdiagnosed as an ordering fault — an identity appearing more than
+once.
+
+| Case | What it pins | Result |
+| --- | --- | --- |
+| **G0** | `player_idle.marrow` is issue-free (0/0), and collection moves none of a session's seven observable values: serialized bytes, `dirty()`, `undo_count()`, `redo_count()` and all three revisions. Prints 6111 bytes / sha256 `c7d6c6de…` every run | PASS |
+| **G1** | All seven orphan overlay families, by full sorted identity list, each with its code, `Error` severity, `remove_orphan_overlay` fix and **typed family** | PASS |
+| **G2** | The animation-name authority is the `animation_edits` **fold**: `{Create,"ghost"}` → zero issues; `{Create}` then `{Delete}` → the seven return | PASS |
+| **G3** | Identity is position-independent — same overlay first and last in its vector, **collected in memory** so the format cannot normalise the position away | PASS |
+| **G4** | Two collections of one unchanged project agree member-by-member. **Witness, no story-owned inversion** | PASS |
+| **G5** | The seven identities survive `save_project` → `load_project`, and the materialized skeleton **does** contain `ghost` — the resurrection that makes this class an Error. **Integration witness, no story-owned inversion** | PASS |
+| **G6** | Every typed target: panels, and each selection replayed through `SelectionSet::replace` with the `AttachmentSelection` fields read **by name**; `draw_order` and `event` carry none | PASS |
+| **G7** | Weights. Control (canonical → zero), sum-0.7, reversed order, and the `1 − 1e-12` sub-tolerance drift; the sum-0.7 sub-case also proves a non-canonical project is loadable and still reported after a real round trip | PASS |
+| **G8** | A lone `{spine, 1e-9}` is an **Error** carrying **no** safe fix, quotes the canonicalizer's own sentence, and survives save → LOAD | PASS |
+| **G9** | (a) stale animation; (b) the same reference with the seven overlays present produces **no** stale-animation issue, because they resurrect it; (c) a non-adjacent repeated stale skin collapses to one while `default` emits nothing; (d) an empty active animation is the setup pose; (e) an orphan weight target **supersedes** its own non-canonical vertices | PASS |
+| **G10** | Severity counts on an asymmetric one-Error/two-Warning fixture (1/2), the two revisions stamped from the session, and a dirty session counting 1/3 with `project.unsaved_changes` appended, **re-sorted and re-counted** | PASS |
+| **G11** | A session with no project yields `std::nullopt` | PASS |
+| **G12a** | The escaping is applied and observable: a `|` inside an animation name escapes to `\|` | PASS |
+| **G12b** | The **collision** half, on `overlay.orphan_weight_target` — the one identity in this story whose tokens are all unconstrained. Two distinct targets, and unescaped they collapse to one | PASS |
+| **A1** | All four legacy members survive by name and JSON type; `issue_count` and `issues` added; issue-free fixture reports an empty array | PASS |
+| **A2** | AC3's numeric half: `warning_count == (project_dirty ? 1 : 0)` and `error_count == 0`, asserted on a **clean** project and again where the session is **dirty** | PASS |
+| **A3** | A throwaway project with one Error and two Warnings over the wire: counts, `issue_count == len(issues)`, the three identities in full, and typed bone/attachment selections reaching the wire | PASS |
+| **A4** | The absent safe fix is an **absent key**, not an empty string. No C++ case can see this — the field *is* empty in both worlds | PASS |
+| **A5** | Three consecutive `project.diagnostics` calls agree exactly, and a following `runtime.validate` still passes | PASS |
+| **M1** | Over the real socket: all six members with the right Python types, `issue_count == len(issues)`, the legacy numeric identity, and — separately — that the tool's `inputSchema` still declares **no** properties | PASS |
+
+### Inversions run
+
+**Twenty-six entries, of which I2 is seven separate runs — thirty-two recorded
+messages.** Every one was run against the **final from-scratch tree**, bit the
+case named, and was restored with the object files deleted before both builds.
+Where the plan's attribution turned out to be wrong, the **measured** attribution
+is recorded and the plan's is named beside it — attribution is by **run order**,
+not authoring order.
+
+| # | Mutation | First detector | Measured failure |
+| --- | --- | --- | --- |
+| **I1** | Resolve orphan animations against the **materialized document** instead of `authored_animation_names` | **G1** | `returned 0 issues, expected 7. Missing:` all seven identities. The story's central mutation: the phantoms are *in* that document, so the collector reports a clean project. G0 stays silent — `player_idle`'s only overlay animation is in the base catalog either way. Also fires at **A3** |
+| **I2a–g** | Drop **one** of the seven family calls from the sweep. Seven runs, one per family | **G1** ×7 | e.g. `returned 6 issues, expected 7. Missing: overlay.orphan_animation\|inherit\|ghost\|arm_l`. Each names **only its own** identity; none was inferred from another. The other six always still fire, which is why a count assertion would pass |
+| **I3** | Delete the `std::sort` from `finalize` | **G1** | `the identity SETS agree but the ORDER differs. Actual order: transform, inherit, deform, …` — **G9(c) is an independent detector**: with G1, G2 and G5 removed it reports the surviving non-adjacent duplicate |
+| **I4** | Delete the adjacent-unique de-duplication (keep the sort) | **G9(c)** | `returned 3 issues, expected 2 … an identity appears MORE THAN ONCE — de-duplication did not collapse it`. `preview_skins` is the one vector nothing else refuses duplicates in |
+| **I5** | Delete `escape_identity_token` | **G12a** | `Missing: …\|ghost\\\|arm_l\|spine\|rotate. Unexpected: …\|ghost\|arm_l\|spine\|rotate`. With G12a's check neutered (the call preserved), **G12b** reports the real hazard: `two distinct orphan weight targets collapsed to 1 issue(s)` |
+| **I6** | Append the record's vector index to the identity | **G1** | `Missing: …\|arm_l\|rotate. Unexpected: …\|arm_l\|rotate\|0`. With G1's and G2's comparisons neutered, **G3** reports the property: `the same overlay produced two identities: '…\|rotate\|0' and '…\|rotate\|2'` |
+| **I7** | Compare influences with `std::abs(a-b) < 1e-9` instead of `==` | **G7 (sub-tolerance drift)** | `returned 0 issues, expected 1 … weights.non_canonical\|mesh_base\|body\|body_mesh\|1`. The sum-0.7 and reversed sub-cases both still fire, so only the deliberately sized drift distinguishes the predicates |
+| **I8** | Give `weights.uncanonicalizable` a `normalize_weights` fix | **G8** | `carries safe_fix_id 'normalize_weights', expected none`. The allowlist invariant **passes** — that id *is* allowlisted — which is exactly why an allowlist check is not a substitute. **A4 is a second detector, in a different binary** |
+| **I9** | Emit `safe_fix_id` as `""` rather than omitting the member | **A4** | `carries a 'safe_fix_id' member, expected the key to be absent`. **The project smoke exits 0**: the C++ field *is* empty in both worlds and no C++ case can see this |
+| **I10** | Build `AttachmentSelection` in the **edit's** field order (both sites) | **G6** | `has slot_name 'mesh_base' and skin_name 'body', expected slot_name 'body' and skin_name 'mesh_base'`. Counts, codes, identities, severities and panels are all still right |
+| **I11** | Remove the supersession — examine an orphan weight edit's vertices anyway | **G9(e)** | `returned 2 issues, expected 1. Unexpected: weights.non_canonical\|mesh_base\|body\|ghost_mesh\|0`. G7 and G8 both use a target that **resolves**, so the supersession never runs there |
+| **I12** | Resolve `preview.stale_animation` against `authored_animation_names` instead of the materialized skeleton | **G9(b)** | `returned 8 issues, expected 7. Unexpected: preview.stale_animation\|ghost`. G9(a) passes — with no overlays the two authorities agree, so G9(b) is the only fixture where they disagree |
+| **I13** | Count severities **before** appending `project.unsaved_changes` | **G10 (dirty session)** | `reported error_count 1 warning_count 2, expected 1 and 3`. **A2's dirty half is a second detector**, over the wire and in a different binary |
+| **I14** | Swap the two accumulators in `finalize` | **G1** *(plan said G10)* | `error_count 0 warning_count 7, expected 7/0`. **Over-determined**: with G1 removed, G2's count-versus-list cross-check fires — `the report counts 0 errors and 7 warnings, but its issue list holds 7 and 0`. G10's asymmetric one-Error/two-Warning fixture is a further detector; a symmetric fixture would see nothing |
+| **I15** | The handler stops emitting `review_queue_count` | **A1** | `the project.diagnostics payload is missing 'review_queue_count'. AC3 requires all four legacy members to survive` |
+| **I16** | Return a default `DiagnosticReport` instead of `std::nullopt` for a session with no project | **G11** | `returned a report (0 issues), expected std::nullopt`. Unreachable through the agent — `ensure_project_loaded` rejects first — so G11 is its only detector |
+| **I17** | The handler serializes only `issues.front()` | **A3** | `issue_count disagrees with the length of the issues array`, plus the identity and selection assertions. **This inversion found a defect in the case**: `issue_count` was first emitted from the serialized array, which made that assertion incapable of failing. It now comes from the report |
+| **I18** | `authored_animation_names` skips the `animation_edits` fold | **G2 (create)** | `returned 7 issues, expected 0 … a project-authored animation is not an orphan`. **G1 stays silent** — its fixture has an empty `animation_edits`, so the fold and the raw base document agree there |
+| **I19** | The MCP `inputSchema` grows a bogus `verbose` property | **M1's schema half** | `project.diagnostics declares input properties. The operation takes no arguments and MAR-186 adds none.` **Every wire assertion passed** — `MarrowClient.send_command` never consults `inputSchema` — so a sequence test alone would have passed over it |
+| **I21** | `const_cast` the session and `seek(0.5)` inside the collector | **G0** | `collect_session_diagnostics advanced preview_revision from 1 to 2`. This is what makes G0's seven-value snapshot non-vacuous: the values *can* move |
+| **I22** | Invert the stale-skin test — report skins that **do** resolve | **G0** | `player_idle.marrow must be issue-free …`. **Heavily over-determined**: with G0 removed, G1 fires immediately with `Unexpected: preview.stale_skin\|default`, because every project built by the suite's helper carries `preview_skins = ["default"]` |
+| **I23** | Orphan targets get `DiagnosticPanel::Project` instead of `Timeline` | **G6** | `overlay.orphan_animation\|deform\|ghost\|body\|body_mesh has panel 'project', expected 'timeline'`. Only G6 reads `target.panel` |
+| **I24** | Skip the weight-canonicality sweep (keep the orphan-target branch) | **G7 (sum 0.7)** | `returned 0 issues, expected 1 … weights.non_canonical\|mesh_base\|body\|body_mesh\|0`. With G7's block removed, **G8** fires — `Missing: weights.uncanonicalizable\|mesh_base\|body\|body_mesh\|0` |
+| **I25** | A detector emits `normalise_weights` (British spelling, not allowlisted) | **G7's explicit fix-id assertion** *(plan said the allowlist invariant)* | `expected a weights.non_canonical Warning carrying 'normalize_weights', got … fix 'normalise_weights'`. With that assertion neutered, **the allowlist invariant** fires: `carries safe_fix_id 'normalise_weights', which is not in the three-entry allowlist` |
+| **I26** | `collect_orphan_animation_overlays` sets `family = None` for the inherit call | **G1** | `the issue 'overlay.orphan_animation\|inherit\|ghost\|arm_l' carries family 'none', expected 'inherit'`. Identity, code, severity, fix and count are all still right — `family` is carried beside the identity, not derived from it |
+| **I20** | `#include "shell_state.hpp"` in `diagnostics.cpp` | **Task 9's grep gate** | `grep -nE "imgui\|ImGui\|shell_\|sokol"` becomes non-empty. **Recorded as a scope check, not as coverage** — AC2's "UI-free" has no runtime symptom |
+
+**Six uniqueness demonstrations were run, not asserted:** I3 → G9(c), I5 → G12b,
+I6 → G3, I8 → A4, I13 → A2, I14 → G2, I22 → G1, I24 → G8, I25 → the allowlist
+invariant. Two of them (I14, I25) **corrected the plan's attribution** rather than
+confirming it.
+
+**Every project-smoke message reproduced byte-identically between the first run
+and the final from-scratch re-run**, compared with `cmp` over whole recorded
+strings. Three entries (I1, I2a, I8) show *additional* lines in the final run
+only because the re-run also executes the agent smoke, which those first runs did
+not — a second detector appearing, not a message changing.
+
+### Methodology
+
+- **Every verification build deleted the object files** — `/tmp/mar186-rebuild.sh`
+  removes the six relevant `.o` files and then builds **all** targets — and this
+  was done after the mutation **and** after the restore, never `touch`. The
+  hazard is live in this tree, measured rather than assumed: the generator is
+  `Unix Makefiles` and `make --version` is **GNU Make 3.81**, whose one-second
+  mtime granularity is what produced MAR-184's nine false "did not bite"
+  readings. Both directions matter: a skipped *mutation* build is a false pass,
+  and a skipped *restore* build leaves the mutated object in place so the next
+  inversion in a different translation unit is attributed to the wrong mutation.
+- **Restores were verified by `cmp` against an independently kept pristine copy**,
+  never by `git checkout`, `git restore`, `git stash` or `git reset` — no such
+  command was run against a tracked file at any point.
+- **Every inversion was re-run against the final from-scratch tree** after
+  `rm -rf build`, and the messages compared against the first-run recordings.
+- **Neutering preserved the call.** `if (false && …)` was not used: its `&&`
+  short-circuits away the very call being relied on. Where a detector had to be
+  silenced for a uniqueness demonstration, either `(void)f(...)` was used — the
+  call runs, only the `return false` is removed — or the case's whole block was
+  removed after establishing that it shares no state with the case being
+  demonstrated (each builds its own base, project and report). One neutering
+  attempt that removed *every* `return false` in a block crashed on an unguarded
+  `front()` and was discarded rather than reported as a result.
+- **Uniqueness was demonstrated by running, not by reasoning**, and where a
+  demonstration showed the plan's attribution was wrong, the measured attribution
+  is what is recorded below.
+- **The containment sweep was widened to the whole repository** after MAR-185's
+  review recorded that a sweep is only as good as its scope. It had first been
+  run over the two files already known to name the enums, which is the same
+  narrow-scope mistake in a smaller form. Widened result: all **21**
+  `case Diagnostic*` labels are in `src/editor/diagnostics.cpp` and nowhere else,
+  and the four enum names appear in exactly four files — the header, that source,
+  `editor_project_smoke.cpp` and `agent_handlers_inspection.cpp`, the latter two
+  by `==`/`!=` comparison only.
+- **A sweep that returns nothing has to be shown to have run.** The first attempt
+  at the repo-wide sweep above was written with unquoted `--include=*.cpp`, which
+  zsh glob-expanded before `grep` ever saw it; the command failed and printed a
+  confident `(none)`. It was caught only because the shell's error was visible in
+  the same output. A "no hits" result is evidence only once the command is known
+  to have executed against the intended set.
+
+### Document errors found
+
+Every story in this arc has found errors in its governing documents. This one
+inherited a design and plan that had **already** been corrected once by a
+downstream review (their E9–E14 / A4–A8), so those are recorded as *incoming*
+rather than rediscovered, and Task 0 plus implementation found **eight more**.
+
+| # | Source | Claim | Measured |
+| --- | --- | --- | --- |
+| **D1** | The team lead's brief | HEAD is `380479a` | **`68720d9`.** MAR-185's commit has been amended at least twice — `5a56663` (the documents' baseline) → `380479a` (the brief) → `68720d9`. All three still resolve; only the tip moved |
+| **D2** | Design §6.2 G7, plan Task 4.1 | "The edit untouched → **zero** issues" is the control that makes the other sub-cases mean something | **False, and it fails on correct code.** `mesh_weight_edit_from_runtime` over `mesh_base`/`body`/`body_mesh` returns a vertex 2 that is already non-canonical (`[spine=0.25, arm_l=0.75]`, ascending). The control yields one issue, and each perturbation sub-case yields **two**. Fixed by canonicalizing the baseline first. Same class as the incoming three-vs-four parser-rule error: a gate that fails on a correct tree |
+| **D3** | Plan §B I7, design §5 | A **one-ULP** perturbation distinguishes an exact `==` from a `1e-9` tolerance; the failure text is "produced 0 issues, expected 1" | **The mutation is undemonstrable that way and the text describes CORRECT behaviour.** One ULP of 1.0 is `DBL_EPSILON/2 ≈ 1.11e-16`, inside `kMeshWeightSumTolerance` (`4·DBL_EPSILON ≈ 8.88e-16`), so the canonicalizer skips the division and correct code emits nothing. Replaced with a `1 − 1e-12` scale, measured into the gap between the two tolerances |
+| **D4** | Design §1.1's table, plan §A.3 | Four sites assert on the `project.diagnostics` payload | **Five.** `agent_dispatch_smoke.cpp:1132` captures the WHOLE compacted `scene_delta` and `:1310-1314` asserts it byte-identical after a run of dry-runs. It binds AC3 harder than either document states, and it is a free pre-existing detector for payload non-determinism |
+| **D5** | Design §6.2 G12, plan Task 3.1 | An identity **collision** can be built in the orphan-animation families, and asserting a count of two catches the resulting deletion | **Not constructible there, so the count assertion was vacuous.** Each family's identity has fixed arity and the family token is a literal, so absorbing a separator changes the arity; of the remaining tokens only the animation name is unconstrained, because a bone or slot that does not resolve is a hard load error. Split into G12a (escaping observable by identity, in that family) and **G12b** on `overlay.orphan_weight_target`, whose three tokens are all free — where the collapse from two issues to one was then measured |
+| **D6** | Plan Task 3.1 G3 | Two round-tripped projects with the orphan first and last detect an index-derived identity | **They do not.** `.marrow` keys overlays by animation name and `Value::Object` is a `std::map`, so a reload normalises the vector order and the orphan lands at index 0 in both. Found by applying the index mutation and watching G3 pass its own comparison. G3 now collects in memory |
+| **D7** | Plan §B I3 → G9(c) | Without the sort, the duplicate `preview.stale_skin` survives | **Not with the specified fixture.** `["default","ghost_skin","ghost_skin"]` emits its two issues *consecutively* (`default` emits nothing), so adjacent-unique de-duplication collapses them with or without the sort. Fixed by interleaving a second distinct stale skin, which also makes G9(c) an independent detector of the de-duplication |
+| **D8** | Plan Task 2.1 / Task 6.3 | G0's session half belongs to Task 2, while `collect_session_diagnostics` is implemented in Task 6 | **The two are inconsistent**: G0 as specified cannot pass until Task 6. Resolved by implementing the wrapper's opened-session guard and delegation in Task 2 — the minimum G0 needs — and leaving the `project.unsaved_changes` append, re-sort and re-count to Task 6, where I13 and I14 still land |
+
+Three smaller measured corrections, recorded because a wrong justification for a
+right decision still misleads:
+
+- **`ensure_project_loaded` is at `agent_dispatch.cpp:542`**, not `:536` or
+  `:531-534`. Fourteen cited line numbers had drifted in total — the largest being
+  the review-queue assertions the plan names as a pre-existing detector, which
+  moved from `:3881-3885` to `:4139-4146` — but **every citation still named the
+  construct its document said it named**, so none was a blocking finding.
+- **Design §3.4 justifies the `nullopt` branch as "following `runtime.validate`'s
+  shape"**; `runtime.validate` actually uses `make_error_with_delta`. `make_error`
+  is still the right choice for a no-payload error, so the decision stands and
+  only the justification was wrong.
+- **Plan §B I20 says a shell include "compiles fine" in this target.**
+  `#include "shell_state.hpp"` in `diagnostics.cpp` in fact fails to compile. The
+  grep gate is still the right mechanism — a shell or sokol header without
+  external dependencies would slip through silently — but the stated reason is
+  not what happens for that particular header.
+
+### Not independently covered
+
+- **The largest orphan class is unreachable.** An overlay naming a missing bone
+  or slot, or a weight influence naming a missing bone, makes the project
+  **unopenable**. MAR-186 reports none of them, by AC2. The user's experience of
+  that class is the runtime's load error, unchanged.
+- **`weights.uncanonicalizable` has no repair.** It is reported and left; a user
+  must edit the vertex by hand or delete the overlay. Normalization is precisely
+  what cannot fix it, which is why its `safe_fix_id` is deliberately absent.
+- **The orphan-weight-target supersession hides real weight problems** on an
+  orphaned edit until the orphan is fixed. Deliberate: the weights are dead data
+  the runtime never sees, and a second row would vanish under MAR-187's
+  `remove_orphan_overlay` without the user having addressed it. G9(e) pins it.
+- **Fixing an orphan overlay can CREATE a stale-preview issue.** If
+  `active_animation` names a phantom animation that overlays resurrected,
+  removing the overlay makes the preview reference stale. Deliberate and
+  asserted, from the other side, by G9(b); MAR-187's revision-keyed refresh is
+  what surfaces it.
+- **AC5's selection half is proved structurally, not by assertion.** The
+  collector takes no `SelectionSet`, mutable or otherwise, so there is nothing
+  for it to write to. A case that built a `SelectionSet`, ran collection and
+  asserted it unchanged would read state a passing run leaves at its default —
+  vacuous — and none was written. What *is* asserted is the substantive half:
+  each target fed to `SelectionSet::replace` makes the expected typed identity
+  active, with the transposed `AttachmentSelection` fields read by name.
+- **G4 and G5 are witnesses with no story-owned inversion**, and G0's
+  byte-identity half is a non-effect assertion. No mutation of MAR-186's own code
+  makes two collections of an unchanged project differ, or an unchanged project
+  serialize differently, without failing something louder first. G0's *other*
+  halves are inverted (I21, I22) and that is where its falsifiability comes from.
+- **`collect_session_diagnostics`' `nullopt` branch is unreachable through the
+  agent** — `ensure_project_loaded` (`agent_dispatch.cpp:542`) rejects first — and
+  its `base_skeleton_document() == nullptr` sub-condition is not separately
+  reachable at all, because `open` sets the document and the runtime data
+  together. G11 reaches the branch from C++ and is its only detector; the
+  sub-condition is recorded as defensive, mirroring `runtime.validate`'s own
+  unexercised null-document guard.
+- **`diagnostic_panel_name` and `diagnostic_severity_name` are total** over three
+  and two values; every arm is read by a message or a payload string some case
+  already asserts.
+- **`review_queue_count`'s expression** is copied verbatim from the shipped
+  branch and is already covered by the review-queue assertions this story did not
+  touch. MAR-186 adds no inversion for a guard it did not write. The review queue
+  is deliberately **not** an issue: making it one would move `warning_count`
+  whenever an agent queues a save, which the shipped "unchanged across queueing
+  six reviews" assertion forbids.
+- **`-Wswitch` warns but does not stop the build**, and **GCC needs `-Wall` for
+  the same diagnostic**, so a non-Clang build of this tree is silent about a
+  missed exhaustive-switch arm. The `-Werror=switch` recipe is recorded above as
+  a deferred mitigation, never as coverage.
+- **No compiler checks `collect_orphan_animation_overlays`' seven family calls.**
+  An eighth `ProjectData` overlay vector added without an eighth call produces no
+  diagnostic and no failure from any shipped case. The `static_assert` beside the
+  list is a guard, not a proof.
+- **Nothing is persisted.** A diagnostic is recomputed on demand; a project that
+  is opened, inspected and closed leaves no trace of what was found — which is
+  also what makes AC2's "read-only" total.
+- **Carried forward, unchanged by this story:** `shell_main.cpp`'s frame body is
+  still reachable from no test; `commit_path_choice` still has zero end-to-end
+  coverage; the runtime still accepts a negative first inherit key time and inert
+  `curve` data on an inherit key; the empty-edit hazard is still fixed only for
+  the inherit family; macOS case duplicates of a **missing** file remain two
+  recent-project entries.
 
 ## MAR-185 Complete Inherit Timeline Editing Parity Validation Results
 

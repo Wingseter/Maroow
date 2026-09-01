@@ -479,7 +479,48 @@ async def test(parameter_only=False):
             },
         )
     )
-    require_ok("project.diagnostics", await client.send_command("project.diagnostics"))
+    diagnostics = require_ok(
+        "project.diagnostics", await client.send_command("project.diagnostics")
+    )
+
+    # MAR-186. The operation COUNT is unchanged -- 66 before, 66 after -- because
+    # this story adds no operation and no tool, so the two registry assertions at
+    # the top of this file cannot see it at all. What changed is the PAYLOAD of
+    # an operation that already existed.
+    #
+    # The four legacy summary members keep their exact names and types, and two
+    # members are added. `issue_count` is asserted against the length of
+    # `issues` because the C++ handler emits it from the report rather than from
+    # the serialized array: a serializer that truncated the array would
+    # otherwise keep the two consistent with each other while dropping issues.
+    diagnostics_delta = diagnostics["scene_delta"]
+    assert isinstance(diagnostics_delta["error_count"], (int, float))
+    assert isinstance(diagnostics_delta["warning_count"], (int, float))
+    assert isinstance(diagnostics_delta["project_dirty"], bool)
+    assert isinstance(diagnostics_delta["review_queue_count"], (int, float))
+    assert isinstance(diagnostics_delta["issue_count"], (int, float))
+    assert isinstance(diagnostics_delta["issues"], list)
+    assert diagnostics_delta["issue_count"] == len(diagnostics_delta["issues"])
+    # player_idle.marrow is issue-free, and `warning_count` is therefore still
+    # numerically the legacy `dirty ? 1 : 0`.
+    assert diagnostics_delta["error_count"] == 0
+    assert diagnostics_delta["warning_count"] == (
+        1 if diagnostics_delta["project_dirty"] else 0
+    )
+
+    # The schema half, and the reason it is separate from the wire half above:
+    # MarrowClient.send_command writes JSON straight to the agent socket and
+    # never consults inputSchema, so a wire call carrying a bogus argument
+    # succeeds regardless. A sequence test alone would pass over a schema that
+    # had grown an argument this operation does not take. Same shape as the
+    # MAR-179 comment near the top of this file.
+    diagnostics_tool = {tool.name: tool for tool in inspection.get_tools()}[
+        "project.diagnostics"
+    ]
+    assert diagnostics_tool.inputSchema["properties"] == {}, (
+        "project.diagnostics declares input properties. The operation takes no "
+        "arguments and MAR-186 adds none."
+    )
 
     aim_duration_before = require_ok(
         "timeline.describe aim before duration edit",

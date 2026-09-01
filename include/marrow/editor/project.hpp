@@ -1165,6 +1165,33 @@ runtime::json::Document build_project_runtime_document(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document);
 /**
+ * @brief Animation names the project authors, after catalog edits and before overlays.
+ * @param project Project whose `animation_edits` fold is applied.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @return Sorted, unique animation names the project legitimately declares.
+ *
+ * This is the authority for "does this animation exist", and neither obvious
+ * alternative is correct. The **base document** is wrong because an
+ * `AnimationEdit{Create}` can declare an animation that exists only in the
+ * project. The **materialized `SkeletonData`** is wrong because the overlay
+ * merge calls `ensure_object_member(animations, edit.animation_name)`, which
+ * *creates* the very phantom animations an orphan detector is looking for — a
+ * collector resolving against it reports a clean project, always.
+ *
+ * The authority is the state `build_runtime_document` is in immediately after
+ * `apply_animation_edits` and before the overlay merge. This function lives in
+ * `project.cpp` because `apply_animation_edits` is in that file's anonymous
+ * namespace and cannot be reached from anywhere else; re-deriving the
+ * Create/Rename/Delete/SetDuration/Unknown fold elsewhere would be a second
+ * source of truth that drifts the first time an `AnimationEditKind` is added.
+ *
+ * The whole document root is copied rather than just `animations`, because a
+ * `Rename` also rewrites `mixing` references.
+ */
+std::vector<std::string> authored_animation_names(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document);
+/**
  * @brief Serializes a project into `.marrow` JSON text.
  * @param project Project to serialize.
  * @return Pretty-printed `.marrow` JSON text.

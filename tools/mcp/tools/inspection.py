@@ -107,7 +107,12 @@ def get_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="project.diagnostics",
-            description="Return lightweight project diagnostics and review queue counts",
+            description=(
+                "Return structured project diagnostics: the legacy error/warning/"
+                "dirty/review-queue summary plus an issues list, each issue "
+                "carrying a stable code, severity, identity, message, typed "
+                "navigation target and an optional safe-fix id"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {}

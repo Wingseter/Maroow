@@ -67,7 +67,22 @@ There is no separate `move_bone` op - bone motion is expressed as
 - `constraints.list`: Lists IK, path, transform, and physics constraints.
 - `timeline.describe`: Summarizes authored timelines for one animation.
 - `mesh.describe`: Summarizes one mesh attachment.
-- `project.diagnostics`: Returns lightweight project diagnostics.
+- `project.diagnostics`: Returns structured project diagnostics. The four legacy
+  summary members are preserved with their exact names and types —
+  `error_count`, `warning_count`, `project_dirty`, `review_queue_count` — and
+  `issue_count` plus an `issues` array are added. `error_count` and
+  `warning_count` are now severity counts, which stays numerically identical to
+  the previous behaviour because an unsaved project contributes a
+  `project.unsaved_changes` warning of its own. Each issue carries a stable
+  `code`, a `severity`, an `identity` that is derived only from the coordinates
+  of the thing it is about (so it survives edits that move the offending record
+  within its vector), a `message`, a typed `target` (`panel`, plus an optional
+  `animation`, `vertex_index` and `selection`), an optional `family` naming the
+  project overlay vector, and an optional `safe_fix_id` drawn from a three-entry
+  allowlist: `remove_orphan_overlay`, `normalize_weights`,
+  `reset_preview_reference`. `safe_fix_id` is **omitted** rather than emitted
+  empty where no safe repair exists. Collection is read-only: it never dirties
+  the project, moves a revision, or repairs anything.
 - `export.preview`: Returns resolved export targets without writing files.
 - `runtime.validate`: Builds runtime data and returns diagnostics.
 - `compare_runtime_export`: Exports temporary JSON/binary files under `/tmp`

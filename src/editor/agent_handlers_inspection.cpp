@@ -4,7 +4,9 @@
 #include <string>
 #include <system_error>
 #include <utility>
+#include <variant>
 
+#include "marrow/editor/diagnostics.hpp"
 #include "marrow/runtime/animation_compare.hpp"
 
 namespace marrow::editor::agent_detail {
@@ -340,13 +342,96 @@ AgentDispatchResult handle_inspection_operation(
     }
 
     if (op == "project.diagnostics") {
+        const auto report = collect_session_diagnostics(session);
+        if (!report.has_value()) {
+            // Unreachable through the dispatcher: `ensure_project_loaded`
+            // rejects first. Written to mirror `runtime.validate`'s own
+            // null-document guard rather than left to crash.
+            return make_error(
+                "Project diagnostics are unavailable.",
+                op,
+                spec,
+                "diagnostics_unavailable");
+        }
+
         json::Value::Object diagnostics;
-        diagnostics.emplace("error_count", number_value(std::size_t{0}));
-        diagnostics.emplace(
-            "warning_count",
-            number_value(static_cast<std::size_t>(session.dirty() ? 1U : 0U)));
+        // The four legacy members keep their exact names, types and
+        // expressions. `error_count` and `warning_count` are now severity
+        // counts, which is what makes them numerically identical to the shipped
+        // values on a project with no other issues: a clean project is 0/0 and
+        // a dirty one is 0/1, because `collect_session_diagnostics` emits a
+        // `project.unsaved_changes` Warning exactly when `session.dirty()`.
+        diagnostics.emplace("error_count", number_value(report->error_count));
+        diagnostics.emplace("warning_count", number_value(report->warning_count));
         diagnostics.emplace("project_dirty", bool_value(session.dirty()));
+        // Verbatim from the shipped branch, not re-derived. The review queue is
+        // a permissions concept, not a project defect, so it is deliberately
+        // NOT an issue -- turning it into one would move `warning_count`
+        // whenever an agent queues a save, and a shipped case asserts this
+        // payload is unchanged across queueing six reviews.
         diagnostics.emplace("review_queue_count", number_value(control.review_queue.size()));
+
+        json::Value::Array issues;
+        issues.reserve(report->issues.size());
+        for (const DiagnosticIssue& issue : report->issues) {
+            json::Value::Object entry;
+            entry.emplace("code", string_value(std::string(diagnostic_code_name(issue.code))));
+            if (issue.family != DiagnosticOverlayFamily::None) {
+                entry.emplace(
+                    "family",
+                    string_value(std::string(diagnostic_overlay_family_name(issue.family))));
+            }
+            entry.emplace(
+                "severity",
+                string_value(std::string(diagnostic_severity_name(issue.severity))));
+            entry.emplace("identity", string_value(issue.identity));
+            entry.emplace("message", string_value(issue.message));
+
+            json::Value::Object target;
+            target.emplace(
+                "panel",
+                string_value(std::string(diagnostic_panel_name(issue.target.panel))));
+            if (!issue.target.animation_name.empty()) {
+                target.emplace("animation", string_value(issue.target.animation_name));
+            }
+            if (issue.target.vertex_index.has_value()) {
+                target.emplace("vertex_index", number_value(*issue.target.vertex_index));
+            }
+            if (issue.target.selection.has_value()) {
+                json::Value::Object selection;
+                if (const auto* bone = std::get_if<BoneSelection>(&*issue.target.selection)) {
+                    selection.emplace("kind", string_value("bone"));
+                    selection.emplace("bone", string_value(bone->bone_name));
+                } else if (const auto* slot =
+                               std::get_if<SlotSelection>(&*issue.target.selection)) {
+                    selection.emplace("kind", string_value("slot"));
+                    selection.emplace("slot", string_value(slot->slot_name));
+                } else if (const auto* attachment =
+                               std::get_if<AttachmentSelection>(&*issue.target.selection)) {
+                    selection.emplace("kind", string_value("attachment"));
+                    selection.emplace("slot", string_value(attachment->slot_name));
+                    selection.emplace("skin", string_value(attachment->skin_name));
+                    selection.emplace(
+                        "attachment", string_value(attachment->attachment_name));
+                }
+                target.emplace("selection", object_value(std::move(selection)));
+            }
+            entry.emplace("target", object_value(std::move(target)));
+
+            // An absent safe fix OMITS the member rather than emitting "". An
+            // empty string is a value a careless consumer treats as present.
+            if (!issue.safe_fix_id.empty()) {
+                entry.emplace("safe_fix_id", string_value(issue.safe_fix_id));
+            }
+            issues.push_back(object_value(std::move(entry)));
+        }
+        // From the REPORT, not from the array just built. Deriving it from the
+        // array would make the wire assertion `issue_count == len(issues)`
+        // incapable of failing -- a truncating serializer would keep them
+        // consistent with each other while dropping issues.
+        diagnostics.emplace("issue_count", number_value(report->issues.size()));
+        diagnostics.emplace("issues", array_value(std::move(issues)));
+
         return make_success(
             "Project diagnostics reported",
             op,

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +23,8 @@
 
 #include "marrow/marrow_c.h"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/diagnostics.hpp"
+#include "marrow/editor/project.hpp"
 #include "marrow/runtime/json.hpp"
 
 namespace {
@@ -618,6 +621,344 @@ void expect_revision_advanced(
         std::string(revision_name) + " did not advance");
 }
 
+// ===========================================================================
+// MAR-186 -- the structured `project.diagnostics` payload over the C ABI.
+//
+// The four legacy members keep their exact names, types and expressions; only
+// `issue_count` and `issues` are added. The regression witnesses for that are
+// the assertions this story did NOT touch: `review_queue_count` after six
+// reviews, `project_dirty` unchanged across queueing them, and -- the strictest
+// and the one neither governing document recorded -- the "dry-run project
+// immutability" check, which compares the WHOLE compacted `scene_delta` of
+// `project.diagnostics` before and after a run of dry-run operations.
+// ===========================================================================
+
+const json::Value* array_member(const json::Value* object, std::string_view name) {
+    const json::Value* value = member(object, name);
+    return value != nullptr && value->is_array() ? value : nullptr;
+}
+
+/// A1 -- every legacy member survives, by name and by JSON type, and the two
+/// new members are present with `player_idle.marrow`'s issue-free values.
+void check_mar186_legacy_shape(
+    Harness& harness,
+    const DispatchObservation& diagnostics) {
+    const json::Value* delta = diagnostics.scene_delta();
+    harness.expect(
+        number_member(delta, "error_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'error_count' as a number");
+    harness.expect(
+        number_member(delta, "warning_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'warning_count' as a number");
+    harness.expect(
+        bool_member(delta, "project_dirty").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'project_dirty' as a boolean");
+    harness.expect(
+        number_member(delta, "review_queue_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'review_queue_count'. AC3 "
+        "requires all four legacy members to survive");
+    harness.expect(
+        number_member(delta, "issue_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'issue_count' as a number");
+    const json::Value* issues = array_member(delta, "issues");
+    harness.expect(
+        issues != nullptr,
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'issues' as an array");
+    if (issues != nullptr) {
+        harness.expect(
+            issues->as_array().empty() &&
+                number_member(delta, "issue_count") == std::optional<double>(0.0),
+            "MAR-186 A1",
+            "player_idle.marrow is issue-free, so 'issues' must be empty and "
+            "'issue_count' zero");
+    }
+
+    // A2's clean half -- AC3's numeric compatibility. On a project with no
+    // other warnings, `warning_count` is still exactly the shipped
+    // `session.dirty() ? 1 : 0`.
+    const auto dirty = bool_member(delta, "project_dirty");
+    const auto warnings = number_member(delta, "warning_count");
+    const auto errors = number_member(delta, "error_count");
+    harness.expect(
+        dirty.has_value() && warnings.has_value() &&
+            warnings == std::optional<double>(*dirty ? 1.0 : 0.0),
+        "MAR-186 A2",
+        "warning_count is no longer numerically the legacy dirty ? 1 : 0 on an "
+        "issue-free project");
+    harness.expect(
+        errors == std::optional<double>(0.0),
+        "MAR-186 A2",
+        "error_count is no longer 0 on an issue-free project");
+}
+
+/// Builds A3-A5's throwaway project: one Error and two Warnings, plus a
+/// separate one carrying the fix-less `weights.uncanonicalizable`.
+bool write_mar186_issue_project(
+    const std::filesystem::path& path,
+    bool uncanonicalizable) {
+    const auto loaded =
+        marrow::editor::load_project("assets/fixtures/player_idle.marrow");
+    if (!loaded) {
+        return false;
+    }
+    marrow::editor::ProjectData project = *loaded.project;
+    project.source_path = path;
+    // The fixture stores its runtime asset paths RELATIVE to its own directory,
+    // so writing the copy into a scratch directory would leave them dangling
+    // and `load_project` would refuse it. Absolutise them.
+    project.runtime_assets.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/player_idle.mskl");
+    project.runtime_assets.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+
+    // 1 Error: an orphan transform overlay naming an animation nothing authors.
+    marrow::editor::TransformTimelineEdit orphan;
+    orphan.animation_name = "ghost";
+    orphan.bone_name = "arm_l";
+    orphan.channel = marrow::editor::TransformTimelineChannel::Rotate;
+    orphan.keyframes.push_back({});
+    project.transform_timeline_edits.push_back(orphan);
+
+    // 1 Warning: a non-canonical weight vertex.
+    //
+    // Built from the PUBLIC runtime geometry rather than through
+    // `mesh_weight_model`: that header lives in `src/editor/` and this binary
+    // does not add that include directory (only `marrow_project_smoke` does,
+    // for its own use). The vertex COUNT still has to match the attachment --
+    // a mismatch makes the project unopenable -- so it is read off the mesh.
+    const auto body_slot = loaded.skeleton_data->find_slot_index("body");
+    const auto* attachment = body_slot.has_value()
+        ? loaded.skeleton_data->find_attachment("mesh_base", *body_slot, "body_mesh")
+        : nullptr;
+    if (attachment == nullptr || attachment->mesh_geometry == nullptr) {
+        return false;
+    }
+    const std::size_t vertex_count = attachment->mesh_geometry->weights.size();
+    if (vertex_count == 0U) {
+        return false;
+    }
+    marrow::editor::MeshWeightAttachmentEdit weights;
+    weights.skin_name = "mesh_base";
+    weights.slot_name = "body";
+    weights.attachment_name = "body_mesh";
+    for (std::size_t index = 0; index < vertex_count; ++index) {
+        marrow::editor::MeshWeightVertexEdit vertex;
+        if (index == 0U && uncanonicalizable) {
+            // Below kMeshWeightEpsilon: the canonicalizer rejects it outright,
+            // and no safe fix exists.
+            vertex.influences = {{"spine", 0.0, 0.0, 1e-9}};
+        } else if (index == 0U) {
+            // Ascending weight order: non-canonical, and far enough from the
+            // fixed point that no serializer rounding can remove it.
+            vertex.influences = {
+                {"spine", 0.0, 0.0, 0.25}, {"arm_l", 0.0, 0.0, 0.75}};
+        } else {
+            // Canonical: descending, unit sum. These must produce NO issue, or
+            // the identity assertions below would be measuring the wrong thing.
+            vertex.influences = {{"spine", 0.0, 0.0, 1.0}};
+        }
+        weights.vertices.push_back(vertex);
+    }
+    project.mesh_weight_attachment_edits = {weights};
+
+    // 1 Warning: a stale preview skin.
+    project.editor_metadata.preview_skins = {"default", "ghost_skin"};
+
+    return static_cast<bool>(marrow::editor::save_project(project, path));
+}
+
+/// A3-A5 over the wire, on a project that actually carries issues.
+bool exercise_mar186_diagnostics(Harness& harness) {
+    const auto unique_suffix =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        ("marrow-mar186-agent-" + std::to_string(unique_suffix));
+    std::error_code ignored;
+    std::filesystem::create_directories(directory, ignored);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored_error;
+            std::filesystem::remove_all(path, ignored_error);
+        }
+    } cleanup{directory};
+
+    const std::filesystem::path issue_path = directory / "mar186_issues.marrow";
+    if (!write_mar186_issue_project(issue_path, false)) {
+        harness.expect(false, "MAR-186 A3", "could not author the issue project");
+        return false;
+    }
+
+    MarrowProject* issue_project = nullptr;
+    if (marrow_editor_project_load(issue_path.string().c_str(), &issue_project) !=
+            MARROW_STATUS_OK ||
+        issue_project == nullptr) {
+        MarrowStringView error{};
+        marrow_get_last_error_message(&error);
+        harness.expect(
+            false,
+            "MAR-186 A3",
+            std::string(error.data ? error.data : "", error.size));
+        return false;
+    }
+    harness.set_project(issue_project);
+
+    const DispatchObservation first = harness.invoke(
+        "MAR-186 A3 project.diagnostics", "{\"op\":\"project.diagnostics\"}");
+    const json::Value* delta = first.scene_delta();
+    const auto dirty = bool_member(delta, "project_dirty");
+    const json::Value* issues = array_member(delta, "issues");
+    harness.expect(
+        issues != nullptr,
+        "MAR-186 A3",
+        "the payload carries no 'issues' array");
+    if (issues == nullptr) {
+        marrow_editor_project_destroy(issue_project);
+        return false;
+    }
+    harness.expect(
+        number_member(delta, "issue_count") ==
+            std::optional<double>(static_cast<double>(issues->as_array().size())),
+        "MAR-186 A3",
+        "issue_count disagrees with the length of the issues array");
+    harness.expect(
+        number_member(delta, "error_count") == std::optional<double>(1.0),
+        "MAR-186 A3",
+        "expected exactly one Error issue over the wire");
+    harness.expect(
+        dirty.has_value() &&
+            number_member(delta, "warning_count") ==
+                std::optional<double>(*dirty ? 3.0 : 2.0),
+        "MAR-186 A3",
+        "expected two project warnings plus the unsaved-changes warning only "
+        "when the session is dirty");
+
+    // Each issue object, by name. The identities are the contract MAR-187
+    // consumes, so they are asserted in full rather than counted.
+    std::vector<std::string> identities;
+    for (const json::Value& issue : issues->as_array()) {
+        const auto identity = string_member(&issue, "identity");
+        harness.expect(
+            identity.has_value(),
+            "MAR-186 A3",
+            "an issue object carries no 'identity' string");
+        if (identity.has_value()) {
+            identities.emplace_back(*identity);
+        }
+        harness.expect(
+            string_member(&issue, "code").has_value() &&
+                string_member(&issue, "severity").has_value() &&
+                string_member(&issue, "message").has_value(),
+            "MAR-186 A3",
+            "an issue object is missing code, severity or message");
+        const json::Value* target = member(&issue, "target");
+        harness.expect(
+            string_member(target, "panel").has_value(),
+            "MAR-186 A3",
+            "an issue target carries no 'panel' string");
+    }
+    std::sort(identities.begin(), identities.end());
+    const std::vector<std::string> expected_identities = {
+        "overlay.orphan_animation|transform|ghost|arm_l|rotate",
+        "preview.stale_skin|ghost_skin",
+        "weights.non_canonical|mesh_base|body|body_mesh|0",
+    };
+    harness.expect(
+        identities == expected_identities,
+        "MAR-186 A3",
+        "the wire identities are not the three expected ones");
+
+    // The typed selection reaches the wire: MAR-187 navigates through it.
+    bool saw_bone_selection = false;
+    bool saw_attachment_selection = false;
+    for (const json::Value& issue : issues->as_array()) {
+        const json::Value* selection = member(member(&issue, "target"), "selection");
+        const auto kind = string_member(selection, "kind");
+        if (kind == std::optional<std::string_view>("bone")) {
+            saw_bone_selection = true;
+        } else if (kind == std::optional<std::string_view>("attachment")) {
+            saw_attachment_selection = true;
+        }
+    }
+    harness.expect(
+        saw_bone_selection && saw_attachment_selection,
+        "MAR-186 A3",
+        "the wire issues carry no typed bone and attachment selections");
+
+    // A5 -- inspection dirties nothing. Three consecutive calls must agree
+    // exactly, and a following runtime.validate must still pass.
+    const std::string first_payload = compact_scene_delta(first);
+    const DispatchObservation second = harness.invoke(
+        "MAR-186 A5 project.diagnostics repeat 1", "{\"op\":\"project.diagnostics\"}");
+    const DispatchObservation third = harness.invoke(
+        "MAR-186 A5 project.diagnostics repeat 2", "{\"op\":\"project.diagnostics\"}");
+    harness.expect(
+        compact_scene_delta(second) == first_payload &&
+            compact_scene_delta(third) == first_payload,
+        "MAR-186 A5",
+        "three consecutive project.diagnostics calls did not agree exactly");
+    harness.invoke(
+        "MAR-186 A5 runtime.validate after inspection",
+        "{\"op\":\"runtime.validate\"}");
+
+    marrow_editor_project_destroy(issue_project);
+
+    // A4 -- the absent safe fix is an ABSENT KEY, not an empty string. No C++
+    // case can see this: `DiagnosticIssue::safe_fix_id` IS the empty string in
+    // both worlds, and the difference exists only in the serialized object.
+    const std::filesystem::path fixless_path = directory / "mar186_fixless.marrow";
+    if (!write_mar186_issue_project(fixless_path, true)) {
+        harness.expect(false, "MAR-186 A4", "could not author the fix-less project");
+        return false;
+    }
+    MarrowProject* fixless_project = nullptr;
+    if (marrow_editor_project_load(fixless_path.string().c_str(), &fixless_project) !=
+            MARROW_STATUS_OK ||
+        fixless_project == nullptr) {
+        harness.expect(false, "MAR-186 A4", "the fix-less project failed to load");
+        return false;
+    }
+    harness.set_project(fixless_project);
+    const DispatchObservation fixless = harness.invoke(
+        "MAR-186 A4 project.diagnostics", "{\"op\":\"project.diagnostics\"}");
+    const json::Value* fixless_issues = array_member(fixless.scene_delta(), "issues");
+    bool saw_uncanonicalizable = false;
+    bool absent_key = true;
+    for (const json::Value* issues_value = fixless_issues;
+         issues_value != nullptr;
+         issues_value = nullptr) {
+        for (const json::Value& issue : issues_value->as_array()) {
+            if (string_member(&issue, "code") !=
+                std::optional<std::string_view>("weights.uncanonicalizable")) {
+                continue;
+            }
+            saw_uncanonicalizable = true;
+            if (json::find_member(issue, "safe_fix_id") != nullptr) {
+                absent_key = false;
+            }
+        }
+    }
+    harness.expect(
+        saw_uncanonicalizable,
+        "MAR-186 A4",
+        "the fix-less project produced no weights.uncanonicalizable issue");
+    harness.expect(
+        absent_key,
+        "MAR-186 A4",
+        "the weights.uncanonicalizable issue object carries a 'safe_fix_id' "
+        "member, expected the key to be absent -- an empty string is a value a "
+        "careless consumer treats as present");
+    marrow_editor_project_destroy(fixless_project);
+    return true;
+}
+
 bool exercise_parameter_operations(Harness& harness) {
     constexpr const char* kParameterProjectPath =
         "assets/fixtures/parameter_face_basic.marrow";
@@ -1055,6 +1396,8 @@ int main(int argc, char** argv) {
         "editor_arm_reach");
     (void)exercise_parameter_operations(harness);
     harness.set_project(project);
+    (void)exercise_mar186_diagnostics(harness);
+    harness.set_project(project);
     const DispatchObservation initial_timeline = harness.invoke(
         "timeline.describe initial",
         "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");
@@ -1085,6 +1428,7 @@ int main(int argc, char** argv) {
         "project.diagnostics initial",
         "{\"op\":\"project.diagnostics\"}");
     expect_scene_contains(harness, "project.diagnostics initial", initial_diagnostics, "error_count");
+    check_mar186_legacy_shape(harness, initial_diagnostics);
 
     const DispatchObservation export_preview = harness.invoke(
         "export.preview",
@@ -4061,6 +4405,28 @@ int main(int argc, char** argv) {
         "{\"op\":\"project.diagnostics\"}");
     const auto dirty_before_reviews =
         bool_member(diagnostics_before_reviews.scene_delta(), "project_dirty");
+    // MAR-186 A2, the DIRTY half. By this point the suite has run many live
+    // edits, so the session is dirty and `project.unsaved_changes` is in the
+    // report. AC3's numeric compatibility says `warning_count` must still be
+    // exactly the shipped `dirty ? 1 : 0` on a project with no other warnings,
+    // and this is the only assertion anywhere that sees the dirty side of it.
+    harness.expect(
+        dirty_before_reviews == std::optional<bool>(true),
+        "MAR-186 A2",
+        "the session is not dirty here, so A2's dirty half cannot run and the "
+        "assertion below would be vacuous");
+    harness.expect(
+        number_member(diagnostics_before_reviews.scene_delta(), "warning_count") ==
+            std::optional<double>(dirty_before_reviews == std::optional<bool>(true) ? 1.0 : 0.0),
+        "MAR-186 A2",
+        "warning_count is no longer numerically the legacy dirty ? 1 : 0 on a "
+        "DIRTY issue-free project -- counting severities before appending "
+        "project.unsaved_changes leaves it one short");
+    harness.expect(
+        number_member(diagnostics_before_reviews.scene_delta(), "error_count") ==
+            std::optional<double>(0.0),
+        "MAR-186 A2",
+        "error_count is no longer 0 on an issue-free project");
     std::uint64_t last_review_id = 0U;
     std::size_t review_count = 0U;
     const auto record_review = [&](

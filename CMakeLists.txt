@@ -508,6 +508,7 @@ add_library(marrow_editor STATIC
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
     src/editor/mesh_weight_model.cpp
+    src/editor/diagnostics.cpp
     src/editor/curve_auto.cpp
     src/editor/session.cpp
     src/editor/constraint_catalog.cpp
