@@ -44,7 +44,7 @@ correction naming an artefact must be resolved in the artefact.
 
 | # | Where | Claim | Finding |
 |---|---|---|---|
-| **F1** | The brief | *"MAR-180 extracted `atomic_file_write.{hpp,cpp}` with a process-global `RenameCallback` seam for exactly this kind of injection; read it and decide whether it suffices"* | **It does not suffice, and the reason is structural, not stylistic.** The callback is consulted at exactly one point — `atomic_file_write.cpp:212`, inside `write_file_atomically` — so it can only inject at a *rename of a file this story writes through that function*. Five of MAR-189's fourteen commit steps perform no such rename (§3.2). Accepted as a *component* (placement uses it), rejected as *the* seam. |
+| **F1** | The brief | *"MAR-180 extracted `atomic_file_write.{hpp,cpp}` with a process-global `RenameCallback` seam for exactly this kind of injection; read it and decide whether it suffices"* | **It does not suffice, and the reason is structural, not stylistic.** The callback is consulted at exactly one point — `atomic_file_write.cpp:212`, inside `write_file_atomically` — so it can only inject at a *rename of a file this story writes through that function*. Five of MAR-189's fifteen commit steps perform no such rename (§3.2). Accepted as a *component* (placement uses it), rejected as *the* seam. |
 | **F2** | The brief | *"MAR-189 is UI-free so [`CheckFrameBodies.cmake`] should be invisible"* | **Half right, and the other half is worse than the gate.** The gate greps only `draw_*_window(` calls between two anchors (`cmake/CheckFrameBodies.cmake:39-71`, compared at `:98`), so MAR-189 never trips it. But AC5 requires approval to *execute*, and today's approval is the `Acknowledge` button at `shell_agent_panel.cpp:148-181`, inside `draw_agent_window` — which is on the gate's own `_allowed_app_only` list because the smoke never enables `show_agent_panel`. **No test in this repository can observe that button.** See §9.1. |
 | **F3** | The brief | *"`agent_dispatch_smoke.cpp` (the `std::array<OperationExpectation, N>` bound — re-derive its line…)"* | Re-derived: **`:42`**, matching MAR-188's correction. **But MAR-189 does not touch it**: `import.psd_layers` already exists (`agent_dispatch.cpp:97`), so the registry stays at **66** and none of the eleven `!= 66U` guards, neither `test_client.py:53,55`, nor any prose site moves. Verified: `grep -c '^    {"' src/editor/agent_dispatch.cpp` = 66; guards split **7** `shell_smoke_graph.cpp` / **2** `shell_smoke_constraints.cpp` / **2** `shell_smoke_timeline.cpp`. |
 | **F4** | MAR-188's deliverable | `PsdReimportPlan` exposes `staged_skeleton_path`, `staged_atlas_path`, `staged_layers_directory` | **There is no `staged_texture_path`, and AC1 names textures explicitly.** `PsdImportResult::texture_path` exists (`psd_import.hpp:51`) and the planner discards it. MAR-189 must add the field (§2.2). |
@@ -403,7 +403,7 @@ sites. §9.3 records this as an interpretation, flagged rather than assumed.
 ### 3.1 Why `RenameCallback` is not enough (F1)
 
 `atomic_file_write.cpp:212` is the sole consult point. It fires only inside
-`write_file_atomically`. Of MAR-189's fourteen steps, **six** perform a rename
+`write_file_atomically`. Of MAR-189's fifteen steps, **six** perform a rename
 through that function (the four `Place*` steps plus the journal manifest write,
 and `PlaceLayers` does one per layer file). The other eight — `ValidateRequest`,
 `PruneUnpreserved`, `ValidateStagedBundle`, `OpenJournal`'s bookkeeping, the four
@@ -498,7 +498,7 @@ present at that instant *and* absent after the rollback.
 | `src/editor/psd_reimport_plan.cpp` | honour the filenames; set `atlas_name` from the atlas stem; copy `texture_path` out of the import result |
 | `include/marrow/editor/psd_reimport_commit.hpp` | **new** — options, result, `commit_psd_reimport` |
 | `src/editor/psd_reimport_commit_internal.hpp` | **new** — `PsdCommitStep`, `kAllCommitSteps`, the seam |
-| `src/editor/psd_reimport_commit.cpp` | **new** — the fourteen steps, journal, rollback |
+| `src/editor/psd_reimport_commit.cpp` | **new** — the fifteen steps, journal, rollback |
 | `include/marrow/editor/agent_control.hpp` | `AgentReviewRequest::input_path`, `::plan_digest` |
 | `include/marrow/editor/agent_dispatch.hpp` | `apply_agent_review` |
 | `src/editor/agent_dispatch.cpp` | carry the two new fields through `enqueue_review` / `review_to_json`; implement `apply_agent_review` |
@@ -659,7 +659,7 @@ implementer can report the *actual* text beside them.
 | **I9** | Write provenance layers in candidate-record order rather than the plan's sorted order | **R4**: `provenance layer order: first difference at index 1` | R1 does not read provenance; R0 does not either. (Mirrors MAR-188's I16 mechanism on a different producer) |
 | **I10** | Drop `bone_name` when copying a planned layer into `PsdLayerProvenance` | **R4**: `layer 'torso\|arm_l': bone='' expected 'torso'` | R4's ordered-identity clause passes — identity does not carry the bone. Only the full-tuple clause sees it. (MAR-188's I19, re-required because MAR-189 builds provenance from a different struct) |
 | **I11** | Ignore `preserve`: never prune | **R5**: `slot 'ghost' must be removed by a preserve=false Missing layer; it is still present` | Every other case's plan preserves everything, so pruning is never exercised |
-| **I12** | A failure after `CleanJournal` rolls the commit back | **R3 / CleanJournal**: `a failure after CleanJournal must still report success; the commit rolled back a completed reimport` | Thirteen of the sweep's fourteen arms *expect* a rollback. Only the per-step expectation table distinguishes the last one — which is precisely why the sweep is a table and not a uniform `!ok` |
+| **I12** | A failure after `CleanJournal` rolls the commit back | **R3 / CleanJournal**: `a failure after CleanJournal must still report success; the commit rolled back a completed reimport` | Fourteen of the sweep's fifteen arms *expect* a rollback. Only the per-step expectation table distinguishes the last one — which is precisely why the sweep is a table and not a uniform `!ok` |
 | **I13** | Rollback does not delete the backups | **R3 / BackupTexture** (first rolling-back arm reached after a backup exists): `journal residue after rollback: [player_idle.matl.marrow-journal-…bak]` | R0–R2 never create a backup that survives; R1 succeeds and `CleanJournal` removes them on that path |
 | **I14** | `apply_agent_review`'s digest comparison always reports equal | **A6**: `a PSD changed since review must be refused; the commit executed` | R-cases never go through the review queue; A5 approves an unchanged PSD, where equal is the correct answer |
 | **I15** | `apply_agent_review` ignores `request.allowed` | **A6**: `approving a whitelist-rejected request must refuse; it committed` | A5's request is allowed, so the check's absence is invisible there |
@@ -786,7 +786,7 @@ standard and no higher.
 1. **F5 is the one that will bite silently.** Every instinct says "the bytes
    match, therefore the copy is right". Write R1's `"image"` clause first.
 2. **Do not let the sweep assume a uniform outcome.** `CleanJournal` succeeds.
-   A uniform `!ok` sweep passes thirteen arms and is wrong about the fourteenth
+   A uniform `!ok` sweep passes fourteen arms and is wrong about the fifteenth
    in the direction that destroys a completed reimport (I12).
 3. **Do not test restoration with a success flag.** §6.2 exists because
    "`rolled_back == true`" is compatible with every byte being wrong.

@@ -5,17 +5,17 @@ deliberate defect to a source file, rebuild, confirm a named case *fails*, then
 restore and rebuild. A case that never fails under the mutation it names is not
 evidence, and `AGENTS.md`'s H1-H4 record how easily such a run lies.
 
-These scripts exist because **two of the guards they implement were learned the
-hard way, and a guard that lives only in one agent's scratch directory is not a
-guard.** Both hazards below were hit independently by more than one agent.
+These scripts exist because **the guards they implement were learned the hard
+way, and a guard that lives only in one agent's scratch directory is not a
+guard.** Every hazard below was hit independently by more than one agent.
 
 | Script | What it does |
 | --- | --- |
 | `snapshot.sh` | Copies the files you are about to mutate into a pristine baseline directory |
 | `rebuild.sh` | Deletes object files, then builds. With no object arguments -- which is how `invert.sh` calls it -- deletes every object under `<build-dir>/CMakeFiles` |
-| `invert.sh` | mutate -> rebuild -> run -> record -> restore -> rebuild, with both guards |
+| `invert.sh` | mutate -> rebuild -> run -> record -> restore -> rebuild, with all three guards |
 
-## The two guards, and why each exists
+## The three guards, and why each exists
 
 **1. A failed mutation build must ABORT the run.** If the mutated source does not
 compile and the harness runs the suite anyway, it exercises the *previous*
@@ -29,6 +29,30 @@ finished work, and the next inversion then runs against the stub. `invert.sh`
 refuses to mutate unless the baseline copy is byte-identical to the tree, so a
 stale baseline is an error rather than a silent revert. Run `snapshot.sh` after
 every implementation step.
+
+**3. A restore that did not restore must be LOUD and non-zero.** Added in
+MAR-189, after MAR-191's planner found the construct `cmp -s ... && echo` in a
+script with `set -uo pipefail` and no `-e`, with `rebuild.sh` running last -- so a
+**failed** restore printed no verdict of its own and returned `rebuild.sh`'s
+status. It was therefore indistinguishable from a successful one, and the tree
+that the *next* inversion ran against was not the tree anyone believed it was.
+This is the more dangerous sibling of the two call-site bugs fixed at `23b326e`:
+those made a restore skip recompilation; this one attributes a failure to
+innocent code.
+
+**Demonstrated rather than asserted**, on a throwaway subject outside the source
+tree, in both of the shapes that produce it:
+
+| Restore failure | Old `invert.sh` | With guard 3 |
+| --- | --- | --- |
+| `cp` cannot write (target read-only) | `cp`'s own stderr, no verdict, **exit 2**, mutation left in the tree | `RESTORE FAILED` naming both absolute paths, **exit 4** |
+| `cp` SUCCEEDS and the file still differs (target is a symlink to `/dev/null`) | **nothing at all**, exit 2 | `RESTORE FAILED`, **exit 4** |
+
+Exit 2 is also what a clean "the mutation did not compile, tree restored" abort
+returns, which is why the status collapse is the load-bearing half. Both `restore`
+call sites propagate it (`restore || exit 4`), and the `cmp` in the verdict names
+**absolute** paths on both sides -- a relative path follows whatever `cd` ran
+earlier, and a `cmp` of a file against itself always passes.
 
 ## The guard was committed unwired, and is now wired
 

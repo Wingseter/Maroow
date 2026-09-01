@@ -905,6 +905,46 @@ script over an inline shell sequence: MAR-188's `invert.py` used absolute paths
 throughout and every one of its twenty restores is trustworthy for that reason
 alone.
 
+**And the absolute path is only half of it: a `cmp` whose FAILURE is silent is not
+a verification.** MAR-191's planner found the third instance of this family in
+`tools/inversion/invert.sh` while MAR-189 was using the harness. The construct was
+
+```
+cmp -s "$copy" "${root}/${file}" && echo "  restore verified by cmp"
+```
+
+in a script with `set -uo pipefail` and **no `-e`**, with `rebuild.sh` running
+last -- so a failed restore printed no verdict of its own and returned
+`rebuild.sh`'s status. **Exit 2 is also what a clean "the mutation did not
+compile, tree restored" abort returns**, so the two were indistinguishable, and
+the tree that the *next* inversion ran against was not the tree anyone believed
+it was. That is worse than the two call-site bugs fixed at `23b326e`: those made
+a restore skip recompilation; this one **attributes a failure to innocent code**.
+
+MAR-189 fixed it as GUARD 3 and demonstrated it in both shapes, on a throwaway
+subject outside the source tree, because *"the code is present"* is not the check:
+
+| Restore failure | Old script | With guard 3 |
+| --- | --- | --- |
+| `cp` cannot write (read-only target) | `cp`'s own stderr, **no verdict**, exit 2, mutation left in the tree | `RESTORE FAILED` naming both absolute paths, **exit 4** |
+| `cp` **succeeds** and the file still differs (target is a symlink to `/dev/null`) | **nothing at all**, exit 2 | `RESTORE FAILED`, **exit 4** |
+
+The second row is the one that matters, because it is the shape with no `cp`
+error to notice. *Rule: any check whose whole job is to catch a rare failure must
+be shown failing before it is trusted -- and a check written as `cond && echo`
+cannot fail, it can only go quiet.* This is the same argument as *"a case green
+before the implementation exists is a witness, not a gate"* and *"a zero is
+evidence only once the pattern matches a known-present instance"*, applied to a
+shell conditional.
+
+**The independent check that saves you meanwhile**, and the one that retrospectively
+validated all sixteen of MAR-189's restores: `invert.sh`'s **guard 2** re-runs the
+baseline `cmp` before every mutation, so a restore that failed makes the *next*
+inversion abort with `stale baseline`. A chain of inversions that all ran is a
+chain whose restores all succeeded -- except the last one, which needs its own
+`cmp` against `git show <current-HEAD>:<path>`, re-derived at the moment of
+comparing rather than from any earlier copy.
+
 ### An identity collision needs a token whose neighbours are unconstrained
 
 MAR-186 escapes `|` and `\` in every identity token, and the reason a collision
@@ -1047,7 +1087,7 @@ every number below was re-derived rather than copied.
 | A5 | `grep -c '^    {"' src/editor/agent_dispatch.cpp` | **66**; guards **11**, split **7** `shell_smoke_graph.cpp` / **2** `shell_smoke_constraints.cpp` / **2** `shell_smoke_timeline.cpp`; `test_client.py:53,55` |
 | A1 | the staged `.matl` under MAR-188's defaults | `"image": "staged.png"` |
 | A3 | the atlas `"name"` member outside tests/samples | display only; region lookup is by region name |
-| A7 | a directory `rename` between `/tmp` and the project directory | **same volume; EXDEV unreachable here.** §2.4's "placement copies rather than renames" stays load-bearing by argument, not by measurement |
+| A7 | a directory `rename` between `/tmp` and the project directory | **same volume here -- but that is the weaker half of the answer.** `write_file_atomically` builds its temporary as `parent / …` where `parent` is the DESTINATION's own directory (`atomic_file_write.cpp:61-78`), so every rename it performs is within one directory and **`EXDEV` is structurally unreachable in production**, not merely untested on this machine. §2.4's "placement copies rather than renames" is what makes that true |
 | A8 | a provenance-only `EditTransaction::commit()` against the OLD document | succeeds; and it writes **no `.marrow`**, so AC4's provenance update is **in memory** |
 | -- | `adopt_runtime_sources` while a transaction is active | refuses (`session.cpp:1901-1907`). The rollback's re-adopt is safe only because `UpdateProvenance`'s transaction is a local that is destroyed first |
 | -- | the tracked bundle | `player_idle.{marrow,matl,mskl,mbin}` + `player_fixture.png`. **There is no layer directory**, and `player_idle.matl` declares `"image": "player_fixture.png"` |
@@ -1174,6 +1214,32 @@ slot the mutation is caught by the clause that is supposed to catch it. *A test
 fixture that is invalid in a way the code under test happens to notice is a gate
 measuring the validator, not the feature.*
 
+### The harness gained a third guard mid-story, and every restore was re-verified
+
+MAR-191's planner found `invert.sh`'s restore verification **silent on failure**
+while this story was using it. Fixed here as GUARD 3 and demonstrated in both
+failure shapes; the general lesson is under *"Two agents share one scratchpad, and
+a restore is only verified by an absolute path"*.
+
+All sixteen of this story's restores were then re-verified **independently of the
+script**, by `cmp` against `git show <current-HEAD>:<path>` with both sides named
+by absolute path and the blob re-derived at the moment of comparing: four files,
+all identical, with a planted-hit control proving the `cmp` was capable of
+reporting a difference. Fifteen of the sixteen were already proven sound by a
+second mechanism -- guard 2 re-runs the baseline `cmp` before every mutation, so
+each inversion that ran is evidence that the previous restore succeeded.
+
+Most of this story's inversions went through a **scoped** wrapper that deletes only
+the objects whose `.d` files name the mutated source, because `invert.sh` rebuilds
+every marrow object (correctly -- `rebuild.sh` deletes `*.o` under
+`<build-dir>/CMakeFiles`, leaving vendored SDL3 alone -- but at minutes per
+inversion). **The wrapper carried guards 1 and 2 and printed a restore verdict,
+but shared the exact defect described above: its failure branch was not non-zero
+either.** Guard 3 did not exist while those runs happened, which is precisely why
+the independent re-verification was done rather than asserted. **I6 alone ran
+through the committed `invert.sh`.** E16's *"both of the harness's guards"* below
+is accurate as of that row's own writing; there are three as of this commit.
+
 ### Deliberately uninverted, by name
 
 - **The failpoint seams themselves.** Both are test-only; neutering either makes
@@ -1206,7 +1272,7 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
 | # | Where | Finding |
 |---|---|---|
 | E1 | both MAR-189 documents | Authored against `cf6a199` / `71465db`, **34 commits** behind `b127048`. Every baseline number re-measured |
-| E2 | design §0.3 F1, §3.1 (twice), §4's table, §7's I12 | *"fourteen steps"*. The enum, `kAllCommitSteps` and §2.7 all say **fifteen** |
+| E2 | design §0.3 F1, §3.1, §4's table, §7's I12, §10's risk 2 | **Five** prose sites said *"fourteen steps"* / *"thirteen of fourteen arms"* while the enum, `kAllCommitSteps` and §2.7 all say **fifteen**. **Corrected in the design in this commit**, so a reader grepping `fourteen` there now finds only the one legitimate hit -- I12's *"passes fourteen arms and is wrong about the fifteenth"* |
 | E3 | plan §0.10 clause 1 | Demands `TMPDIR`; `agent_path_allowed` whitelists `/tmp` and `/private/tmp` and **not** `TMPDIR`. **Disjoint** -- no A-case was writable as specified, and the first one written that way was refused with *"Input path is outside the agent whitelist."* |
 | E4 | plan §0.10 clause order | Ordered as written, clause 2 is dead code and §0.10's specified message is unachievable. Reordered narrowest-first; the same trap fired once more one level down and the self-test caught it |
 | E5 | plan §0.10's premise | Names a **layer directory** in the tracked bundle. There is none: `player_idle.{marrow,matl,mskl,mbin}` + `player_fixture.png` |
@@ -1234,8 +1300,17 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
 - **§9.2's irreversible window.** A failure inside `adopt_runtime_sources` during
   the rollback's re-adopt. The rollback seam added here can fail a rollback
   *step*; it cannot fail the session call inside one.
-- **EXDEV.** One volume on this machine, so §2.4's cross-filesystem placement
-  argument is reasoned and unmeasured.
+- **EXDEV, and it is narrower than "unmeasured".** One volume on this machine, so
+  a real cross-device rename could not be produced. But `write_file_atomically`
+  places its temporary in the **destination's own directory**
+  (`atomic_file_write.cpp:61-78`), which makes `EXDEV` **structurally
+  unreachable** on the placement path rather than merely unobserved -- the
+  design's cross-filesystem note is what buys that, not a hazard it leaves open.
+  What is genuinely uncovered is the *handling* of a cross-device error, and the
+  seam this story added can inject one directly: a failpoint returning
+  `std::make_error_code(std::errc::cross_device_link).message()` after any
+  `Place*` step exercises the rollback for it. Not written, because it would
+  assert the rollback and not the EXDEV path itself.
 - **The skins loss.** `build_skeleton_document` calls `root->erase("skins")`, so a
   committed reimport erases every skin and attachment definition and replaces
   bones and slots wholesale. Validation **does** refuse -- measured as
