@@ -1496,6 +1496,119 @@ void draw_slot_attachment_timeline_editor(
     ImGui::EndChild();
 }
 
+/**
+ * @brief The stepped inherit key editor. MAR-185.
+ *
+ * Modelled on `draw_slot_attachment_timeline_editor` -- the closest sibling,
+ * being stepped, discrete and easing-free -- with two deliberate differences,
+ * both required by `AGENTS.md`'s Headless Frame Smoke Notes so that a real
+ * mouse can find the `Mode` combo:
+ *
+ *  - **No `BeginChild`.** A widget inside a child belongs to the CHILD window,
+ *    so `FindWindowByName(kTimelineWindowTitle)->GetID(label)` would seed the
+ *    wrong window and the sweep would report the combo "absent".
+ *  - **No `PushID`.** A surviving id on the stack changes every widget id below
+ *    it, breaking the same seed. Uniqueness comes from `##<index>` suffixes
+ *    instead, which leave the visible labels as "Time" and "Mode".
+ *
+ * An inherit lane is a handful of stepped mode changes, so the scroll region a
+ * child would provide is not worth the loss of frame coverage.
+ */
+void draw_inherit_timeline_editor(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (!state->load_result || !track.bone_index.has_value() ||
+        *track.bone_index >= state->load_result.skeleton_data->bones().size()) {
+        ImGui::TextUnformatted("The selected inherit track could not be resolved.");
+        return;
+    }
+    const auto& skeleton = *state->load_result.skeleton_data;
+    const std::string bone_name = skeleton.bones()[*track.bone_index].name;
+    const auto runtime_edit = make_bone_inherit_timeline_edit(*state, track);
+    const auto* existing = state->load_result.project->find_bone_inherit_timeline_edit(
+        track.animation_name, bone_name);
+    if (existing == nullptr && !runtime_edit.has_value()) {
+        ImGui::TextUnformatted("The selected inherit track could not be resolved.");
+        return;
+    }
+    const marrow::editor::BoneInheritTimelineEdit display_edit =
+        existing != nullptr ? *existing : *runtime_edit;
+    const double duration_seconds = selected_animation_duration(*state);
+
+    static constexpr std::array<marrow::runtime::BoneInherit, 5> kInheritModes{
+        marrow::runtime::BoneInherit::Normal,
+        marrow::runtime::BoneInherit::OnlyTranslation,
+        marrow::runtime::BoneInherit::NoRotationOrReflection,
+        marrow::runtime::BoneInherit::NoScale,
+        marrow::runtime::BoneInherit::NoScaleOrReflection};
+
+    ImGui::TextUnformatted("Bone Inherit Key Editor");
+    ImGui::Text("%s / %s / Inherit", track.animation_name.c_str(), bone_name.c_str());
+    ImGui::TextDisabled(
+        "Inherit keys are stepped: no easing, no curve, no loop synchronization.");
+    for (std::size_t key_index = 0; key_index < display_edit.keyframes.size();
+         ++key_index) {
+        const auto display_key = display_edit.keyframes[key_index];
+        const std::string suffix = "##inherit" + std::to_string(key_index);
+        const std::string header = "Key " + std::to_string(key_index + 1U) + " @ " +
+            format_time_seconds(display_key.time) + suffix;
+        if (!ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            continue;
+        }
+        double edited_time = display_key.time;
+        const bool time_changed = ImGui::DragScalar(
+            ("Time" + suffix).c_str(), ImGuiDataType_Double, &edited_time, 0.01f,
+            nullptr, nullptr, "%.3f s");
+        apply_timeline_project_drag(
+            state,
+            time_changed,
+            EditActionKind::EditProperty,
+            "Updated inherit key timing on " + bone_name,
+            "timeline:" + track.id + ":key:" + std::to_string(key_index),
+            false,
+            "Inherit edit failed",
+            [&]() {
+                if (const auto edit_index =
+                        ensure_bone_inherit_timeline_edit_index(state, track)) {
+                    auto& keys = state->load_result.project
+                        ->bone_inherit_timeline_edits[*edit_index].keyframes;
+                    keys[key_index].time = clamp_existing_key_time(
+                        keys, key_index, edited_time, duration_seconds);
+                }
+            });
+
+        const std::string selected_token =
+            std::string(marrow::editor::inherit_mode_json_key(display_key.inherit));
+        if (ImGui::BeginCombo(("Mode" + suffix).c_str(), selected_token.c_str())) {
+            for (const marrow::runtime::BoneInherit mode : kInheritModes) {
+                const std::string token =
+                    std::string(marrow::editor::inherit_mode_json_key(mode));
+                if (!ImGui::Selectable(token.c_str(), mode == display_key.inherit)) {
+                    continue;
+                }
+                const marrow::editor::ProjectData previous =
+                    *state->load_result.project;
+                if (const auto edit_index =
+                        ensure_bone_inherit_timeline_edit_index(state, track)) {
+                    state->load_result.project
+                        ->bone_inherit_timeline_edits[*edit_index]
+                        .keyframes[key_index]
+                        .inherit = mode;
+                    apply_project_command_change(
+                        state,
+                        previous,
+                        EditActionKind::EditProperty,
+                        "Updated inherit mode on " + bone_name,
+                        "timeline:" + track.id + ":key:" + std::to_string(key_index),
+                        false,
+                        "Inherit edit failed");
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+}
+
 void draw_transform_timeline_editor(
     ShellState* state,
     const std::vector<TimelineTrackRow>& tracks) {
@@ -1529,6 +1642,10 @@ void draw_transform_timeline_editor(
     }
     if (track->slot_index.has_value() && track->id.find(":Attachment") != std::string::npos) {
         draw_slot_attachment_timeline_editor(state, *track);
+        return;
+    }
+    if (track->kind == marrow::editor::timeline_model::TimelineTrackKind::Inherit) {
+        draw_inherit_timeline_editor(state, *track);
         return;
     }
 
@@ -2274,7 +2391,7 @@ static void draw_dopesheet_body(
             Icon::AddKey,
             has_editable_track
                 ? "Add or replace a keyframe at the playhead"
-                : "Select an editable track (Inherit remains read-only)",
+                : "Select an editable track",
             false,
             !has_editable_track)) {
         add_timeline_key_at_playhead(state, *toolbar_track);
@@ -2293,7 +2410,7 @@ static void draw_dopesheet_body(
             Icon::RemoveKey,
             has_remove_target
                 ? "Remove selected keys, or an authored key exactly at the playhead"
-                : "Select an editable track (Inherit remains read-only)",
+                : "Select an editable track",
             false,
             !has_remove_target)) {
         remove_selected_timeline_keys(state, tracks);

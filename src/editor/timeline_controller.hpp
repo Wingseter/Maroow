@@ -157,6 +157,12 @@ std::optional<std::size_t> ensure_slot_color_timeline_edit_index(
 std::optional<std::size_t> ensure_slot_attachment_timeline_edit_index(
     ShellState* state,
     const TimelineTrackRow& track);
+std::optional<marrow::editor::BoneInheritTimelineEdit> make_bone_inherit_timeline_edit(
+    const ShellState& state,
+    const TimelineTrackRow& track);
+std::optional<std::size_t> ensure_bone_inherit_timeline_edit_index(
+    ShellState* state,
+    const TimelineTrackRow& track);
 marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
     const ShellState& state,
     const TimelineTrackRow& track);

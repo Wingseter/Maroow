@@ -83,6 +83,11 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"remove_slot_color_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_attachment_keyframe", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_attachment_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    // MAR-185. `dry_run_supported` mirrors the family exactly: every
+    // `set_*_keyframe` supports a dry run, every `remove_*_keyframe` does not.
+    // The dispatcher ENFORCES the flag, so it is behaviour, not documentation.
+    {"set_inherit_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_inherit_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_draw_order_keyframe", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_draw_order_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"save", "management", true, true, false, true, &handle_management_operation},
@@ -368,10 +373,16 @@ bool timeline_lane_selectors_arg(
             lane.slot_name = std::string(*slot);
             lane.attachment_name = std::string(*attachment);
         } else if (*kind == "draw_order" || *kind == "event" ||
-                   *kind == "slot_attachment") {
+                   *kind == "slot_attachment" || *kind == "inherit") {
             // Rejected rather than ignored: those families are piecewise
             // constant and already wrap without a pop, and an event key at the
             // boundary would fire twice per loop.
+            //
+            // MAR-185 adds `inherit` HERE, the third of three sibling parsers
+            // that needed it. The lane was rejected either way; what was wrong
+            // was the MESSAGE -- it fell through to "Unknown timeline loop-sync
+            // lane kind: inherit", a false statement about the vocabulary once
+            // inherit is a real kind.
             *error_out = "timeline.set_loop_sync does not support " +
                 std::string(*kind) +
                 " lanes: they are piecewise constant and need no boundary key.";
@@ -1023,6 +1034,12 @@ json::Value timeline_description_value(
     object.emplace("slot_attachment_timelines", number_value(animation->slot_attachment_timelines.size()));
     object.emplace("slot_color_timelines", number_value(animation->slot_color_timelines.size()));
     object.emplace("mesh_deform_timelines", number_value(animation->mesh_deform_timelines.size()));
+    // MAR-185, purely additive: every shipped member keeps its name, type and
+    // position. Read from the MATERIALIZED animation, so it is subject to the
+    // runtime's constant-timeline pruning.
+    object.emplace(
+        "bone_inherit_timelines",
+        number_value(animation->bone_inherit_timelines.size()));
     const auto* runtime_draw_order = animation->find_draw_order_timeline();
     const auto* project_draw_order = project.find_draw_order_timeline_edit(animation_name);
     object.emplace(

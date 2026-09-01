@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -1637,6 +1638,263 @@ bool render_headless_smoke_frames(
             return false;
         }
         shell_state.hierarchy_selection_anchor.reset();
+    }
+
+    // --- MAR-185 F1: the Mode combo is ON SCREEN, found by a real mouse. ---
+    //
+    // A UI-free helper cannot observe a deleted widget: calling the function a
+    // combo calls asserts the handler, not the combo, and such a case passes
+    // unchanged after the widget is removed. AGENTS.md records exactly that
+    // failure for MAR-178, whose own scenario printed success while the frame
+    // smoke failed by name. S1-S6 are all UI-free; this is the only case that
+    // can see the widget.
+    {
+        // `player_idle` carries no inherit timeline at all, so the lane has to
+        // be authored first. Two keys, and NOT a lone {0.0, normal}: every
+        // player_idle bone is setup-`Normal` and the runtime prunes an inherit
+        // lane of exactly one origin key matching the bone's setup inherit.
+        {
+            auto transaction = shell_state.session.begin_edit({
+                marrow::editor::EditKind::AddKeyframe,
+                "Seed an inherit lane for the frame smoke",
+                "mar185:frames",
+                false,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview});
+            if (!transaction) {
+                std::cerr << "MAR-185 F1: could not open a transaction.\n";
+                return false;
+            }
+            marrow::editor::InheritTimelineMergeRequest request;
+            request.animation_name = "idle";
+            request.bone_name = "spine";
+            request.keys = {{0.25, "noScale"}, {0.6, "normal"}};
+            const auto merged = marrow::editor::merge_inherit_timeline(
+                transaction.project(), *shell_state.session.runtime_data(), request);
+            if (!merged || !merged.changed) {
+                transaction.cancel();
+                std::cerr << "MAR-185 F1: seeding the inherit lane failed: "
+                          << merged.error << '\n';
+                return false;
+            }
+            if (!transaction.commit()) {
+                std::cerr << "MAR-185 F1: the seeding transaction did not commit.\n";
+                return false;
+            }
+            sync_shell_from_editor_session(&shell_state);
+        }
+
+        const auto spine_index =
+            shell_state.load_result.skeleton_data->find_bone_index("spine");
+        if (!spine_index.has_value()) {
+            std::cerr << "MAR-185 F1: the fixture lost its spine bone.\n";
+            return false;
+        }
+        const std::string inherit_track_id =
+            "bone:" + std::to_string(*spine_index) + ":Inherit";
+        shell_state.timeline_editor.requested_view_mode = TimelineViewMode::Dopesheet;
+        shell_state.selected_timeline_track_id = inherit_track_id;
+        shell_state.timeline_editor.selected_keys.clear();
+        shell_state.timeline_editor.active_key.reset();
+
+        // `SetWindowFocus` is deliberately confined to the opening frames.
+        // Forcing focus onto the Timeline window while a combo popup is open
+        // CLOSES the popup, so the item sweep below would find an empty popup
+        // and report "the combo never hovered its item" for the wrong reason.
+        bool focus_timeline = true;
+        const auto render_timeline_frame = [&]() {
+            io.DeltaTime = 1.0f / 60.0f;
+            ImGui::NewFrame();
+            if (focus_timeline) ImGui::SetWindowFocus(kTimelineWindowTitle);
+            draw_timeline_window(&shell_state, nullptr);
+            ImGui::Render();
+        };
+        render_timeline_frame();
+        render_timeline_frame();
+
+        ImGuiWindow* timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+        if (timeline_window == nullptr) {
+            std::cerr << "MAR-185 F1: no Timeline window.\n";
+            return false;
+        }
+        // The key editor is emitted after the dopesheet table, so it starts
+        // below the fold; scroll to the bottom before aiming a mouse at it.
+        // `ScrollMax` is written in `Begin()` (`imgui.cpp:8393-8394`) from
+        // `window->ContentSize`, which the PREVIOUS frame's `End()` finalised --
+        // so the input is one frame behind, and on the first pass after a
+        // layout change it still reads 0. A loop that breaks on
+        // `ScrollMax == Scroll` gives up before the window has ever reported
+        // its real extent, which is how this case first read "widget absent".
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+            if (timeline_window == nullptr) break;
+            const float target = timeline_window->ScrollMax.y > 0.0f
+                ? timeline_window->ScrollMax.y
+                : timeline_window->Scroll.y + 200.0f;
+            if (timeline_window->ScrollMax.y > 0.0f &&
+                timeline_window->Scroll.y >= timeline_window->ScrollMax.y) {
+                break;
+            }
+            ImGui::SetScrollY(timeline_window, target);
+            render_timeline_frame();
+        }
+        timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
+        if (timeline_window == nullptr) {
+            std::cerr << "MAR-185 F1: lost the Timeline window while scrolling.\n";
+            return false;
+        }
+
+        // The two seeds. `Time` is swept in the SAME pass and must also be
+        // found: without it, a broken `GetID` seed -- a surviving `PushID`, a
+        // wrapping `BeginChild`, a `BeginTabItem` -- is indistinguishable from
+        // a deleted combo, and the case would report the wrong defect.
+        // The seed is NOT `window->GetID(label)`. `draw_timeline_window` wraps
+        // the dopesheet in `BeginTabBar("timeline_views")` +
+        // `BeginTabItem("Dopesheet")`, and `BeginTabItem` pushes the tab's id,
+        // so every widget below it is hashed against that instead of the
+        // window root. This is the exact hazard AGENTS.md's Headless Frame
+        // Smoke Notes records; the `Time` half of this case is what turned a
+        // silent "widget absent" into a diagnosable broken seed. The chain
+        // below reproduces `TabBarCalcTabID` for a non-docked tab.
+        const ImGuiID tab_bar_id = timeline_window->GetID("timeline_views");
+        const ImGuiID dopesheet_tab_id = ImHashStr("Dopesheet", 0, tab_bar_id);
+        const ImGuiID mode_id = ImHashStr("Mode##inherit0", 0, dopesheet_tab_id);
+        const ImGuiID time_id = ImHashStr("Time##inherit0", 0, dopesheet_tab_id);
+        ImVec2 mode_position{0.0f, 0.0f};
+        ImVec2 time_position{0.0f, 0.0f};
+        bool found_mode = false;
+        bool found_time = false;
+        const float min_x = timeline_window->InnerClipRect.Min.x + 2.0f;
+        const float max_x = timeline_window->InnerClipRect.Max.x - 2.0f;
+        const float min_y = timeline_window->InnerClipRect.Min.y + 2.0f;
+        const float max_y = timeline_window->InnerClipRect.Max.y - 2.0f;
+        for (float y = min_y; y <= max_y && !(found_mode && found_time); y += 4.0f) {
+            // Two columns: a left-edge column reaches a full-width DragScalar
+            // and a combo, but a widget sharing a `SameLine()` row would be
+            // missed by one column alone.
+            for (const float x : {min_x + 24.0f, (min_x + max_x) * 0.5f}) {
+                io.AddMousePosEvent(x, y);
+                render_timeline_frame();
+                const ImGuiID hovered = ImGui::GetCurrentContext()->HoveredId;
+                if (hovered == mode_id && !found_mode) {
+                    found_mode = true;
+                    mode_position = ImVec2(x, y);
+                }
+                if (hovered == time_id && !found_time) {
+                    found_time = true;
+                    time_position = ImVec2(x, y);
+                }
+            }
+        }
+        if (!found_mode) {
+            std::cerr << "MAR-185 F1: no widget in the Timeline window matched "
+                         "GetID(\"Mode##inherit0\") across the sweep"
+                      << (found_time
+                              ? " (the control 'Time' matched at x=" +
+                                  std::to_string(time_position.x) +
+                                  ", so the seed is sound)"
+                              : " -- and 'Time' did not match either, so the "
+                                "GetID seed is broken rather than the combo "
+                                "missing")
+                      << ".\n";
+            return false;
+        }
+        if (!found_time) {
+            std::cerr << "MAR-185 F1: the Mode combo was found but the Time drag "
+                         "of the same key was not, so the sweep is not covering "
+                         "the key editor as intended.\n";
+            return false;
+        }
+
+        // Open the combo and click `noScale` with a real mouse. Two presses at
+        // one pixel inside `io.MouseDoubleClickTime` are a DOUBLE click, which
+        // ImGui turns into something else entirely, so the clock is advanced
+        // past it between gestures.
+        const auto stored_mode = [&]() -> std::optional<marrow::runtime::BoneInherit> {
+            const auto* edit =
+                shell_state.session.project()->find_bone_inherit_timeline_edit(
+                    "idle", "spine");
+            if (edit == nullptr || edit->keyframes.empty()) return std::nullopt;
+            return edit->keyframes.front().inherit;
+        };
+        if (stored_mode() != marrow::runtime::BoneInherit::NoScale) {
+            std::cerr << "MAR-185 F1: the seeded lane does not start at noScale.\n";
+            return false;
+        }
+        const std::size_t undo_before = shell_state.session.undo_count();
+        focus_timeline = false;
+        io.AddMousePosEvent(mode_position.x, mode_position.y);
+        render_timeline_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        render_timeline_frame();
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        render_timeline_frame();
+
+        // Let the popup settle before reading its rectangle: on the frame it
+        // opens, `InnerClipRect` is still the pre-layout value, and a sweep
+        // bounded by it walks straight past the item list.
+        render_timeline_frame();
+        const auto find_combo_popup = [&]() -> ImGuiWindow* {
+            for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows) {
+                if (window != nullptr && window->Active &&
+                    std::strstr(window->Name, "##Combo_") != nullptr) {
+                    return window;
+                }
+            }
+            return nullptr;
+        };
+        ImGuiWindow* popup = find_combo_popup();
+        if (popup == nullptr) {
+            std::cerr << "MAR-185 F1: clicking the Mode combo opened no popup.\n";
+            return false;
+        }
+        const float popup_min_y = popup->InnerClipRect.Min.y + 4.0f;
+        const float popup_max_y = popup->InnerClipRect.Max.y - 4.0f;
+        const float popup_x =
+            (popup->InnerClipRect.Min.x + popup->InnerClipRect.Max.x) * 0.5f;
+        const ImGuiID item_id = popup->GetID("normal");
+        bool clicked_item = false;
+        for (float y = popup_min_y; y <= popup_max_y && !clicked_item; y += 3.0f) {
+            io.DeltaTime = static_cast<float>(io.MouseDoubleClickTime) * 2.0f;
+            io.AddMousePosEvent(popup_x, y);
+            render_timeline_frame();
+            if (find_combo_popup() == nullptr) break;
+            if (ImGui::GetCurrentContext()->HoveredId != item_id) continue;
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+            render_timeline_frame();
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+            render_timeline_frame();
+            clicked_item = true;
+        }
+        if (!clicked_item) {
+            std::cerr << "MAR-185 F1: the open combo never hovered its 'normal' "
+                         "item across y=" << popup_min_y << ".." << popup_max_y
+                      << " at x=" << popup_x << ".\n";
+            return false;
+        }
+        if (stored_mode() != marrow::runtime::BoneInherit::Normal) {
+            std::cerr << "MAR-185 F1: clicking 'normal' in the Mode combo did not "
+                         "change the stored mode.\n";
+            return false;
+        }
+        if (shell_state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-185 F1: the combo click recorded "
+                      << (shell_state.session.undo_count() - undo_before)
+                      << " history entries, expected 1.\n";
+            return false;
+        }
+        std::cout << "MAR-185 F1: the Mode combo is on screen at ("
+                  << mode_position.x << "," << mode_position.y
+                  << ") with the same key's Time drag at (" << time_position.x
+                  << "," << time_position.y
+                  << "), and clicking it commits one history entry.\n";
+
+        while (shell_state.session.undo_count() > 0U) {
+            if (!shell_state.session.undo()) break;
+        }
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
     }
 
     std::cout << shell_state.status_message << '\n'

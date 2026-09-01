@@ -50,9 +50,9 @@ async def test(parameter_only=False):
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 64
+    assert len(registry_names) == 66
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 64
+    assert len(mcp_names) == 66
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
 

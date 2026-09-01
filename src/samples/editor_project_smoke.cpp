@@ -15266,6 +15266,836 @@ bool validate_mar184_inherit_overlays(
     return true;
 }
 
+namespace mar185 {
+
+/**
+ * @brief Loads a fresh throwaway project over the base-backed inherit fixture.
+ *
+ * Every case here builds its own project INSIDE the standing
+ * `player_idle.marrow` invocation. Pointing `marrow_project_smoke` at a project
+ * over `skin_inherit_constraints.mskl` would take `main()`'s
+ * `markers.present.empty()` skip branch and run nothing at all.
+ */
+bool open_seed(
+    const std::filesystem::path& path,
+    std::string_view label,
+    marrow::editor::ProjectLoadResult* loaded_out) {
+    const marrow::editor::ProjectData seed = mar184::minimal_project(path);
+    const auto saved = marrow::editor::save_project(seed, path);
+    if (!saved) {
+        std::cerr << label << ": the seed project failed to save: "
+                  << saved.error->message << '\n';
+        return false;
+    }
+    *loaded_out = marrow::editor::load_project(path);
+    if (!*loaded_out) {
+        std::cerr << label << ": the seed project failed to load: "
+                  << loaded_out->error->message << '\n';
+        return false;
+    }
+    return true;
+}
+
+/** @brief Saves a project and reloads it through the real `load_project`. */
+bool save_and_reload(
+    const marrow::editor::ProjectData& project,
+    const std::filesystem::path& path,
+    std::string_view label,
+    marrow::editor::ProjectLoadResult* reloaded_out) {
+    const auto saved = marrow::editor::save_project(project, path);
+    if (!saved) {
+        std::cerr << label << ": save_project failed: " << saved.error->message
+                  << '\n';
+        return false;
+    }
+    *reloaded_out = marrow::editor::load_project(path);
+    if (!*reloaded_out) {
+        std::cerr << label << ": the saved project failed to reload: "
+                  << reloaded_out->error->message << '\n';
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Asserts a removal is refused, on its MESSAGE, with nothing written.
+ *
+ * Never on a bare `!result`: a removal can fail for six distinct reasons and a
+ * bare failure check passes under its own inversion.
+ */
+bool expect_removal_rejection(
+    marrow::editor::ProjectData* project,
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view sub_case,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    const std::vector<double>& times,
+    std::string_view expected_a,
+    std::string_view expected_b) {
+    const std::string before = marrow::editor::serialize_project(*project);
+    const auto result = marrow::editor::remove_inherit_timeline_keys(
+        project, skeleton, animation_name, bone_name, times);
+    if (result || result.changed) {
+        std::cerr << "MAR-185 " << sub_case << ": expected a rejection naming '"
+                  << expected_a << "', got changed="
+                  << (result.changed ? "true" : "false") << " with error '"
+                  << result.error << "'.\n";
+        return false;
+    }
+    if (result.error.find(expected_a) == std::string::npos ||
+        result.error.find(expected_b) == std::string::npos) {
+        std::cerr << "MAR-185 " << sub_case << ": expected the error to name '"
+                  << expected_a << "' and '" << expected_b << "', got '"
+                  << result.error << "'.\n";
+        return false;
+    }
+    const std::string after = marrow::editor::serialize_project(*project);
+    if (after != before) {
+        std::cerr << "MAR-185 " << sub_case
+                  << ": the rejected removal changed serialize_project() ("
+                  << before.size() << " -> " << after.size()
+                  << " bytes). Validation must complete before ANY write.\n";
+        return false;
+    }
+    return true;
+}
+
+/** @brief The effective inherit keys of one exported `.mskl` lane. */
+const marrow::runtime::BoneInheritTimeline* exported_inherit_timeline(
+    const marrow::runtime::SkeletonData& skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name) {
+    const auto* animation = skeleton.find_animation(animation_name);
+    if (animation == nullptr) return nullptr;
+    const auto bone_index = skeleton.find_bone_index(bone_name);
+    if (!bone_index.has_value()) return nullptr;
+    for (const auto& timeline : animation->bone_inherit_timelines) {
+        if (timeline.bone_index == *bone_index) return &timeline;
+    }
+    return nullptr;
+}
+
+}  // namespace mar185
+
+/**
+ * @brief MAR-185 P2-P10, U1-U2: inherit keys as first-class timeline keys.
+ *
+ * P0 -- the non-effect witness -- is NOT restated here. MAR-184's P4 above
+ * already asserts `serialize_project(player_idle.marrow)` against the same
+ * 6111-byte / `c7d6c6de…` constants in this same binary, so it is already the
+ * live detector for "MAR-185 changed an existing project's bytes". A second
+ * copy would be a case that cannot fail for a reason the first one would not.
+ */
+bool validate_mar185_inherit_editing() {
+    using marrow::runtime::BoneInherit;
+    const mar184::TemporaryDirectory temporary("editing");
+
+    // -- P1 -- the Inherit dopesheet row is EDITABLE, and its key resolves. --
+    //
+    // Model-layer, so it runs first in the verification order and is the first
+    // thing anywhere to touch the lane. Every shell workflow gates on
+    // `track_is_editable`: Add, Remove, copy and the toolbar all bail without
+    // it, and the status line says "The selected timeline is read-only".
+    {
+        const std::filesystem::path path = temporary.path / "p1.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P1", &loaded)) return false;
+        const auto* animation =
+            loaded.skeleton_data->find_animation("toggle_inherit");
+        const auto bone_index = loaded.skeleton_data->find_bone_index("child");
+        if (animation == nullptr || !bone_index.has_value()) {
+            std::cerr << "MAR-185 P1: the fixture lost 'toggle_inherit'/'child'.\n";
+            return false;
+        }
+        const auto tracks = marrow::editor::timeline_model::build_tracks(
+            *loaded.skeleton_data, *animation);
+        const auto row = std::find_if(
+            tracks.begin(), tracks.end(),
+            [&](const marrow::editor::timeline_model::TrackRow& track) {
+                return track.kind ==
+                        marrow::editor::timeline_model::TimelineTrackKind::Inherit &&
+                    track.bone_index == bone_index;
+            });
+        if (row == tracks.end()) {
+            std::cerr << "MAR-185 P1: build_tracks produced no Inherit row for "
+                         "'child'.\n";
+            return false;
+        }
+        if (!marrow::editor::timeline_model::track_is_editable(*row)) {
+            std::cerr << "MAR-185 P1: the Inherit row '" << row->id
+                      << "' is still read-only. Every shell workflow -- Add, "
+                         "Remove, copy, the toolbar -- gates on this and bails "
+                         "with \"The selected timeline is read-only\".\n";
+            return false;
+        }
+        // The project-layer half of the selector: a materialized edit must
+        // resolve by (animation, bone, time) exactly as the shell's selector
+        // will once it is built from this row.
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                *loaded.project, *loaded.skeleton_data, "toggle_inherit",
+                "child") == nullptr) {
+            std::cerr << "MAR-185 P1: `ensure` did not materialize child's lane.\n";
+            return false;
+        }
+        marrow::editor::TimelineKeySelector selector;
+        selector.kind = marrow::editor::TimelineKeyKind::Inherit;
+        selector.animation_name = "toggle_inherit";
+        selector.bone_name = "child";
+        selector.time = row->key_times.front();
+        const auto probe = marrow::editor::retime_keyframes(
+            loaded.project.get(), {selector}, 0.0, false, 30.0);
+        if (!probe || probe.key_count != 1U) {
+            std::cerr << "MAR-185 P1: an Inherit selector over the row's own key "
+                         "time resolved " << probe.key_count << " keys, expected 1"
+                      << (probe.error.empty() ? "" : " (" + probe.error + ")")
+                      << ".\n";
+            return false;
+        }
+    }
+
+    // -- P2 -- all five modes, authored through the EDITING primitive. ------
+    //
+    // MAR-184's own P3 builds the five keys by direct struct construction, so
+    // it never exercises the token vocabulary. This one goes through
+    // `merge_inherit_timeline`, which is the only place the five tokens are
+    // validated, and then through a real `load_project` materialization.
+    {
+        const std::filesystem::path path = temporary.path / "p2.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P2", &loaded)) return false;
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "controller";
+        request.keys = {
+            {0.0, "noScale"},
+            {0.1, "onlyTranslation"},
+            {0.2, "noRotationOrReflection"},
+            {0.3, "noScaleOrReflection"},
+            {0.4, "normal"}};
+        const auto merged = marrow::editor::merge_inherit_timeline(
+            loaded.project.get(), *loaded.skeleton_data, request);
+        if (!merged || merged.added_key_count != 5U) {
+            std::cerr << "MAR-185 P2: the five-mode merge added "
+                      << merged.added_key_count << " keys: " << merged.error << '\n';
+            return false;
+        }
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(*loaded.project, path, "MAR-185 P2", &reloaded)) {
+            return false;
+        }
+        const auto* lane = mar185::exported_inherit_timeline(
+            *reloaded.skeleton_data, "toggle_inherit", "controller");
+        const std::array<BoneInherit, 5> expected{
+            BoneInherit::NoScale,
+            BoneInherit::OnlyTranslation,
+            BoneInherit::NoRotationOrReflection,
+            BoneInherit::NoScaleOrReflection,
+            BoneInherit::Normal};
+        if (lane == nullptr || lane->keyframes.size() != expected.size()) {
+            std::cerr << "MAR-185 P2: the materialized lane carries "
+                      << (lane == nullptr ? 0U : lane->keyframes.size())
+                      << " keys, expected 5.\n";
+            return false;
+        }
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            if (lane->keyframes[index].inherit != expected[index]) {
+                std::cerr << "MAR-185 P2: key " << index << " materialized as "
+                          << mar184::mode_name(lane->keyframes[index].inherit)
+                          << ", expected " << mar184::mode_name(expected[index])
+                          << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // -- P4 -- AC1's same-time obligation, both halves. ----------------------
+    //
+    // Two inherit keys can never share a time, because both parsers refuse a
+    // non-increasing pair. That is a claim about every WRITE path, so it is
+    // discharged by test rather than by prose: the merge rejects a colliding
+    // request by name, and the clipboard's paste primitive COLLAPSES a pasted
+    // key onto an existing one instead of inserting a duplicate.
+    {
+        const std::filesystem::path path = temporary.path / "p4.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P4", &loaded)) return false;
+        const std::string before = marrow::editor::serialize_project(*loaded.project);
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "controller";
+        request.keys = {{0.2, "noScale"}, {0.2000005, "normal"}};
+        const auto rejected = marrow::editor::merge_inherit_timeline(
+            loaded.project.get(), *loaded.skeleton_data, request);
+        if (rejected || rejected.changed ||
+            rejected.error.find("collide") == std::string::npos ||
+            rejected.error.find("0.2") == std::string::npos) {
+            std::cerr << "MAR-185 P4: two keys 5e-7 apart were not rejected by "
+                         "name; error was \"" << rejected.error << "\".\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(*loaded.project) != before) {
+            std::cerr << "MAR-185 P4: the rejected merge wrote to the project.\n";
+            return false;
+        }
+
+        // The paste half, over the same primitive `paste_timeline_clipboard`
+        // calls, so this is the shell's collision rule and not a restatement.
+        std::vector<marrow::editor::InheritKeyframeEdit> destination{
+            {0.0, BoneInherit::NoScale}, {0.4, BoneInherit::Normal}};
+        const std::vector<marrow::editor::InheritKeyframeEdit> source{
+            {0.0, BoneInherit::OnlyTranslation}};
+        marrow::editor::timeline_model::paste_keys_replace_collisions(
+            &destination, source, 0.4, false);
+        if (destination.size() != 2U) {
+            std::cerr << "MAR-185 P4: pasting onto an existing time produced "
+                      << destination.size()
+                      << " keys, expected the collision to collapse to 2.\n";
+            return false;
+        }
+        if (destination[1].inherit != BoneInherit::OnlyTranslation) {
+            std::cerr << "MAR-185 P4: the collapsed key kept the OLD mode.\n";
+            return false;
+        }
+        for (std::size_t index = 1U; index < destination.size(); ++index) {
+            if (!(destination[index].time > destination[index - 1U].time)) {
+                std::cerr << "MAR-185 P4: the pasted vector is not strictly "
+                             "increasing.\n";
+                return false;
+            }
+        }
+    }
+
+    // -- P3 -- removal, down to the floor, proved through the EXPORT. --------
+    //
+    // The removal order is deliberate and is NOT the plan's. Removing down to a
+    // lone `{0.0, Normal}` key would hand the survivor straight to
+    // `prune_constant_timelines`, which deletes an inherit lane of exactly one
+    // origin key whose mode equals the bone's setup inherit -- and every bone of
+    // this fixture is setup-`Normal`. The lane would then be ABSENT from the
+    // export for a reason that has nothing to do with the removal primitive.
+    // Leaving `{0.5, OnlyTranslation}` keeps the survivor observable.
+    {
+        const std::filesystem::path path = temporary.path / "p3.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P3", &loaded)) return false;
+
+        const auto* materialized = marrow::editor::ensure_bone_inherit_timeline_edit(
+            *loaded.project, *loaded.skeleton_data, "toggle_inherit", "child");
+        if (materialized == nullptr || materialized->keyframes.size() != 4U) {
+            std::cerr << "MAR-185 P3: `ensure` did not materialize child's four "
+                         "base keys.\n";
+            return false;
+        }
+
+        struct Step {
+            double time;
+            std::size_t expected_effective;
+        };
+        for (const Step step : {Step{1.0, 3U}, Step{0.0, 2U}, Step{0.25, 1U}}) {
+            const auto removed = marrow::editor::remove_inherit_timeline_keys(
+                loaded.project.get(), *loaded.skeleton_data, "toggle_inherit",
+                "child", {step.time});
+            if (!removed || !removed.changed) {
+                std::cerr << "MAR-185 P3: removing the key at " << step.time
+                          << " failed: " << removed.error << '\n';
+                return false;
+            }
+            if (removed.removed_key_count != 1U ||
+                removed.effective_key_count != step.expected_effective) {
+                std::cerr << "MAR-185 P3: removing " << step.time << " reported "
+                          << removed.removed_key_count << " removed and "
+                          << removed.effective_key_count << " remaining, expected 1 and "
+                          << step.expected_effective << ".\n";
+                return false;
+            }
+        }
+
+        // The floor. Without it the edit empties, BOTH serializers skip an empty
+        // edit, and `build_runtime_document` assigns into a COPY of the base --
+        // so the emptied lane silently restores the imported four-key track.
+        if (!mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P3",
+                "toggle_inherit", "child", {0.5},
+                "must keep at least one key", "child")) {
+            return false;
+        }
+
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(
+                *loaded.project, path, "MAR-185 P3", &reloaded)) {
+            return false;
+        }
+        const std::filesystem::path exported_path =
+            temporary.path / "p3_export.mskl";
+        marrow::editor::ProjectExportOptions export_options;
+        export_options.skeleton_output_path = exported_path;
+        const auto exported = marrow::editor::export_runtime_assets(
+            *reloaded.project, *reloaded.base_skeleton_document, export_options);
+        if (!exported) {
+            std::cerr << "MAR-185 P3: the export failed: " << exported.error->message
+                      << '\n';
+            return false;
+        }
+        const auto exported_skeleton =
+            marrow::runtime::load_skeleton_data(exported_path);
+        if (!exported_skeleton) {
+            std::cerr << "MAR-185 P3: the exported `.mskl` failed to parse.\n";
+            return false;
+        }
+        const auto* lane = mar185::exported_inherit_timeline(
+            *exported_skeleton.skeleton_data, "toggle_inherit", "child");
+        if (lane == nullptr) {
+            std::cerr << "MAR-185 P3: the exported `.mskl` carries NO inherit "
+                         "timeline for 'child'.\n";
+            return false;
+        }
+        if (lane->keyframes.size() != 1U) {
+            std::cerr << "MAR-185 P3: the exported .mskl carries "
+                      << lane->keyframes.size()
+                      << " inherit keys for 'child', expected the 1 that survived "
+                         "removal. An emptied edit is skipped by both serializers "
+                         "and restores the imported base track.\n";
+            return false;
+        }
+        if (!mar184::float32_times_equal(
+                static_cast<double>(lane->keyframes[0].time), 0.5) ||
+            lane->keyframes[0].inherit != BoneInherit::OnlyTranslation) {
+            std::cerr << "MAR-185 P3: the surviving exported key is ("
+                      << static_cast<double>(lane->keyframes[0].time) << ", "
+                      << mar184::mode_name(lane->keyframes[0].inherit)
+                      << "), expected (0.5, onlyTranslation).\n";
+            return false;
+        }
+    }
+
+    // -- P5 -- rejection atomicity, on a bone with NO project edit yet. ------
+    //
+    // The "no project edit yet" clause is LOAD-BEARING and is the whole reason
+    // this case runs on `child`. `ensure_bone_inherit_timeline_edit` on a bone
+    // whose edit already exists is a silent no-op, so a candidate-free
+    // implementation could not be caught there; on an unknown animation or bone
+    // `ensure` returns nullptr and writes nothing either. `child` is the only
+    // bone whose animation AND name resolve while no edit exists, so it is the
+    // only place a premature `ensure` leaves four materialized keys behind.
+    {
+        const std::filesystem::path path = temporary.path / "p5.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P5", &loaded)) return false;
+        if (!loaded.project->bone_inherit_timeline_edits.empty()) {
+            std::cerr << "MAR-185 P5: the seed already carries an inherit edit, "
+                         "which disarms this case.\n";
+            return false;
+        }
+        if (!mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P5",
+                "toggle_inherit", "child", {0.31},
+                "no inherit key exists at time", "0.31")) {
+            return false;
+        }
+        if (!loaded.project->bone_inherit_timeline_edits.empty()) {
+            std::cerr << "MAR-185 P5: the rejected removal left "
+                      << loaded.project->bone_inherit_timeline_edits.size()
+                      << " materialized inherit edit(s) behind.\n";
+            return false;
+        }
+        // The four cheap rejections, each asserted on its own message.
+        if (!mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P5a",
+                "no_such_animation", "child", {0.25},
+                "animation", "no_such_animation") ||
+            !mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P5b",
+                "toggle_inherit", "no_such_bone", {0.25},
+                "bone", "no_such_bone") ||
+            !mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P5c",
+                "toggle_inherit", "child",
+                {std::numeric_limits<double>::quiet_NaN()},
+                "finite", "non-negative") ||
+            !mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P5d",
+                "toggle_inherit", "child", {0.25, 0.2500005},
+                "collide", "0.25") ||
+            !mar185::expect_removal_rejection(
+                loaded.project.get(), *loaded.skeleton_data, "P5e",
+                "toggle_inherit", "child", {},
+                "at least one key time", "inherit")) {
+            return false;
+        }
+    }
+
+
+    // -- P6 -- a retime with room, asserted on the STORED time after reload. -
+    {
+        const std::filesystem::path path = temporary.path / "p6.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P6", &loaded)) return false;
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                *loaded.project, *loaded.skeleton_data, "toggle_inherit",
+                "child") == nullptr) {
+            std::cerr << "MAR-185 P6: `ensure` did not materialize child's lane.\n";
+            return false;
+        }
+        marrow::editor::TimelineKeySelector selector;
+        selector.kind = marrow::editor::TimelineKeyKind::Inherit;
+        selector.animation_name = "toggle_inherit";
+        selector.bone_name = "child";
+        selector.time = 0.25;
+        const auto retimed = marrow::editor::retime_keyframes(
+            loaded.project.get(), {selector}, 0.15, false, 30.0);
+        if (!retimed || retimed.key_count != 1U) {
+            std::cerr << "MAR-185 P6: retime_keyframes resolved "
+                      << retimed.key_count << " keys, expected 1"
+                      << (retimed.error.empty() ? "" : " (" + retimed.error + ")")
+                      << ".\n";
+            return false;
+        }
+        if (std::abs(retimed.applied_delta - 0.15) > 1e-12) {
+            std::cerr << "MAR-185 P6: applied_delta is " << retimed.applied_delta
+                      << ", expected the unclamped 0.15.\n";
+            return false;
+        }
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(*loaded.project, path, "MAR-185 P6", &reloaded)) {
+            return false;
+        }
+        const auto* edit = reloaded.project->find_bone_inherit_timeline_edit(
+            "toggle_inherit", "child");
+        if (edit == nullptr || edit->keyframes.size() != 4U) {
+            std::cerr << "MAR-185 P6: the reloaded lane is missing or resized.\n";
+            return false;
+        }
+        // `applied_delta` alone is not evidence: an `apply_resolved_retime` with
+        // no Inherit arm is `void` with no trailing statement, so it reports the
+        // full delta while writing NOTHING. Only the stored time can see that.
+        const auto moved = std::find_if(
+            edit->keyframes.begin(), edit->keyframes.end(),
+            [](const marrow::editor::InheritKeyframeEdit& key) {
+                return std::abs(key.time - 0.4) <= 1e-9;
+            });
+        if (moved == edit->keyframes.end()) {
+            std::cerr << "MAR-185 P6: after save -> load the key is still at "
+                      << edit->keyframes[1].time << ", expected 0.400000.\n";
+            return false;
+        }
+        if (moved->inherit != BoneInherit::NoRotationOrReflection) {
+            std::cerr << "MAR-185 P6: the retimed key changed mode to "
+                      << mar184::mode_name(moved->inherit) << ".\n";
+            return false;
+        }
+    }
+
+    // -- P7 -- a retime that must clamp against an UNSELECTED neighbour. -----
+    {
+        const std::filesystem::path path = temporary.path / "p7.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P7", &loaded)) return false;
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                *loaded.project, *loaded.skeleton_data, "toggle_inherit",
+                "child") == nullptr) {
+            std::cerr << "MAR-185 P7: `ensure` did not materialize child's lane.\n";
+            return false;
+        }
+        marrow::editor::TimelineKeySelector selector;
+        selector.kind = marrow::editor::TimelineKeyKind::Inherit;
+        selector.animation_name = "toggle_inherit";
+        selector.bone_name = "child";
+        selector.time = 0.25;
+        // +0.40 would land on 0.65, past the unselected 0.5 neighbour. The
+        // clamp is 0.5 - 1 ms - 0.25 = 0.249.
+        const auto retimed = marrow::editor::retime_keyframes(
+            loaded.project.get(), {selector}, 0.40, false, 30.0);
+        if (!retimed || retimed.key_count != 1U) {
+            std::cerr << "MAR-185 P7: retime_keyframes failed: " << retimed.error
+                      << '\n';
+            return false;
+        }
+        if (std::abs(retimed.applied_delta - 0.249) > 1e-9) {
+            std::cerr << "MAR-185 P7: applied_delta is " << retimed.applied_delta
+                      << ", expected the clamped 0.249. Without an Inherit arm in "
+                         "include_resolved_retime_bounds the delta is bounded by "
+                         "nothing at all.\n";
+            return false;
+        }
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(*loaded.project, path, "MAR-185 P7", &reloaded)) {
+            return false;
+        }
+        const auto* edit = reloaded.project->find_bone_inherit_timeline_edit(
+            "toggle_inherit", "child");
+        if (edit == nullptr || edit->keyframes.size() != 4U ||
+            std::abs(edit->keyframes[1].time - 0.499) > 1e-9) {
+            std::cerr << "MAR-185 P7: the reloaded key sits at "
+                      << (edit == nullptr ? -1.0 : edit->keyframes[1].time)
+                      << ", expected the clamped 0.499.\n";
+            return false;
+        }
+    }
+
+    // -- P8 -- scale: the rejection, its label, and the stored-time precision.
+    {
+        const std::filesystem::path path = temporary.path / "p8.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P8", &loaded)) return false;
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                *loaded.project, *loaded.skeleton_data, "toggle_inherit",
+                "child") == nullptr) {
+            std::cerr << "MAR-185 P8: `ensure` did not materialize child's lane.\n";
+            return false;
+        }
+        const auto make_selector = [](double time) {
+            marrow::editor::TimelineKeySelector selector;
+            selector.kind = marrow::editor::TimelineKeyKind::Inherit;
+            selector.animation_name = "toggle_inherit";
+            selector.bone_name = "child";
+            selector.time = time;
+            return selector;
+        };
+        // 8a. A ratio that squeezes 0.25 and 0.5 to 0.4 ms apart. Without an
+        // Inherit arm in the validate switch, `valid` stays true and `error`
+        // stays empty -- there is no diagnostic anywhere and the scale lands.
+        const std::string before = marrow::editor::serialize_project(*loaded.project);
+        const auto rejected = marrow::editor::scale_keyframe_times(
+            loaded.project.get(), {make_selector(0.25), make_selector(0.5)},
+            marrow::editor::TimelineScalePivot::RangeStart, 0.0016);
+        if (rejected || rejected.changed) {
+            std::cerr << "MAR-185 P8: the colliding scale was accepted (changed="
+                      << (rejected.changed ? "true" : "false")
+                      << "); expected a rejection naming the separation.\n";
+            return false;
+        }
+        if (rejected.error.find("inherit key 'child'") == std::string::npos ||
+            rejected.error.find("the minimum separation is") == std::string::npos) {
+            std::cerr << "MAR-185 P8: rejection message is \"" << rejected.error
+                      << "\"; expected it to name \"inherit key 'child'\" and "
+                         "\"the minimum separation is\".\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(*loaded.project) != before) {
+            std::cerr << "MAR-185 P8: the rejected scale changed "
+                         "serialize_project().\n";
+            return false;
+        }
+
+        // 8b. A legal ratio, on a PROJECT-ONLY lane whose stored times are not
+        // float32-exact, with selectors carrying the narrowed times a shell
+        // TrackRow would supply. `resolved_stored_key_time` is what makes the
+        // scale read the stored double instead of the selector's; without its
+        // Inherit arm the pivot and the projection are both computed from the
+        // narrowed value and every result is ~2.5e-8 off.
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "controller";
+        request.keys = {{0.1, "noScale"}, {0.7, "normal"}};
+        const auto merged = marrow::editor::merge_inherit_timeline(
+            loaded.project.get(), *loaded.skeleton_data, request);
+        if (!merged) {
+            std::cerr << "MAR-185 P8: seeding the controller lane failed: "
+                      << merged.error << '\n';
+            return false;
+        }
+        const auto narrowed = [](double time) {
+            return static_cast<double>(static_cast<float>(time));
+        };
+        auto low = make_selector(narrowed(0.1));
+        auto high = make_selector(narrowed(0.7));
+        low.bone_name = "controller";
+        high.bone_name = "controller";
+        const auto scaled = marrow::editor::scale_keyframe_times(
+            loaded.project.get(), {low, high},
+            marrow::editor::TimelineScalePivot::RangeStart, 2.0);
+        if (!scaled || !scaled.changed) {
+            std::cerr << "MAR-185 P8: the legal scale was rejected: " << scaled.error
+                      << '\n';
+            return false;
+        }
+        const auto* lane = loaded.project->find_bone_inherit_timeline_edit(
+            "toggle_inherit", "controller");
+        if (lane == nullptr || lane->keyframes.size() != 2U) {
+            std::cerr << "MAR-185 P8: the scaled controller lane is missing.\n";
+            return false;
+        }
+        const double expected_low = 0.1 + (0.1 - 0.1) * 2.0;
+        const double expected_high = 0.1 + (0.7 - 0.1) * 2.0;
+        if (std::abs(lane->keyframes[0].time - expected_low) > 1e-12 ||
+            std::abs(lane->keyframes[1].time - expected_high) > 1e-12) {
+            std::cerr << "MAR-185 P8: the scaled times are ("
+                      << std::setprecision(17) << lane->keyframes[0].time << ", "
+                      << lane->keyframes[1].time << "), expected ("
+                      << expected_low << ", " << expected_high
+                      << ") within 1e-12. A scale that reads the selector's "
+                         "float32-narrowed time instead of the stored double "
+                         "misses by ~2.5e-8.\n";
+            return false;
+        }
+    }
+
+
+    // -- P9 -- an inherit key past an explicit duration grows it. -----------
+    {
+        const std::filesystem::path path = temporary.path / "p9.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 P9", &loaded)) return false;
+        const auto duration_set = marrow::editor::set_animation_duration(
+            loaded.project.get(), *loaded.skeleton_data, "toggle_inherit", 1.0);
+        if (!duration_set) {
+            std::cerr << "MAR-185 P9: setting the explicit duration failed: "
+                      << duration_set.error << '\n';
+            return false;
+        }
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "controller";
+        request.keys = {{0.4, "noScale"}, {1.4, "normal"}};
+        const auto merged = marrow::editor::merge_inherit_timeline(
+            loaded.project.get(), *loaded.skeleton_data, request);
+        if (!merged) {
+            std::cerr << "MAR-185 P9: seeding the late inherit key failed: "
+                      << merged.error << '\n';
+            return false;
+        }
+        const auto grown = marrow::editor::auto_extend_explicit_animation_durations(
+            loaded.project.get(), *loaded.skeleton_data);
+        if (!grown) {
+            std::cerr << "MAR-185 P9: auto-grow failed: " << grown.error << '\n';
+            return false;
+        }
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(*loaded.project, path, "MAR-185 P9", &reloaded)) {
+            std::cerr << "MAR-185 P9: an inherit key past the explicit duration did "
+                         "not grow it, so the project no longer round-trips. "
+                         "`auto_extend_explicit_animation_durations` folds a "
+                         "hand-maintained list of vectors that the compiler does "
+                         "not check.\n";
+            return false;
+        }
+        const auto* animation =
+            reloaded.skeleton_data->find_animation("toggle_inherit");
+        const double expected = static_cast<double>(
+            static_cast<marrow::runtime::AnimationScalar>(1.4));
+        if (animation == nullptr || !animation->explicit_duration.has_value() ||
+            std::abs(
+                static_cast<double>(*animation->explicit_duration) - expected) > 1e-9) {
+            std::cerr << "MAR-185 P9: the explicit duration is "
+                      << (animation == nullptr || !animation->explicit_duration.has_value()
+                              ? -1.0
+                              : static_cast<double>(*animation->explicit_duration))
+                      << " after auto-grow, expected " << expected << ".\n";
+            return false;
+        }
+    }
+
+    // -- U1 -- an animation rename carries the inherit overlay with it. -----
+    {
+        const std::filesystem::path path = temporary.path / "u1.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 U1", &loaded)) return false;
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "controller";
+        request.keys = {{0.0, "noScale"}, {0.4, "normal"}};
+        if (!marrow::editor::merge_inherit_timeline(
+                loaded.project.get(), *loaded.skeleton_data, request)) {
+            std::cerr << "MAR-185 U1: seeding the overlay failed.\n";
+            return false;
+        }
+        const auto renamed = marrow::editor::rename_animation(
+            loaded.project.get(), *loaded.base_skeleton_document, "toggle_inherit",
+            "toggle_two");
+        if (!renamed) {
+            std::cerr << "MAR-185 U1: rename_animation failed: " << renamed.error
+                      << '\n';
+            return false;
+        }
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(*loaded.project, path, "MAR-185 U1", &reloaded)) {
+            return false;
+        }
+        const auto& edits = reloaded.project->bone_inherit_timeline_edits;
+        if (edits.size() != 1U || edits[0].animation_name != "toggle_two") {
+            std::cerr << "MAR-185 U1: after renaming toggle_inherit -> toggle_two, "
+                         "the reloaded project's inherit edit still names '"
+                      << (edits.empty() ? "<none>" : edits[0].animation_name)
+                      << "'.\n";
+            return false;
+        }
+        if (mar185::exported_inherit_timeline(
+                *reloaded.skeleton_data, "toggle_two", "controller") == nullptr) {
+            std::cerr << "MAR-185 U1: the materialized 'toggle_two' carries no "
+                         "inherit timeline for 'controller'.\n";
+            return false;
+        }
+    }
+
+    // -- U2 -- an animation delete takes the inherit overlay with it. -------
+    //
+    // The second animation exists only so `delete_animation`'s last-animation
+    // guard does not fire and mask the case.
+    {
+        const std::filesystem::path path = temporary.path / "u2.marrow";
+        marrow::editor::ProjectLoadResult loaded;
+        if (!mar185::open_seed(path, "MAR-185 U2", &loaded)) return false;
+        if (!marrow::editor::create_animation(
+                loaded.project.get(), *loaded.base_skeleton_document, "spare")) {
+            std::cerr << "MAR-185 U2: the spare animation could not be created.\n";
+            return false;
+        }
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "controller";
+        request.keys = {{0.0, "noScale"}, {0.4, "normal"}};
+        if (!marrow::editor::merge_inherit_timeline(
+                loaded.project.get(), *loaded.skeleton_data, request)) {
+            std::cerr << "MAR-185 U2: seeding the overlay failed.\n";
+            return false;
+        }
+        const auto deleted = marrow::editor::delete_animation(
+            loaded.project.get(), *loaded.base_skeleton_document, "toggle_inherit");
+        if (!deleted) {
+            std::cerr << "MAR-185 U2: delete_animation failed: " << deleted.error
+                      << '\n';
+            return false;
+        }
+        marrow::editor::ProjectLoadResult reloaded;
+        if (!mar185::save_and_reload(*loaded.project, path, "MAR-185 U2", &reloaded)) {
+            return false;
+        }
+        for (const auto& edit : reloaded.project->bone_inherit_timeline_edits) {
+            if (edit.animation_name == "toggle_inherit") {
+                std::cerr << "MAR-185 U2: the deleted animation's inherit edit "
+                             "survived the delete.\n";
+                return false;
+            }
+        }
+        // The orphan edit is what re-creates the animation: on reload
+        // `build_runtime_document` walks the overlay and calls
+        // `ensure_object_member` for an animation the delete removed.
+        if (reloaded.skeleton_data->find_animation("toggle_inherit") != nullptr) {
+            std::cerr << "MAR-185 U2: the reloaded skeleton still has animation "
+                         "'toggle_inherit', re-created from an orphan inherit "
+                         "edit.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-185 P1-P9, U1-U2: the Inherit dopesheet row is editable and "
+                 "its keys resolve; all five modes author through the merge "
+                 "primitive and materialize in order; two keys can never share a "
+                 "time, by rejection and by paste collapse; removal walks down to "
+                 "a one-key floor whose survivor reaches the exported `.mskl`, and "
+                 "every rejection -- the floor, a time matching no key, an unknown "
+                 "animation or bone, a non-finite time, colliding requested times, "
+                 "and an empty request -- names its cause and leaves "
+                 "serialize_project() byte-identical; a retime applies and clamps "
+                 "against unselected neighbours and is proved on the STORED time "
+                 "after a real reload; a scale rejects a sub-millisecond "
+                 "projection naming the inherit lane and otherwise lands on the "
+                 "stored double to 1e-12; a key past an explicit duration grows "
+                 "it; and an animation rename or delete carries the overlay with "
+                 "it through save and LOAD.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -15447,6 +16277,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar184_inherit_overlays(result)) {
+            return 1;
+        }
+        if (!validate_mar185_inherit_editing()) {
             return 1;
         }
     }

@@ -572,7 +572,17 @@ struct TimelineBoxSelection {
 struct TimelineRetimeGesture {
     std::uint32_t item_id{0U};
     float start_mouse_x{0.0f};
+    /// @brief The keys as they stand NOW; rewritten every applied delta.
     std::vector<TimelineKeyRef> keys;
+    /**
+     * @brief The selection as it stood when the gesture opened. MAR-185.
+     *
+     * `keys` follows the moving keys, so it cannot restore anything. This is
+     * what a cancel puts back, and it is exactly what the rolled-back project
+     * resolves.
+     */
+    std::vector<TimelineKeyRef> original_keys;
+    std::optional<TimelineKeyRef> original_active_key;
     std::vector<double> original_times;
     double applied_delta{0.0};
     bool materialized{false};

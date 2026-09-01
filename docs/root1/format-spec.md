@@ -1001,6 +1001,44 @@ The key is purely additive and no version moves: `.mskl` stays version 1,
 has never heard of `inherit` walks past it on the `continue` its transform
 parser has always taken for an unrecognised channel key — exactly as today.
 
+##### Editing rules (MAR-185)
+
+MAR-185 makes these keys first-class timeline keys — selectable, retimeable,
+scalable, copy/pasteable, removable, and reachable from the agent — without
+changing one byte of the on-disk shape above. What it adds is a set of rules the
+editor enforces on the way in:
+
+- **No easing, ever.** An inherit key carries no `curve`, no `curve_mode`, no
+  `curve_driver`, and no `loop_sync`, and the exclusion is *structural* rather
+  than a branch: `InheritKeyframeEdit` has no such member, so
+  `read_key_interpolation` and its siblings return `nullptr` and every easing,
+  curve-preset and loop-synchronization surface refuses an inherit key by name.
+  A stepped lane has no outgoing tangent to ease and no scalar to drive one.
+- **Two keys of one lane can never share a time.** The minimum separation the
+  editor enforces is **1 ms**, the same `kNonEventKeySpacing` every non-event
+  family uses. A retime *clamps* to it against unselected neighbours; a scale
+  *rejects*, naming the lane (`inherit key '<bone>'`) and the separation it
+  would have produced. A paste that lands within 1 µs of an existing key
+  replaces that key in place rather than inserting a second one, and an Add at
+  the playhead does the same — Add and Edit are one operation.
+- **An inherit timeline edit must keep at least one keyframe.** Emptying it does
+  **not** clear the lane. Both serializers skip an empty edit, and
+  `build_runtime_document` assigns into a *copy* of the base document, so an
+  emptied edit silently restores the **imported** track on the next
+  materialization. `remove_inherit_timeline_keys` refuses the last removal and
+  names the remedy.
+- **A lane reduced to one key at time zero whose mode equals the bone's setup
+  `inherit` is pruned by the runtime at load** (`prune_constant_timelines`),
+  exactly as a rotate lane whose only key is a zero angle at the origin is. This
+  is pre-existing, shared with every other family, and deliberately not diverged
+  from. Once pruned the lane cannot be re-created from the dopesheet, because a
+  dopesheet row exists only for a materialized timeline.
+- **A new key's mode is sampled from the effective animation at the playhead**,
+  not from the bone's setup pose, so adding a key in the middle of a stepped
+  lane never changes the pose at that instant.
+
+`.mskl` stays version 1, `.mbin` stays version 2, and `.marrow` gains no key.
+
 ### `mesh_edits`
 
 Current editor mesh-authoring payload:

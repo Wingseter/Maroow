@@ -109,6 +109,29 @@ std::optional<double> clipboard_time_shift(
     const Clipboard& clipboard,
     std::string_view animation_name,
     double playhead_time);
+
+/**
+ * @brief Remaps a clipboard's animation reference across a rename. MAR-185.
+ *
+ * `Clipboard::animation_name` is ONE field shared by all seven key families, so
+ * this fix is deliberately not inherit-specific: before it, copying keys and
+ * then renaming that animation silently disabled Paste for every family --
+ * `clipboard_time_shift` refuses a name mismatch and the toolbar button simply
+ * greys out with no message. There is no inherit-only version of that bug.
+ *
+ * GUI-scoped by construction: the clipboard lives in `ShellState`, and the
+ * agent has no clipboard at all. An AGENT-driven `animation.rename` therefore
+ * still leaves this stale -- the shell observes the session through
+ * `sync_shell_from_editor_session_if_revised`, which cannot tell a rename from
+ * a selection change. Closing that needs a rename-aware session signal.
+ */
+void cascade_animation_rename(
+    Clipboard* clipboard,
+    std::string_view from,
+    std::string_view to);
+
+/** @brief Clears a clipboard that references a deleted animation. MAR-185. */
+void cascade_animation_delete(Clipboard* clipboard, std::string_view animation_name);
 std::optional<double> snap_delta_to_frames(
     double earliest_time,
     double requested_delta,

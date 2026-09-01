@@ -238,7 +238,12 @@ const TrackRow* find_track(
 }
 
 bool track_is_editable(const TrackRow& track) {
-    return track.transform_channel.has_value() ||
+    // MAR-185: keyed on `kind`, deliberately NOT on an id substring. The two
+    // slot clauses below match `:Color`/`:Attachment` inside `track.id`, and a
+    // bone literally named `Attachment` would satisfy them by accident; the
+    // Inherit row's own kind cannot be spoofed by a name.
+    return track.kind == TimelineTrackKind::Inherit ||
+        track.transform_channel.has_value() ||
         track.deform_attachment_name.has_value() ||
         (track.slot_index.has_value() &&
          (track.id.find(":Color") != std::string::npos ||
@@ -390,7 +395,13 @@ std::size_t clipboard_track_count(const Clipboard& clipboard) {
         clipboard.project_fragment.draw_order_timeline_edits.size() +
         clipboard.project_fragment.event_timeline_edits.size() +
         clipboard.project_fragment.slot_color_timeline_edits.size() +
-        clipboard.project_fragment.slot_attachment_timeline_edits.size();
+        clipboard.project_fragment.slot_attachment_timeline_edits.size() +
+        // MAR-185. Not compiler-checked: a fixed-length N-term sum, not a
+        // switch. Omitting it makes a one-lane inherit clipboard count as ZERO,
+        // so `paste_timeline_clipboard`'s `clipboard_track_count == 1` gate
+        // never opens and its inherit remap branch is dead code -- a paste onto
+        // a different bone's row silently lands back on the source bone.
+        clipboard.project_fragment.bone_inherit_timeline_edits.size();
 }
 
 std::optional<double> clipboard_time_shift(
@@ -404,6 +415,30 @@ std::optional<double> clipboard_time_shift(
     }
     const double shift = playhead_time - clipboard.earliest_time;
     return std::isfinite(shift) ? std::optional<double>(shift) : std::nullopt;
+}
+
+void cascade_animation_rename(
+    Clipboard* clipboard,
+    std::string_view from,
+    std::string_view to) {
+    if (clipboard == nullptr || !clipboard->has_data ||
+        clipboard->animation_name != from) {
+        return;
+    }
+    clipboard->animation_name = std::string(to);
+    // The copied fragment's own edits also carry an `animation_name`, and it is
+    // deliberately left alone: `paste_timeline_clipboard` walks the fragment's
+    // vectors directly and resolves every destination row against
+    // `state->selected_animation_name`, never against the fragment's field.
+    // Rewriting it would be a seventh hand-maintained list with no reader.
+}
+
+void cascade_animation_delete(Clipboard* clipboard, std::string_view animation_name) {
+    if (clipboard == nullptr || !clipboard->has_data ||
+        clipboard->animation_name != animation_name) {
+        return;
+    }
+    *clipboard = Clipboard{};
 }
 
 std::optional<double> snap_delta_to_frames(

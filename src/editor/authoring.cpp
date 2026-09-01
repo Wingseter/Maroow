@@ -127,6 +127,10 @@ void rename_all_timeline_edits(ProjectData* project, std::string_view from, std:
     rename_timeline_edits(&project->event_timeline_edits, from, to);
     rename_timeline_edits(&project->slot_color_timeline_edits, from, to);
     rename_timeline_edits(&project->slot_attachment_timeline_edits, from, to);
+    // MAR-185. Not compiler-checked: this is a hand-maintained call list, not a
+    // switch. Omitting it leaves the inherit overlay naming the OLD animation,
+    // so the renamed animation silently loses its inherit lane on reload.
+    rename_timeline_edits(&project->bone_inherit_timeline_edits, from, to);
 }
 
 void erase_all_timeline_edits(ProjectData* project, std::string_view animation_name) {
@@ -136,6 +140,9 @@ void erase_all_timeline_edits(ProjectData* project, std::string_view animation_n
     erase_timeline_edits(&project->event_timeline_edits, animation_name);
     erase_timeline_edits(&project->slot_color_timeline_edits, animation_name);
     erase_timeline_edits(&project->slot_attachment_timeline_edits, animation_name);
+    // MAR-185. Omitting it leaves an ORPHAN inherit edit, which
+    // `build_runtime_document` then re-creates the deleted animation from.
+    erase_timeline_edits(&project->bone_inherit_timeline_edits, animation_name);
 }
 
 AuthoringResult missing_project_result() {
@@ -299,6 +306,22 @@ std::optional<ResolvedTimelineKey> resolve_timeline_key(
         return ResolvedTimelineKey{
             selector.kind, *timeline_index, *key_index, selector.time};
     }
+    case TimelineKeyKind::Inherit: {
+        const auto timeline_index = matching_timeline_index(
+            project.bone_inherit_timeline_edits,
+            [&](const BoneInheritTimelineEdit& edit) {
+                return edit.animation_name == selector.animation_name &&
+                    edit.bone_name == selector.bone_name;
+            });
+        if (!timeline_index.has_value()) return fail("inherit");
+        const auto key_index = matching_key_index(
+            project.bone_inherit_timeline_edits[*timeline_index].keyframes,
+            selector.time,
+            0U);
+        if (!key_index.has_value()) return fail("inherit");
+        return ResolvedTimelineKey{
+            selector.kind, *timeline_index, *key_index, selector.time};
+    }
     }
     *error_out = "Unsupported timeline key kind.";
     return std::nullopt;
@@ -362,6 +385,8 @@ bool family_owns_scalar_component(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: a stepped mode enum has no scalar axis at all.
+    case TimelineKeyKind::Inherit:
         return false;
     }
     return false;
@@ -416,6 +441,7 @@ bool read_scalar_component(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    case TimelineKeyKind::Inherit:
         return false;
     }
     return false;
@@ -530,6 +556,10 @@ double family_key_spacing(TimelineKeyKind kind) {
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::SlotColor:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: inherit keys are strictly increasing, so they share the 1 ms
+    // floor. A zero spacing would let the editor author a collision that both
+    // parsers then refuse on reload.
+    case TimelineKeyKind::Inherit:
         return kNonEventKeySpacing;
     }
     return kNonEventKeySpacing;
@@ -606,6 +636,9 @@ bool resolved_key_is_loop_pinned(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: `BoneInheritTimelineEdit` carries no `loop_sync` member, so no
+    // inherit key can ever be a managed boundary.
+    case TimelineKeyKind::Inherit:
         return false;
     }
     return false;
@@ -657,6 +690,11 @@ std::string scale_lane_label(
             project.slot_attachment_timeline_edits[resolved.timeline_index];
         return "slot-attachment key '" + edit.slot_name + "'";
     }
+    case TimelineKeyKind::Inherit: {
+        const auto& edit =
+            project.bone_inherit_timeline_edits[resolved.timeline_index];
+        return "inherit key '" + edit.bone_name + "'";
+    }
     }
     return "timeline key";
 }
@@ -698,6 +736,8 @@ double resolved_stored_key_time(
     case TimelineKeyKind::SlotAttachment:
         return timeline_stored_key_time(
             project.slot_attachment_timeline_edits, resolved);
+    case TimelineKeyKind::Inherit:
+        return timeline_stored_key_time(project.bone_inherit_timeline_edits, resolved);
     }
     return resolved.original_time;
 }
@@ -857,6 +897,10 @@ void apply_resolved_scale(
         apply_timeline_scale(
             &project->slot_attachment_timeline_edits, resolved, pivot_time, scale);
         return;
+    case TimelineKeyKind::Inherit:
+        apply_timeline_scale(
+            &project->bone_inherit_timeline_edits, resolved, pivot_time, scale);
+        return;
     }
 }
 
@@ -927,6 +971,18 @@ void include_resolved_retime_bounds(
             minimum_delta,
             maximum_delta);
         return;
+    case TimelineKeyKind::Inherit:
+        // MAR-185: no `include_loop_boundary_retime_pins` companion -- an
+        // inherit lane carries no `loop_sync` opt-in, so it has no managed
+        // boundary key to pin.
+        include_timeline_retime_bounds(
+            project.bone_inherit_timeline_edits,
+            resolved,
+            all_resolved,
+            family_key_spacing(resolved.kind),
+            minimum_delta,
+            maximum_delta);
+        return;
     }
 }
 
@@ -961,6 +1017,9 @@ void apply_resolved_retime(
         return;
     case TimelineKeyKind::SlotAttachment:
         apply_timeline_retime(&project->slot_attachment_timeline_edits, resolved, delta);
+        return;
+    case TimelineKeyKind::Inherit:
+        apply_timeline_retime(&project->bone_inherit_timeline_edits, resolved, delta);
         return;
     }
 }
@@ -1000,6 +1059,12 @@ void sort_retimed_timelines(
         &project->slot_attachment_timeline_edits,
         TimelineKeyKind::SlotAttachment,
         resolved);
+    // MAR-185: provably a no-op for inherit, exactly as for the six above -- a
+    // retime applies one shared clamped delta and a scale validates the whole
+    // projected sequence first, so neither can reorder. Added because this list
+    // is not compiler-checked and the next family must not have to derive that.
+    sort_affected_timelines(
+        &project->bone_inherit_timeline_edits, TimelineKeyKind::Inherit, resolved);
 }
 
 bool valid_parameter_definition(
@@ -2020,6 +2085,17 @@ AuthoringResult set_animation_duration(
         project->slot_color_timeline_edits, animation_name, &inferred_duration);
     include_animation_timeline_maximum(
         project->slot_attachment_timeline_edits, animation_name, &inferred_duration);
+    // MAR-185. The seventh fold, sixty-five lines from the one in
+    // `auto_extend_explicit_animation_durations` that I14 proves bites -- and
+    // this one is NOT compiler-checked either. It is currently dormant only by
+    // CALLER ACCIDENT: both production callers pass a runtime-built skeleton
+    // whose `inferred_duration_excluding_loop_boundaries` walk above already
+    // covers inherit, so the omission cannot be observed today. The primitive
+    // was still wrong in isolation, and the dormancy stops holding the moment a
+    // caller passes a stale skeleton. Plain, not the loop-boundary-excluding
+    // variant, because an inherit lane carries no `loop_sync`.
+    include_animation_timeline_maximum(
+        project->bone_inherit_timeline_edits, animation_name, &inferred_duration);
     if (!std::isfinite(inferred_duration) || inferred_duration < 0.0 ||
         inferred_duration > static_cast<double>(
             std::numeric_limits<runtime::AnimationScalar>::max())) {
@@ -2097,6 +2173,11 @@ AuthoringResult auto_extend_explicit_animation_durations(
             candidate.slot_color_timeline_edits, animation.name, &maximum_time);
         include_animation_timeline_maximum(
             candidate.slot_attachment_timeline_edits, animation.name, &maximum_time);
+        // MAR-185: the PLAIN variant, not the loop-boundary-excluding one -- an
+        // inherit lane carries no `loop_sync` and therefore no managed boundary
+        // key to exclude. Not compiler-checked; this is a call list.
+        include_animation_timeline_maximum(
+            candidate.bone_inherit_timeline_edits, animation.name, &maximum_time);
 
         if (!std::isfinite(maximum_time) || maximum_time < 0.0) {
             return {
@@ -2409,6 +2490,12 @@ TimelineScaleResult scale_keyframe_times(
                 selected_indices, kind, animation_name, label, pivot_time, scale,
                 &error);
             break;
+        case TimelineKeyKind::Inherit:
+            valid = validate_projected_scale(
+                candidate.bone_inherit_timeline_edits[timeline_index],
+                selected_indices, kind, animation_name, label, pivot_time, scale,
+                &error);
+            break;
         }
         if (!valid) {
             return fail(std::move(error));
@@ -2585,6 +2672,113 @@ InheritTimelineMergeResult merge_inherit_timeline(
     return {{true, {}}, added_key_count, replaced_key_count, effective_key_count};
 }
 
+InheritKeyRemovalResult remove_inherit_timeline_keys(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    const std::vector<double>& times) {
+    // The same 1e-6 window the merge, `find_keyframe_near_time` and
+    // `timeline_model::kKeyTimeEpsilon` use, so no two layers can disagree
+    // about which key a time names.
+    constexpr double kTimeEpsilon = kKeyTimeEpsilon;
+
+    if (project == nullptr) {
+        return {missing_project_result()};
+    }
+    if (times.empty()) {
+        return {{false, "inherit removal requires at least one key time"}};
+    }
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (animation == nullptr) {
+        return {{false,
+                 "animation '" + std::string(animation_name) + "' does not exist"}};
+    }
+    const auto bone_index = effective_skeleton.find_bone_index(bone_name);
+    if (!bone_index.has_value()) {
+        return {{false, "bone '" + std::string(bone_name) + "' does not exist"}};
+    }
+    for (const double time : times) {
+        // `NaN < 0.0` is FALSE, so a bare sign test lets a NaN straight
+        // through. The finiteness test is what actually rejects it.
+        if (!finite_animation_scalar(time) || time < 0.0) {
+            return {{false, "key time must be finite and non-negative"}};
+        }
+    }
+
+    // Sorted copy, so the reported collision is the same whichever order the
+    // caller handed the times in.
+    std::vector<double> sorted_times = times;
+    std::sort(sorted_times.begin(), sorted_times.end());
+    for (std::size_t index = 1; index < sorted_times.size(); ++index) {
+        if (std::abs(sorted_times[index] - sorted_times[index - 1U]) <= kTimeEpsilon) {
+            return {{false,
+                     "requested removals collide at time " +
+                         std::to_string(sorted_times[index])}};
+        }
+    }
+
+    // The effective timeline, read the way `ensure` materializes it but WITHOUT
+    // calling `ensure` -- nothing above the candidate copy may touch the
+    // project, and `ensure` on a bone with no edit yet WOULD write one.
+    std::vector<InheritKeyframeEdit> effective;
+    if (const BoneInheritTimelineEdit* existing =
+            project->find_bone_inherit_timeline_edit(animation_name, bone_name)) {
+        effective = existing->keyframes;
+    } else if (const auto* base = animation->find_inherit_timeline(*bone_index)) {
+        effective.reserve(base->keyframes.size());
+        for (const auto& source : base->keyframes) {
+            effective.push_back(
+                InheritKeyframeEdit{static_cast<double>(source.time), source.inherit});
+        }
+    }
+
+    std::set<std::size_t> resolved_indices;
+    for (const double time : sorted_times) {
+        std::size_t match = effective.size();
+        for (std::size_t index = 0; index < effective.size(); ++index) {
+            if (std::abs(effective[index].time - time) <= kTimeEpsilon) {
+                match = index;
+                break;
+            }
+        }
+        if (match == effective.size()) {
+            return {{false,
+                     "no inherit key exists at time " + std::to_string(time) +
+                         " on bone '" + std::string(bone_name) + "'"}};
+        }
+        resolved_indices.insert(match);
+    }
+
+    if (resolved_indices.size() >= effective.size()) {
+        return {{false,
+                 "an inherit timeline must keep at least one key; removing every "
+                 "key would restore the imported track for bone '" +
+                     std::string(bone_name) + "'"}};
+    }
+
+    // ---- Everything above this line touches nothing. ----------------------
+    ProjectData candidate = *project;
+    BoneInheritTimelineEdit* edit = ensure_bone_inherit_timeline_edit(
+        candidate, effective_skeleton, animation_name, bone_name);
+    if (edit == nullptr) {
+        return {{false, "bone '" + std::string(bone_name) + "' does not exist"}};
+    }
+    // Descending, so an earlier erase cannot invalidate a later index.
+    for (auto index = resolved_indices.rbegin(); index != resolved_indices.rend();
+         ++index) {
+        if (*index < edit->keyframes.size()) {
+            edit->keyframes.erase(
+                edit->keyframes.begin() + static_cast<std::ptrdiff_t>(*index));
+        }
+    }
+    const std::size_t removed_key_count = resolved_indices.size();
+    const std::size_t effective_key_count = edit->keyframes.size();
+    *project = std::move(candidate);
+    return {{true, {}}, removed_key_count, effective_key_count};
+}
+
 TimelineScalarOffsetResult offset_keyframe_scalars(
     ProjectData* project,
     const std::vector<TimelineKeySelector>& selectors,
@@ -2720,6 +2914,10 @@ const runtime::Interpolation* read_key_interpolation(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: the exclusion is STRUCTURAL -- `InheritKeyframeEdit` has no such
+    // member -- so this arm is what makes the missing member a compile-time
+    // fact rather than something a reader has to derive.
+    case TimelineKeyKind::Inherit:
         return nullptr;
     }
     return nullptr;
@@ -2749,6 +2947,9 @@ void write_key_interpolation(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: unreachable for inherit -- every caller checks the matching
+    // `read_*` first, and that returns nullptr.
+    case TimelineKeyKind::Inherit:
         return;
     }
 }
@@ -2777,6 +2978,10 @@ const TimelineCurveMode* read_key_curve_mode(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: the exclusion is STRUCTURAL -- `InheritKeyframeEdit` has no such
+    // member -- so this arm is what makes the missing member a compile-time
+    // fact rather than something a reader has to derive.
+    case TimelineKeyKind::Inherit:
         return nullptr;
     }
     return nullptr;
@@ -2802,6 +3007,9 @@ void write_key_curve_mode(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: unreachable for inherit -- every caller checks the matching
+    // `read_*` first, and that returns nullptr.
+    case TimelineKeyKind::Inherit:
         return;
     }
 }
@@ -2823,6 +3031,10 @@ const TimelineScalarComponent* read_key_curve_driver(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: the exclusion is STRUCTURAL -- `InheritKeyframeEdit` has no such
+    // member -- so this arm is what makes the missing member a compile-time
+    // fact rather than something a reader has to derive.
+    case TimelineKeyKind::Inherit:
         return nullptr;
     }
     return nullptr;
@@ -2848,6 +3060,9 @@ void write_key_curve_driver(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: unreachable for inherit -- every caller checks the matching
+    // `read_*` first, and that returns nullptr.
+    case TimelineKeyKind::Inherit:
         return;
     }
 }
@@ -3871,6 +4086,8 @@ bool timeline_key_is_managed_loop_boundary(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: no `loop_sync` member, so no managed boundary key exists.
+    case TimelineKeyKind::Inherit:
         return false;
     }
     return false;

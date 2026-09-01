@@ -3694,8 +3694,8 @@ bool validate_preview_playback_speed_shell_smoke(
     }
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 64U) {
-        std::cerr << "Preview speed shell smoke requires the exact 64-operation registry.\n";
+    if (operation_count_before != 66U) {
+        std::cerr << "Preview speed shell smoke requires the exact 66-operation registry.\n";
         return false;
     }
     state.session.clear_history();
@@ -4325,6 +4325,637 @@ bool validate_preview_playback_speed_shell_smoke(
         std::cerr << "Preview speed editing changed the Agent operation surface.\n";
         return false;
     }
+    return true;
+}
+
+
+namespace {
+
+/**
+ * @brief Writes a `.marrow` over `skin_inherit_constraints.mskl`. MAR-185.
+ *
+ * The shell smoke has NO marker gate -- each scenario in `shell_smoke.cpp`
+ * builds its own `ShellState` -- so unlike `marrow_project_smoke` it may point
+ * itself at a second fixture. `skin_inherit_constraints.mskl` is the only
+ * fixture carrying a base inherit timeline: `toggle_inherit`/`child`, keys
+ * 0.0 normal, 0.25 noRotationOrReflection, 0.5 onlyTranslation, 1.0 normal,
+ * with every bone's setup `inherit` absent (i.e. `Normal`).
+ */
+std::string_view inherit_mode_token(marrow::runtime::BoneInherit mode) {
+    switch (mode) {
+    case marrow::runtime::BoneInherit::Normal: return "normal";
+    case marrow::runtime::BoneInherit::OnlyTranslation: return "onlyTranslation";
+    case marrow::runtime::BoneInherit::NoRotationOrReflection:
+        return "noRotationOrReflection";
+    case marrow::runtime::BoneInherit::NoScale: return "noScale";
+    case marrow::runtime::BoneInherit::NoScaleOrReflection:
+        return "noScaleOrReflection";
+    }
+    return "<unknown>";
+}
+
+bool write_inherit_fixture_project(const std::filesystem::path& project_path) {
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/skin_inherit_constraints.mskl");
+    options.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    options.name = "mar185_inherit";
+    options.active_animation = "toggle_inherit";
+    const marrow::editor::ProjectData project =
+        marrow::editor::create_minimal_project(options);
+    const auto saved = marrow::editor::save_project(project, project_path);
+    if (!saved) {
+        std::cerr << "MAR-185 shell smoke could not write " << project_path << ": "
+                  << saved.error->message << '\n';
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool validate_inherit_editing_shell_smoke(
+    const std::filesystem::path& project_path) {
+    using marrow::runtime::BoneInherit;
+    const ScopedPreferenceIsolation isolation("inherit-editing");
+    if (!isolation.installed()) {
+        std::cerr << "MAR-185 shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 66U) {
+        std::cerr << "MAR-185 shell smoke requires the exact 66-operation registry.\n";
+        return false;
+    }
+
+    const std::filesystem::path scratch =
+        project_path.parent_path() / "mar185_inherit_shell.marrow";
+    if (!write_inherit_fixture_project(scratch)) {
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = scratch;
+    if (!reload_project(&state) || state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-185 shell smoke could not load " << scratch << ".\n";
+        return false;
+    }
+    if (!set_selected_animation(
+            &state, "toggle_inherit", "MAR-185 shell smoke", false, true)) {
+        std::cerr << "MAR-185 shell smoke could not select 'toggle_inherit'.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    const auto tracks = [&] {
+        const auto* animation =
+            state.session.runtime_data()->find_animation("toggle_inherit");
+        return animation != nullptr
+            ? build_timeline_tracks(*state.load_result.skeleton_data, *animation)
+            : std::vector<TimelineTrackRow>{};
+    };
+    const auto inherit_row = [&](const std::vector<TimelineTrackRow>& rows)
+        -> const TimelineTrackRow* {
+        const auto bone_index =
+            state.load_result.skeleton_data->find_bone_index("child");
+        if (!bone_index.has_value()) return nullptr;
+        for (const auto& row : rows) {
+            if (row.kind == marrow::editor::timeline_model::TimelineTrackKind::Inherit &&
+                row.bone_index == bone_index) {
+                return &row;
+            }
+        }
+        return nullptr;
+    };
+    const auto stored_keys = [&]() -> std::vector<marrow::editor::InheritKeyframeEdit> {
+        const auto* edit = state.load_result.project->find_bone_inherit_timeline_edit(
+            "toggle_inherit", "child");
+        return edit != nullptr ? edit->keyframes
+                               : std::vector<marrow::editor::InheritKeyframeEdit>{};
+    };
+    const auto mode_at = [&](double time) -> std::optional<BoneInherit> {
+        for (const auto& key : stored_keys()) {
+            if (std::abs(key.time - time) <= 1e-6) return key.inherit;
+        }
+        return std::nullopt;
+    };
+
+    // --- S1: Add at 0.75 s seeds the SAMPLED mode, not the setup pose. -----
+    //
+    // 0.75 sits between the fixture's `0.5 onlyTranslation` and `1.0 normal`,
+    // and a stepped lane holds the earlier key's value, so the sample is
+    // OnlyTranslation. Every bone of this fixture is setup-`Normal`, so a
+    // sampler that read the setup pose would produce a two-value difference --
+    // and adding a key would silently CHANGE the pose at that instant.
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) {
+            std::cerr << "MAR-185 S1: no bone:*:Inherit row for 'child'.\n";
+            return false;
+        }
+        if (!scrub_timeline_time(&state, 0.75, "MAR-185 S1", false)) {
+            std::cerr << "MAR-185 S1: the playhead would not move to 0.75.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        if (!add_timeline_key_at_playhead(&state, *row)) {
+            std::cerr << "MAR-185 S1: adding a key on " << row->id
+                      << " failed; status was \"" << state.status_message << "\".\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-185 S1: the add recorded "
+                      << (state.session.undo_count() - undo_before)
+                      << " history entries, expected 1.\n";
+            return false;
+        }
+        if (stored_keys().size() != 5U) {
+            std::cerr << "MAR-185 S1: the lane holds " << stored_keys().size()
+                      << " keys after the add, expected 5.\n";
+            return false;
+        }
+        const auto seeded = mode_at(0.75);
+        if (!seeded.has_value() || *seeded != BoneInherit::OnlyTranslation) {
+            std::cerr << "MAR-185 S1: the key added at 0.75 s carries mode \""
+                      << (seeded.has_value() ? inherit_mode_token(*seeded) : "<none>")
+                      << "\", expected the sampled \"onlyTranslation\".\n";
+            return false;
+        }
+    }
+
+    // --- S2: Add on an existing key REPLACES it in place. Add is Edit. -----
+    //
+    // Measured, and worth stating because it is not what the plan predicted: for
+    // a STEPPED lane the sampler returns the value of the very key the playhead
+    // is on, so an Add inside the 1 us identity window writes back exactly what
+    // is already stored. The lane must therefore not grow -- which is the whole
+    // "Add is Edit" claim -- and the session must record NO undo entry, because
+    // an edit that changes nothing is not an edit. The call reporting `false` is
+    // the shipped no-op-coalescing behaviour of every other family, not an
+    // inherit-specific failure.
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        if (!scrub_timeline_time(&state, 0.5, "MAR-185 S2", false)) return false;
+        const std::size_t count_before = stored_keys().size();
+        const std::size_t undo_before = state.session.undo_count();
+        const bool committed = add_timeline_key_at_playhead(&state, *row);
+        if (state.status_message == "The selected timeline is read-only") {
+            std::cerr << "MAR-185 S2: the add was refused as read-only.\n";
+            return false;
+        }
+        if (stored_keys().size() != count_before) {
+            std::cerr << "MAR-185 S2: the lane grew from " << count_before << " to "
+                      << stored_keys().size()
+                      << " keys; an add exactly on a key must REPLACE it, never "
+                         "insert a second key at the same time -- two inherit keys "
+                         "sharing a time are refused by both parsers on reload.\n";
+            return false;
+        }
+        if (committed || state.session.undo_count() != undo_before) {
+            std::cerr << "MAR-185 S2: re-adding the identical stepped value "
+                         "recorded a history entry.\n";
+            return false;
+        }
+        if (mode_at(0.5) != BoneInherit::OnlyTranslation) {
+            std::cerr << "MAR-185 S2: the replaced key no longer carries the "
+                         "sampled mode.\n";
+            return false;
+        }
+        const auto keys = stored_keys();
+        for (std::size_t index = 1U; index < keys.size(); ++index) {
+            if (!(keys[index].time > keys[index - 1U].time)) {
+                std::cerr << "MAR-185 S2: the lane is no longer strictly "
+                             "increasing at index " << index << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // --- S3: copy two keys, move the playhead, paste. ----------------------
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        const auto index_of = [&](double time) -> std::optional<std::size_t> {
+            for (std::size_t index = 0U; index < row->key_times.size(); ++index) {
+                if (std::abs(row->key_times[index] - time) <= 1e-6) return index;
+            }
+            return std::nullopt;
+        };
+        const auto low = index_of(0.25);
+        const auto high = index_of(0.5);
+        if (!low.has_value() || !high.has_value()) {
+            std::cerr << "MAR-185 S3: the lane lost its 0.25/0.5 keys.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*row, *low), timeline_key_ref(*row, *high)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+        if (!copy_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S3: copying two inherit keys failed.\n";
+            return false;
+        }
+        if (state.timeline_editor.clipboard.project_fragment
+                .bone_inherit_timeline_edits.empty()) {
+            std::cerr << "MAR-185 S3: the clipboard fragment carries no inherit "
+                         "lane, so the copy walked past the family.\n";
+            return false;
+        }
+        if (!scrub_timeline_time(&state, 0.6, "MAR-185 S3", false)) return false;
+        const std::size_t undo_before = state.session.undo_count();
+        const auto rows_before_paste = tracks();
+        if (!paste_timeline_clipboard(&state, rows_before_paste)) {
+            std::cerr << "MAR-185 S3: pasting the inherit keys failed.\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-185 S3: the paste recorded "
+                      << (state.session.undo_count() - undo_before)
+                      << " history entries, expected 1.\n";
+            return false;
+        }
+        if (!mode_at(0.6).has_value() || !mode_at(0.85).has_value()) {
+            std::cerr << "MAR-185 S3: the pasted pair did not land at 0.6 and "
+                         "0.85.\n";
+            return false;
+        }
+        const auto keys = stored_keys();
+        for (std::size_t index = 1U; index < keys.size(); ++index) {
+            if (!(keys[index].time > keys[index - 1U].time)) {
+                std::cerr << "MAR-185 S3: the pasted lane is not strictly "
+                             "increasing at index " << index << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // --- S4: exact-playhead Remove, and the 5 ms miss. ---------------------
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (!scrub_timeline_time(&state, 0.85, "MAR-185 S4", false)) return false;
+        if (!remove_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S4: the exact-playhead removal failed; status "
+                         "was \"" << state.status_message << "\".\n";
+            return false;
+        }
+        if (mode_at(0.85).has_value()) {
+            std::cerr << "MAR-185 S4: the key at 0.85 survived its removal.\n";
+            return false;
+        }
+        const auto rows_after = tracks();
+        const TimelineTrackRow* row_after = inherit_row(rows_after);
+        if (row_after == nullptr) return false;
+        const std::size_t count_before = stored_keys().size();
+        if (!scrub_timeline_time(&state, 0.605, "MAR-185 S4", false)) return false;
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (remove_selected_timeline_keys(&state, rows_after)) {
+            std::cerr << "MAR-185 S4: a removal 5 ms off the nearest key "
+                         "succeeded; the playhead must match exactly.\n";
+            return false;
+        }
+        if (state.status_message != "No authored key exists at the playhead") {
+            std::cerr << "MAR-185 S4: the missed removal said \""
+                      << state.status_message
+                      << "\", expected \"No authored key exists at the "
+                         "playhead\".\n";
+            return false;
+        }
+        if (stored_keys().size() != count_before) {
+            std::cerr << "MAR-185 S4: the missed removal still changed the lane.\n";
+            return false;
+        }
+    }
+
+    // --- S5: a cancelled retime gesture changes NOTHING. AC3. --------------
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        const auto index_of_first = [&]() -> std::optional<std::size_t> {
+            for (std::size_t index = 0U; index < row->key_times.size(); ++index) {
+                if (std::abs(row->key_times[index] - 0.25) <= 1e-6) return index;
+            }
+            return std::nullopt;
+        }();
+        if (!index_of_first.has_value()) {
+            std::cerr << "MAR-185 S5: the lane lost its 0.25 key.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*row, *index_of_first)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+
+        const std::string project_before =
+            marrow::editor::serialize_project(*state.load_result.project);
+        const std::string animation_before = state.selected_animation_name;
+        const auto selection_before = state.timeline_editor.selected_keys;
+        const auto active_before = state.timeline_editor.active_key;
+        const std::size_t undo_before = state.session.undo_count();
+
+        if (!begin_timeline_retime_gesture(&state, 0x185u, 0.0f, rows)) {
+            std::cerr << "MAR-185 S5: the retime gesture would not open on an "
+                         "inherit key.\n";
+            return false;
+        }
+        if (!apply_timeline_retime_delta(&state, rows, 0.05, false)) {
+            std::cerr << "MAR-185 S5: the retime delta would not apply.\n";
+            return false;
+        }
+        finish_timeline_retime_gesture(&state, false);
+
+        if (marrow::editor::serialize_project(*state.load_result.project) !=
+            project_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime left the project "
+                         "changed.\n";
+            return false;
+        }
+        if (state.selected_animation_name != animation_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the preview "
+                         "animation to \"" << state.selected_animation_name
+                      << "\".\n";
+            return false;
+        }
+        if (state.timeline_editor.selected_keys != selection_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the key "
+                         "selection (" << selection_before.size() << " -> "
+                      << state.timeline_editor.selected_keys.size() << " keys).\n";
+            return false;
+        }
+        if (state.timeline_editor.active_key.has_value() !=
+                active_before.has_value() ||
+            (active_before.has_value() &&
+             !(*state.timeline_editor.active_key == *active_before))) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the active "
+                         "key.\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the history "
+                         "depth (" << undo_before << " -> "
+                      << state.session.undo_count() << ").\n";
+            return false;
+        }
+    }
+
+    // --- S7: a single-lane paste REMAPS onto the selected row. -------------
+    //
+    // `paste_timeline_clipboard`'s remap branch is reachable only when
+    // `clipboard_track_count` returns exactly 1, and that function is a
+    // fixed-length N-term sum over the fragment's family vectors -- an
+    // enumeration site the compiler says nothing about. With inherit missing
+    // from the sum a one-lane inherit clipboard counts as **zero** tracks,
+    // `selected_remap_track` stays null, and the inherit paste loop's remap
+    // branch is dead code: the keys land back on the bone they were copied
+    // from, silently, whatever row is selected.
+    {
+        // A second Inherit row to remap ONTO. The fixture ships exactly one
+        // inherit timeline (`child`), so without this there is no other row.
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::AddKeyframe,
+                "Seed a second inherit lane",
+                "mar185:s7",
+                false,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview});
+            if (!transaction) {
+                std::cerr << "MAR-185 S7: could not open a transaction.\n";
+                return false;
+            }
+            marrow::editor::InheritTimelineMergeRequest request;
+            request.animation_name = "toggle_inherit";
+            request.bone_name = "controller";
+            request.keys = {{0.0, "noScale"}, {0.4, "normal"}};
+            const auto merged = marrow::editor::merge_inherit_timeline(
+                transaction.project(), *state.session.runtime_data(), request);
+            if (!merged || !merged.changed || !transaction.commit()) {
+                std::cerr << "MAR-185 S7: seeding the controller lane failed: "
+                          << merged.error << '\n';
+                return false;
+            }
+            sync_shell_from_editor_session(&state);
+        }
+
+        const auto rows = tracks();
+        const auto find_inherit_row = [&](std::string_view bone,
+                                          const std::vector<TimelineTrackRow>& in)
+            -> const TimelineTrackRow* {
+            const auto index = state.load_result.skeleton_data->find_bone_index(bone);
+            if (!index.has_value()) return nullptr;
+            for (const auto& row : in) {
+                if (row.kind == marrow::editor::timeline_model::TimelineTrackKind::Inherit &&
+                    row.bone_index == index) {
+                    return &row;
+                }
+            }
+            return nullptr;
+        };
+        const TimelineTrackRow* source_row = find_inherit_row("child", rows);
+        const TimelineTrackRow* destination_row = find_inherit_row("controller", rows);
+        if (source_row == nullptr || destination_row == nullptr) {
+            std::cerr << "MAR-185 S7: needs both a 'child' and a 'controller' "
+                         "Inherit row.\n";
+            return false;
+        }
+        const auto key_at = [&](std::string_view bone, double time) {
+            const auto* edit = state.load_result.project->find_bone_inherit_timeline_edit(
+                "toggle_inherit", bone);
+            if (edit == nullptr) return false;
+            for (const auto& key : edit->keyframes) {
+                if (std::abs(key.time - time) <= 1e-6) return true;
+            }
+            return false;
+        };
+        const auto index_of = [&](const TimelineTrackRow& row, double time)
+            -> std::optional<std::size_t> {
+            for (std::size_t i = 0U; i < row.key_times.size(); ++i) {
+                if (std::abs(row.key_times[i] - time) <= 1e-6) return i;
+            }
+            return std::nullopt;
+        };
+        const auto source_key = index_of(*source_row, 0.25);
+        if (!source_key.has_value()) {
+            std::cerr << "MAR-185 S7: the 'child' lane lost its 0.25 key.\n";
+            return false;
+        }
+
+        // Copy ONE key from child -- one lane, so the remap arm is the one
+        // under test -- then select controller's row and paste.
+        state.selected_timeline_track_id = source_row->id;
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*source_row, *source_key)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+        if (!copy_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S7: copying one inherit key failed.\n";
+            return false;
+        }
+        if (marrow::editor::timeline_model::clipboard_track_count(
+                state.timeline_editor.clipboard) != 1U) {
+            std::cerr << "MAR-185 S7: clipboard_track_count reports "
+                      << marrow::editor::timeline_model::clipboard_track_count(
+                             state.timeline_editor.clipboard)
+                      << " tracks for a one-lane inherit clipboard, expected 1. "
+                         "The remap branch is unreachable at any other value.\n";
+            return false;
+        }
+
+        const auto rows_before_paste = tracks();
+        const TimelineTrackRow* destination = find_inherit_row("controller", rows_before_paste);
+        if (destination == nullptr) return false;
+        state.selected_timeline_track_id = destination->id;
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (!scrub_timeline_time(&state, 0.9, "MAR-185 S7", false)) return false;
+        if (!paste_timeline_clipboard(&state, rows_before_paste)) {
+            std::cerr << "MAR-185 S7: the remapping paste failed.\n";
+            return false;
+        }
+        if (!key_at("controller", 0.9)) {
+            std::cerr << "MAR-185 S7: the paste did not land on the SELECTED "
+                         "'controller' row.\n";
+            return false;
+        }
+        if (key_at("child", 0.9)) {
+            std::cerr << "MAR-185 S7: the paste landed back on the source bone "
+                         "'child' instead of the selected 'controller' row -- the "
+                         "single-lane remap branch never ran.\n";
+            return false;
+        }
+
+        // The OTHER direction, and the nastier one. With inherit missing from
+        // the sum, a clipboard holding an inherit lane AND one other family
+        // counts as **one** track, so the `== 1U` gate -- whose whole purpose is
+        // to arm the remap only for a single-lane clipboard -- opens for a
+        // TWO-track clipboard and cross-remaps the other family onto whatever
+        // row is selected. Under-counting breaks inherit; it also mis-arms
+        // every other family.
+        {
+            // The fixture's `toggle_inherit` carries ONLY the one inherit lane,
+            // so the second family has to be authored before it can be copied.
+            {
+                auto transaction = state.session.begin_edit({
+                    marrow::editor::EditKind::AddKeyframe,
+                    "Seed a rotate lane",
+                    "mar185:s7b",
+                    false,
+                    marrow::editor::EditImpact::Project |
+                        marrow::editor::EditImpact::Runtime |
+                        marrow::editor::EditImpact::Preview});
+                if (!transaction) {
+                    std::cerr << "MAR-185 S7: could not open a transaction.\n";
+                    return false;
+                }
+                marrow::editor::TransformTimelineEdit rotate;
+                rotate.animation_name = "toggle_inherit";
+                rotate.bone_name = "root";
+                rotate.channel = marrow::editor::TransformTimelineChannel::Rotate;
+                rotate.keyframes.push_back({0.0, 0.0, 0.0, 0.0, {}, {}, {}});
+                rotate.keyframes.push_back({0.5, 30.0, 0.0, 0.0, {}, {}, {}});
+                transaction.project()->transform_timeline_edits.push_back(
+                    std::move(rotate));
+                if (!transaction.commit()) {
+                    std::cerr << "MAR-185 S7: seeding the rotate lane failed.\n";
+                    return false;
+                }
+                sync_shell_from_editor_session(&state);
+            }
+            const auto rows_two = tracks();
+            const TimelineTrackRow* inherit_source = find_inherit_row("child", rows_two);
+            const TimelineTrackRow* rotate_row = nullptr;
+            for (const auto& row : rows_two) {
+                if (row.transform_channel.has_value() && !row.key_times.empty()) {
+                    rotate_row = &row;
+                    break;
+                }
+            }
+            if (inherit_source == nullptr || rotate_row == nullptr) {
+                std::cerr << "MAR-185 S7: needs an inherit row and one transform "
+                             "row to build a two-track clipboard.\n";
+                return false;
+            }
+            state.selected_timeline_track_id = inherit_source->id;
+            state.timeline_editor.selected_keys = {
+                timeline_key_ref(*inherit_source, 0U), timeline_key_ref(*rotate_row, 0U)};
+            state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+            if (!copy_selected_timeline_keys(&state, rows_two)) {
+                std::cerr << "MAR-185 S7: the two-track copy failed.\n";
+                return false;
+            }
+            const std::size_t two_track_count =
+                marrow::editor::timeline_model::clipboard_track_count(
+                    state.timeline_editor.clipboard);
+            if (two_track_count != 2U) {
+                std::cerr << "MAR-185 S7: a clipboard holding one inherit lane and "
+                             "one transform lane counts as " << two_track_count
+                          << " tracks, expected 2. At 1 the single-lane remap gate "
+                             "opens for a TWO-track clipboard and cross-remaps the "
+                             "other family onto the selected row.\n";
+                return false;
+            }
+        }
+
+    }
+
+    // --- S6: a GUI rename carries the clipboard with it. -------------------
+    //
+    // The second detector for the cascade; `marrow_timeline_model_tests`' U3 is
+    // the first and runs earlier in the verification order.
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys = {timeline_key_ref(*row, 0U)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+        if (!copy_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S6: the copy failed.\n";
+            return false;
+        }
+        if (!apply_animation_catalog_action(
+                &state, AnimationCatalogAction::Rename, "toggle_inherit",
+                "toggle_two")) {
+            std::cerr << "MAR-185 S6: the rename failed: " << state.error_message
+                      << '\n';
+            return false;
+        }
+        if (state.timeline_editor.clipboard.animation_name != "toggle_two") {
+            std::cerr << "MAR-185 S6: clipboard.animation_name is \""
+                      << state.timeline_editor.clipboard.animation_name
+                      << "\" after the rename, expected \"toggle_two\".\n";
+            return false;
+        }
+        if (!marrow::editor::timeline_model::clipboard_time_shift(
+                 state.timeline_editor.clipboard, "toggle_two",
+                 state.timeline_time_seconds)
+                 .has_value()) {
+            std::cerr << "MAR-185 S6: Paste is still disabled after the rename.\n";
+            return false;
+        }
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove(scratch, ignored);
+    std::cout << "MAR-185 S1-S7: an inherit lane adds a SAMPLED key at the "
+                 "playhead, replaces one in place, copies and pastes as a typed "
+                 "fragment, removes only on an exact playhead match, survives a "
+                 "cancelled retime bit-identically, remaps a single-lane paste "
+                 "onto the SELECTED row rather than the source bone, and follows "
+                 "a GUI animation rename through the clipboard.\n";
     return true;
 }
 

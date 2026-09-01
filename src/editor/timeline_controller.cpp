@@ -501,6 +501,52 @@ make_slot_attachment_timeline_edit(
     return edit;
 }
 
+std::optional<marrow::editor::BoneInheritTimelineEdit> make_bone_inherit_timeline_edit(
+    const ShellState& state,
+    const TimelineTrackRow& track) {
+    if (!state.load_result || !track.bone_index.has_value() ||
+        *track.bone_index >= state.load_result.skeleton_data->bones().size()) {
+        return std::nullopt;
+    }
+    const auto* animation =
+        state.load_result.skeleton_data->find_animation(track.animation_name);
+    const auto* timeline =
+        animation != nullptr ? animation->find_inherit_timeline(*track.bone_index) : nullptr;
+    if (timeline == nullptr) {
+        return std::nullopt;
+    }
+
+    marrow::editor::BoneInheritTimelineEdit edit;
+    edit.animation_name = track.animation_name;
+    edit.bone_name = state.load_result.skeleton_data->bones()[*track.bone_index].name;
+    edit.keyframes.reserve(timeline->keyframes.size());
+    for (const auto& keyframe : timeline->keyframes) {
+        edit.keyframes.push_back(marrow::editor::InheritKeyframeEdit{
+            static_cast<double>(keyframe.time), keyframe.inherit});
+    }
+    return edit;
+}
+
+std::optional<std::size_t> ensure_bone_inherit_timeline_edit_index(
+    ShellState* state,
+    const TimelineTrackRow& track) {
+    if (state == nullptr || !state->load_result || !track.bone_index.has_value() ||
+        *track.bone_index >= state->load_result.skeleton_data->bones().size()) {
+        return std::nullopt;
+    }
+    const std::string& bone_name =
+        state->load_result.skeleton_data->bones()[*track.bone_index].name;
+    auto* edit = marrow::editor::ensure_bone_inherit_timeline_edit(
+        *state->load_result.project,
+        *state->session.runtime_data(),
+        track.animation_name,
+        bone_name);
+    return edit == nullptr
+        ? std::nullopt
+        : std::optional<std::size_t>(static_cast<std::size_t>(
+              edit - state->load_result.project->bone_inherit_timeline_edits.data()));
+}
+
 std::optional<std::size_t> ensure_slot_color_timeline_edit_index(
     ShellState* state,
     const TimelineTrackRow& track) {
@@ -601,6 +647,40 @@ marrow::editor::EventKeyframeEdit sample_event_keyframe(const ShellState& state)
     }
 
     keyframe.event_name = state.load_result.skeleton_data->events().front().name;
+    return keyframe;
+}
+
+/**
+ * @brief Seeds a new inherit key from what the preview currently SHOWS.
+ *
+ * Sampled, not "setup" and not `Normal`: every sibling sampler reads the
+ * current preview -- the transform sampler reads the preview skeleton, the
+ * slot-colour path reads `slot_states()[...].color`, the attachment path reads
+ * `slot_states()[...].attachment_name`. Seeding from the bone's setup pose
+ * instead would make "add a key in the middle of a stepped lane" CHANGE the
+ * pose at that instant, which is the one thing an Add must never do.
+ */
+marrow::editor::InheritKeyframeEdit sample_inherit_keyframe(
+    const ShellState& state,
+    const TimelineTrackRow& track) {
+    marrow::editor::InheritKeyframeEdit keyframe;
+    keyframe.time = state.timeline_time_seconds;
+    keyframe.inherit = marrow::runtime::BoneInherit::Normal;
+    if (!state.load_result || !track.bone_index.has_value() ||
+        *track.bone_index >= state.load_result.skeleton_data->bones().size()) {
+        return keyframe;
+    }
+    keyframe.inherit =
+        state.load_result.skeleton_data->bones()[*track.bone_index].inherit;
+    const auto* animation =
+        state.load_result.skeleton_data->find_animation(track.animation_name);
+    if (animation == nullptr) {
+        return keyframe;
+    }
+    if (const auto* sampled = animation->sample_bone_inherit(
+            *track.bone_index, state.timeline_time_seconds)) {
+        keyframe.inherit = sampled->inherit;
+    }
     return keyframe;
 }
 
@@ -926,6 +1006,14 @@ std::optional<marrow::editor::TimelineKeySelector> timeline_key_selector(
         }
         return selector;
     }
+    // MAR-185: ahead of the two id-substring slot branches, and keyed on the
+    // row's own kind rather than on its id.
+    if (track.kind == timeline_model::TimelineTrackKind::Inherit && track.bone_index.has_value() &&
+        *track.bone_index < skeleton.bones().size()) {
+        selector.kind = marrow::editor::TimelineKeyKind::Inherit;
+        selector.bone_name = skeleton.bones()[*track.bone_index].name;
+        return selector;
+    }
     if (track.slot_index.has_value() && *track.slot_index < skeleton.slots().size()) {
         selector.slot_name = skeleton.slots()[*track.slot_index].name;
         if (track.id.find(":Color") != std::string::npos) {
@@ -1001,6 +1089,12 @@ bool visit_editable_timeline_keys(
         visitor(state->load_result.project->slot_attachment_timeline_edits[*index].keyframes);
         return true;
     }
+    if (track.kind == timeline_model::TimelineTrackKind::Inherit) {
+        const auto index = ensure_bone_inherit_timeline_edit_index(state, track);
+        if (!index.has_value()) return false;
+        visitor(state->load_result.project->bone_inherit_timeline_edits[*index].keyframes);
+        return true;
+    }
     return false;
 }
 
@@ -1061,6 +1155,16 @@ bool visit_existing_project_timeline_keys(
             state->load_result.skeleton_data->slots()[*track.slot_index].name;
         auto* edit = project.find_slot_attachment_timeline_edit(
             track.animation_name, slot_name);
+        if (edit == nullptr) return false;
+        visitor(edit->keyframes);
+        return true;
+    }
+    if (track.kind == timeline_model::TimelineTrackKind::Inherit && track.bone_index.has_value() &&
+        *track.bone_index < state->load_result.skeleton_data->bones().size()) {
+        const std::string& bone_name =
+            state->load_result.skeleton_data->bones()[*track.bone_index].name;
+        auto* edit = project.find_bone_inherit_timeline_edit(
+            track.animation_name, bone_name);
         if (edit == nullptr) return false;
         visitor(edit->keyframes);
         return true;
@@ -1156,6 +1260,11 @@ bool add_timeline_key_at_playhead(
                         state->preview_skeleton->slot_states()[*track.slot_index].attachment_name;
                     if (!attachment.empty()) new_key.attachment_name = attachment;
                 }
+            } else if constexpr (
+                std::is_same_v<Key, marrow::editor::InheritKeyframeEdit>) {
+                // The generic `find_keyframe_near_time` replace path below needs
+                // no inherit arm: Add IS Edit for this family too.
+                new_key = sample_inherit_keyframe(*state, track);
             }
             new_key.time = state->timeline_time_seconds;
             auto insertion = std::lower_bound(
@@ -1244,6 +1353,9 @@ bool timeline_key_kind_carries_easing(marrow::editor::TimelineKeyKind kind) {
     case marrow::editor::TimelineKeyKind::DrawOrder:
     case marrow::editor::TimelineKeyKind::Event:
     case marrow::editor::TimelineKeyKind::SlotAttachment:
+    // MAR-185: a stepped lane has no outgoing tangent to ease, so the MAR-170
+    // curve presets skip it in `collect_curve_preset_selectors`.
+    case marrow::editor::TimelineKeyKind::Inherit:
         return false;
     }
     return false;
@@ -2024,6 +2136,25 @@ bool copy_selected_timeline_keys(
                     indices,
                     &clipboard.project_fragment.slot_attachment_timeline_edits);
             }
+        } else if (track.kind == timeline_model::TimelineTrackKind::Inherit &&
+                   track.bone_index.has_value()) {
+            const std::string& bone_name =
+                state->load_result.skeleton_data->bones()[*track.bone_index].name;
+            const auto* existing =
+                state->load_result.project->find_bone_inherit_timeline_edit(
+                    track.animation_name, bone_name);
+            const auto runtime = make_bone_inherit_timeline_edit(*state, track);
+            if (existing != nullptr) {
+                append_selected_timeline_fragment(
+                    *existing,
+                    indices,
+                    &clipboard.project_fragment.bone_inherit_timeline_edits);
+            } else if (runtime.has_value()) {
+                append_selected_timeline_fragment(
+                    *runtime,
+                    indices,
+                    &clipboard.project_fragment.bone_inherit_timeline_edits);
+            }
         }
     }
     // The flag is a property of a lane in a project, never of a clipboard
@@ -2038,6 +2169,9 @@ bool copy_selected_timeline_keys(
     for (auto& edit : clipboard.project_fragment.mesh_deform_timeline_edits) {
         edit.loop_sync = false;
     }
+    // MAR-185: `bone_inherit_timeline_edits` gets NO entry here, and its
+    // absence is deliberate rather than an oversight -- `BoneInheritTimelineEdit`
+    // has no `loop_sync` member at all, so there is nothing to scrub.
     clipboard.has_data = std::isfinite(clipboard.earliest_time);
     if (!clipboard.has_data) return false;
     state->timeline_editor.clipboard = std::move(clipboard);
@@ -2101,6 +2235,18 @@ bool paste_timeline_clipboard(
                 return track.animation_name == state->selected_animation_name &&
                     track.slot_index == slot_index &&
                     track.id.find(suffix) != std::string::npos;
+            });
+        return iterator == tracks.end() ? nullptr : &(*iterator);
+    };
+    const auto find_bone_inherit_track = [&](std::string_view bone_name) {
+        const auto bone_index =
+            state->load_result.skeleton_data->find_bone_index(bone_name);
+        if (!bone_index.has_value()) return static_cast<const TimelineTrackRow*>(nullptr);
+        const auto iterator = std::find_if(
+            tracks.begin(), tracks.end(), [&](const TimelineTrackRow& track) {
+                return track.animation_name == state->selected_animation_name &&
+                    track.bone_index == bone_index &&
+                    track.kind == timeline_model::TimelineTrackKind::Inherit;
             });
         return iterator == tracks.end() ? nullptr : &(*iterator);
     };
@@ -2212,6 +2358,22 @@ bool paste_timeline_clipboard(
         }
     }
 
+    for (const auto& source : clipboard.project_fragment.bone_inherit_timeline_edits) {
+        const TimelineTrackRow* track = selected_remap_track != nullptr &&
+                selected_remap_track->kind == timeline_model::TimelineTrackKind::Inherit
+            ? selected_remap_track
+            : find_bone_inherit_track(source.bone_name);
+        if (track == nullptr) continue;
+        if (const auto index = ensure_bone_inherit_timeline_edit_index(state, *track)) {
+            paste_keys_replace_collisions(
+                &state->load_result.project->bone_inherit_timeline_edits[*index].keyframes,
+                source.keyframes,
+                *shift,
+                false);
+            remember_track(*track, source.keyframes.size());
+        }
+    }
+
     // MAR-171: pasted keys keep their copied mode and driver, and the paste
     // gives them new neighbours, so their segments resolve here.
     std::string auto_curve_error;
@@ -2276,6 +2438,8 @@ bool begin_timeline_retime_gesture(
     gesture.item_id = item_id;
     gesture.start_mouse_x = start_mouse_x;
     gesture.keys = state->timeline_editor.selected_keys;
+    gesture.original_keys = state->timeline_editor.selected_keys;
+    gesture.original_active_key = state->timeline_editor.active_key;
     gesture.transaction = std::move(transaction);
     for (const TimelineKeyRef& key : gesture.keys) {
         const TimelineTrackRow* track = find_timeline_track(tracks, key.track_id);
@@ -2302,6 +2466,18 @@ void finish_timeline_retime_gesture(ShellState* state, bool commit) {
     if (completion.action ==
         marrow::editor::timeline_model::CompletionAction::Cancel) {
         gesture.transaction.cancel();
+        // MAR-185, found by the inherit shell scenario's S5 and NOT
+        // inherit-specific: `apply_timeline_retime_delta` rewrites
+        // `selected_keys` so the selection follows the moving keys, and the
+        // cancel below rolls the PROJECT back but left those refs naming times
+        // the project no longer has. The next gesture then failed with "The
+        // selected timeline keys changed during retime". `gesture.keys` is the
+        // pre-gesture selection, already validated to resolve in
+        // `begin_timeline_retime_gesture`, and the project is now back in
+        // exactly that state -- so restoring it is the coherent end state for
+        // every family, not just inherit.
+        state->timeline_editor.selected_keys = gesture.original_keys;
+        state->timeline_editor.active_key = gesture.original_active_key;
         sync_shell_from_editor_session(state);
         if (completion.report_cancelled) {
             state->status_message = "Cancelled timeline retime";

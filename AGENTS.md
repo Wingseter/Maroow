@@ -38,13 +38,24 @@
 - Sokol ImGui setup/frame/shutdown lifecycle probe: `./build/marrow_sokol_imgui_runtime_probe`
 - Typed transient entity selection model: `./build/marrow_selection_tests`
 - Viewport interaction data-kernel tests: `./build/marrow_viewport_interaction_tests`
-- Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
+- Timeline data-model and authoring-boundary tests, including MAR-185's UI-free
+  clipboard animation cascade (rename remaps `Clipboard::animation_name` and
+  re-enables Paste, delete clears it, an unrelated animation changes nothing):
+  `./build/marrow_timeline_model_tests`
 - Timeline scalar-graph projection/geometry/view/drag-math tests: `./build/marrow_timeline_graph_model_tests`
 - Editor project authoring smoke including `offset_keyframe_scalars` and MAR-184's
   stepped inherit overlays (schema round trip, all five modes, the five parser
   rejections, the curve rejection, the `ensure` accessor, base-backed /
   project-only / empty materialization, the merge primitive's four rejections and
-  all three collision arms, and `.mskl`/`.mbin` export equivalence -- P1-P13):
+  all three collision arms, and `.mskl`/`.mbin` export equivalence -- P1-P13),
+  and MAR-185's inherit EDITING parity (the editable dopesheet row and its
+  selector, all five modes through the merge primitive, the same-time obligation
+  by rejection and by paste collapse, removal down to the one-key floor proved
+  through the export, six rejections each asserted on their message and each
+  leaving `serialize_project()` byte-identical, retime apply and clamp proved on
+  the stored time after a real reload, a scale rejection naming the inherit lane
+  and a legal scale exact to 1e-12, duration auto-grow, and the rename/delete
+  overlay cascade -- P1-P9, U1-U2):
   `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - `marrow_project_smoke` asserts only what the project it is pointed at actually contains. The viewport debug-overlay gate keys on whether the document authors `editor.viewport.debug_overlay` (round-tripping it value for value when present, asserting the `DebugOverlaySettings` defaults when absent, plus an alternating-pattern round trip that catches two toggles wired to each other's key — which an all-`true` fixture cannot), and the `player_idle`-specific editing suites run only for a project carrying their markers (bones `spine`/`arm_l`, animations `attack`/`aim`, skin `mesh_base`). A project matching NONE of them prints a named skip and still runs the shape and export checks; a project matching SOME of them ABORTS, because a partial match is a corrupted fixture rather than a project to skip
 - Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
@@ -58,6 +69,12 @@
   settings write (C20-C25):
   `MARROW_CONFIG_HOME=/tmp/mar183-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Headless editor shell smoke including the graph drag scenario and actual-frame drags: `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- Inherit timeline editing in the shell -- sampled Add at the playhead, in-place
+  replace, typed copy/paste, exact-playhead Remove, a bit-identical cancelled
+  retime, the single-lane paste remap onto the selected row, and the GUI rename
+  clipboard cascade (S1-S7), plus the actual-frame
+  case that locates the `Mode` combo with a real mouse and clicks through its
+  popup (F1): `MARROW_CONFIG_HOME=/tmp/mar185-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -250,12 +267,161 @@ produces a silently wrong test rather than a loud failure if you get it wrong.
   a popup is an ordinary window, so `FindWindowByName("Title##suffix")` plus the
   same `HoveredId` sweep works on it — and check `window->Active` to tell an
   open modal from a stale one.
+- **`window->GetID(label)` is the wrong seed if anything pushed an ID.** The
+  Timeline window draws its dopesheet inside
+  `BeginTabBar("timeline_views")` + `BeginTabItem("Dopesheet")`, and
+  `BeginTabItem` **pushes the tab's id**, so every widget below it is hashed
+  against that and not against the window root. A sweep seeded with
+  `FindWindowByName(kTimelineWindowTitle)->GetID("Mode")` matches nothing and
+  reports the widget "absent" — `TabBarCalcTabID`
+  (`external/imgui/imgui_widgets.cpp:10033`) hashes the label under the tab
+  bar's pushed id. Reproduce the chain instead:
+  `ImHashStr(label, 0, ImHashStr("Dopesheet", 0, window->GetID("timeline_views")))`.
+  Measured in MAR-185, where the widget was drawn and hoverable the whole time.
+- **`ScrollMax` is one frame behind.** It is written in `Begin()`
+  (`external/imgui/imgui.cpp:8393-8394`) — but *from* `window->ContentSize`,
+  which `Begin()` itself recomputes twenty lines earlier at **`:7995`**, via
+  `CalcWindowContentSizes`, from the **previous** frame's `DC.CursorMaxPos`.
+  (`End()` at `:8711` never assigns `ContentSize` at all; the only assignments
+  anywhere are `:7995` and the `:8022` reset.) So the write is current and the
+  **input** is stale, and on the first pass after a layout change it still
+  reads `0`. A scroll-into-view loop that breaks on `ScrollMax == Scroll` gives
+  up before the window has ever reported its real extent, and the widget below
+  the fold is then reported missing. Render a frame first, re-read `ScrollMax`
+  every iteration, and keep a fallback for the `0` case.
+- **Forcing focus closes an open popup.** `SetWindowFocus(parent)` inside a
+  per-frame render helper dismisses a combo popup — `FocusWindow`
+  (`imgui.cpp:13553`) calls `ClosePopupsOverWindow` at `:13588` — so an item
+  sweep then finds an empty popup and blames the item. Confine `SetWindowFocus`
+  to the opening frames.
+- **A popup's `InnerClipRect` is not settled on the frame it opens.** Render one
+  more frame before capturing the rectangle a sweep will be bounded by,
+  otherwise the loop walks straight past the item list. **This is the same
+  one-frame-behind mechanism as `ScrollMax` above**: the rect is derived at
+  `:8382-8383` from `InnerRect`, which is sized off `ContentSizeIdeal`
+  (`:8110`) — the same previous-frame `CursorMaxPos` measurement. The two
+  entries share one cause, and understanding that lag explains both.
 - **A UI-free helper cannot observe a deleted widget.** Calling the function a
   button calls asserts the handler, not the button; such a test passes unchanged
   after the widget is removed. When "the widget is on screen" is the deliverable,
   the frame is the only mechanism that can see it — demonstrated by deleting
   `draw_constraint_catalog_buttons()`'s body, which left MAR-178's own scenario
   printing its full success line while the frame smoke failed by name.
+
+## Repo facts that outlive their story
+
+Measured facts that a future story will need and that are **not** discoverable
+by reading the build files or the source. Each was established by building or
+running, not by inference, and each is recorded here rather than inside the
+story that found it, because the story's section is not where the next person
+will look.
+
+### Adding a value to an enum: the compiler helps with switches and nothing else
+
+**`-Wswitch` is ON, by default, with no flag.** `grep -rn
+"Wall\|Wswitch\|Wextra" CMakeLists.txt` returns **nothing**, and `-Werror`
+appears once at `:352` scoped to `marrow_constraint_warning_check` — from which
+it is natural, and **wrong**, to conclude that adding an enum value produces no
+diagnostics. Clang enables `-Wswitch` without `-Wall`. MAR-185 settled this by
+adding a throwaway `TimelineKeyKind` value, deleting **every** object file and
+rebuilding **all** targets: **25 warnings** (18 `authoring.cpp`, 6
+`agent_handlers_editing.cpp`, 1 `timeline_controller.cpp`), against **0** on a
+pristine rebuild.
+
+**The probe must build every target, and this is the part that is easy to get
+wrong.** MAR-185's first probe used `cmake --build build --target marrow_editor`
+and measured 24 — it could not see `timeline_key_kind_carries_easing`
+(`timeline_controller.cpp`) at all, because that file belongs to
+`marrow_editor_shell`. The site was found and fixed anyway, by building the
+shell separately, but a probe scoped to one target **understates its own
+checklist** and will silently hand the next person a short list. Use:
+
+```
+find build/CMakeFiles -name '*.o' -delete
+cmake --build build -j8 2>&1 | grep Wswitch
+```
+
+So, when you add a value to an enum that is switched on:
+
+- **Every exhaustive `switch` is found for you, in every target you build.** Add
+  the value, delete **all** object files, build **all** targets, and read the
+  warning list. That list is complete for switches *only across the targets you
+  actually built* — which is why the two "all"s are not decoration.
+
+**Check the number against arithmetic, not just against a second build.** The 25
+is self-checking, and the check would have caught the scoped-probe error without
+rebuilding anything: MAR-185 named **14** switch arms as deliberately uninverted
+and had **11** switch-site inversions, and 14 + 11 = 25. Per file: 18
+`authoring.cpp` (12 uninverted + 6 inverted), 6 `agent_handlers_editing.cpp`
+(1 uninverted + I16 + the four `selector.kind` sites), 1 `timeline_controller.cpp`
+(uninverted). A probe reporting 24 cannot contain all 14 named arms, because
+`timeline_key_kind_carries_easing` has exactly one definition and it is in
+`marrow_editor_shell` — the documents contradicted themselves before any second
+measurement was taken.
+- **Nothing else is.** The compiler is silent for **if/else chains**, for
+  **`if constexpr` type chains**, and for **fixed-length N-term lists and sums
+  that enumerate one entry per family**. In MAR-185 that was **at least
+  sixteen** sites — treat any such number as a **floor**, not a total, because
+  the only way to find them is to look:
+
+  *Lists and sums:* `rename_all_timeline_edits` (`authoring.cpp:123`),
+  `erase_all_timeline_edits` (`:136`), `set_animation_duration`'s fold list
+  (`:2076-2098`), `auto_extend_explicit_animation_durations`' fold list
+  (`:2164-2180`), `sort_retimed_timelines` (`:1045`), `clipboard_track_count`
+  (`timeline_model.cpp:392`), and `copy_selected_timeline_keys`' `loop_sync`
+  scrub loop (`timeline_controller.cpp:2160-2172`).
+  *Chains:* `write_scalar_component` (`authoring.cpp:451`),
+  `timeline_key_selectors_arg` (`agent_handlers_editing.cpp:801`), the easing
+  parser (`:1114-1167`), the curve-mode parser (`:1406-1456`),
+  `timeline_lane_selectors_arg` (`agent_dispatch.cpp:375`),
+  `timeline_key_selector` (`timeline_controller.cpp:971`),
+  `visit_editable_timeline_keys` (`:1048`),
+  `visit_existing_project_timeline_keys` (`:1102`),
+  `add_timeline_key_at_playhead`'s `if constexpr` chain (`:1199`),
+  `copy_selected_timeline_keys` (`:2044`) and `paste_timeline_clipboard`
+  (`:2184`).
+
+  **Every line number above was re-derived against the committed tree**, after
+  three of them were found stale — they had been copied from measurements taken
+  before this story's own edits shifted them.
+
+  **Six of MAR-185's biting inversions lived in this class, and review found
+  three defects in it that its own author had missed** — every one of them in
+  the class the story had itself identified as compiler-blind:
+  `clipboard_track_count` (a six-term sum, live: it broke the paste remap in
+  *both* directions), `set_animation_duration`'s fold list (latent), and
+  `timeline_lane_selectors_arg` (message-only). Sweep this class by hand, every
+  time, and prefer a test that exercises the **consumer** of such a list over
+  one that reads the list — none of the three would have been found by reading.
+- **A warning tells you a site exists, never what the arm should do.** Several
+  arms are correct by fall-through and adding them changes nothing observable;
+  others are `void` with no trailing statement and silently write nothing.
+  Deciding which is which is still manual, and is what a per-site fall-through
+  table is for.
+
+Turning on `-Wall`/`-Wextra` tree-wide remains its own piece of work; MAR-185
+did not do it.
+
+### `ResolvedTimelineKey::original_time` is the SELECTOR's time, not the stored one
+
+A 1e-6 seam in the timeline authoring layer, and a real one. `resolve_timeline_key`
+(`authoring.cpp:202`) carries `selector.time` **verbatim** into
+`ResolvedTimelineKey::original_time` in **all seven** of its arms, while
+`resolved_stored_key_time` (`:722`) reads
+`timelines[timeline_index].keyframes[key_index].time`. A selector only has to
+identify a key within `kKeyTimeEpsilon` (**1e-6**), and a shell selector is
+built from track rows whose times have been through `float32`, so the two
+values legitimately differ — by ~1.5e-9 for `0.1`, and by up to the full 1e-6
+in principle.
+
+`scale_keyframe_times` re-reads the stored time deliberately
+(`snapshot.original_time = resolved_stored_key_time(candidate, snapshot)`,
+`authoring.cpp:2386`)
+because it multiplies, and a live gesture re-derives its selectors every frame.
+A retime adds one shared delta and does not care. **If you write a new operation
+that computes from `original_time`, decide which of the two you actually mean**
+— MAR-185's I13 is the inversion that demonstrates the difference is observable
+(`0.10000000149011612` and `1.299999974668026` against `0.1` and `1.3`).
 
 ## MAR-192–210 Platform Program Local Implementation Checkpoint
 
@@ -290,6 +456,385 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-185 Complete Inherit Timeline Editing Parity Validation Results
+
+Validated 2026-09-01 against a from-scratch `rm -rf build` tree at MAR-184's
+commit `8cc5c57`. MAR-185 turns MAR-184's stored inherit overlay into a
+**first-class timeline family**: selectable, add/edit at the playhead, removable
+by exact time, retimeable, scalable, copy/pasteable, cascaded by animation
+rename and delete, drawn as a real widget, and reachable from the agent and MCP.
+
+**Nothing about the file format moved.** `.mskl` stays version 1, `.mbin` stays
+version 2, the C ABI is untouched, `.marrow` gains no key, no fixture was
+edited, no CTest target was registered (`ctest -N` is **22** before and after),
+no translation unit was added, and `git diff --stat` over
+`timeline_graph_model.{hpp,cpp}`, `session.cpp`, `include/marrow/c/`, `src/c/`,
+`include/marrow/runtime/`, `src/runtime/`, `assets/fixtures/` and
+`CMakeLists.txt` is **empty**. One number did move: the agent registry, **64 ->
+66**, at exactly thirteen sites.
+
+### The compiler DOES police this. The story's stated premise was wrong.
+
+The single most consequential finding, and the one to carry forward. Both
+MAR-185 documents, and the briefs that produced them, are built on this
+inference:
+
+> `-Werror` appears once, scoped to `marrow_constraint_warning_check`. There is
+> no `-Wall`, no `-Wextra`, and no `-Wswitch` on any product target. So adding
+> `TimelineKeyKind::Inherit` produces **zero diagnostics**.
+
+The premise (`grep -rn "Wswitch\|Wall\|Wextra" CMakeLists.txt` -> **empty**) is
+true. The conclusion is false: **Clang enables `-Wswitch` by default**, without
+`-Wall`. Measured by adding a throwaway seventh enum value and rebuilding
+`marrow_editor` with its object files deleted first:
+
+```
+src/editor/authoring.cpp:205:13: warning: enumeration value 'ThrowawaySeventhProbe'
+    not handled in switch [-Wswitch]
+... 25 diagnostics total, over ALL targets: 18 authoring.cpp, 6
+agent_handlers_editing.cpp, 1 timeline_controller.cpp. 0 errors. A pristine
+rebuild after restoring the header: 0 warnings.
+```
+
+The first probe measured **24**, because it was scoped to
+`--target marrow_editor` and structurally could not see
+`timeline_key_kind_carries_easing` in `marrow_editor_shell`. That site was found
+and fixed anyway by building the shell separately, but the number and the recipe
+were both wrong; the durable section above now says to delete every object file
+and build all targets.
+
+So the sweep is **partly compiler-assisted**, and the honest division is:
+
+- **25 exhaustive `switch` sites are policed.** The compiler enumerated them; the
+  real work was deciding what each arm should *do*, which §1.1's fall-through
+  table is still the right artifact for.
+- **At least sixteen enumeration sites are NOT policed**, and this is where the
+  danger actually lives — the compiler is silent for every one. Sixteen is a
+  floor, not a total; the full enumeration is in "Repo facts that outlive their
+  story" above, and it includes the one this story got **wrong**
+  (`clipboard_track_count`, D20). Among them:
+  the seven-vector call lists `rename_all_timeline_edits` (`authoring.cpp:123`),
+  `erase_all_timeline_edits` (`:132`), `sort_retimed_timelines` (`:986`) and
+  `auto_extend_explicit_animation_durations`' folds (`:2153-2166`); and the
+  if/else chains `write_scalar_component` (`:425`),
+  `parse_timeline_key_selectors` (`agent_handlers_editing.cpp:~795-895`), the
+  easing parser (`~:1080-1150`), the curve-mode parser (`~:1370-1440`),
+  `timeline_key_selector` (`timeline_controller.cpp:891`) and
+  `visit_editable_timeline_keys` / `visit_existing_project_timeline_keys`
+  (`:960`, `:1008`).
+  **Four of this story's biting inversions -- I10, I11, I14 and I22 -- are
+  exactly these unpoliced lists, and I22 is a defect that shipped in the first
+  commit and was caught in review.** The next person to add a `TimelineKeyKind` value
+  should let the compiler enumerate the switches and hand-sweep this list.
+
+MAR-185 does **not** turn on `-Wall`/`-Wextra`; that remains its own piece of
+work. **This fact is recorded durably in "Repo facts that outlive their story"
+above**, not only here, because the next story to add an enum value will read
+that section and not this one.
+
+The registry-count sweep has the same shape: the ten pre-existing `!= 64U`
+guards live in **three** files (`shell_smoke_graph.cpp` 7,
+`shell_smoke_constraints.cpp` 2, `shell_smoke_timeline.cpp` 1), and a sweep that
+assumes two will silently miss `shell_smoke_constraints.cpp:147,676` (D19).
+
+### What was measured before any code was written
+
+| Gate | Answer |
+| --- | --- |
+| HEAD | `8cc5c57`; MAR-184 added 1,935 lines across five files (`project.cpp` **398**, `editor_project_smoke.cpp` 1,244, `authoring.cpp` 140, `project.hpp` 85, `authoring.hpp` 68) |
+| `ctest --test-dir build -N` | **22**, identical at the end |
+| A6 (`-Wswitch`) | **FAILED as stated** -- **25** diagnostics over all targets (18 `authoring.cpp`, 6 `agent_handlers_editing.cpp`, 1 `timeline_controller.cpp`), see above. The first probe measured 24 because it was scoped to one target |
+| A7 (MAR-184 symbols) | A probe naming `BoneInheritTimelineEdit`, `InheritKeyframeEdit`, `ProjectData::bone_inherit_timeline_edits`, `find_bone_inherit_timeline_edit`, `ensure_bone_inherit_timeline_edit`, `inherit_mode_from_key`, `inherit_mode_json_key`, `InheritTimelineMergeRequest::replace_existing_times` and `merge_inherit_timeline` compiles and links unchanged. MAR-184's **seventh `!empty()` disjunct** is present, as `has_inherit_timeline_edits` at `project.cpp:5128-5140`, feeding the seven-argument call at `:5141-5148` |
+| A8 (the pruning M-gate) | Reproduced MAR-184's result byte-for-byte. `marrow_inspect` still **cannot** answer it (MAR-184's own D9, copied forward unfixed into MAR-185's Task 0.9); a `libmarrow_runtime.a` probe was used: a lone `{0.0, "normal"}` on `controller` -> `animation 'toggle_inherit': 1 inherit timelines` (only `child`; **controller pruned**), while `{0.0,"noScale"}+{0.4,"normal"}` -> `2 inherit timelines` with `bone_index=1 name='controller' keys=2: (0,3) (0.4,0)` |
+| A9 (is I13 viable?) | **Yes.** `resolve_timeline_key` sets `ResolvedTimelineKey::original_time` to the *selector's* time verbatim, while `resolved_stored_key_time` reads `keyframes[i].time`; the two may legitimately differ by up to `kKeyTimeEpsilon` (1e-6). P8 makes the difference a realistic float32 narrowing and I13 reproduces at ~2.5e-8. **Recorded durably in "Repo facts that outlive their story" above** -- it is a seam in the shared authoring layer, not a MAR-185 detail |
+| A10 (clipboard cascade) | `grep -rn "clipboard" src/editor/shell_project_panels.cpp` -> **0**. `clipboard.animation_name` has **three** sites, not the two the design predicted: the read in `timeline_model.cpp:400`, the write in `timeline_controller.cpp:1940`, and the Paste-enable gate at `shell_timeline.cpp:2429` |
+| Registry baseline | 64 rows / `std::array<OperationExpectation, 64>` at `agent_dispatch_smoke.cpp:39` / ten `!= 64U` / two `== 64` at `test_client.py:53,55` |
+| Non-effect witness | `serialize_project(load_project("assets/fixtures/player_idle.marrow").project)` = **6111 bytes**, sha256 `c7d6c6de6a0badf8171772ebb75884785c1b203c86ff4fd4553344029953616b` |
+| UI witness | `git grep -c "Inherit remains read-only" -- src/` -> **2** before, **0** after |
+| Fixtures | `skin_inherit_constraints.mskl`: five bones, all `inherit` **absent**; `toggle_inherit`/`child` keys `0.0 normal`, `0.25 noRotationOrReflection`, `0.5 onlyTranslation`, `1.0 normal`. `player_idle.mskl`: sixteen bones, all absent, **0** inherit timelines |
+
+### Result
+
+| Slice | What it proves | Status |
+| --- | --- | --- |
+| The seventh vocabulary member | `TimelineKeyKind::Inherit` appended last; **25** compiler-named switch arms plus **at least sixteen** hand-swept enumeration sites | PASS |
+| Editable lane and selector | P1: the `bone:2:Inherit` row is editable and an Inherit selector over its own key time resolves exactly one key | PASS |
+| All five modes, through the editing surface | P2: five tokens merged in one request survive save -> LOAD -> materialization in order. MAR-184's P3 builds the same five by struct construction and never touches the token vocabulary | PASS |
+| The same-time obligation | P4: a merge of two keys 5e-7 apart is refused naming `collide` with `serialize_project` unchanged, and `paste_keys_replace_collisions` collapses a pasted key onto an existing time instead of inserting a duplicate | PASS |
+| Removal, and the floor | P3: three removals count down 3/2/1, the fourth is refused naming the remedy, and the exported `.mskl` carries the **one** survivor rather than the imported four | PASS |
+| Rejection atomicity | P5: a removal for a time that does not exist, on a bone with **no project edit yet**, leaves `serialize_project()` byte-identical; six rejections each asserted on their message | PASS |
+| Retime | P6/P7: a delta with room applies and is proved on the **stored** time after a real `load_project`; a delta that would cross an unselected neighbour clamps to `0.249` | PASS |
+| Scale | P8: a projection 0.4 ms apart is refused naming `inherit key 'child'` and `the minimum separation is`; a legal ratio lands on the stored double to 1e-12 | PASS |
+| Duration auto-grow | P9: a key at 1.4 s grows an explicit 1.0 s duration to float32(1.4) | PASS |
+| Animation cascade | U1/U2: rename carries the overlay and the materialized timeline; delete removes it and does **not** re-create the animation from an orphan | PASS |
+| Clipboard cascade | U3 (UI-free algebra) + S6 (the GUI path). Fixes all seven families at once -- `Clipboard::animation_name` is one field | PASS |
+| Shell workflows | S1-S7: sampled Add, in-place replace, typed copy/paste, exact-playhead Remove, a bit-identical cancelled retime, the single-lane paste remap onto the SELECTED row, and the rename cascade | PASS |
+| The widget, on screen | F1: a real mouse finds the `Mode` combo at (344,796) and the same key's `Time` drag at (344,772); clicking `normal` changes the stored mode and records exactly one history entry | PASS |
+| Agent + MCP | A1-A7 and `test_client.py`: 66/66 registry and MCP names, both new tools with their `required` sets | PASS |
+| Formats and scope | `.mskl` v1 / `.mbin` v2 / C ABI / graph model / `session.cpp` / fixtures / CMake untouched; `marrow_inspect --compare` reports `matches` | PASS |
+| Whole suite | From-scratch build with **0 warnings, 0 errors**; `ctest` 22/22; every unit binary, both smokes, the shell, third-party verification and the constraint warning check green; `~/Library/Application Support/Marrow` **ABSENT** | PASS |
+
+### Inversions run
+
+Twenty-six mutations, each applied to the from-scratch tree with **the object
+files deleted** before both the mutation build and the restore build (H1 --
+`touch` is not sufficient and was not used), each producing the exact text
+below, each restored and rebuilt. Every message was compared with `cmp` against
+an independently recorded first-run string (H2), never by eye and never by
+slicing a line number out of a reference file.
+
+| # | Mutation | Bit | Exact failure text |
+| --- | --- | --- | --- |
+| **I1** | `sample_inherit_keyframe` seeds from the bone's setup pose instead of `sample_bone_inherit` | **S1** | `MAR-185 S1: the key added at 0.75 s carries mode "normal", expected the sampled "onlyTranslation".` |
+| **I2** | `track_is_editable` drops the Inherit disjunct | **P1** | `MAR-185 P1: the Inherit row 'bone:2:Inherit' is still read-only. Every shell workflow -- Add, Remove, copy, the toolbar -- gates on this and bails with "The selected timeline is read-only".` |
+| **I3** | `resolve_timeline_key` drops its Inherit arm | **P1** (re-attributed) | `MAR-185 P1: an Inherit selector over the row's own key time resolved 0 keys, expected 1 (Unsupported timeline key kind.).` -- **the attribution moved, and only the H3 re-run found it.** When I3 first ran, P1 did not exist yet and P6 was the first detector (`MAR-185 P6: retime_keyframes resolved 0 keys, expected 1 (Unsupported timeline key kind.).`). P1 was added two tasks later, runs earlier, and now catches it first. Both detect it; the table names the one that actually fires |
+| **I4** | `scale_keyframe_times`' validate switch drops its Inherit arm | **P8** | `MAR-185 P8: the colliding scale was accepted (changed=true); expected a rejection naming the separation.` |
+| **I5** | `scale_lane_label` drops its Inherit arm | **P8** | `MAR-185 P8: rejection message is "Scaling would place animation 'toggle_inherit' timeline key at 0.250400 s, 0.000400 s from the selected key at 0.250000 s; the minimum separation is 0.001000 s."; expected it to name "inherit key 'child'" and "the minimum separation is".` -- the rejection still happens (I4's arm is present); only the label degrades |
+| **I6** | `include_resolved_retime_bounds` drops its Inherit arm | **P7** | `MAR-185 P7: applied_delta is 0.4, expected the clamped 0.249. Without an Inherit arm in include_resolved_retime_bounds the delta is bounded by nothing at all.` |
+| **I7** | `apply_resolved_retime` drops its Inherit arm | **P6** | `MAR-185 P6: after save -> load the key is still at 0.25, expected 0.400000.` -- `void`, no trailing statement: the retime reports the full `applied_delta` while writing nothing, so only the **stored** time after a real reload can see it |
+| **I8** | the candidate copy removed from `remove_inherit_timeline_keys` and `ensure` hoisted above the resolve step | **P5** | `MAR-185 P5: the rejected removal changed serialize_project() (954 -> 1555 bytes). Validation must complete before ANY write.` |
+| **I9** | the last-key floor (step 8) deleted | **P3** | `MAR-185 P3: expected a rejection naming 'must keep at least one key', got changed=true with error ''.` |
+| **I9b** | the same, with P3's floor assertion neutered so the removal still RUNS | **P3** | `MAR-185 P3: the exported .mskl carries 4 inherit keys for 'child', expected the 1 that survived removal. An emptied edit is skipped by both serializers and restores the imported base track.` |
+| **I10** | the seventh line dropped from `rename_all_timeline_edits` | **U1** | `MAR-185 U1: after renaming toggle_inherit -> toggle_two, the reloaded project's inherit edit still names 'toggle_inherit'.` |
+| **I11** | the seventh line dropped from `erase_all_timeline_edits` | **U2** | `MAR-185 U2: the deleted animation's inherit edit survived the delete.` |
+| **I11b** | the same, with U2's first assertion neutered | **U2** | `MAR-185 U2: the reloaded skeleton still has animation 'toggle_inherit', re-created from an orphan inherit edit.` |
+| **I12** | `cascade_animation_rename` made a no-op | **U3** | `clipboard animation cascade: the rename must remap the clipboard's animation, measured 'toggle_inherit'` (5 failures across the case) |
+| **I13** | `resolved_stored_key_time` drops its Inherit arm | **P8** | `MAR-185 P8: the scaled times are (0.10000000149011612, 1.299999974668026), expected (0.10000000000000001, 1.3) within 1e-12. A scale that reads the selector's float32-narrowed time instead of the stored double misses by ~2.5e-8.` -- **viable, contrary to the plan's doubt** |
+| **I14** | the seventh `include_animation_timeline_maximum` fold dropped | **P9** | `MAR-185 P9: the saved project failed to reload: $.animations.toggle_inherit.duration: duration must not be shorter than the last timeline key (1.400000)` then `MAR-185 P9: an inherit key past the explicit duration did not grow it...` |
+| **I15** | the `Mode` combo's emission deleted | **F1** | `MAR-185 F1: no widget in the Timeline window matched GetID("Mode##inherit0") across the sweep (the control 'Time' matched at x=344.000000, so the seed is sound).` **The evidence is the contrast, not the failure**: under this mutation `marrow_project_smoke`, `marrow_timeline_model_tests`, `marrow_agent_dispatch_smoke` and S1-S6 all stayed **green**, and only the frame case failed |
+| **I16** | `timeline_key_kind_name` drops its Inherit arm | **A2** | `[FAIL] set_inherit_keyframe: echoed kind was not "inherit"` |
+| **I17** | `parse_timeline_key_selectors` drops its `"inherit"` branch | **A5** | `[FAIL] timeline.retime_keyframes inherit: expected ok=true`, `the retime resolved no inherit key`, `the retime applied no delta` |
+| **I18** | `remove_inherit_keyframe`'s registry row given `dry_run_supported = true` | **A4** | `[FAIL] operations.list registry: dry-run metadata changed for remove_inherit_keyframe` then `[FAIL] remove_inherit_keyframe rejects dry_run: rejected response error.code changed`. **Over-determined, and the plan's claim about it is wrong** -- see the document errors |
+| **I19** | the two `OperationExpectation` rows removed and the bound put back to 64 | **A1** | `[FAIL] operation registry integrity: descriptor count must match the operation protocol contract` -- a **shipped** detector, re-used, not a new one |
+| **I21** | `finish_timeline_retime_gesture`'s cancel stops restoring the pre-gesture selection | **S5** | `MAR-185 S5: the cancelled retime changed the key selection (1 -> 1 keys).` -- the mutation reverts this story's own AC3 fix; see below. The "1 -> 1" is cosmetic: S5 compares full `TimelineKeyRef` vectors, not counts |
+| **I22** | the seventh term removed from `clipboard_track_count` again | **S7** | `MAR-185 S7: clipboard_track_count reports 0 tracks for a one-lane inherit clipboard, expected 1. The remap branch is unreachable at any other value.` **Nothing earlier catches it, demonstrated by running:** under the mutation `marrow_timeline_model_tests`, `marrow_project_smoke` and `marrow_agent_dispatch_smoke` are all green and S1-S6 pass; S7 is the first and only failure. Its **two-track** arm is independently falsifiable -- with all three single-lane assertions neutered, the same mutation yields `MAR-185 S7: a clipboard holding one inherit lane and one transform lane counts as 1 tracks, expected 2. At 1 the single-lane remap gate opens for a TWO-track clipboard and cross-remaps the other family onto the selected row.` |
+| **I23** | A6's `undo` call suppressed | **A6** | `[FAIL] undo the inherit retime: undo did not move the retimed key back to 0.25`. Run to prove A6's **new** assertion is not vacuous; the old count assertion stayed **silent** under it, which is the measurement that condemned it (D14's sibling) |
+| **I24** | `"inherit"` removed from `timeline_lane_selectors_arg`'s rejection group | **A7** | `[FAIL] timeline.set_loop_sync names inherit as unsupported, not unknown: the rejection still calls inherit an unknown lane kind` |
+
+**I20 is not a test and is not counted as one.** Adding `Inherit` to
+`track_is_graphable` makes `git diff --stat -- src/editor/timeline_graph_model.cpp`
+non-empty (`1 file changed, 2 insertions(+), 1 deletion(-)`). It is a scope
+check over a diff, and calling a diff "coverage" would be dishonest.
+
+**Every inversion was re-run against the final from-scratch tree** (H3), and
+**twenty-one of twenty-two reproduced bit-identically** under `cmp`. The
+twenty-second is I3, whose *text* is identical but whose *attribution* moved
+from P6 to P1 because P1 was written after I3 first ran -- recorded above rather
+than quietly left pointing at P6. Nothing was thinned: the re-run is what caught
+it.
+
+**Uniqueness was demonstrated by running, never by reading.**
+
+- **I3 -> P1, not P3/P5.** `remove_inherit_timeline_keys` never calls
+  `resolve_timeline_key`, so P3 and P5 cannot see it; both passed under I3 in
+  both runs. P1 is the first case that builds an Inherit selector at all.
+- **I6 -> P7, not P6.** Under I6 P6 passed (its +0.15 delta has room) and P7 was
+  the first failure.
+- **I8 -> P5, not P3.** Under I8 P3 passed, because P3 runs on a bone whose
+  project edit **already exists**, where `ensure` is a silent no-op. P5 is the
+  only case whose animation and bone both resolve while no edit exists.
+- **I11 -> U2, not U1.** Under I11 U1 passed; a rename is unaffected by a
+  missing erase.
+- **I9b and I11b** are the H4 discipline applied to two assertions that a
+  passing run leaves at their default: each neuters the earlier assertion in the
+  **same** case and shows the later one fires on its own. I9b's first attempt
+  used `if (false && helper(...))`, which **short-circuits the helper away** so
+  the removal never ran and the case passed for the wrong reason; it was
+  rewritten as `(void)helper(...)` so the call still executes and only its
+  verdict is discarded. That near-miss is recorded because it is the same shape
+  as H4.
+- **I15's uniqueness is the contrast**, recorded above.
+- **I22 -> S7, and nothing else anywhere.** Under the mutation all three other
+  binaries are green and S1-S6 pass; S7 is the first and only failure. That is
+  the whole reason S7 exists: the defect it covers shipped in `5a56663` because
+  no case reached the *consumer* of `clipboard_track_count`.
+
+### Document errors found
+
+Twenty-six, against the plan's expectation of "between three and seven" --
+and **D20, D21 and D22 are this story's own defects, not a document's**, all
+three in the compiler-blind class its own headline finding named. Review found
+them; the story did not.
+D17-D19 were added after the first pass, on the team lead's prompt to re-sum
+every other total once D4 proved the `SlotAttachment` figure was a
+**mis-transcription** rather than drift — a mis-transcription implies its
+neighbours deserve re-adding, which drift would not. That re-sum found D18.
+
+| # | Source | Claim | Measured at `8cc5c57` |
+| --- | --- | --- | --- |
+| **D1** | design §1.1, the plan's headline, and the implementation brief | no `-Wall`/`-Wswitch` in CMake, therefore **zero** diagnostics from a seventh enum value | **The premise is right and the conclusion is wrong.** Clang enables `-Wswitch` by default; the probe produced **25** diagnostics (18/6/1). The story's "defining hazard" does not exist in the form stated. What is genuinely unpoliced is the ten enumeration sites listed above -- and three of this story's biting inversions live there |
+| **D2** | design §1.1's table, which calls itself "the complete inventory" | 29 sites, of which 21 in `authoring.cpp` and 3 in `agent_handlers_editing.cpp` | **The inventory claim is false, and remains false even though `-Wswitch` now catches these four.** Four `switch (selector.kind)` sites in `agent_handlers_editing.cpp` are missing: `:997` (the `timeline.retime_keyframes` materialize lambda), `:1224` (interpolation), `:2064` (`timeline.scale_key_times` materialize), `:2163` (the scale response's per-key fields) -- lines as they stand in the **committed** tree, which the arms themselves shifted from the pre-change `:940`/`:1167`/`:1993`/`:2107`. `:997` and `:2064` are **silently wrong** without an arm -- an agent retime or scale of an inherit key would never materialize the project edit, which is precisely A5's path |
+| **D3** | both documents | `parse_timeline_key_selectors` is the only `kind` if/else chain in the agent handlers | **Two more**: the easing parser (`~:1080-1150`) and the curve-mode parser (`~:1370-1440`). `"inherit"` would fall to their final `else` and produce `Unknown timeline easing key kind: inherit`, a false statement about the vocabulary once inherit is a real kind. Both now name it in their explicit no-easing rejection group |
+| **D4** | design §1.1 and plan §A.3 | `grep -rn "TimelineKeyKind::SlotAttachment" src/ include/ tools/ \| wc -l` -> **28** | **33**, and the documents' own per-file breakdown (19+7+5+2) already summed to 33. A transcription error, not drift -- MAR-184 added no site |
+| **D5** | plan §A3 / design §1.9 | the marker-gated `else` is `editor_project_smoke.cpp:14062-14206`, registration after `:14204-14206` | Drift of **+1241**. `main()` `:14028` -> **`:15269`**; the skip `:14062` -> **`:15304`**; the partial-match abort -> **`:15313`**; the registration point is now **`:15448-15450`, after `validate_mar184_inherit_overlays`**. `mar178_open_skin_session` `:11763` -> **`:11764`**. The substantive rule -- one invocation, throwaway projects inside it -- holds and was obeyed |
+| **D6** | design §1.1 S14-S21 | `read_key_interpolation:2564`, `write_key_interpolation:2589`, `read_key_curve_mode:2624`, `write_key_curve_mode:2646`, `read_key_curve_driver:2670`, `write_key_curve_driver:2692`, `timeline_key_is_managed_loop_boundary:3703` | All **+140**, because MAR-184 inserted `merge_inherit_timeline` at `:2448`: **`:2704`, `:2729`, `:2764`, `:2786`, `:2810`, `:2832`, `:3843`**. Everything **before** `:2448` (S1-S13, S22-S24, both cascade lists, `kKeyTimeEpsilon`, `kNonEventKeySpacing`) is unmoved to the line |
+| **D7** | design §0.2/§0.3, plan standing rules | `build_timeline_edits_value` `project.cpp:4381`; its `!empty()` gate `:4826-4852`; `build_project_runtime` defined `:7860`, called `:7532-7533`; `ensure_bone_inherit_timeline_edit` `:7160` | **`:4648`** (seven vectors, confirmed); the gate is **`:5128-5140`** with the seventh disjunct as `has_inherit_timeline_edits`, feeding the call at **`:5141-5148`**; `build_project_runtime` defined **`:8258`**, called from `load_project` at **`:7932`**; `ensure_bone_inherit_timeline_edit` **`:7545`**. Separately, the brief's "~2,000 added lines in `project.cpp` alone" is wrong: **398** in `project.cpp`, 1,935 across five files |
+| **D8** | design §2.6 / plan §1.2 | `scale_keyframe_times`' validate switch at `:2372-2412` | The switch is **`:2380-2412`**; `:2372` is the `affected` loop above it. The "provably a no-op" sort comment is **`:2527-2528`** in the committed tree -- and this row's own first version said "`:2434-2435`, exactly as cited", which was wrong at `8cc5c57` too, where it sat at **`:2440-2441`**. A citation can be wrong at the commit it claims to have been measured at |
+| **D9** | design §1.3 / plan gate A10 | `clipboard.animation_name` has exactly two sites | **Three.** The read at `timeline_model.cpp:400`, the write at `timeline_controller.cpp:1940`, and the Paste-enable gate at `shell_timeline.cpp:2429`. The design's prose mentions the button; its grep expectation did not |
+| **D10** | plan Task 0.9 | answer the pruning gate with `./build/marrow_inspect …\| grep -i inherit` | `marrow_inspect` prints **nothing** about inherit timelines. This is MAR-184's own recorded document error **D9**, copied forward into MAR-185 unfixed -- and an absent grep hit would have read as confirmation. A `libmarrow_runtime.a` probe was used |
+| **D11** | plan §2.1 P3 | remove `1.0`, then `0.5`, then `0.25`, then attempt `0.0`; assert the export carries one key at `0.0` mode `Normal` | **That assertion can never pass.** The survivor would be a lone `{0.0, Normal}` key on a setup-`Normal` bone, which `prune_constant_timelines` deletes at materialization -- the plan's own R8. The order used here removes `1.0`, `0.0`, `0.25`, leaving `{0.5, OnlyTranslation}`, which survives and keeps the export assertion meaningful |
+| **D12** | plan Task 9 | `grep -rn "!= 66U" src/ \| wc -l` must be **10** | **11.** The ten pre-existing guards move, and MAR-185's own new shell scenario adds an eleventh in the same shape. Thirteen sites carry the 64 -> 66 substitution as planned |
+| **D13** | design §6.4 S2 / plan §6.1 | an Add exactly on an existing key "replaced the mode in place", observably | For a **stepped** lane the sampler returns the value of the very key the playhead is on, so the write is identical, the session records no undo entry and the call reports `false`. S2 asserts what is actually true: the lane does not grow, no history entry is recorded, and the vector stays strictly increasing |
+| **D14** | plan §B I18 | "the second half -- the key still exists -- is what makes it bite" | **It cannot bite.** The dry-run branch runs the primitive against a *candidate*, so the key survives under the mutation too and that assertion is never falsified. What bites is the error code, and even that is **over-determined** by a pre-existing `operations.list` registry-metadata guard that fires first |
+| **D15** | design §2.13 / plan Task 7.1 | emit the combo "at plain window scope" and seed the sweep with `FindWindowByName(kTimelineWindowTitle)->GetID("Mode")` | The dopesheet is inside `BeginTabBar("timeline_views")` + `BeginTabItem("Dopesheet")`, and `BeginTabItem` pushes the tab's id, so the window-root seed never matches. The seed must be chained: `ImHashStr("Mode##inherit0", 0, ImHashStr("Dopesheet", 0, window->GetID("timeline_views")))`. The design **did** warn that a `BeginTabItem` breaks the seed; it did not notice that the timeline window already has one |
+| **D17** | plan Task 11.4 | `git add -A` | **Wrong for a tree with concurrent planners in it.** At commit time the working tree also held `plan-mar186`'s two untracked documents, which `-A` would have swept into this story's commit. Only MAR-185's own paths were staged. `impl-mar184` made the same call for the same reason; the instruction should say "stage this story's paths" |
+| **D18** | design §1.1 and §5.1 | "**Eleven** of twenty-nine are unobservable", and §5.1's "these are the **eleven** §1.1 sites" | **Two different mis-counts of the same set, found by re-summing after D4.** §1.1's table really does have 11 rows marked "No", but two of those rows name **two functions each** (`S16-S18` covers `read_key_curve_mode` *and* `read_key_curve_driver`; `S19-S20` covers both `write_*` twins), so 11 rows = **13 functions** — the prose counts rows while the `S` labels count functions, and the two numberings disagree. §5.1 then calls the same set "the eleven" while **listing fourteen names**. The plan's §B.1 is the one that adds up: eleven fall-through-correct arms **plus three unreachable** = **14**, which is what shipped and what this section records |
+| **D20** | **this story's own implementation** (found in review of `5a56663`) | `clipboard_track_count` needed no seventh term | **Wrong, and it shipped. It fails in BOTH directions.** `timeline_model.cpp:392` was a six-term sum with no `bone_inherit_timeline_edits`, and it is the sole gate for `selected_remap_track` (`timeline_controller.cpp:2213`). **Under-count:** one inherit lane counts as **zero**, the `== 1U` gate never opens, and MAR-185's own remap branch is **dead code** -- a paste onto a different bone's selected row silently lands back on the source bone. **Mis-arm, the nastier half:** one inherit lane *plus* one other-family lane counts as **one**, so the gate opens for a **two-track** clipboard, which is precisely what it exists to prevent, and the *other* family gets cross-remapped onto the selected row. Fixed, and both arms covered by **S7** with inversion **I22**. Exactly the compiler-blind class this story's own headline finding identified -- which is the argument for testing the **consumer** of such a sum rather than reading the sum |
+| **D21** | **this story's own implementation** (found in review of `5a56663`) | `set_animation_duration`'s fold list needed no inherit term | **Wrong, and latent.** `authoring.cpp:2076-2098` folds six vectors and omitted `bone_inherit_timeline_edits`, sixty-five lines from the fold list at `:2164-2180` that *was* swept and that I14 proves bites. It has **four** production call sites (`shell_project_panels.cpp:374`, `agent_handlers_editing.cpp:464`/`:521`, and `authoring.cpp:2193` inside `auto_extend_explicit_animation_durations` itself), and it is dormant because **`auto_extend`'s own seventh fold (`:2179-2180`) has already raised `maximum_time` to at least the inherit maximum before passing it as the requested duration**, so the `applied_duration < normalized_inferred_duration` test at `:2114-2115` cannot resolve differently either way. *This row first gave a different reason -- "both production callers pass a runtime-built skeleton" -- which is refuted by its own fourth call site: that one provably passes a stale skeleton (`session.cpp:1949`). D24 counts it.* Fixed regardless, because the primitive was wrong in isolation. **Correct by inspection, unreachable by test** -- measured, not assumed: removing the fold leaves the whole suite green |
+| **D22** | **this story's own implementation** (found in review of `5a56663`) | D3 fixed both sibling `kind` parsers | **There were three, not two.** `timeline_lane_selectors_arg` (`agent_dispatch.cpp:375`) omitted `"inherit"` from its `draw_order`/`event`/`slot_attachment` rejection group, so an inherit lane fell through to `"Unknown timeline loop-sync lane kind: inherit"` -- a false statement about the vocabulary once inherit is a real kind. The lane was correctly refused either way; only the message lied. Fixed, and unlike its two siblings it now has a detector: **A7's loop-sync assertion**, with inversion **I24** |
+| **D24** | **this story's own reasoning**, three times -- including inside the entry that names the pattern, and once in this row's own first draft | a conclusion verified by checking its justification | **The recurring failure mode of this story, named because it kept recurring.** Three claims were **right in conclusion and wrong in justification**, each of which would have propagated as verified, and **each is cited here with a location so this row can be checked rather than believed**:
+(1) the **`ScrollMax` mechanism** in the frame-smoke notes above -- the correction said `ContentSize` was "finalised by the previous frame's `End()`", and `End()` (`imgui.cpp:8711`) never assigns `ContentSize` at all; `Begin()` does, at `:7995`.
+(2) the **stale-binary asymmetry**, cross-story at H1 in the MAR-183 section -- "a stale object can only cost you a missed inversion", where H1 itself records that a skipped *restore* build produces a false **positive** instead.
+(3) **D21's dormancy reason** above -- "both production callers pass a fresh skeleton", when there are **four** and one provably passes a stale one.
+In all three the conclusion was right and only the mechanism was wrong. **The pattern caught its own author twice and a reviewer's correction to it once** -- which is the strongest thing this row can say about itself. An earlier version of this row cited "R1's uniqueness argument" as a fourth instance; **MAR-185 has no R-series at all** (it labels inversions I1-I24), so that instance did not resolve and has been dropped -- a pattern entry whose own examples cannot be verified is the very failure it describes. It is invisible to testing, because the conclusion is correct and everything stays green; only re-deriving the *argument* catches it, which is what caught all three |
+| **D25** | this story's own method, three times | each sweep covered the thing it was aimed at | **Scope is the through-line, and all three are the same mistake wearing different clothes.** The `-Wswitch` probe was scoped to **one target** and reported 24 instead of 25. The anchor checker was scoped to **one section** and so verified 21 anchors while missing the stale `:2434-2435` sort citation two sections away. The parser sweep was scoped to **one file** and so found two of the three `Unknown timeline` chains (D22/D23). In each case the sweep was correct *within its scope* and the scope was the unexamined assumption -- which is why every one of them produced a confident, specific, wrong number. **Ask what a sweep does not reach before trusting what it returns.** The checker has since been widened to the whole file and to `git show HEAD:` blobs rather than the worktree -- and it immediately paid for itself, catching a **fourth** stale anchor the section-scoped version could not see: `shell_timeline.cpp:2312` for the Paste-enable gate, cited twice (gate row A10 and D9), which this story's own widget insertion had pushed to **`:2429`**. Its remaining flags are all correctly historical -- D5's pre-drift `:14028`/`:14204`, and MAR-181/MAR-183 citations measured at their own commits |
+| **D23** | design §1.1 S27, plan §1.3 S27 | the agent's key-selector parser is called `parse_timeline_key_selectors` | **No such symbol exists.** `grep -rn "parse_timeline_key_selectors" src/ include/` returns **0**. It is `timeline_key_selectors_arg` (`agent_handlers_editing.cpp:801`), whose `_selectors_arg` suffix leads straight to its sibling `timeline_lane_selectors_arg` -- the two are declared **adjacently** at `agent_dispatch_internal.hpp:140` and `:155`, so the real name would have put D22's third parser directly under the eye. But the wrong name is only a **contributing** cause and this row first oversold it: D3's other two siblings are inline chains, not `*_selectors_arg` symbols at all, so whatever sweep found *them* was never a name sweep. The **primary** cause is scope -- the sweep ran over `agent_handlers_editing.cpp` while the third parser lives in `agent_dispatch.cpp`. `grep -rn "Unknown timeline" src/` finds all three, across both files |
+| **D19** | the implementation brief (not the documents) | "the ten `!= 64U` guards in `shell_smoke_graph.cpp` and `shell_smoke_timeline.cpp`" | Ten guards across **three** files, not two: `shell_smoke_graph.cpp` (7), **`shell_smoke_constraints.cpp:147,676` (2)**, `shell_smoke_timeline.cpp:3697` (1). **Both design §1.5 and plan §A.3 list all three files correctly** — the omission was the brief's alone. All three were swept; the two constraint guards were re-confirmed by line after the fact rather than inferred from a green suite, and `grep -rn "!= 64U" src/ tools/` is empty |
+| **D16** | plan Task 2.1 P0 and §6.2 P10 | add a byte-identity witness and a `.mskl`/`.mbin` export-equivalence case | Both are **already shipped by MAR-184 in the same binary** -- its P4 asserts the identical 6111-byte / `c7d6c6de…` constants, and its P12 asserts `.mskl` v1 / `.mbin` v2 for an inherit overlay. Duplicating them would add cases that cannot fail for any reason the originals would not. Recorded rather than written |
+
+### One cross-family behaviour change, and why it is here
+
+`finish_timeline_retime_gesture`'s **cancel** path now restores the pre-gesture
+key selection (`timeline_controller.cpp`, `TimelineRetimeGesture::original_keys`
+/ `original_active_key`). This is **not** inherit-specific and it was not in
+either document; S5 found it.
+
+`apply_timeline_retime_delta` rewrites `state->timeline_editor.selected_keys` on
+every applied delta so the selection follows the moving keys, and it also
+overwrites `gesture.keys` with the moved refs. The cancel rolled the **project**
+back and left the selection naming times the project no longer had -- so the
+next gesture on that selection failed with *"The selected timeline keys changed
+during retime"*. AC3 names "selection" explicitly, so the alternative was to
+ship a story whose AC3 is unmet on a clause it lists. The existing coverage
+never saw it: `validate_timeline_p0_authoring_smoke` cancels three retimes and
+asserts only that `serialize_project` rolls back.
+
+The fix is confined to the Cancel branch, restores refs that
+`begin_timeline_retime_gesture` had already validated, and is proved by **I21**.
+The whole suite is green with it, including every pre-existing timeline,
+graph, curve-preset, loop-sync and scale scenario.
+
+### Not independently covered
+
+Carried forward and added to. Everything here is stated because a passing run is
+not evidence for it.
+
+- **Fourteen switch arms are deliberately uninverted** -- eleven that fall
+  through to the correct answer plus three that are unreachable. The number is
+  the plan's §B.1 arithmetic, not design §5.1's prose, which calls the same set
+  "eleven" while listing fourteen names (D18). Inventing a case for any of them
+  would be the non-biting theatre H4 warns about:
+  `family_owns_scalar_component`, `read_scalar_component`,
+  `write_scalar_component`, `family_key_spacing`, `resolved_key_is_loop_pinned`,
+  `read_key_interpolation`, `read_key_curve_mode`, `read_key_curve_driver`,
+  `timeline_key_is_managed_loop_boundary`, `timeline_key_kind_carries_easing`,
+  `timeline_key_curve_value`, and the three **unreachable** write arms
+  `write_key_interpolation`, `write_key_curve_mode`, `write_key_curve_driver`
+  (their callers check the matching `read_*` first, which returns `nullptr`).
+  The arms are written anyway, for the reader and for the next enum value.
+- **`sort_retimed_timelines`' seventh call is provably a no-op.** A retime
+  applies one shared clamped delta, which preserves index order; a scale
+  validates the whole projected sequence first. The source says so itself at
+  `authoring.cpp:2527-2528`.
+- **The two agent materialize arms added by D2 (`agent_handlers_editing.cpp:997`
+  and `:2064`) have asymmetric coverage.** The retime arm at `:997` is exercised
+  by A5. The **scale** arm at `:2064` is byte-identical to it and sits on the
+  same materialize-then-apply ordering, so the disclosure is about coverage
+  rather than doubt -- but no case sends
+  `timeline.scale_key_times` with an inherit selector. It is written because the
+  compiler named it and because leaving it out is silently wrong, but this story
+  has no failing detector for it.
+- **`export.preview` carries no inherit data and never will** -- it reports
+  target paths only. A6's assertion is a **non-effect** witness (the `targets`
+  array is byte-identical across an inherit edit) with no story-owned inversion,
+  and `marrow_inspect --compare` over `player_idle`'s export is the real
+  equivalence witness. It reported `matches`; note that `player_idle.marrow` on
+  disk still carries **no** inherit data, because every agent case that writes
+  one runs against an in-memory session.
+- **A4's "the key still exists" half is not falsifiable** (D14), and A4's error
+  code is over-determined by a pre-existing registry-metadata guard. The code
+  comment beside it now says so, rather than repeating the plan's refuted
+  rationale.
+- **`set_animation_duration`'s seventh fold (D21) is correct by inspection and
+  unreachable by test** — and the *reason* it is unreachable is not the one this
+  row first gave. It has **four** production call sites, not two:
+  `shell_project_panels.cpp:374`, `agent_handlers_editing.cpp:464` and `:521`,
+  and `authoring.cpp:2193` **inside `auto_extend_explicit_animation_durations`
+  itself**. That fourth one demolishes the original "every caller passes a fresh
+  skeleton" argument: it is reached from `session.cpp:1317/:1427/:1954/:2692`
+  and provably passes a **stale** one, as `session.cpp:1949` says in as many
+  words ("Duration auto-extension reads the CURRENT runtime data").
+
+  The dormancy is real but comes from somewhere else: `auto_extend`'s **own**
+  seventh fold (`authoring.cpp:2179-2180`) has already raised `maximum_time` to
+  at least the inherit maximum before it calls `set_animation_duration` with
+  that value as the requested duration, so `applied_duration <
+  normalized_inferred_duration` (`:2114-2115`) cannot resolve differently with
+  or without the inner fold. Two other routes to reachability are closed as
+  well, recorded so nobody re-treads them: **pruning** cannot expose it, because
+  `prune_constant_timelines` only erases lanes matching
+  `has_single_key_at_origin`, which contribute a floor of 0.0 anyway; and a
+  **ghost-bone overlay** cannot, because `skeleton_parse.cpp` rejects
+  "animation references unknown bone" and the rebuild fails before such a
+  session can exist. Removing the fold leaves the whole suite green, so
+  "unreachable by test" is measured, not assumed, and no case is owed.
+- **Inherit undo/redo has no failing detector this story owns.** AC6 names
+  undo/redo, and A6 now asserts the retimed key's **time** across undo and redo
+  (0.25 -> 0.35 -> 0.25 -> 0.35) rather than the `bone_inherit_timelines`
+  **count**, which a retime cannot change and which was therefore vacuous in
+  exactly the H4 shape -- in this story, after this story wrote H4 into its own
+  method. The count assertion is kept as a labelled witness. The product is
+  correct **by construction** and needs nothing: `HistoryEntry` holds a
+  `ProjectData` **by value** (`shell_state.hpp`, `session.cpp`) and
+  `apply_history` swaps it wholesale, so there is no per-family list for a
+  future family to forget. The falsifying mutation therefore lies in the shared
+  history machinery, outside this story; I23 (suppressing the `undo` call
+  itself) is what demonstrates the new assertion is not vacuous.
+- **MCP coverage for the two new tools is count-only.** `test_client.py` moved
+  64 -> 66 and asserts the two name sets are equal, but asserts **nothing** about
+  either tool's schema or `required` set. Both were read against the C++ registry
+  and match field for field -- including the deliberate `dry_run` asymmetry that
+  mirrors the `set_/remove_attachment_keyframe` pair -- so AC5 holds, but nothing
+  test-enforces it. A schema-shape assertion in `test_client.py` is the close.
+- **The byte-identity witness and the `.mskl`/`.mbin` export case are MAR-184's**
+  (D16), not this story's, and they have no MAR-185-owned inversion.
+- **The build still has no `-Wall`/`-Wextra`.** MAR-185 did not add them. What it
+  did establish is that `-Wswitch` is on by default, so the next
+  `TimelineKeyKind` value is policed at its **25** switch sites and **not** at the
+  ten enumeration sites listed at the top of this section.
+- **An inherit lane can still be pruned out of existence** by reducing it to one
+  key at t = 0 whose mode equals the bone's setup `inherit`. Identical to rotate,
+  translate, scale and shear; deliberately not diverged from. Once pruned the
+  lane cannot be re-created from the dopesheet, because a row exists only for a
+  materialized timeline. D11 is what happens when a test forgets this.
+- **An agent-driven `animation.rename` leaves the GUI clipboard stale.** The GUI
+  path cascades (`apply_animation_catalog_action`); the agent path mutates the
+  session, and the shell observes it through
+  `sync_shell_from_editor_session_if_revised`, which cannot tell a rename from a
+  selection change. Closing it needs a rename-aware session signal -- a
+  different story. AC4's clipboard clause is inherently GUI-scoped, because
+  `TimelineClipboard` lives in `ShellState` and the agent has no clipboard.
+- **The clipboard cascade fixes all seven families at once, deliberately.**
+  `Clipboard::animation_name` is one field and there is no inherit-only version
+  of the bug; before this, copying keys and renaming that animation silently
+  greyed Paste out with no message for every family. The copied fragment's own
+  `animation_name` is deliberately **not** rewritten: `paste_timeline_clipboard`
+  walks the fragment's vectors directly and resolves destinations against
+  `state->selected_animation_name`, so rewriting it would be a seventh
+  hand-maintained list with no reader.
+- **Only the `Mode` combo is proved on screen.** F1 locates it and its sibling
+  `Time` drag with a real mouse and clicks through the popup. The lane's
+  diamonds, the toolbar buttons and the dopesheet row itself are covered UI-free
+  only; a regression that deleted the Inherit lane's *draw* call would not be
+  caught.
+- **`merge_inherit_timeline`'s `replace_existing_times = false` arm still has no
+  product caller.** `set_inherit_keyframe` uses `true`; only MAR-184's own case
+  exercises `false`. MAR-185 gave `replace_existing_times` its first product
+  caller, in that one polarity.
+- **`shell_main.cpp`'s frame body is still reachable from no test**, and
+  **`commit_path_choice` still has zero end-to-end coverage**. Both carried
+  forward unchanged from MAR-183; MAR-185 adds no line to either.
 
 ## MAR-184 Add Stepped Inherit Timeline Overlays Validation Results
 

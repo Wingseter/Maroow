@@ -129,6 +129,10 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
+    if (!validate_inherit_editing_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
     if (!validate_constraint_lifecycle_shell_smoke(options.project_path)) {
         ImGui::DestroyContext();
         return 1;

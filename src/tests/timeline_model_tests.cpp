@@ -1265,6 +1265,71 @@ void test_scale_ratio_math(TestSuite& suite) {
 
 } // namespace
 
+/**
+ * @brief MAR-185 U3: the clipboard's animation reference follows a rename.
+ *
+ * Pure, UI-free, no session and no frame -- nothing in the shell can stand in
+ * for it, because `Clipboard` is plain data and the cascade is plain algebra.
+ */
+void test_clipboard_animation_cascade(TestSuite& suite) {
+    const auto seeded = [] {
+        model::Clipboard clipboard;
+        clipboard.has_data = true;
+        clipboard.animation_name = "toggle_inherit";
+        clipboard.earliest_time = 0.25;
+        clipboard.project_fragment.bone_inherit_timeline_edits.push_back(
+            marrow::editor::BoneInheritTimelineEdit{
+                "toggle_inherit",
+                "child",
+                {{0.25, marrow::runtime::BoneInherit::NoScale}}});
+        return clipboard;
+    };
+
+    model::Clipboard clipboard = seeded();
+    suite.expect(
+        !model::clipboard_time_shift(clipboard, "toggle_two", 0.5).has_value(),
+        "a clipboard naming another animation must refuse to paste before the "
+        "cascade runs");
+
+    model::cascade_animation_rename(&clipboard, "toggle_inherit", "toggle_two");
+    suite.expect(
+        clipboard.animation_name == "toggle_two",
+        "the rename must remap the clipboard's animation, measured '" +
+            clipboard.animation_name + "'");
+    suite.expect(clipboard.has_data, "the rename must not clear the clipboard");
+    suite.expect(
+        near(clipboard.earliest_time, 0.25),
+        "the rename must not move the clipboard's earliest time");
+    suite.expect(
+        clipboard.project_fragment.bone_inherit_timeline_edits.size() == 1U,
+        "the rename must not touch the copied fragment");
+    const auto shift = model::clipboard_time_shift(clipboard, "toggle_two", 0.5);
+    suite.expect(
+        shift.has_value() && near(*shift, 0.25),
+        "after the cascade the clipboard must paste into the renamed animation");
+
+    model::cascade_animation_rename(&clipboard, "some_other_animation", "x");
+    suite.expect(
+        clipboard.animation_name == "toggle_two",
+        "renaming an unrelated animation must change nothing");
+
+    model::cascade_animation_delete(&clipboard, "toggle_two");
+    suite.expect(!clipboard.has_data, "the delete must clear the clipboard");
+    suite.expect(
+        clipboard.project_fragment.bone_inherit_timeline_edits.empty(),
+        "the delete must clear the copied fragment");
+    suite.expect(
+        !model::clipboard_time_shift(clipboard, "toggle_two", 0.5).has_value(),
+        "a cleared clipboard must refuse to paste");
+
+    model::Clipboard untouched = seeded();
+    model::cascade_animation_delete(&untouched, "some_other_animation");
+    suite.expect(
+        untouched.has_data && untouched.animation_name == "toggle_inherit" &&
+            untouched.project_fragment.bone_inherit_timeline_edits.size() == 1U,
+        "deleting an unrelated animation must leave the clipboard alone");
+}
+
 int main() {
     TestSuite suite;
     suite.run("same-time identity and reconciliation", [&] {
@@ -1314,5 +1379,8 @@ int main() {
         test_loop_boundary_inferred_duration_floor(suite);
     });
     suite.run("scale ratio math", [&] { test_scale_ratio_math(suite); });
+    suite.run("clipboard animation cascade", [&] {
+        test_clipboard_animation_cascade(suite);
+    });
     return suite.finish();
 }

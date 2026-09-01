@@ -58,6 +58,7 @@ std::string timeline_key_kind_name(TimelineKeyKind kind) {
     case TimelineKeyKind::Event: return "event";
     case TimelineKeyKind::SlotColor: return "slot_color";
     case TimelineKeyKind::SlotAttachment: return "slot_attachment";
+    case TimelineKeyKind::Inherit: return "inherit";
     }
     return "transform";
 }
@@ -149,6 +150,8 @@ json::Value timeline_key_curve_value(
     case TimelineKeyKind::DrawOrder:
     case TimelineKeyKind::Event:
     case TimelineKeyKind::SlotAttachment:
+    // MAR-185: `InheritKeyframeEdit` has no `interpolation` member.
+    case TimelineKeyKind::Inherit:
         break;
     }
     return json::Value{};
@@ -881,6 +884,17 @@ bool timeline_key_selectors_arg(
             }
             selector.kind = TimelineKeyKind::SlotAttachment;
             selector.slot_name = std::string(*slot);
+        } else if (*kind == "inherit") {
+            // MAR-185. An if/else chain: the compiler says nothing about a
+            // missing branch here, and its absence would land on the final
+            // `else` below and reject every inherit key by name.
+            const auto bone = string_arg(key_value, "bone");
+            if (!bone.has_value()) {
+                *error_out = "Inherit " + std::string(family_noun) + " keys require bone.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::Inherit;
+            selector.bone_name = std::string(*bone);
         } else {
             *error_out = "Unknown timeline " + std::string(family_noun) + " key kind: " + std::string(*kind);
             return false;
@@ -975,6 +989,17 @@ AgentDispatchResult handle_timeline_editing_operation(
                         skeleton,
                         selector.animation_name,
                         selector.slot_name);
+                    break;
+                // MAR-185. Silently wrong without this arm: the inherit edit is
+                // never materialized, so `resolve_timeline_key` finds no
+                // timeline and the whole retime rejects with "Persisted inherit
+                // key not found" even for a key the lane really has.
+                case TimelineKeyKind::Inherit:
+                    (void)ensure_bone_inherit_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name);
                     break;
                 }
             }
@@ -1127,8 +1152,11 @@ AgentDispatchResult handle_timeline_editing_operation(
                 selector.kind = TimelineKeyKind::SlotColor;
                 selector.slot_name = std::string(*slot);
             } else if (*kind == "draw_order" || *kind == "event" ||
-                       *kind == "slot_attachment") {
+                       *kind == "slot_attachment" || *kind == "inherit") {
                 // These families carry no `interpolation` field at all.
+                // MAR-185 adds `inherit` HERE rather than leaving it to the
+                // final `else`: once inherit is a real kind, "Unknown timeline
+                // easing key kind" is a false statement about the vocabulary.
                 return make_error(
                     "timeline.set_interpolation does not support " +
                         std::string(*kind) + " keys.",
@@ -1191,6 +1219,9 @@ AgentDispatchResult handle_timeline_editing_operation(
                 case TimelineKeyKind::DrawOrder:
                 case TimelineKeyKind::Event:
                 case TimelineKeyKind::SlotAttachment:
+                // MAR-185: unreachable -- the parser above rejects `inherit`
+                // before a selector of this kind can reach here.
+                case TimelineKeyKind::Inherit:
                     break;
                 }
             }
@@ -1414,7 +1445,7 @@ AgentDispatchResult handle_timeline_editing_operation(
                     op,
                     spec);
             } else if (*kind == "draw_order" || *kind == "event" ||
-                       *kind == "slot_attachment") {
+                       *kind == "slot_attachment" || *kind == "inherit") {
                 return make_error(
                     "timeline.set_curve_mode does not support " + std::string(*kind) +
                         " keys: they carry no easing at all.",
@@ -2029,6 +2060,14 @@ AgentDispatchResult handle_timeline_editing_operation(
                         selector.animation_name,
                         selector.slot_name);
                     break;
+                // MAR-185: same reason as the retime path above.
+                case TimelineKeyKind::Inherit:
+                    (void)ensure_bone_inherit_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name);
+                    break;
                 }
             }
         };
@@ -2120,6 +2159,9 @@ AgentDispatchResult handle_timeline_editing_operation(
                     case TimelineKeyKind::SlotColor:
                     case TimelineKeyKind::SlotAttachment:
                         entry.emplace("slot", string_value(selector.slot_name));
+                        break;
+                    case TimelineKeyKind::Inherit:
+                        entry.emplace("bone", string_value(selector.bone_name));
                         break;
                     case TimelineKeyKind::Event:
                         entry.emplace(
@@ -3042,6 +3084,130 @@ AgentDispatchResult handle_timeline_editing_operation(
             return std::move(*result);
         }
         return make_success("Set attachment keyframe successfully.", op, spec, object_value(std::move(preview)));
+    }
+
+    // MAR-185. Both operations delegate to the shared authoring primitives --
+    // `merge_inherit_timeline` and `remove_inherit_timeline_keys` -- and
+    // reimplement NO validation, which is what keeps the GUI and the agent from
+    // ever disagreeing about what a legal inherit lane is.
+    if (op == "set_inherit_keyframe" || op == "remove_inherit_keyframe") {
+        const bool removing = op == "remove_inherit_keyframe";
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                std::string(op) + " requires 'args' object.", op, spec);
+        }
+        const auto anim_name = string_arg(*args, "animation");
+        const auto bone_name = string_arg(*args, "bone");
+        const auto time = number_arg(*args, "time");
+        if (!anim_name.has_value() || !bone_name.has_value() || !time.has_value()) {
+            return make_error(
+                std::string(op) + " requires animation, bone, and time.", op, spec);
+        }
+        std::optional<std::string_view> mode;
+        if (!removing) {
+            mode = string_arg(*args, "inherit");
+            if (!mode.has_value()) {
+                return make_error(
+                    "set_inherit_keyframe requires an inherit mode string.", op, spec);
+            }
+        }
+
+        // The effective lane AFTER the operation, echoed as `affected_keys`.
+        // Built by running the primitive against a candidate, so a dry run
+        // reports exactly what the real call would produce.
+        const auto apply = [&](ProjectData* project) -> AuthoringResult {
+            if (removing) {
+                const auto result = remove_inherit_timeline_keys(
+                    project, skeleton, *anim_name, *bone_name, {*time});
+                return {result.changed, result.error};
+            }
+            InheritTimelineMergeRequest request;
+            request.animation_name = std::string(*anim_name);
+            request.bone_name = std::string(*bone_name);
+            request.keys = {{*time, std::string(*mode)}};
+            request.replace_existing_times = true;
+            const auto result = merge_inherit_timeline(project, skeleton, request);
+            return {result.changed, result.error};
+        };
+        const auto lane_value = [&](const ProjectData& project) {
+            json::Value::Array keys;
+            if (const auto* edit = project.find_bone_inherit_timeline_edit(
+                    *anim_name, *bone_name)) {
+                for (const auto& keyframe : edit->keyframes) {
+                    json::Value::Object entry;
+                    entry.emplace("time", number_value(keyframe.time));
+                    entry.emplace(
+                        "inherit",
+                        string_value(std::string(inherit_mode_json_key(keyframe.inherit))));
+                    keys.push_back(object_value(std::move(entry)));
+                }
+            }
+            return array_value(std::move(keys));
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            const AuthoringResult result = apply(&candidate);
+            if (!result) {
+                return make_error(result.error, op, spec, "invalid_request");
+            }
+            json::Value::Object preview;
+            preview.emplace("dry_run", bool_value(true));
+            preview.emplace(
+                "kind",
+                string_value(timeline_key_kind_name(TimelineKeyKind::Inherit)));
+            preview.emplace("animation", string_value(std::string(*anim_name)));
+            preview.emplace("bone", string_value(std::string(*bone_name)));
+            preview.emplace("changed", bool_value(result.changed));
+            preview.emplace("affected_keys", lane_value(candidate));
+            return make_success(
+                "Inherit keyframe validated.", op, spec, object_value(std::move(preview)));
+        }
+
+        auto transaction = session.begin_edit({
+            removing ? EditKind::RemoveKeyframe : EditKind::AddKeyframe,
+            removing ? "Remove inherit keyframe via Agent"
+                     : "Set inherit keyframe via Agent",
+            "Agent",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const AuthoringResult result = apply(transaction.project());
+        if (!result) {
+            transaction.cancel();
+            return make_error(result.error, op, spec, "invalid_request");
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error(
+                "The inherit keyframe request changed nothing.", op, spec,
+                "invalid_request");
+        }
+        json::Value::Object response;
+        response.emplace("dry_run", bool_value(false));
+        response.emplace(
+            "kind", string_value(timeline_key_kind_name(TimelineKeyKind::Inherit)));
+        response.emplace("animation", string_value(std::string(*anim_name)));
+        response.emplace("bone", string_value(std::string(*bone_name)));
+        response.emplace("changed", bool_value(true));
+        response.emplace("affected_keys", lane_value(*transaction.project()));
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{removing ? "Failed to remove inherit keyframe: "
+                                      : "Failed to apply inherit keyframe: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            removing ? "Removed inherit keyframe successfully."
+                     : "Set inherit keyframe successfully.",
+            op,
+            spec,
+            object_value(std::move(response)));
     }
 
     if (op == "set_draw_order_keyframe") {

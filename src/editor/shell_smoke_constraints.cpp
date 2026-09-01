@@ -144,8 +144,8 @@ bool validate_constraint_lifecycle_shell_smoke(
 
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 64U) {
-        std::cerr << "Constraint lifecycle shell smoke requires the exact 64-operation registry.\n";
+    if (operation_count_before != 66U) {
+        std::cerr << "Constraint lifecycle shell smoke requires the exact 66-operation registry.\n";
         return false;
     }
 
@@ -673,8 +673,8 @@ bool validate_constraint_parameter_shell_smoke(
 
     const std::size_t operation_count_before =
         marrow::editor::agent_operation_descriptor_count();
-    if (operation_count_before != 64U) {
-        std::cerr << "Constraint parameter shell smoke requires the exact 64-operation registry.\n";
+    if (operation_count_before != 66U) {
+        std::cerr << "Constraint parameter shell smoke requires the exact 66-operation registry.\n";
         return false;
     }
 

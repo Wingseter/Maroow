@@ -1234,6 +1234,43 @@ def get_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="set_inherit_keyframe",
+            description="Create or replace a stepped bone inherit keyframe.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string"},
+                    "bone": {"type": "string"},
+                    "time": {"type": "number"},
+                    "inherit": {
+                        "type": "string",
+                        "enum": [
+                            "normal",
+                            "onlyTranslation",
+                            "noRotationOrReflection",
+                            "noScale",
+                            "noScaleOrReflection"
+                        ]
+                    },
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["animation", "bone", "time", "inherit"]
+            }
+        ),
+        types.Tool(
+            name="remove_inherit_keyframe",
+            description="Remove a stepped bone inherit keyframe by exact time.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string"},
+                    "bone": {"type": "string"},
+                    "time": {"type": "number"}
+                },
+                "required": ["animation", "bone", "time"]
+            }
+        ),
+        types.Tool(
             name="import.spine_json",
             description="Validate or queue a reviewed Spine JSON import.",
             inputSchema={

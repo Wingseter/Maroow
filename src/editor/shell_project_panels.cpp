@@ -604,6 +604,18 @@ bool apply_animation_catalog_action(
     }
 
     sync_shell_from_editor_session(state);
+    // MAR-185. The clipboard is the one piece of shell state a catalog edit
+    // never reached: `Clipboard::animation_name` gates every paste, so before
+    // this a copy followed by a rename of that animation silently greyed the
+    // Paste button out with no message, for ALL SEVEN key families at once.
+    // It is one field, so there is no inherit-only version of the fix.
+    if (action == AnimationCatalogAction::Rename) {
+        marrow::editor::timeline_model::cascade_animation_rename(
+            &state->timeline_editor.clipboard, source, destination);
+    } else if (action == AnimationCatalogAction::Delete) {
+        marrow::editor::timeline_model::cascade_animation_delete(
+            &state->timeline_editor.clipboard, source);
+    }
     if (state->selected_animation_name != previous_selection) {
         state->timeline_editor.selected_keys.clear();
         state->timeline_editor.active_key.reset();

@@ -106,6 +106,15 @@ enum class TimelineKeyKind {
     Event,
     SlotColor,
     SlotAttachment,
+    /**
+     * @brief MAR-185. Appended last, never inserted.
+     *
+     * `scale_keyframe_times` stores `static_cast<int>(kind)` in its identity
+     * tuple and in its `affected` set, so inserting a value ahead of an
+     * existing one would renumber every comparison. Nothing persists the
+     * numeric value to disk.
+     */
+    Inherit,
 };
 
 /**
@@ -629,6 +638,44 @@ InheritTimelineMergeResult merge_inherit_timeline(
     ProjectData* project,
     const runtime::SkeletonData& effective_skeleton,
     const InheritTimelineMergeRequest& request);
+
+struct InheritKeyRemovalResult : AuthoringResult {
+    std::size_t removed_key_count{0U};
+    /// @brief Keys left on the lane AFTER the removal.
+    std::size_t effective_key_count{0U};
+};
+
+/**
+ * @brief Atomically removes stepped inherit keys by exact time. MAR-185.
+ *
+ * Every requested time must resolve, within 1e-6, to a key of the EFFECTIVE
+ * timeline -- the project edit when one exists, otherwise the imported base
+ * track. A time matching none rejects the whole call.
+ *
+ * The last key of a lane cannot be removed. An inherit edit with zero keyframes
+ * is skipped by BOTH serializers, and `build_runtime_document` assigns into a
+ * COPY of the base document, so an emptied edit does not clear the lane -- it
+ * silently restores the imported base track on the next materialization. The
+ * floor is the guard against that, and the rejection names the remedy.
+ *
+ * Preflight-then-mutate: every check above runs against a read-only view, and
+ * only then is a candidate copied, mutated and moved into place. A rejection
+ * therefore leaves `serialize_project()` byte-identical.
+ *
+ * @param project Project receiving the removal.
+ * @param effective_skeleton Skeleton the project currently materializes to.
+ *        STALE after a successful removal.
+ * @param animation_name Animation owning the lane.
+ * @param bone_name Bone owning the lane.
+ * @param times Key times to remove; any order, each matched within 1e-6.
+ * @return Counts and `changed`, or an error with the project untouched.
+ */
+InheritKeyRemovalResult remove_inherit_timeline_keys(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name,
+    const std::vector<double>& times);
 
 // ── Mesh vertex weights ────────────────────────────────────────────────────
 //

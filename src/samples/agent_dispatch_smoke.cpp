@@ -36,7 +36,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 64> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 66> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -93,6 +93,8 @@ constexpr std::array<OperationExpectation, 64> kExpectedOperations{{
     {"remove_slot_color_keyframe", "edit", true, false, false},
     {"set_attachment_keyframe", "edit", true, false, true},
     {"remove_attachment_keyframe", "edit", true, false, false},
+    {"set_inherit_keyframe", "edit", true, false, true},
+    {"remove_inherit_keyframe", "edit", true, false, false},
     {"set_draw_order_keyframe", "edit", true, false, true},
     {"remove_draw_order_keyframe", "edit", true, false, false},
     {"save", "management", true, true, false},
@@ -3756,6 +3758,262 @@ int main(int argc, char** argv) {
         "remove_draw_order_keyframe",
         "{\"op\":\"remove_draw_order_keyframe\",\"args\":{\"animation\":\"idle\","
         "\"time\":0.75}}");
+
+    // --- MAR-185 A2-A7: the two inherit operations ------------------------
+    //
+    // Against `player_idle`, whose sixteen bones ALL have an absent setup
+    // `inherit` (i.e. `Normal`) and whose animations carry zero inherit
+    // timelines. No case here writes a lone `{0.0, "normal"}` key: the runtime
+    // prunes an inherit lane of exactly one origin key whose mode equals the
+    // bone's setup inherit, so such a case would fail at `timeline.describe`
+    // for a reason that has nothing to do with the operation.
+    {
+        const auto inherit_count = [&](std::string_view label) -> double {
+            const DispatchObservation described = harness.invoke(
+                label,
+                "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");
+            return number_member(described.scene_delta(), "bone_inherit_timelines")
+                .value_or(-1.0);
+        };
+        const auto first_mode =
+            [&](const DispatchObservation& observation) -> std::optional<std::string_view> {
+            const json::Value* keys = member(observation.scene_delta(), "affected_keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return std::nullopt;
+            }
+            return string_member(&keys->as_array().front(), "inherit");
+        };
+
+        // A2. The live setter, its echoed kind, its affected keys, and the
+        // count `timeline.describe` now reports.
+        const DispatchObservation set_first = harness.invoke(
+            "set_inherit_keyframe",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"inherit\":\"noScale\"}}");
+        harness.expect(
+            string_member(set_first.scene_delta(), "kind") ==
+                std::optional<std::string_view>("inherit"),
+            "set_inherit_keyframe",
+            "echoed kind was not \"inherit\"");
+        harness.expect(
+            first_mode(set_first) == std::optional<std::string_view>("noScale"),
+            "set_inherit_keyframe",
+            "affected_keys did not report the stored {0.25, noScale}");
+        harness.expect(
+            inherit_count("timeline.describe after set_inherit_keyframe") == 1.0,
+            "set_inherit_keyframe",
+            "timeline.describe did not report one bone_inherit_timeline");
+
+        // A3. The dry run reports the WOULD-BE mode and stores nothing.
+        const DispatchObservation dry = harness.invoke(
+            "set_inherit_keyframe dry-run",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"inherit\":\"onlyTranslation\","
+            "\"dry_run\":true}}");
+        harness.expect(
+            bool_member(dry.scene_delta(), "dry_run") == std::optional<bool>(true),
+            "set_inherit_keyframe dry-run",
+            "the response did not report dry_run=true");
+        harness.expect(
+            first_mode(dry) == std::optional<std::string_view>("onlyTranslation"),
+            "set_inherit_keyframe dry-run",
+            "affected_keys did not preview the would-be mode");
+        const DispatchObservation after_dry = harness.invoke(
+            "set_inherit_keyframe dry-run leaves the store alone",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"inherit\":\"noScale\","
+            "\"dry_run\":true}}");
+        harness.expect(
+            first_mode(after_dry) == std::optional<std::string_view>("noScale"),
+            "set_inherit_keyframe dry-run",
+            "the dry run MUTATED the stored mode");
+
+        // A4. `remove_inherit_keyframe` is registered dry_run_supported=false,
+        // and the dispatcher enforces that.
+        //
+        // The count assertion below is a WITNESS, not a detector, and the
+        // difference is measured rather than assumed. Flipping the registry
+        // flag to true does not delete the key: the handler's dry-run branch
+        // runs the primitive against `ProjectData candidate = *session.project()`
+        // and never assigns it back, so the key survives that mutation too.
+        // What actually fails is the error code -- and even that is
+        // over-determined by the `operations.list` registry-metadata guard,
+        // which predates this story. Stated here so the comment does not claim
+        // coverage the code does not have.
+        harness.invoke(
+            "remove_inherit_keyframe rejects dry_run",
+            "{\"op\":\"remove_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"dry_run\":true}}",
+            false,
+            "dry_run_unsupported");
+        harness.expect(
+            inherit_count("timeline.describe after the rejected dry run") == 1.0,
+            "remove_inherit_keyframe rejects dry_run",
+            "the rejected dry run removed the key anyway");
+
+        // A5. The generic retime path, reached with kind: "inherit" over the
+        // wire. This is the ONLY case that exercises the selector parser's
+        // inherit branch and the retime handler's materialize arm.
+        const DispatchObservation retimed = harness.invoke(
+            "timeline.retime_keyframes inherit",
+            "{\"op\":\"timeline.retime_keyframes\",\"args\":{\"keys\":[{"
+            "\"kind\":\"inherit\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"time\":0.25}],\"delta\":0.1,\"snap\":false}}");
+        harness.expect(
+            number_member(retimed.scene_delta(), "key_count") ==
+                std::optional<double>(1.0),
+            "timeline.retime_keyframes inherit",
+            "the retime resolved no inherit key");
+        harness.expect(
+            number_member(retimed.scene_delta(), "applied_delta").value_or(-1.0) >
+                0.09,
+            "timeline.retime_keyframes inherit",
+            "the retime applied no delta");
+
+        // A6. Undo/redo, `runtime.validate` and the export-preview NON-EFFECT
+        // witness. `export.preview` reports target paths only -- it carries no
+        // timeline content at all -- so the honest assertion is that it names
+        // the same targets, byte for byte, across an inherit edit.
+        const DispatchObservation preview_before = harness.invoke(
+            "export.preview before undo", "{\"op\":\"export.preview\"}");
+        harness.invoke("runtime.validate after inherit edit",
+                       "{\"op\":\"runtime.validate\"}");
+        const double before_undo = inherit_count("timeline.describe before undo");
+        harness.invoke("undo the inherit retime", "{\"op\":\"undo\"}");
+        harness.invoke("runtime.validate after undo", "{\"op\":\"runtime.validate\"}");
+        const DispatchObservation preview_after = harness.invoke(
+            "export.preview after undo", "{\"op\":\"export.preview\"}");
+        // `targets` is an array of plain strings, so joining them IS the
+        // byte-for-byte comparison; there is no nested value to lose.
+        const auto target_list = [&](const DispatchObservation& observation) {
+            std::string joined;
+            const json::Value* targets = member(observation.scene_delta(), "targets");
+            if (targets != nullptr && targets->is_array()) {
+                for (const json::Value& entry : targets->as_array()) {
+                    joined += entry.is_string() ? std::string(entry.as_string())
+                                                : std::string("<non-string>");
+                    joined += '\n';
+                }
+            }
+            return joined;
+        };
+        harness.expect(
+            preview_before.parsed && preview_after.parsed &&
+                !target_list(preview_before).empty() &&
+                target_list(preview_before) == target_list(preview_after),
+            "export.preview",
+            "an inherit edit changed the export target list");
+        // The count is a WITNESS only, and deliberately labelled as one: a
+        // retime cannot change how many inherit timelines an animation has, so
+        // asserting the count across its undo is unfalsifiable -- exactly the
+        // H4 shape. What an undo of a retime CAN change is the key's time, so
+        // that is what is asserted below.
+        harness.expect(
+            inherit_count("timeline.describe after undo") == before_undo,
+            "undo the inherit retime",
+            "undo did not restore the previous inherit timeline count");
+
+        // The falsifiable half. A5 moved `spine`'s key from 0.25 to 0.35, so a
+        // correct undo puts it back at 0.25 and a correct redo returns it to
+        // 0.35. Read through a dry run, which reports the effective lane after
+        // the would-be merge without writing: the probe key at 0.05 is ignored.
+        const auto lane_has_time = [&](std::string_view label, double time) {
+            const DispatchObservation probe = harness.invoke(
+                label,
+                "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"time\":0.05,\"inherit\":\"noScale\","
+                "\"dry_run\":true}}");
+            const json::Value* keys = member(probe.scene_delta(), "affected_keys");
+            if (keys == nullptr || !keys->is_array()) return false;
+            for (const json::Value& entry : keys->as_array()) {
+                const auto stored = number_member(&entry, "time");
+                if (stored.has_value() && std::abs(*stored - time) <= 1e-6) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        harness.expect(
+            lane_has_time("read the lane after undo", 0.25),
+            "undo the inherit retime",
+            "undo did not move the retimed key back to 0.25");
+        harness.invoke("redo the inherit retime", "{\"op\":\"redo\"}");
+        harness.invoke("runtime.validate after redo", "{\"op\":\"runtime.validate\"}");
+        harness.expect(
+            lane_has_time("read the lane after redo", 0.35),
+            "redo the inherit retime",
+            "redo did not return the retimed key to 0.35");
+
+        // A7. Three rejections, each naming its offending value.
+        // Returns by VALUE: `string_member` views into the observation's own
+        // parsed document, which dies with the local `observation`.
+        const auto rejects = [&](std::string_view label,
+                                 std::string_view command) -> std::string {
+            const DispatchObservation observation =
+                harness.invoke(label, command, false);
+            // The dispatcher puts the reason on the response's own `message`;
+            // `error` carries only the machine-readable `code`.
+            const auto message = string_member(&observation.root, "message");
+            harness.expect(
+                message.has_value() && !message->empty(), label,
+                "the rejection carried no message");
+            return std::string(message.value_or(std::string_view{}));
+        };
+        const auto rejection_names =
+            [&](const std::string& message, std::string_view needle) {
+                return message.find(needle) != std::string::npos;
+            };
+        const std::string bad_mode = rejects(
+            "set_inherit_keyframe rejects an unknown mode",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.4,\"inherit\":\"noScales\"}}");
+        harness.expect(
+            rejection_names(bad_mode, "noScales"),
+            "set_inherit_keyframe rejects an unknown mode",
+            "the rejection did not name the offending token");
+        const std::string bad_bone = rejects(
+            "set_inherit_keyframe rejects an unknown bone",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"no_such_bone\",\"time\":0.4,\"inherit\":\"noScale\"}}");
+        harness.expect(
+            rejection_names(bad_bone, "no_such_bone"),
+            "set_inherit_keyframe rejects an unknown bone",
+            "the rejection did not name the offending bone");
+        // The third sibling parser. `timeline_lane_selectors_arg` rejects an
+        // inherit lane either way; before MAR-185 it fell through to "Unknown
+        // timeline loop-sync lane kind: inherit", which is a false statement
+        // about the vocabulary once inherit is a real kind. Asserted on the
+        // TEXT, because both spellings reject.
+        const std::string inherit_lane = rejects(
+            "timeline.set_loop_sync names inherit as unsupported, not unknown",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[{"
+            "\"kind\":\"inherit\",\"animation\":\"idle\",\"bone\":\"spine\"}],"
+            "\"enabled\":true}}");
+        harness.expect(
+            rejection_names(inherit_lane, "does not support inherit lanes") &&
+                !rejection_names(inherit_lane, "Unknown timeline"),
+            "timeline.set_loop_sync names inherit as unsupported, not unknown",
+            "the rejection still calls inherit an unknown lane kind");
+
+        const std::string bad_time = rejects(
+            "set_inherit_keyframe rejects a negative time",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":-1,\"inherit\":\"noScale\"}}");
+        harness.expect(
+            rejection_names(bad_time, "finite") && rejection_names(bad_time, "non-negative"),
+            "set_inherit_keyframe rejects a negative time",
+            "the rejection did not name the finiteness rule");
+
+        // The live removal, which also clears the lane this block created.
+        harness.invoke(
+            "remove_inherit_keyframe",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.6,\"inherit\":\"onlyTranslation\"}}");
+        harness.invoke(
+            "remove_inherit_keyframe live",
+            "{\"op\":\"remove_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.6}}");
+    }
 
     const DispatchObservation created_animation = harness.invoke(
         "animation.create",
