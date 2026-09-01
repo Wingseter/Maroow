@@ -1314,7 +1314,7 @@ order**. The predicted case is the design's; the text is what actually printed.
 | **I18b** | `rollback_advance` consults the seam and **discards its message**, so the rollback still stops and reports nothing | R6b | **R6b** -- `a failing rollback must NAME the step it was undoing. Expected 'rollback of PlaceAtlas failed: injected failure: disk went away'; got ''`. R3 stays green, because nothing there reads `rollback_error`'s content. This is the arm that makes the rollback seam load-bearing |
 | **I19** | derive the target texture from the ATLAS's stem instead of the atlas document's `image` -- the "obvious wrong fix" -- with both `ValidateRequest` name guards disabled so it reaches placement | R1b | **R1** -- `the committed texture ('…/bundle_tex.png') must equal the staged bytes; sizes 137 and 117`. R1's byte clause overlaps R1b's subject for any mutation that misplaces content; see the note below |
 | **STRAY** | plant `planted_orphan.png` beside the atlas after a successful commit | R1b | **R1b** -- `appeared: …/r1b/planted_orphan.png` |
-| **I20** | give R2(d)'s project a deform timeline, i.e. make the skins loss observable | R2(d) | **R2(d)** -- `the commit was REFUSED with '… deform timeline references unknown attachment 'shadow_mesh''. This case records a known limitation; a refusal here means the limitation is gone`. Proves the characterization case is not inert |
+| **I20** | delete the structural `<skin>/<slot>` comparison, leaving the runtime build | R2(d) | **R2(d)** -- `a staged bundle that erases a hand-authored skin must be refused even when NOTHING references it; the commit reported success`. **R2(c) passes unchanged under the same mutation**, on its own deform message -- which is what makes R2(d) the unique detector for the structural half |
 
 **I17 is the clearest instance in this story of why `!result` is not an
 assertion.** Removing the whitelist check does not make the operation succeed; it
@@ -1442,36 +1442,54 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   Until R6b existed the seam was declared and never fired and `rollback_error` was
   only ever asserted **empty**, which is a seam with no evidence behind it;
   **I18b** is the arm that proves R6b sees a discarded message.
-- **DISCLOSURE: the commit path can erase a user's hand-authored skins without
-  the validation refusing.** This was first written here as a reasoned aside and
-  is now a measurement, because reasoning was the wrong instrument: R2(c)'s
-  refusal is triggered by a **deform timeline that references the lost
-  attachment**, not by the skin's absence as such. The realistic rig -- skins and
-  mesh-weight overlays, **no IK constraint and no deform timeline** -- has nothing
-  in the runtime document naming the skin, so `build_project_runtime` has nothing
-  to fail on.
+- **The skins erasure is refused, and this row records what the refusal does and
+  does not inspect.** It was a DISCLOSURE first, and the transition is the
+  evidence: written originally as a reasoned aside ("refused by nothing in one
+  narrow case"), then measured as **R2(d)** and found materially worse -- a rig
+  with hand-authored skins and mesh-weight overlays, **no IK constraint and no
+  deform timeline**, was **committed**, the committed skeleton had **no `skins`
+  member**, and `import.psd_layers` reported success. Silent, unrecoverable data
+  loss.
 
-  Built as **R2(d)** and measured: the commit **succeeds**, and the committed
-  skeleton has **no `skins` member**. The hand-authored skin and the mesh-weight
-  overlay that targeted it are both gone, and `import.psd_layers` reports success.
-  A mesh-weight overlay whose target no longer resolves degrades to the
-  `overlay.orphan_weight_target` **Warning** already recorded in this file, which
-  is a diagnostic and not a load error -- so nothing on the commit path refuses.
+  R2(c)'s refusal is triggered by a deform timeline that **names** the lost
+  attachment; the runtime build cannot see a loss nothing references, which is why
+  a **structural** comparison was added rather than a runtime-build one.
+  `ValidateStagedBundle` now compares the current skeleton file's
+  `<skin>/<slot>` identity set against the staged one's and refuses on the
+  difference, naming it:
 
-  R2(d) is a **characterization** case, labelled as such: it asserts what the code
-  does, not what it should do, so that whoever makes the validator refuse this
-  class sees it go red and comes here to read why. **I20** proves it is not inert
-  -- giving R2(d)'s project a deform timeline makes it report
-  *"the commit was REFUSED … a refusal here means the limitation is gone"*.
+  ```
+  ValidateStagedBundle: the staged skeleton drops skin attachments the project's
+  skeleton defines (default/shadow); a PSD reimport replaces bones, slots and
+  skins wholesale, so committing it would destroy hand-authored attachments
+  ```
 
-  The cause is the importer (`build_skeleton_document` erases `skins` wholesale)
-  and MAR-189 changes no importer. **What MAR-189 could have done and did not is
-  refuse a commit whose staged skeleton drops a `skins` member the current one
-  has** -- a structural comparison rather than a runtime-build one. That is a real
-  gap in AC1's "validated together with the current project overlay", it is one
-  step, and it is left open deliberately rather than silently: it would change the
-  contract for every project whose skeleton came from a PSD in the first place
-  (which never has skins), and that decision is not this story's to make alone.
+  **What it compares:** the set of `<skin name>/<slot name>` pairs under `$.skins`,
+  read from the skeleton **file** being replaced -- not the session's base
+  document, because the file is what this commit overwrites and what the backup
+  preserves.
+
+  **What it does NOT compare, and this is the honest boundary:** anything *inside*
+  a surviving attachment. A `<skin>/<slot>` present in both documents passes
+  regardless of whether its `type`, `region`, `vertices`, `triangles`, `uvs` or
+  `weights` changed, so a reimport that keeps an identity and replaces a mesh with
+  a region attachment under the same name is **not** refused. Nor does it compare
+  skin ordering, or anything outside `$.skins`. It is a check against *losing* an
+  attachment identity, not against *altering* one.
+
+  **Blast radius:** a skeleton produced by a PSD import has no `skins` at all, so
+  the comparison never fires for the projects this story creates. It engages only
+  where the current skeleton **has** skins the staged one lacks -- exactly the
+  population that was losing data.
+
+  **Ordering is deliberate:** the structural comparison runs **after** the runtime
+  build, so a project failing both keeps the more specific diagnosis. R2(c) still
+  refuses on its deform message; **I20** (delete the comparison) reddens **R2(d)
+  alone** and R2(c) passes unchanged, which is the uniqueness evidence.
+
+  The underlying cause is unchanged and is not this story's: `build_skeleton_document`
+  erases `skins` wholesale (`psd_import.cpp:1041`). MAR-189 refuses rather than
+  fixing the importer.
 
 - **EXDEV, and it is narrower than "unmeasured".** One volume on this machine, so
   a real cross-device rename could not be produced. But `write_file_atomically`

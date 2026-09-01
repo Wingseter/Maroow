@@ -2930,27 +2930,29 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
         std::cout << "R2(c): refused with -- " << result.error << '\n';
     }
 
-    // ---- R2(d) -- CHARACTERIZATION: skins + mesh weights, no deform ----------
+    // ---- R2(d) -- the skins loss is refused STRUCTURALLY ----------------------
     //
-    // R2(c) proves the skins loss is refused when something in the runtime
-    // document POINTS INTO the lost skin -- a deform timeline. The realistic rig
-    // that worries a reviewer is different: hand-authored skins and mesh-weight
-    // OVERLAYS, no IK constraint and no deform timeline. Nothing in the runtime
-    // document then references the skin by name, so there may be nothing for
-    // `build_project_runtime` to fail on.
+    // This case has a history worth keeping, because the transition is the best
+    // evidence in the story. It was first written as a CHARACTERIZATION case: it
+    // asserted that this project -- hand-authored skins and a mesh-weight overlay,
+    // no IK constraint and no deform timeline -- was COMMITTED, and that the
+    // committed skeleton had no `skins` member. That was not a hypothetical. It
+    // was measured, and it meant the commit path destroyed a user's rig and
+    // reported success.
     //
-    // This case does not assert what SHOULD happen. It records what DOES, so the
-    // limitation is a measurement in the suite rather than a sentence in a
-    // document, and so that anyone who later makes the validator refuse here sees
-    // this case go red and has to come and read why.
+    // R2(c) refuses because a deform timeline NAMES the lost attachment, so the
+    // runtime build has something to fail on. Nothing here names it, which is
+    // exactly why a runtime-build check could not see it and a STRUCTURAL
+    // comparison had to be added: the staged skeleton's `<skin>/<slot>` set is
+    // compared against the current skeleton's before any target moves.
+    //
+    // The case now asserts the refusal. Its predecessor is the reason the refusal
+    // exists.
     {
         Scenario scenario;
         if (!mar189::open_scenario(
                 scratch, "r2d", initial_tree, initial_tree, &scenario,
                 [](marrow::editor::ProjectData* project) {
-                    // A mesh-weight overlay on the skin the reimport is about to
-                    // erase. No IK constraint, and the skeleton below carries no
-                    // deform timeline.
                     marrow::editor::MeshWeightAttachmentEdit weights;
                     weights.skin_name = "default";
                     weights.slot_name = "shadow";
@@ -2969,49 +2971,48 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
         }
         const std::filesystem::path skeleton_path =
             scenario.directory / (std::string(mar189::kBundleStem) + ".mskl");
+        // No deform timeline. Nothing in the runtime document references the skin
+        // by name, which is the whole point of this case.
         if (!mar189::add_shadow_mesh_skin(skeleton_path, false)) {
             return false;
         }
         if (!mar189::plan_scenario(&scenario, "R2(d)")) {
             return false;
         }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
         marrow::editor::PsdReimportCommitOptions options;
         options.project_path = scenario.project_path;
         const marrow::editor::PsdReimportCommitResult result =
             marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
 
-        const marrow::runtime::json::LoadResult committed =
-            marrow::runtime::json::load_document(
-                scenario.session.project()->resolved_skeleton_path());
-        if (!committed) {
-            std::cerr << "R2(d): the committed skeleton did not parse.\n";
+        const std::string expected =
+            "ValidateStagedBundle: the staged skeleton drops skin attachments the "
+            "project's skeleton defines (default/shadow); a PSD reimport replaces "
+            "bones, slots and skins wholesale, so committing it would destroy "
+            "hand-authored attachments";
+        if (result) {
+            std::cerr << "R2(d): a staged bundle that erases a hand-authored skin must "
+                         "be refused even when NOTHING references it; the commit "
+                         "reported success.\n";
             return false;
         }
-        const bool skins_survived =
-            marrow::runtime::json::find_member(committed.document->root, "skins") != nullptr;
-
-        if (result && !skins_survived) {
-            // MEASURED, and it is the disclosure. Nothing referenced the skin by
-            // name, so the runtime build had nothing to fail on and the commit
-            // erased a hand-authored skin -- and the mesh-weight overlay that
-            // targeted it -- without the validation refusing.
-            std::cout << "R2(d) [LIMITATION, measured]: a project with hand-authored "
-                         "skins and a mesh-weight overlay but no deform timeline and no "
-                         "IK constraint is COMMITTED, and the committed skeleton has no "
-                         "'skins' member. The skins erasure is refused only when the "
-                         "runtime document references the lost skin by name (R2(c)).\n";
-            return true;
-        }
-        if (!result) {
-            std::cerr << "R2(d): the commit was REFUSED with '" << result.error
-                      << "'. This case records a known limitation; a refusal here means "
-                         "the limitation is gone and the record must be updated -- see "
-                         "the MAR-189 'Not independently covered' section.\n";
+        if (result.error != expected) {
+            std::cerr << "R2(d): expected '" << expected << "'; got '" << result.error
+                      << "'.\n";
             return false;
         }
-        std::cerr << "R2(d): the commit succeeded AND the skins survived, which neither "
-                     "the importer nor this case expects.\n";
-        return false;
+        // The identity is named, not counted. A count would not say WHICH
+        // attachment was about to be destroyed, which is the only part of the
+        // message a user can act on.
+        if (result.error.find("default/shadow") == std::string::npos) {
+            std::cerr << "R2(d): the refusal must name the lost attachment identity.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "R2(d)")) {
+            return false;
+        }
+        std::cout << "R2(d): refused with -- " << result.error << '\n';
     }
 
     std::cout << "MAR-189 R0-R2: a clean commit walks the whole step enum in order and "

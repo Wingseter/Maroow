@@ -215,6 +215,25 @@ std::string atlas_image_member(const std::filesystem::path& atlas_path, std::str
     return image->as_string();
 }
 
+/** @brief `<skin>/<slot>` for every attachment a skeleton document defines, sorted. */
+std::vector<std::string> skin_slot_identities(const runtime::json::Value& root) {
+    std::vector<std::string> identities;
+    const Value* skins = runtime::json::find_member(root, "skins");
+    if (skins == nullptr || !skins->is_object()) {
+        return identities;
+    }
+    for (const auto& skin : skins->as_object()) {
+        if (!skin.second.is_object()) {
+            continue;
+        }
+        for (const auto& slot : skin.second.as_object()) {
+            identities.push_back(skin.first + "/" + slot.first);
+        }
+    }
+    std::sort(identities.begin(), identities.end());
+    return identities;
+}
+
 /** @brief Every regular file under @p root, as paths relative to it, sorted. */
 std::vector<std::filesystem::path> relative_files(
     const std::filesystem::path& root,
@@ -585,6 +604,54 @@ bool CommitRun::validate_staged_bundle() {
         fail(PsdCommitStep::ValidateStagedBundle,
              "the staged bundle does not build with the project's overlays: " +
                  runtime_result.error->message);
+        return false;
+    }
+
+    // The STRUCTURAL half, and it runs after the build deliberately.
+    //
+    // `build_skeleton_document` erases `skins` wholesale (`psd_import.cpp:1041`).
+    // The runtime build catches that only when something NAMES a lost attachment
+    // -- a deform timeline, say. A rig with hand-authored skins and mesh-weight
+    // overlays but no such reference has nothing for the build to fail on, so the
+    // build succeeds and the commit destroys the skins while reporting success.
+    // Measured before this check existed; that is what it is here to stop.
+    //
+    // The comparison is against the skeleton FILE, not the session's base
+    // document: the file is the thing this commit replaces, and it is the thing
+    // whose bytes the backup preserves.
+    //
+    // It runs AFTER the runtime build so that a project which fails both keeps the
+    // more specific diagnosis -- the build names the exact JSON path that stopped
+    // resolving, and this names only the identity that disappeared.
+    const runtime::json::LoadResult current =
+        runtime::json::load_document(target_skeleton_);
+    if (!current) {
+        fail(PsdCommitStep::ValidateStagedBundle,
+             "the project's current skeleton did not parse: " + current.error->message);
+        return false;
+    }
+    const std::vector<std::string> current_skins =
+        skin_slot_identities(current.document->root);
+    const std::vector<std::string> staged_skins =
+        skin_slot_identities(document.document->root);
+    std::vector<std::string> lost;
+    std::set_difference(
+        current_skins.begin(),
+        current_skins.end(),
+        staged_skins.begin(),
+        staged_skins.end(),
+        std::back_inserter(lost));
+    if (!lost.empty()) {
+        std::string identities;
+        for (const std::string& identity : lost) {
+            identities += (identities.empty() ? "" : ", ") + identity;
+        }
+        fail(PsdCommitStep::ValidateStagedBundle,
+             "the staged skeleton drops skin attachments the project's skeleton "
+             "defines (" +
+                 identities +
+                 "); a PSD reimport replaces bones, slots and skins wholesale, so "
+                 "committing it would destroy hand-authored attachments");
         return false;
     }
     return advance(PsdCommitStep::ValidateStagedBundle);
