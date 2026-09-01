@@ -1146,27 +1146,45 @@ keeping, because the wrong answer was the plausible one.
 | `expect_inert` clause 5 (full recursive directory listing) | **I9b** | **Gate.** Fails at **Q6** by run order: `Q6: planning changed the project directory.` with a set difference naming four files |
 | Every other P- and Q- clause | I1-I6, I7b, I8, P8 d/e/h/i/j/k, I9-I19 | Gate |
 
-**What was nearly recorded, and why it was wrong.** With the containment guard in
-its original post-hoc position, I9 failed at the guard and clause 5 was never
-reached, so "no inversion turns it red" looked true and the review asked for the
-witness label. Once the guard was moved to run BEFORE the import, the right
-question changed: not "does I9 reach the listing" but "if the guard were gone,
-does anything else watch". **I9b** answers it -- remove the pre-check *and* stage
-into the project directory, so writes really escape -- and the listing turns red
-naming the created files by path and size.
+**What was nearly recorded, twice, and why both versions were wrong.** The first
+draft called clause 5 a witness with no detector. The second explained that the
+guard move had *created* coverage which had not existed a commit earlier. **Both
+are false, and the second was measured to be false rather than argued away.**
 
-So the two layers are independent, which is the shape defence in depth is supposed
-to have: the guard prevents the escape, and if the guard is ever removed or
-weakened the inertness listing still catches it. Recording clause 5 as a witness
-would have understated the coverage and left a future reader believing a real
-detector did not exist.
+The mutation was reconstructed against the ORIGINAL post-hoc guard -- remove the
+post-hoc check *and* retarget the layer directory -- and it produces the
+**identical** failure:
 
-**The general lesson is about the question, not the answer.** "This clause has no
-detector" and "this clause has a detector only because the guard was fixed" are
-different facts, and fixing a defect can *create* coverage that did not exist a
-commit earlier. **Re-run the coverage question after changing the code it is a
-question about** -- a coverage row measured against the previous implementation is
-as stale as a line anchor, and it goes stale silently.
+```
+Q6: planning changed the project directory.
+  missing: .../project/staged_layers/b_c.png (75 bytes)
+  missing: .../project/staged_layers/c.png (75 bytes)
+  created: .../project/staged_layers/torso_body.png (75 bytes)
+  created: .../project/staged_layers/torso_body_2.png (75 bytes)
+```
+
+So **clause 5 had a detector all along.** The guard move neither created nor
+destroyed coverage; it changed only *which* mutation exposes it -- remove the
+post-hoc check before, remove the pre-check after. The row was wrong when it was
+written and would have been equally wrong one commit earlier.
+
+The two layers are independent, which is the shape defence in depth is supposed to
+have: the guard prevents the escape, and if the guard is ever removed or weakened
+the inertness listing still catches it. That was true before the guard moved too.
+
+**The real lesson, which is less comfortable than "re-run the question".** A
+coverage claim is a **universal quantifier** -- "*no* inversion turns this red".
+Observing that one mutation fails to reach a clause establishes nothing about it;
+the claim is discharged only by constructing the mutation that *would* falsify it
+and watching what happens. The first row generalised from a single mutation's
+outcome to a statement about the whole register, and stated an inference in the
+grammar of a measurement.
+
+Note also what nearly happened to the *correction*: the tidy story -- "fixing the
+guard created coverage" -- was plausible, flattering to everyone, and false. It
+was caught only by running the old code. **A correct conclusion resting on a false
+premise survives only until someone checks the premise**, which this story already
+recorded for Q0b and then immediately re-enacted one section away.
 
 **A guard placed after the operation it guards REPORTS rather than PREVENTS.**
 MAR-188 originally checked containment at the end of `plan_psd_reimport`, after
