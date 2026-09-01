@@ -8,6 +8,12 @@
 
 #include "marrow/editor/psd_reimport_plan.hpp"
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace marrow::editor::agent_detail {
 
 namespace {
@@ -24,10 +30,30 @@ const char* psd_change_name(PsdLayerChangeKind change) {
     return "unknown";
 }
 
-/// @brief A unique staging directory under @p root, so a re-run never inherits one.
+/**
+ * @brief A staging directory under @p root unique across RUNS and across PROCESSES.
+ *
+ * The counter alone is not enough and the difference is a real defect, not a test
+ * artefact: it is per-process and restarts at 1 in every process, while the
+ * default root is a fixed path. Two editors on one machine each planning a
+ * reimport therefore both choose `<root>/plan-1`, and `plan_psd_reimport` refuses
+ * a staging root that is not empty or absent -- so the second one fails with
+ * "staging root must be empty or absent" and the user sees a reimport that cannot
+ * be approved for no reason they can act on.
+ *
+ * Found by investigating why the PSD smoke failed under concurrent runs. The
+ * process id is what makes the name unique across processes; the counter keeps it
+ * unique within one.
+ */
 std::filesystem::path unique_staging_directory(const std::filesystem::path& root) {
     static std::uint64_t sequence = 0U;
-    return root / ("plan-" + std::to_string(++sequence));
+#if defined(_WIN32)
+    const long long pid = static_cast<long long>(_getpid());
+#else
+    const long long pid = static_cast<long long>(::getpid());
+#endif
+    return root /
+        ("plan-" + std::to_string(pid) + "-" + std::to_string(++sequence));
 }
 
 } // namespace

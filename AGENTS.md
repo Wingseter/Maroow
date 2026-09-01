@@ -806,6 +806,48 @@ after being written. A mutation whose effect cannot be observed is not a weak
 inversion; it is not an inversion at all, and recording "I7 did not bite" without
 that reasoning would have told the next reader nothing.
 
+### A suite that shares a fixed scratch path is green only while nobody else runs it
+
+Found by review during MAR-189, and the way it was found is the point:
+`marrow.psd_import_smoke` **failed once** in a full `ctest`, then passed on an
+isolated rerun and three direct reruns. The reviewer investigated instead of
+re-running until green.
+
+Every scratch root in `psd_import_smoke.cpp` was a **fixed** path
+(`$TMPDIR/{marrow_psd_import_smoke,mar188_q0,mar188_plan,mar189_naming,mar189_commit}`,
+`/tmp/mar189_agent`) and the cases `remove_all` their root on entry, so two
+concurrent runs delete each other's trees mid-run. Measured: **four concurrent
+runs of the pre-fix binary, four failures.** After giving every root a pid
+suffix: **eight concurrent runs, eight passes.**
+
+> A recorded pass that depends on nobody else running the same binary is not a
+> result. Name every scratch root after the **process**, not after the story.
+
+This is the sibling of the scratchpad rule already recorded above -- that one is
+about two *agents* colliding on a directory, this one about two *processes* -- and
+the same fix answers both.
+
+**The part that was not a test problem at all.** Chasing the last concurrent
+failure led into production code: `unique_staging_directory`
+(`agent_handlers_management.cpp`) appended a counter that is `static` and
+therefore **per-process**, under a **fixed** default root. Two editors on one
+machine each planning a reimport both choose `<root>/plan-1`, and
+`plan_psd_reimport` refuses a staging root that is not empty or absent -- so the
+second user's approval fails with *"staging root must be empty or absent"*, for no
+reason they can act on. The name now carries the pid. *A "unique" name is unique
+only across the scope its uniquing mechanism spans; a process-local counter says
+nothing about another process.*
+
+**What the fix does NOT cover, measured rather than assumed.** Two concurrent
+`ctest` runs still fail -- but on **other** tests: `marrow.project_smoke`,
+`marrow.runtime_unit`, `marrow.agent_dispatch_smoke`, `marrow.editor_shell_smoke`.
+`marrow.psd_import_smoke` failed **zero** times across both. `project_smoke` fails
+the same way at the pre-fix commit, and `agent_dispatch_smoke` writes to fixed
+`/tmp/agent_spine_import_sample.*` paths that predate this story. **Concurrent
+`ctest` is flaky repo-wide and it is not this story's doing** -- recorded here
+because the next validation sweep over this suite needs to know that "run the
+tests twice at once" is not yet a supported operation.
+
 ### A fixture in which two candidate rules agree cannot distinguish them
 
 The three degenerate gate shapes recorded above are all properties of the
@@ -1436,9 +1478,16 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   `apply_agent_review`) was offered and not taken.
 - **§9.2's irreversible window.** A failure inside `adopt_runtime_sources` during
   the rollback's re-adopt. The rollback seam added here can fail a rollback
-  *step* -- and now **does**, in `R6b`, which asserts `rollback_error` names the
-  step it was undoing and that `steps_rolled_back` records the reverse order
-  (`PlaceSkeleton`, `PlaceAtlas`). It cannot fail the session call inside one.
+  *step* -- and now **does**, at **every** step it can reach. `R6b` asserts
+  `rollback_error`'s text and the reverse order (`PlaceSkeleton`, `PlaceAtlas`);
+  **R6c** is the parallel of R3 for the rollback path, one arm per step
+  `rollback_advance` can reach -- eleven of them (`UpdateProvenance`, the four
+  `Place*`, the four `Backup*`, `OpenJournal`, `AdoptRuntimeSources`) -- each
+  failing the commit at `UpdateProvenance` so the rollback walks the whole journal,
+  and asserting the ledger **ends** at the injected step rather than merely
+  containing it. *"Injectable per step" and "asserted at one step" are different
+  claims, and only the sweep makes the first one evidence.* It still cannot fail
+  the session call inside a rollback step.
   Until R6b existed the seam was declared and never fired and `rollback_error` was
   only ever asserted **empty**, which is a seam with no evidence behind it;
   **I18b** is the arm that proves R6b sees a discarded message.

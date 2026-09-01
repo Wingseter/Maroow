@@ -15,6 +15,12 @@
 #include <variant>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "atlas_packer.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/editor/psd_reimport_commit.hpp"
@@ -51,6 +57,47 @@ bool expect_near(double actual, double expected, double epsilon, std::string_vie
     std::cerr << label << " expected " << std::setprecision(17) << expected
               << " but was " << actual << '\n';
     return false;
+}
+
+/**
+ * @brief A scratch root private to THIS process.
+ *
+ * Every root in this file used to be a fixed path under `temp_directory_path()`,
+ * and the cases `remove_all` their roots on entry -- so two concurrent runs of
+ * this binary delete each other's trees mid-run. That is not hypothetical:
+ * `marrow.psd_import_smoke` FAILED in its first full `ctest` and passed on an
+ * isolated rerun, which is the signature of exactly this and is also the
+ * signature of a flake worth ignoring. It was neither.
+ *
+ * A green result that depends on nobody else running the same binary is not a
+ * result. The pid suffix is what makes the recorded 23/23 reproducible under the
+ * concurrency this repository actually has.
+ */
+std::filesystem::path scratch_root(std::string_view name) {
+#if defined(_WIN32)
+    const long long pid = static_cast<long long>(_getpid());
+#else
+    const long long pid = static_cast<long long>(::getpid());
+#endif
+    return std::filesystem::temp_directory_path() /
+        (std::string(name) + "-" + std::to_string(pid));
+}
+
+/**
+ * @brief The agent cases' root, under `/tmp` and NOT `temp_directory_path()`.
+ *
+ * `agent_path_allowed` whitelists `/tmp` and `/private/tmp` and does not whitelist
+ * `$TMPDIR`, so an A-case sited under `temp_directory_path()` is refused as a
+ * forbidden input path before it can test anything. Per-process for the same
+ * reason as `scratch_root`.
+ */
+std::filesystem::path agent_scratch_root() {
+#if defined(_WIN32)
+    const long long pid = static_cast<long long>(_getpid());
+#else
+    const long long pid = static_cast<long long>(::getpid());
+#endif
+    return std::filesystem::path("/tmp") / ("mar189_agent-" + std::to_string(pid));
 }
 
 marrow::runtime::json::Value make_number_value(double value) {
@@ -3747,6 +3794,84 @@ bool validate_mar189_commit_rollback(const std::filesystem::path& scratch) {
         }
     }
 
+    // ---- R6c -- the ROLLBACK sweep, one arm per rollback-able step ------------
+    //
+    // R6b asserts the rollback seam at ONE step. That is a seam that is
+    // *injectable* per step and *asserted* at one, and the two are different
+    // claims -- MAR-190's AC6 rests on the first, so it needs the evidence base
+    // the commit path already has from R3.
+    //
+    // `rollback_advance` is reached from five sites, covering eleven distinct
+    // steps: `UpdateProvenance`, the four `Place*`, the four `Backup*`,
+    // `OpenJournal` and `AdoptRuntimeSources`. Every arm fails the COMMIT at
+    // `UpdateProvenance` -- the last step before `CleanJournal`, so the rollback
+    // walks the whole journal -- and fails the ROLLBACK at its own step.
+    {
+        const std::vector<PsdCommitStep> rollback_steps = {
+            PsdCommitStep::UpdateProvenance,
+            PsdCommitStep::PlaceSkeleton,
+            PsdCommitStep::PlaceAtlas,
+            PsdCommitStep::PlaceTexture,
+            PsdCommitStep::PlaceLayers,
+            PsdCommitStep::BackupSkeleton,
+            PsdCommitStep::BackupAtlas,
+            PsdCommitStep::BackupTexture,
+            PsdCommitStep::BackupLayers,
+            PsdCommitStep::OpenJournal,
+            PsdCommitStep::AdoptRuntimeSources,
+        };
+        for (const PsdCommitStep step : rollback_steps) {
+            const std::string name = marrow::editor::psd_commit_step_name(step);
+            const std::string label = "R6c/" + name;
+            Scenario scenario;
+            if (!mar189::open_scenario(
+                    scratch, "r6c_" + name, initial_tree, candidate_tree, &scenario) ||
+                !mar189::plan_scenario(&scenario, label.c_str())) {
+                return false;
+            }
+            marrow::editor::PsdReimportCommitOptions options;
+            options.project_path = scenario.project_path;
+            marrow::editor::PsdReimportCommitResult result;
+            {
+                const mar189::ScopedCommitFailpoint commit_seam(
+                    mar189::fail_after(PsdCommitStep::UpdateProvenance));
+                const mar189::ScopedRollbackFailpoint rollback_seam(
+                    [step](PsdCommitStep undone) -> std::string {
+                        return undone == step ? "injected" : std::string();
+                    });
+                result = marrow::editor::commit_psd_reimport(
+                    scenario.session, scenario.plan, options);
+            }
+            if (result) {
+                std::cerr << label << ": the commit must fail.\n";
+                return false;
+            }
+            const std::string expected =
+                "rollback of " + name + " failed: injected failure: injected";
+            if (result.rollback_error != expected) {
+                std::cerr << label << ": the rollback seam must fire at this step and "
+                             "name it. Expected '"
+                          << expected << "'; got '" << result.rollback_error << "'.\n";
+                return false;
+            }
+            // The ledger's LAST entry is the step the seam stopped at. Asserting
+            // only that the step appears would pass on a rollback that carried on
+            // past its own reported failure.
+            if (result.steps_rolled_back.empty() ||
+                marrow::editor::psd_commit_step_name(result.steps_rolled_back.back()) !=
+                    name) {
+                std::cerr << label << ": the rollback ledger must END at the injected "
+                             "step; it is ";
+                for (const std::string& entry :
+                     mar189::step_names(result.steps_rolled_back)) {
+                    std::cerr << ' ' << entry;
+                }
+                std::cerr << ".\n";
+                return false;
+            }
+        }
+    }
+
     // ---- R7 -- the journal exists in flight, and is gone after ----------------
     {
         Scenario scenario;
@@ -4308,6 +4433,7 @@ bool validate_mar189_agent_operation(const std::filesystem::path& scratch) {
     return true;
 }
 
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -4321,7 +4447,7 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path temp_root =
-        std::filesystem::temp_directory_path() / "marrow_psd_import_smoke";
+        scratch_root("marrow_psd_import_smoke");
     std::error_code error;
     std::filesystem::remove_all(temp_root, error);
     error.clear();
@@ -4346,23 +4472,23 @@ int main(int argc, char** argv) {
     // Q0 runs BEFORE every other MAR-188 case so a synthesiser regression is
     // attributed to the gate rather than to whichever case happens to notice.
     if (!validate_mar188_q0(options.initial_psd,
-                            std::filesystem::temp_directory_path() / "mar188_q0")) {
+                            scratch_root("mar188_q0"))) {
         return 1;
     }
     if (!validate_mar188_reimport_planning(
-            std::filesystem::temp_directory_path() / "mar188_plan")) {
+            scratch_root("mar188_plan"))) {
         return 1;
     }
     if (!validate_mar189_staged_naming(
-            std::filesystem::temp_directory_path() / "mar189_naming")) {
+            scratch_root("mar189_naming"))) {
         return 1;
     }
     if (!validate_mar189_reimport_commit(
-            std::filesystem::temp_directory_path() / "mar189_commit")) {
+            scratch_root("mar189_commit"))) {
         return 1;
     }
     if (!validate_mar189_commit_rollback(
-            std::filesystem::temp_directory_path() / "mar189_commit")) {
+            scratch_root("mar189_commit"))) {
         return 1;
     }
     // Under `/tmp`, deliberately, and NOT `temp_directory_path()`. On macOS the
@@ -4370,7 +4496,7 @@ int main(int argc, char** argv) {
     // (`agent_dispatch.cpp:626-629`) does not whitelist -- so an A-case sited there
     // is refused as a forbidden input path before it can test anything. The two
     // sets are disjoint, and the safety gate accepts both.
-    if (!validate_mar189_agent_operation("/tmp/mar189_agent")) {
+    if (!validate_mar189_agent_operation(agent_scratch_root())) {
         return 1;
     }
 

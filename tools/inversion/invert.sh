@@ -38,7 +38,16 @@ restore() {
     return 4
   fi
   echo "  restore verified by cmp $copy $(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
-  "$(dirname "${BASH_SOURCE[0]}")/rebuild.sh" "$build_dir" >/dev/null 2>&1
+  # GUARD 3's own residual, and the same class as the defect it fixed: the file is
+  # back but the BINARY is not until this succeeds. Discarding its status leaves a
+  # stale mutated binary behind a "restore verified" line, and the next inversion
+  # measures it.
+  if ! "$(dirname "${BASH_SOURCE[0]}")/rebuild.sh" "$build_dir" > "${build_dir}/inversion-restore-build.log" 2>&1; then
+    echo "=== ${label}: RESTORE REBUILD FAILED -- the source is back but the binary is not. ==="
+    echo "  Do not run another inversion; the next one would measure a stale build."
+    grep -E "error:" "${build_dir}/inversion-restore-build.log" | head -3
+    return 5
+  fi
   return 0
 }
 
@@ -49,7 +58,7 @@ python3 "$mutation" "${root}/${file}" || { echo "${label}: MUTATION SCRIPT FAILE
 if ! "$(dirname "${BASH_SOURCE[0]}")/rebuild.sh" "$build_dir" > "${build_dir}/inversion-build.log" 2>&1; then
   echo "=== ${label}: BUILD FAILED -- the mutation does not compile. NOT a result. ==="
   grep -E "error:" "${build_dir}/inversion-build.log" | head -5
-  restore || exit 4
+  restore || exit $?
   exit 2
 fi
 
@@ -57,5 +66,5 @@ fi
 code=$?
 echo "=== ${label}  exit=${code} ==="
 if [ "$code" -eq 0 ]; then echo "  *** DID NOT BITE -- the suite still passed ***"; fi
-restore || exit 4
+restore || exit $?
 exit 0
