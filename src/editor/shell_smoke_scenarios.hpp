@@ -74,6 +74,9 @@ bool validate_timeline_p0_authoring_smoke(
 bool validate_derived_cache_smoke(ShellState* state);
 bool validate_selection_set_shell_smoke(ShellState* state);
 
+bool validate_mar187_problems_shell_smoke(
+    const std::filesystem::path& project_path);
+
 bool validate_shell_foundation_smoke(
     ShellState& shell_state,
     const Options& options);

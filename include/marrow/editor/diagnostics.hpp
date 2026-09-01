@@ -117,11 +117,75 @@ enum class DiagnosticOverlayFamily {
 };
 
 /**
+ * @brief The record coordinates a repair needs. Added by MAR-187 (see below).
+ *
+ * @par Why this exists, and why it is a DOWNSTREAM amendment
+ * MAR-186 shipped `code` and `family` so a fix could find the right *vector*
+ * without splitting `identity` on `|`. That answers "which of the eight
+ * vectors" completely. It does **not** answer "which record **within** the
+ * vector", and for two families that question has an answer neither MAR-186's
+ * design nor MAR-187's asked for:
+ *
+ * - `Transform` records are keyed `{animation, bone, channel}` — two channels on
+ *   one bone are two independent overlays, as
+ *   `collect_orphan_animation_overlays` says in as many words — but
+ *   `DiagnosticTarget` carries only a `BoneSelection`. Rotate and Translate on
+ *   one bone produce two issues with **identical** targets.
+ * - `Deform` records are keyed `{animation, slot, attachment}` while the target
+ *   carries only a `SlotSelection`.
+ * - `PreviewStaleSkin` is not an overlay at all, and its target carries only a
+ *   panel — so the skin name it is about exists nowhere but inside `identity`.
+ *   `reset_preview_reference` needs it to know which `preview_skins` entry to
+ *   erase. Found the same way as the other two: by writing the repair and
+ *   discovering it had nothing typed to work from.
+ *
+ * Without these fields `remove_orphan_overlay` can only recover the remainder by
+ * parsing `identity` — the exact operation the escaping in `join_identity`
+ * exists to make unsafe, because a `|` inside a user animation name would route
+ * the erase to the wrong record.
+ *
+ * MAR-187 added this rather than reopening MAR-186 because MAR-186 had already
+ * shipped and was under review when the gap was measured, and it uses none of
+ * these fields itself. Recorded in `AGENTS.md` as a deliberate downstream
+ * amendment, not as a precedent.
+ *
+ * @par What the compiler does and does not police here
+ * The `switch (issue.family)` that consumes this **is** policed — a new
+ * `DiagnosticOverlayFamily` value warns at every arm. **Populating** it is not:
+ * the writes live inside `collect_orphan_animation_overlays`' seven-call list,
+ * and nothing compile-time protects that list. The `static_assert` beside it is
+ * a **tautology** — MAR-186's own review measured this by deleting a whole
+ * family loop and watching an all-targets rebuild succeed silently. The real
+ * guards are the cases that compare full identity lists: MAR-186's G1, and
+ * MAR-187's X1, which additionally carries a sibling record per key so a fix
+ * that erases the right vector but the wrong RECORD fails by name.
+ */
+struct OverlayRecordKey {
+    /// Empty when the record is not animation-scoped (mesh-weight overlays).
+    std::string animation_name;
+    /// Set for `Transform` and `Inherit`.
+    std::string bone_name;
+    /// Set for `Deform`, `SlotColor`, `SlotAttachment` and `MeshWeight`.
+    std::string slot_name;
+    /// Set for `MeshWeight`, and for `PreviewStaleSkin`'s named skin.
+    std::string skin_name;
+    /// Set for `Deform` and `MeshWeight`.
+    std::string attachment_name;
+    /// Set for `Transform` only. The fourth key token that has no other home.
+    std::optional<TransformTimelineChannel> channel;
+};
+
+/**
  * @brief Where the user should be taken to see the problem.
  *
  * `selection` is expressed in `SelectionSet`'s own vocabulary, so MAR-187
  * navigates by calling `SelectionSet::replace(*target.selection)` rather than
  * re-deriving an identity.
+ *
+ * This is about **navigation**, which is why MAR-187's `OverlayRecordKey` sits
+ * on `DiagnosticIssue` beside `family` rather than here: a repair coordinate is
+ * not a place to take the user, and two of its fields name records the user is
+ * never navigated to.
  */
 struct DiagnosticTarget {
     DiagnosticPanel panel{DiagnosticPanel::Project};
@@ -137,6 +201,13 @@ struct DiagnosticTarget {
 struct DiagnosticIssue {
     DiagnosticCode code{DiagnosticCode::ProjectUnsavedChanges};
     DiagnosticOverlayFamily family{DiagnosticOverlayFamily::None};
+    /**
+     * @brief The record's own key fields, for a repair that erases one record.
+     *
+     * Default-constructed for every issue that is not about an overlay record.
+     * MAR-187 (see `OverlayRecordKey`); MAR-186 emits it but never reads it.
+     */
+    OverlayRecordKey overlay_record;
     DiagnosticSeverity severity{DiagnosticSeverity::Warning};
     /**
      * @brief Stable identity, derived only from the code and the coordinates of

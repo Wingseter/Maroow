@@ -35,6 +35,10 @@
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
 #include "shell_viewport_ui.hpp"
+#include "shell_problems.hpp"
+#include "marrow/editor/safe_fix.hpp"
+#include "marrow/editor/problems_model.hpp"
+#include "mesh_weight_model.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
 #include "marrow/allocator.hpp"
@@ -5658,6 +5662,408 @@ bool validate_mar182_dirty_prompt_mouse_smoke(const std::filesystem::path& proje
     return true;
 }
 
+
+// ===========================================================================
+// MAR-187 S1-S6 -- the Problems router and the shell wiring.
+//
+// EVERY case here is UI-FREE WITH RESPECT TO WIDGETS. They call
+// `activate_problem_row` and `refresh_problems_if_revised` directly, so they
+// prove the ROUTER and not that anything is drawn. AGENTS.md records the
+// MAR-178 worked example where deleting a button's body left that story's own
+// scenario printing its full success line while the frame smoke failed by name;
+// F1 in shell_smoke_frames.cpp is the only case here that can see a widget.
+// ===========================================================================
+
+namespace {
+
+/** @brief Seeds a shell state whose project carries the problems S1-S4 need. */
+bool seed_problem_project(
+    ShellState* state,
+    const std::filesystem::path& project_path,
+    const std::filesystem::path& scratch) {
+    state->project_path = project_path;
+    if (!reload_project(state) || state->load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-187 S: could not load " << project_path << ".\n";
+        return false;
+    }
+    marrow::editor::ProjectData project = *state->session.project();
+
+    // A bone-targeted orphan overlay (Timeline panel).
+    marrow::editor::TransformTimelineEdit transform;
+    transform.animation_name = "ghost";
+    transform.bone_name = "arm_l";
+    transform.channel = marrow::editor::TransformTimelineChannel::Rotate;
+    transform.keyframes.push_back({});
+    project.transform_timeline_edits.push_back(transform);
+
+    // A weight problem (Weights panel) and an orphan weight target whose
+    // AttachmentSelection deliberately does not resolve (S4).
+    const auto body_slot = state->load_result.skeleton_data->find_slot_index("body");
+    const auto* attachment = body_slot.has_value()
+        ? state->load_result.skeleton_data->find_attachment(
+              "mesh_base", *body_slot, "body_mesh")
+        : nullptr;
+    if (attachment == nullptr) {
+        std::cerr << "MAR-187 S: the fixture lost mesh_base/body/body_mesh.\n";
+        return false;
+    }
+    marrow::editor::MeshWeightAttachmentEdit edit =
+        marrow::editor::mesh_weight_model::mesh_weight_edit_from_runtime(
+            *state->load_result.skeleton_data, "mesh_base", "body", "body_mesh",
+            *attachment);
+    for (auto& vertex : edit.vertices) {
+        (void)marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+            *state->load_result.skeleton_data, &vertex);
+    }
+    if (edit.vertices.size() < 2U) {
+        std::cerr << "MAR-187 S: body_mesh has too few vertices.\n";
+        return false;
+    }
+    for (auto& influence : edit.vertices[1].influences) {
+        influence.weight *= 0.7;
+    }
+    marrow::editor::MeshWeightAttachmentEdit orphan = edit;
+    orphan.attachment_name = "ghost_mesh";
+    project.mesh_weight_attachment_edits = {edit, orphan};
+
+    // A stale preview skin (Project panel).
+    project.editor_metadata.preview_skins = {"default", "ghost_skin"};
+
+    const std::filesystem::path seeded = scratch / "mar187_shell.marrow";
+    const auto saved = marrow::editor::save_project(project, seeded);
+    if (!saved) {
+        std::cerr << "MAR-187 S: save_project failed: " << saved.error->message << ".\n";
+        return false;
+    }
+    state->project_path = seeded;
+    if (!reload_project(state)) {
+        std::cerr << "MAR-187 S: could not reload the seeded project.\n";
+        return false;
+    }
+    refresh_problems_if_revised(state);
+    return true;
+}
+
+bool find_shell_issue(
+    const ShellState& state,
+    std::string_view identity,
+    std::string_view label,
+    marrow::editor::DiagnosticIssue* out) {
+    if (!state.problems.report.has_value()) {
+        std::cerr << label << ": the shell holds no report.\n";
+        return false;
+    }
+    const auto index =
+        marrow::editor::find_issue_by_identity(*state.problems.report, identity);
+    if (!index.has_value()) {
+        std::cerr << label << ": the shell's report does not carry '" << identity
+                  << "'.\n";
+        return false;
+    }
+    *out = state.problems.report->issues[*index];
+    return true;
+}
+
+}  // namespace
+
+bool validate_mar187_problems_shell_smoke(
+    const std::filesystem::path& project_path) {
+    const ScopedPreferenceIsolation isolation("mar187-problems");
+    if (!isolation.installed()) {
+        std::cerr << "MAR-187 problems shell smoke could not isolate "
+                     "MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+    const std::filesystem::path scratch =
+        std::filesystem::temp_directory_path() / "mar187-shell-smoke";
+    std::error_code ec;
+    std::filesystem::remove_all(scratch, ec);
+    std::filesystem::create_directories(scratch, ec);
+
+    ShellState state;
+    if (!seed_problem_project(&state, project_path, scratch)) {
+        return false;
+    }
+    if (!state.problems.report.has_value() || state.problems.report->issues.empty()) {
+        std::cerr << "MAR-187 S: the seeded project reports no problems.\n";
+        return false;
+    }
+
+    // -- S1 -- timeline activation. -----------------------------------------
+    {
+        marrow::editor::DiagnosticIssue issue;
+        if (!find_shell_issue(
+                state, "overlay.orphan_animation|transform|ghost|arm_l|rotate",
+                "MAR-187 S1", &issue)) {
+            return false;
+        }
+        state.selected_animation_name.clear();
+        activate_problem_row(&state, issue);
+        const auto* bone = state.selection.active() != nullptr
+            ? std::get_if<marrow::editor::BoneSelection>(state.selection.active())
+            : nullptr;
+        if (bone == nullptr || bone->bone_name != "arm_l") {
+            std::cerr << "MAR-187 S1: activating the transform-overlay row left the "
+                         "selection "
+                      << (state.selection.active() == nullptr ? "empty"
+                                                              : "on the wrong item")
+                      << "; expected active bone 'arm_l'.\n";
+            return false;
+        }
+        if (state.selected_animation_name != "ghost") {
+            std::cerr << "MAR-187 S1: selected_animation_name is '"
+                      << state.selected_animation_name << "', expected 'ghost'.\n";
+            return false;
+        }
+        if (state.problems.focus_request != kTimelineWindowTitle) {
+            std::cerr << "MAR-187 S1: the focus request is '"
+                      << state.problems.focus_request << "', expected '"
+                      << kTimelineWindowTitle << "'.\n";
+            return false;
+        }
+        if (state.problems.selected_identity != issue.identity) {
+            std::cerr << "MAR-187 S1: the row was not remembered by identity.\n";
+            return false;
+        }
+    }
+
+    // -- S2 -- weight activation: selection, mode, FFD vertex, focus. --------
+    {
+        marrow::editor::DiagnosticIssue issue;
+        if (!find_shell_issue(
+                state, "weights.non_canonical|mesh_base|body|body_mesh|1",
+                "MAR-187 S2", &issue)) {
+            return false;
+        }
+        activate_problem_row(&state, issue);
+        const auto* attachment = state.selection.active() != nullptr
+            ? std::get_if<marrow::editor::AttachmentSelection>(state.selection.active())
+            : nullptr;
+        if (attachment == nullptr || attachment->slot_name != "body" ||
+            attachment->skin_name != "mesh_base" ||
+            attachment->attachment_name != "body_mesh") {
+            std::cerr << "MAR-187 S2: the active selection is not "
+                         "AttachmentSelection{slot 'body', skin 'mesh_base', "
+                         "attachment 'body_mesh'} -- read BY NAME, because "
+                         "AttachmentSelection and MeshWeightTarget are transposed.\n";
+            return false;
+        }
+        if (current_shell_mode(&state) != ShellMode::WeightPaint) {
+            std::cerr << "MAR-187 S2: shell_mode is not WeightPaint after activating a "
+                         "weight issue. The numeric influence table is unreachable "
+                         "outside WeightPaint (shell_inspector.cpp's "
+                         "inspector_bone_pose_editable gate).\n";
+            return false;
+        }
+        if (!state.viewport_ffd_selection.has_value() ||
+            state.viewport_ffd_selection->vertex_indices !=
+                std::vector<std::size_t>{1U}) {
+            std::cerr << "MAR-187 S2: the FFD selection does not name exactly vertex "
+                         "1.\n";
+            return false;
+        }
+        if (state.problems.focus_request != kPropertiesWindowTitle) {
+            std::cerr << "MAR-187 S2: the focus request is '"
+                      << state.problems.focus_request << "', expected '"
+                      << kPropertiesWindowTitle
+                      << "'. There is no Weight window; weight authoring is the "
+                         "Properties window in WeightPaint mode.\n";
+            return false;
+        }
+    }
+
+    // -- S3 -- preview activation: Project panel, nothing selectable. --------
+    {
+        marrow::editor::DiagnosticIssue issue;
+        if (!find_shell_issue(
+                state, "preview.stale_skin|ghost_skin", "MAR-187 S3", &issue)) {
+            return false;
+        }
+        const marrow::editor::SelectionSet before = state.selection;
+        activate_problem_row(&state, issue);
+        if (state.problems.focus_request != kProjectWindowTitle) {
+            std::cerr << "MAR-187 S3: the focus request is '"
+                      << state.problems.focus_request << "', expected '"
+                      << kProjectWindowTitle
+                      << "' -- the preview reference is shown in the Project "
+                         "window.\n";
+            return false;
+        }
+        if ((state.selection.active() == nullptr) != (before.active() == nullptr) ||
+            (state.selection.active() != nullptr &&
+             *state.selection.active() != *before.active())) {
+            std::cerr << "MAR-187 S3: activating a preview row changed the selection; "
+                         "a stale preview skin names no selectable identity.\n";
+            return false;
+        }
+    }
+
+    // -- S4 -- a REMOVED target changes nothing it should not. ---------------
+    {
+        state.selection.replace(marrow::editor::BoneSelection{"spine"});
+        marrow::editor::DiagnosticIssue issue;
+        if (!find_shell_issue(
+                state, "overlay.orphan_weight_target|mesh_base|body|ghost_mesh",
+                "MAR-187 S4", &issue)) {
+            return false;
+        }
+        state.status_message.clear();
+        activate_problem_row(&state, issue);
+        const auto* bone = state.selection.active() != nullptr
+            ? std::get_if<marrow::editor::BoneSelection>(state.selection.active())
+            : nullptr;
+        if (bone == nullptr || bone->bone_name != "spine") {
+            std::cerr << "MAR-187 S4: activating the orphan weight-target row replaced "
+                         "the selection with an identity no runtime resolves. The "
+                         "previous BoneSelection{spine} had to survive.\n";
+            return false;
+        }
+        for (const char* token : {"mesh_base", "body", "ghost_mesh"}) {
+            if (state.status_message.find(token) == std::string::npos) {
+                std::cerr << "MAR-187 S4: status_message '" << state.status_message
+                          << "' does not name '" << token << "'.\n";
+                return false;
+            }
+        }
+        if (state.problems.focus_request != kPropertiesWindowTitle) {
+            std::cerr << "MAR-187 S4: the focus request is '"
+                      << state.problems.focus_request << "', expected '"
+                      << kPropertiesWindowTitle << "'.\n";
+            return false;
+        }
+    }
+
+    // -- S5 -- a fix through the shell path. --------------------------------
+    {
+        marrow::editor::DiagnosticIssue issue;
+        if (!find_shell_issue(
+                state, "weights.non_canonical|mesh_base|body|body_mesh|1",
+                "MAR-187 S5", &issue)) {
+            return false;
+        }
+        activate_problem_row(&state, issue);
+        const std::string selected_before = state.problems.selected_identity;
+        const std::size_t undo_before = state.session.undo_count();
+        // Counted EXCLUDING `project.unsaved_changes`: applying a fix makes the
+        // session dirty, so the collector ADDS that Warning in the same refresh
+        // it drops the repaired issue, and a raw size comparison does not move.
+        // Measured -- the first version of this assertion read "did not shrink"
+        // on correct code.
+        const auto real_issue_count = [&]() {
+            std::size_t count = 0;
+            for (const auto& candidate : state.problems.report->issues) {
+                if (candidate.identity != "project.unsaved_changes") {
+                    ++count;
+                }
+            }
+            return count;
+        };
+        const std::size_t issues_before = real_issue_count();
+
+        const marrow::editor::SafeFixResult applied =
+            marrow::editor::apply_safe_fix(state.session, issue);
+        if (!applied.ok || !applied.changed) {
+            std::cerr << "MAR-187 S5: the shell-path fix reported ok=" << applied.ok
+                      << " changed=" << applied.changed << " error='" << applied.error
+                      << "'.\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-187 S5: the fix produced " << (state.session.undo_count() - undo_before)
+                      << " history entries, expected exactly one.\n";
+            return false;
+        }
+        sync_shell_from_editor_session_if_revised(&state);
+        if (state.observed_project_revision != state.session.project_revision()) {
+            std::cerr << "MAR-187 S5: the shell did not catch up with the session's "
+                         "project revision after the fix.\n";
+            return false;
+        }
+        refresh_problems_if_revised(&state);
+        if (!state.problems.report.has_value() ||
+            real_issue_count() != issues_before - 1U) {
+            std::cerr << "MAR-187 S5: the refreshed report holds "
+                      << (state.problems.report.has_value() ? real_issue_count() : 0U)
+                      << " problems excluding project.unsaved_changes, expected "
+                      << (issues_before - 1U) << ".\n";
+            return false;
+        }
+        if (marrow::editor::find_issue_by_identity(
+                *state.problems.report, selected_before).has_value()) {
+            std::cerr << "MAR-187 S5: the repaired problem is still reported.\n";
+            return false;
+        }
+        // The remembered row is GONE, so it must be CLEARED -- not left pointing
+        // at whatever now occupies that position.
+        if (!state.problems.selected_identity.empty()) {
+            std::cerr << "MAR-187 S5: after the repaired row vanished, "
+                         "selected_identity is '" << state.problems.selected_identity
+                      << "', expected empty.\n";
+            return false;
+        }
+    }
+
+    // -- S6 -- inspection invariants in the shell. ---------------------------
+    {
+        // SEVEN values, not four. The first version of this case snapshotted
+        // bytes, dirty and undo_count only, and a `seek(0.5)` planted in the
+        // refresh path did not move ANY of them -- it moves `preview_revision`,
+        // which nothing here was reading. The case passed and the inversion was
+        // recorded as "did not bite" until the mutation was moved and the
+        // snapshot widened. That is AGENTS.md's H4 in this story's own test
+        // code: an assertion that reads state a passing run leaves at its
+        // default proves nothing.
+        const std::string bytes_before =
+            marrow::editor::serialize_project(*state.session.project());
+        const bool dirty_before = state.session.dirty();
+        const std::size_t undo_before = state.session.undo_count();
+        const std::size_t redo_before = state.session.redo_count();
+        const std::uint64_t project_before = state.session.project_revision();
+        const std::uint64_t runtime_before = state.session.runtime_revision();
+        const std::uint64_t preview_before = state.session.preview_revision();
+        const std::size_t collects_before = state.problems.collect_count;
+        for (int pass = 0; pass < 10; ++pass) {
+            refresh_problems_if_revised(&state);
+        }
+        if (state.session.redo_count() != redo_before ||
+            state.session.project_revision() != project_before ||
+            state.session.runtime_revision() != runtime_before ||
+            state.session.preview_revision() != preview_before) {
+            std::cerr << "MAR-187 S6: refreshing the Problems view moved a session "
+                         "revision -- preview_revision " << preview_before << " -> "
+                      << state.session.preview_revision() << ", project "
+                      << project_before << " -> " << state.session.project_revision()
+                      << ", runtime " << runtime_before << " -> "
+                      << state.session.runtime_revision()
+                      << ". Inspection must not mutate the session.\n";
+            return false;
+        }
+        if (state.problems.collect_count != collects_before) {
+            std::cerr << "MAR-187 S6: ten refreshes with no edit in between ran "
+                      << (state.problems.collect_count - collects_before)
+                      << " collections, expected 0. The view is keyed on the two "
+                         "revisions precisely so an idle frame costs nothing.\n";
+            return false;
+        }
+        if (state.session.dirty() != dirty_before ||
+            state.session.undo_count() != undo_before ||
+            marrow::editor::serialize_project(*state.session.project()) != bytes_before) {
+            std::cerr << "MAR-187 S6: refreshing the Problems view mutated the "
+                         "session.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-187 S1-S6: activating a timeline row selects its bone, names its "
+                 "animation and asks for the Timeline; a weight row selects its "
+                 "attachment BY NAME, enters WeightPaint and narrows the FFD "
+                 "selection to one vertex; a preview row asks for Project and "
+                 "selects nothing; a removed target leaves the previous selection "
+                 "standing and says what is gone; a fix through the shell path is one "
+                 "history entry that shrinks the list and clears the vanished row; and "
+                 "ten idle refreshes run no collection at all.\n";
+    return true;
+}
 
 bool validate_shell_foundation_smoke(
     ShellState& shell_state,

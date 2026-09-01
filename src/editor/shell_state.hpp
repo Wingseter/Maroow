@@ -27,6 +27,7 @@
 #include "marrow/editor/authoring.hpp"
 #include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/problems_model.hpp"
 #include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "session_shell_binding.hpp"
@@ -496,6 +497,26 @@ struct ViewportTransformGesture {
     ViewportTransformGesturePayload payload{};
 };
 
+/**
+ * @brief Everything the Problems window remembers between frames (MAR-187).
+ *
+ * `selected_identity` is the ISSUE's identity, never a row index: the report is
+ * re-collected and re-sorted whenever either revision moves, so an index would
+ * silently point at a different problem after an unrelated edit.
+ */
+struct ProblemsPanelState {
+    std::optional<marrow::editor::DiagnosticReport> report;
+    marrow::editor::ProblemsView view;
+    marrow::editor::ProblemsSeverityFilter filter{
+        marrow::editor::ProblemsSeverityFilter::All};
+    /// Empty when no row is selected. Survives a refresh by identity.
+    std::string selected_identity;
+    /// The window the last activation asked to focus. Empty when none.
+    std::string focus_request;
+    /// Counts collections, so a case can prove inspection ran exactly once.
+    std::size_t collect_count{0U};
+};
+
 struct ViewportFfdSelectionScope {
     std::size_t slot_index{0U};
     std::optional<std::size_t> display_skin_index;
@@ -901,6 +922,7 @@ struct ShellState {
     /// should consult the gate, but the absolute phrasing this comment used to
     /// carry was wrong and a reader should not take it at face value.
     bool should_exit{false};
+    ProblemsPanelState problems;
     std::string status_message;
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
@@ -998,6 +1020,9 @@ constexpr char kParametersWindowTitle[] = "Parameters";
 constexpr char kParameterDeformersWindowTitle[] = "Shapes / Deformers";
 constexpr char kExpressionsWindowTitle[] = "Expressions";
 constexpr char kLipSyncWindowTitle[] = "Lip Sync";
+// MAR-187. Docked as a TAB beside the Timeline, so it renders no rows until it
+// is focused -- which is why F1 focuses it on its opening frames.
+constexpr char kProblemsWindowTitle[] = "Problems";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr float kPi = 3.14159265358979323846f;

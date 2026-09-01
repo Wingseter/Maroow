@@ -25,6 +25,7 @@
 #include "shell_constraints.hpp"
 #include "shell_agent_panel.hpp"
 #include "shell_inspector.hpp"
+#include "shell_problems.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
 #include "shell_preferences.hpp"
@@ -496,6 +497,7 @@ void ensure_default_dock_layout(
 
     ImGui::DockBuilderDockWindow(kViewportWindowTitle, dock_center_id);
     ImGui::DockBuilderDockWindow(kTimelineWindowTitle, dock_bottom_id);
+    ImGui::DockBuilderDockWindow(kProblemsWindowTitle, dock_bottom_id);
     ImGui::DockBuilderDockWindow(kHierarchyWindowTitle, dock_left_id);
     ImGui::DockBuilderDockWindow(kProjectWindowTitle, dock_left_id);
     ImGui::DockBuilderDockWindow(kPropertiesWindowTitle, dock_left_bottom_id);
@@ -586,6 +588,7 @@ ShellFrameOutcome render_shell_frame(
     draw_hierarchy_window(shell_state);
     draw_viewport_window(shell_state);
     draw_inspector_window(shell_state);
+    draw_problems_window(shell_state);
     if (current_shell_mode(shell_state) == ShellMode::Parameter) {
         draw_parameter_windows(shell_state);
     }

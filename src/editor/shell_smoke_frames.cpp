@@ -28,6 +28,9 @@
 #include "shell_parameters.hpp"
 #include "shell_smoke_scenarios.hpp"
 #include "shell_preview.hpp"
+#include "mesh_weight_model.hpp"
+#include "marrow/editor/problems_model.hpp"
+#include "shell_problems.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
 #include "shell_timeline_graph.hpp"
@@ -73,6 +76,7 @@ bool render_headless_smoke_frames(
         draw_hierarchy_window(&shell_state);
         draw_viewport_window(&shell_state);
         draw_inspector_window(&shell_state);
+        draw_problems_window(&shell_state);
         draw_parameter_windows(&shell_state);
 
         if (!validated_dock_layout) {
@@ -1893,6 +1897,213 @@ bool render_headless_smoke_frames(
         while (shell_state.session.undo_count() > 0U) {
             if (!shell_state.session.undo()) break;
         }
+        sync_shell_from_editor_session(&shell_state);
+        shell_state.session.clear_history();
+    }
+
+
+    // --- MAR-187 F1: the Problems window is ON SCREEN, driven by a real mouse.
+    //
+    // The ONLY case in this story that can observe a widget. S1-S6 call
+    // `activate_problem_row` and `apply_safe_fix` directly, so they assert the
+    // ROUTER; every one of them passes unchanged if `draw_problems_window`'s
+    // body is deleted. AGENTS.md records the MAR-178 worked example where
+    // exactly that left a story's own scenario printing its success line.
+    //
+    // It is also the only detector for one real defect: wiring the Fix button to
+    // `normalize_weights_command` instead of `apply_safe_fix`. That command's
+    // scope is EMPTY -- meaning every vertex -- unless an FFD selection narrows
+    // it, so it would repair a second vertex the user never saw a row for. No
+    // UI-free case reaches the button, so no UI-free case can see it.
+    {
+        // Two non-canonical vertices. Repairing the FIRST must leave the SECOND
+        // reported -- that difference is the whole detector.
+        {
+            const auto body_slot =
+                shell_state.load_result.skeleton_data->find_slot_index("body");
+            const auto* attachment = body_slot.has_value()
+                ? shell_state.load_result.skeleton_data->find_attachment(
+                      "mesh_base", *body_slot, "body_mesh")
+                : nullptr;
+            if (attachment == nullptr) {
+                std::cerr << "MAR-187 F1: the fixture lost mesh_base/body/body_mesh.\n";
+                return false;
+            }
+            marrow::editor::MeshWeightAttachmentEdit edit =
+                marrow::editor::mesh_weight_model::mesh_weight_edit_from_runtime(
+                    *shell_state.load_result.skeleton_data, "mesh_base", "body",
+                    "body_mesh", *attachment);
+            for (auto& vertex : edit.vertices) {
+                (void)marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+                    *shell_state.load_result.skeleton_data, &vertex);
+            }
+            if (edit.vertices.size() < 3U) {
+                std::cerr << "MAR-187 F1: body_mesh has too few vertices.\n";
+                return false;
+            }
+            for (auto& influence : edit.vertices[0].influences) {
+                influence.weight *= 0.7;
+            }
+            for (auto& influence : edit.vertices[2].influences) {
+                influence.weight *= 0.7;
+            }
+            auto transaction = shell_state.session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "MAR-187 F1 seeds two non-canonical vertices",
+                "mar187:f1",
+                false,
+                marrow::editor::EditImpact::Project | marrow::editor::EditImpact::Runtime});
+            if (!transaction) {
+                std::cerr << "MAR-187 F1: could not open a transaction.\n";
+                return false;
+            }
+            transaction.project()->mesh_weight_attachment_edits = {edit};
+            const auto committed = transaction.commit();
+            if (!committed) {
+                std::cerr << "MAR-187 F1: seeding failed: " << committed.error->message
+                          << '\n';
+                return false;
+            }
+            sync_shell_from_editor_session(&shell_state);
+            shell_state.session.clear_history();
+        }
+
+        static constexpr char kFirstIdentity[] =
+            "weights.non_canonical|mesh_base|body|body_mesh|0";
+        static constexpr char kSecondIdentity[] =
+            "weights.non_canonical|mesh_base|body|body_mesh|2";
+
+        // `SetWindowFocus` is confined to the OPENING frames. The window is a
+        // dock tab beside the Timeline in the real layout, so it renders no rows
+        // until focused -- and forcing focus later would close any popup the
+        // severity combo had opened, making an item sweep report the widget
+        // absent for the wrong reason.
+        bool focus_problems = true;
+        const auto render_problems_frame = [&]() {
+            io.DeltaTime = 1.0f / 60.0f;
+            ImGui::NewFrame();
+            if (focus_problems) {
+                ImGui::SetWindowFocus(kProblemsWindowTitle);
+            }
+            draw_problems_window(&shell_state);
+            ImGui::Render();
+        };
+        render_problems_frame();
+        render_problems_frame();
+        focus_problems = false;
+
+        ImGuiWindow* problems_window = ImGui::FindWindowByName(kProblemsWindowTitle);
+        if (problems_window == nullptr) {
+            std::cerr << "MAR-187 F1: no Problems window exists after two frames. "
+                         "`draw_problems_window` is not reached from this frame "
+                         "body.\n";
+            return false;
+        }
+
+        // Every widget is emitted at plain window scope with an explicit
+        // `##<identity>` suffix -- no `PushID`, no `BeginTabItem`, no
+        // `BeginChild` -- so `window->GetID(label)` IS the seed. If a future
+        // revision wraps the rows, this seed silently stops matching and the
+        // sweep reports "absent"; the control sweep below is what makes that
+        // distinguishable from a genuinely missing widget.
+        const ImGuiID severity_id = problems_window->GetID("Severity");
+        const std::string fix_label = std::string("Fix##fix_") + kFirstIdentity;
+        const ImGuiID fix_id = problems_window->GetID(fix_label.c_str());
+        const std::string row_label_prefix = "##row_";
+
+        const auto sweep_for = [&](ImGuiID target, float column_inset,
+                                   ImVec2* found_out) {
+            const ImVec2 origin = problems_window->Pos;
+            const ImVec2 size = problems_window->Size;
+            for (float y = origin.y + 4.0f; y < origin.y + size.y - 2.0f; y += 2.0f) {
+                const float x = origin.x + column_inset;
+                io.AddMousePosEvent(x, y);
+                render_problems_frame();
+                if (ImGui::GetCurrentContext()->HoveredId == target) {
+                    *found_out = ImVec2(x, y);
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // CONTROL SWEEP FIRST. Sweeping a control that already exists is what
+        // keeps a broken id seed from being misread as a missing widget.
+        ImVec2 severity_at{};
+        if (!sweep_for(severity_id, 60.0f, &severity_at)) {
+            std::cerr << "MAR-187 F1: no widget in the \"Problems\" window matched the "
+                         "id of the severity filter. A real mouse swept every "
+                         "position and HoveredId never equalled it, so the widget is "
+                         "absent or unreachable -- or the id seed is wrong, which is "
+                         "why this control is swept before anything else.\n";
+            return false;
+        }
+
+        // The Fix button sits after a `SameLine()`, so it needs its OWN sweep
+        // column: a column at the row's left edge reaches the Selectable and
+        // misses the button entirely.
+        ImVec2 fix_at{};
+        bool found_fix = false;
+        for (float inset = 40.0f; inset < problems_window->Size.x - 8.0f && !found_fix;
+             inset += 20.0f) {
+            found_fix = sweep_for(fix_id, inset, &fix_at);
+        }
+        if (!found_fix) {
+            std::cerr << "MAR-187 F1: the Fix button for '" << kFirstIdentity
+                      << "' was never hovered by any sweep column. The severity "
+                         "filter WAS found, so the window draws and the id seed is "
+                         "right; the button itself is missing or unreachable.\n";
+            return false;
+        }
+
+        const std::size_t undo_before = shell_state.session.undo_count();
+        io.AddMousePosEvent(fix_at.x, fix_at.y);
+        render_problems_frame();
+        io.AddMouseButtonEvent(0, true);
+        render_problems_frame();
+        io.AddMouseButtonEvent(0, false);
+        render_problems_frame();
+        // Two presses at the same pixel are a double click, and ImGui turns one
+        // into a text input on some widgets. Advance past the threshold before
+        // any further gesture.
+        io.DeltaTime = io.MouseDoubleClickTime + 0.1f;
+        render_problems_frame();
+        io.DeltaTime = 1.0f / 60.0f;
+
+        if (shell_state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-187 F1: clicking Fix produced "
+                      << (shell_state.session.undo_count() - undo_before)
+                      << " history entries, expected exactly one.\n";
+            return false;
+        }
+        refresh_problems_if_revised(&shell_state);
+        if (!shell_state.problems.report.has_value()) {
+            std::cerr << "MAR-187 F1: no report after the fix.\n";
+            return false;
+        }
+        if (marrow::editor::find_issue_by_identity(
+                *shell_state.problems.report, kFirstIdentity).has_value()) {
+            std::cerr << "MAR-187 F1: the clicked row's problem is still reported.\n";
+            return false;
+        }
+        // THE I25 DETECTOR. `normalize_weights_command`'s scope is empty --
+        // every vertex -- so wiring the button to it would silently repair this
+        // one too, and no UI-free case would notice.
+        if (!marrow::editor::find_issue_by_identity(
+                *shell_state.problems.report, kSecondIdentity).has_value()) {
+            std::cerr << "MAR-187 F1: clicking Fix on vertex 0 also repaired vertex 2. "
+                         "The button must call apply_safe_fix, whose scope is the ONE "
+                         "vertex the row names -- not normalize_weights_command, "
+                         "whose scope is empty and therefore means EVERY vertex.\n";
+            return false;
+        }
+        std::cout << "MAR-187 F1: the Problems window renders; the severity filter was "
+                     "located at (" << severity_at.x << "," << severity_at.y
+                  << ") and the Fix button at (" << fix_at.x << "," << fix_at.y
+                  << ") by a real mouse; clicking it recorded one history entry, "
+                     "cleared that row, and left the second non-canonical vertex "
+                     "reported.\n";
+
         sync_shell_from_editor_session(&shell_state);
         shell_state.session.clear_history();
     }

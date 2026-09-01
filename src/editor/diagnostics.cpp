@@ -53,9 +53,16 @@ std::string join_identity(
     return identity;
 }
 
+// MAR-187's `overlay_record` is a REQUIRED parameter and deliberately has no
+// default. A defaulted one would let every existing call site keep compiling
+// while silently emitting an empty key, which is the failure mode the amendment
+// exists to prevent. Making it required turns "you forgot the key" into a
+// compile error for every caller that already exists -- the only half of the
+// population problem a compiler can reach.
 DiagnosticIssue make_issue(
     DiagnosticCode code,
     DiagnosticOverlayFamily family,
+    OverlayRecordKey overlay_record,
     DiagnosticSeverity severity,
     std::string identity,
     std::string message,
@@ -64,6 +71,7 @@ DiagnosticIssue make_issue(
     DiagnosticIssue issue;
     issue.code = code;
     issue.family = family;
+    issue.overlay_record = std::move(overlay_record);
     issue.severity = severity;
     issue.identity = std::move(identity);
     issue.message = std::move(message);
@@ -166,7 +174,11 @@ DiagnosticIssue make_orphan_animation_issue(
     const std::string& animation_name,
     const std::vector<std::string_view>& scope_tokens,
     std::string_view scope_label,
-    std::optional<SelectionItem> selection) {
+    std::optional<SelectionItem> selection,
+    // MAR-187. The caller supplies the record's own key fields; `animation_name`
+    // is filled in below because it is already a parameter and forgetting it
+    // there would be a silent per-family omission.
+    OverlayRecordKey overlay_record) {
     std::vector<std::string_view> tokens;
     tokens.reserve(scope_tokens.size() + 2U);
     tokens.push_back(family_token);
@@ -180,9 +192,12 @@ DiagnosticIssue make_orphan_animation_issue(
     target.selection = std::move(selection);
     target.animation_name = animation_name;
 
+    overlay_record.animation_name = animation_name;
+
     return make_issue(
         DiagnosticCode::OverlayOrphanAnimation,
         family,
+        std::move(overlay_record),
         // Error, not Warning: unlike every other family here, this one corrupts
         // what ships.
         DiagnosticSeverity::Error,
@@ -244,7 +259,16 @@ void collect_orphan_animation_overlays(
             edit.animation_name,
             {edit.bone_name, transform_channel_token(edit.channel)},
             "bone '" + edit.bone_name + "'",
-            BoneSelection{edit.bone_name}));
+            BoneSelection{edit.bone_name},
+            // MAR-187: the CHANNEL is the key token with no other home. A
+            // `BoneSelection` cannot distinguish rotate from translate on one
+            // bone, and those are two independent records.
+            [&] {
+                OverlayRecordKey key;
+                key.bone_name = edit.bone_name;
+                key.channel = edit.channel;
+                return key;
+            }()));
     }
 
     // 2/7 -- bone inherit.
@@ -259,7 +283,12 @@ void collect_orphan_animation_overlays(
             edit.animation_name,
             {edit.bone_name},
             "bone '" + edit.bone_name + "'",
-            BoneSelection{edit.bone_name}));
+            BoneSelection{edit.bone_name},
+            [&] {
+                OverlayRecordKey key;
+                key.bone_name = edit.bone_name;
+                return key;
+            }()));
     }
 
     // 3/7 -- mesh deform.
@@ -275,7 +304,15 @@ void collect_orphan_animation_overlays(
             {edit.slot_name, edit.attachment_name},
             "slot '" + edit.slot_name + "' attachment '" + edit.attachment_name +
                 "'",
-            SlotSelection{edit.slot_name}));
+            SlotSelection{edit.slot_name},
+            // MAR-187: the ATTACHMENT name is the key token with no other home,
+            // for the same reason the transform channel is.
+            [&] {
+                OverlayRecordKey key;
+                key.slot_name = edit.slot_name;
+                key.attachment_name = edit.attachment_name;
+                return key;
+            }()));
     }
 
     // 4/7 -- draw order. Animation-scoped only; nothing selectable.
@@ -290,7 +327,10 @@ void collect_orphan_animation_overlays(
             edit.animation_name,
             {},
             {},
-            std::nullopt));
+            std::nullopt,
+            // Animation-scoped only: the animation name (filled in by
+            // `make_orphan_animation_issue`) is the whole key.
+            OverlayRecordKey{}));
     }
 
     // 5/7 -- events. Animation-scoped only; nothing selectable.
@@ -305,7 +345,10 @@ void collect_orphan_animation_overlays(
             edit.animation_name,
             {},
             {},
-            std::nullopt));
+            std::nullopt,
+            // Animation-scoped only: the animation name (filled in by
+            // `make_orphan_animation_issue`) is the whole key.
+            OverlayRecordKey{}));
     }
 
     // 6/7 -- slot colour.
@@ -320,7 +363,12 @@ void collect_orphan_animation_overlays(
             edit.animation_name,
             {edit.slot_name},
             "slot '" + edit.slot_name + "'",
-            SlotSelection{edit.slot_name}));
+            SlotSelection{edit.slot_name},
+            [&] {
+                OverlayRecordKey key;
+                key.slot_name = edit.slot_name;
+                return key;
+            }()));
     }
 
     // 7/7 -- slot attachment.
@@ -336,7 +384,12 @@ void collect_orphan_animation_overlays(
             edit.animation_name,
             {edit.slot_name},
             "slot '" + edit.slot_name + "'",
-            SlotSelection{edit.slot_name}));
+            SlotSelection{edit.slot_name},
+            [&] {
+                OverlayRecordKey key;
+                key.slot_name = edit.slot_name;
+                return key;
+            }()));
     }
 }
 
@@ -388,6 +441,16 @@ void collect_mesh_weight_overlays(
             issues->push_back(make_issue(
                 DiagnosticCode::OverlayOrphanWeightTarget,
                 DiagnosticOverlayFamily::MeshWeight,
+                // MAR-187: the record key, in MeshWeightAttachmentEdit's OWN
+                // field order. `AttachmentSelection` above is transposed; this
+                // is not, and the two must not be confused.
+                [&] {
+                    OverlayRecordKey key;
+                    key.skin_name = edit.skin_name;
+                    key.slot_name = edit.slot_name;
+                    key.attachment_name = edit.attachment_name;
+                    return key;
+                }(),
                 // Warning, not Error: this is dead data. Nothing downstream
                 // ever sees it.
                 DiagnosticSeverity::Warning,
@@ -431,6 +494,13 @@ void collect_mesh_weight_overlays(
                 issues->push_back(make_issue(
                     DiagnosticCode::WeightsUncanonicalizable,
                     DiagnosticOverlayFamily::MeshWeight,
+                    [&] {
+                        OverlayRecordKey key;
+                        key.skin_name = edit.skin_name;
+                        key.slot_name = edit.slot_name;
+                        key.attachment_name = edit.attachment_name;
+                        return key;
+                    }(),
                     DiagnosticSeverity::Error,
                     join_identity(DiagnosticCode::WeightsUncanonicalizable, scoped),
                     "Vertex " + vertex_token + " of skin '" + edit.skin_name +
@@ -462,6 +532,13 @@ void collect_mesh_weight_overlays(
             issues->push_back(make_issue(
                 DiagnosticCode::WeightsNonCanonical,
                 DiagnosticOverlayFamily::MeshWeight,
+                [&] {
+                    OverlayRecordKey key;
+                    key.skin_name = edit.skin_name;
+                    key.slot_name = edit.slot_name;
+                    key.attachment_name = edit.attachment_name;
+                    return key;
+                }(),
                 // Warning: the runtime normalizes at load, so what renders is
                 // right; only the stored data is not the fixed point.
                 DiagnosticSeverity::Warning,
@@ -512,6 +589,8 @@ void collect_stale_preview_references(
         issues->push_back(make_issue(
             DiagnosticCode::PreviewStaleAnimation,
             DiagnosticOverlayFamily::None,
+            // Not an overlay record: the repair rewrites editor_metadata.
+            OverlayRecordKey{},
             // Warning: the preview falls back silently and nothing exported is
             // affected.
             DiagnosticSeverity::Warning,
@@ -535,6 +614,18 @@ void collect_stale_preview_references(
         issues->push_back(make_issue(
             DiagnosticCode::PreviewStaleSkin,
             DiagnosticOverlayFamily::None,
+            // MAR-187. The SAME gap as the transform channel and the deform
+            // attachment, in a code that is not about an overlay at all: this
+            // issue's `DiagnosticTarget` carries only a panel, so the skin name
+            // it is about exists nowhere but inside `identity` and the message
+            // prose. `reset_preview_reference` needs it to know which entry of
+            // `preview_skins` to erase, and recovering it by splitting the
+            // identity is what the escaping exists to make unsafe.
+            [&] {
+                OverlayRecordKey key;
+                key.skin_name = skin_name;
+                return key;
+            }(),
             DiagnosticSeverity::Warning,
             join_identity(DiagnosticCode::PreviewStaleSkin, {skin_name}),
             "The preview skin '" + skin_name +
@@ -669,6 +760,7 @@ std::optional<DiagnosticReport> collect_session_diagnostics(const EditorSession&
         report.issues.push_back(make_issue(
             DiagnosticCode::ProjectUnsavedChanges,
             DiagnosticOverlayFamily::None,
+            OverlayRecordKey{},
             DiagnosticSeverity::Warning,
             join_identity(DiagnosticCode::ProjectUnsavedChanges, {}),
             "The project has unsaved changes.",

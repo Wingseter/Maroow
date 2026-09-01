@@ -70,6 +70,20 @@
   `project.unsaved_changes`, and the `std::nullopt` for a session with no
   project (G0-G12):
   `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- MAR-187's Problems view and safe fixes: an issue-free project yields an empty
+  view and moves none of a session's seven observable values; a report whose
+  LOWEST identity is a Warning still groups Error first; an empty group is
+  omitted; the view's counts are the collector's under all three filters; a row
+  identity survives an insertion that sorts before it; a removed target plans no
+  selection; all seven `DiagnosticCode` values plan a typed target read BY NAME;
+  the refresh key is BOTH revisions, proved through a runtime-only
+  `adopt_runtime_sources`; the orphan-overlay repair removes ONE record,
+  including siblings differing only by transform channel, deform attachment or
+  bone; a weight repair fixes one vertex; the preview repairs write the
+  substituted value and keep a resolvable duplicate; exactly three of a
+  74-string corpus are allowlisted; three rejection arms each name their cause;
+  and a fresh open repairs nothing (V0-V8, X1-X9):
+  `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - `marrow_project_smoke` asserts only what the project it is pointed at actually contains. The viewport debug-overlay gate keys on whether the document authors `editor.viewport.debug_overlay` (round-tripping it value for value when present, asserting the `DebugOverlaySettings` defaults when absent, plus an alternating-pattern round trip that catches two toggles wired to each other's key — which an all-`true` fixture cannot), and the `player_idle`-specific editing suites run only for a project carrying their markers (bones `spine`/`arm_l`, animations `attack`/`aim`, skin `mesh_base`). A project matching NONE of them prints a named skip and still runs the shape and export checks; a project matching SOME of them ABORTS, because a partial match is a corrupted fixture rather than a project to skip
 - Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Atomic project save, cross-directory Save As rebasing, history rebasing, session `create`/`close`, and failure-safe runtime-source adoption (S1-S10): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
@@ -88,6 +102,12 @@
   clipboard cascade (S1-S7), plus the actual-frame
   case that locates the `Mode` combo with a real mouse and clicks through its
   popup (F1): `MARROW_CONFIG_HOME=/tmp/mar185-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- MAR-187's Problems router in the shell -- timeline/weight/preview activation,
+  a removed target leaving the previous selection standing, a fix through the
+  shell path clearing the vanished row, and ten idle refreshes running zero
+  collections (S1-S6), plus the actual-frame case that locates the severity
+  filter and a row's Fix button with a real mouse and clicks it (F1):
+  `MARROW_CONFIG_HOME=/tmp/mar187-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -104,6 +124,9 @@
 - Windows Debug build/test: `cmake --build build-msvc --config Debug` then `ctest --test-dir build-msvc -C Debug --output-on-failure`
 - Windows Release build/test: `cmake --build build-msvc --config Release` then `ctest --test-dir build-msvc -C Release --output-on-failure`
 - Windows portable folder/ZIP staging: `cmake --build build-msvc --config Release --target marrow_portable_stage`
+- Editor shell frame-body agreement check (the two hand-duplicated frame bodies must draw the
+  same windows; runs automatically POST_BUILD on `marrow_editor_shell`, and on demand here):
+  `cmake --build build --target marrow_frame_body_check`
 - Constraint warning check: `cmake --build build --target marrow_constraint_warning_check`
 - Documentation build (requires Doxygen on `PATH`): `cmake --build build --target marrow_docs`
 - Release benchmark configure: `cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release`
@@ -204,7 +227,7 @@
   2. Start MCP server: `source tools/mcp/venv/bin/activate && python3 tools/mcp/server.py`
   3. Test end-to-end: `source tools/mcp/venv/bin/activate && python3 tools/mcp/test_client.py`
 - MCP schema syntax validation: `tools/mcp/venv/bin/python -m py_compile tools/mcp/server.py tools/mcp/test_client.py tools/mcp/tools/editing.py tools/mcp/tools/inspection.py`
-- Agent registry validation (64 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, timeline key-time scaling, mesh weight rebind, deterministic automatic weight generation, and constraint rename/delete authoring): `./build/marrow_agent_dispatch_smoke`
+- Agent registry validation (66 operations, including parameter, animation-duration, timeline-interpolation, timeline-curve-mode, timeline-loop-boundary, timeline key-time scaling, mesh weight rebind, deterministic automatic weight generation, and constraint rename/delete authoring): `./build/marrow_agent_dispatch_smoke`
 - Parameter Agent/MCP E2E: start `./build/marrow_editor_shell --project assets/fixtures/parameter_face_basic.marrow --agent-port 9876`, then run `tools/mcp/venv/bin/python tools/mcp/test_client.py --parameter-only`
 - Editor shell launch: `./build/marrow_editor_shell`
 - macOS launch-focus regression check: `./build/marrow_editor_shell --verify-launch-focus`
@@ -354,12 +377,38 @@ find build/CMakeFiles -name '*.o' -delete
 cmake --build build -j8 2>&1 | grep Wswitch
 ```
 
+**The `/CMakeFiles` in that path is load-bearing, and the unscoped form is a
+trap.** `find build -name '*.o' -delete` also deletes **vendored SDL3's**
+objects. `libSDL3.a` is then re-created incrementally at **96 bytes / 1 object**,
+which produces a link failure and `ctest` **20/22** — with the story's sources
+provably untouched. MAR-186's review nearly reported that as a two-test
+regression of its own change; deleting `libSDL3.a` and rebuilding restored it to
+250 objects and 22/22.
+
+The general lesson is the mirror of one already recorded here: **a RED run is
+evidence only once the build is known sound**, exactly as *"no hits is evidence
+only once the command is known to have executed."* Both are the same mistake —
+trusting an output without validating the harness that produced it — and this
+chain has now been bitten by it in both directions.
+
 So, when you add a value to an enum that is switched on:
 
-- **Every exhaustive `switch` is found for you, in every target you build.** Add
-  the value, delete **all** object files, build **all** targets, and read the
-  warning list. That list is complete for switches *only across the targets you
-  actually built* — which is why the two "all"s are not decoration.
+- **On Clang, every exhaustive `switch` is found for you, in every target you
+  build — as a WARNING that does not stop the build.** Add the value, delete
+  **all** object files, build **all** targets, and read the warning list. That
+  list is complete for switches *only across the targets you actually built* —
+  which is why the two "all"s are not decoration. Two qualifiers belong here
+  rather than in any one story's section, because this is the paragraph the next
+  person will read:
+  - **it warns; it does not fail.** Nothing in this tree promotes `-Wswitch` to
+    an error. A missed arm ships unless somebody reads the output. The recipe, if
+    you want it, is `set_source_files_properties(<file> PROPERTIES
+    COMPILE_OPTIONS "$<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Werror=switch>")`;
+  - **GCC enables `-Wswitch` only under `-Wall`**, and this tree passes no
+    warning flags at all. A non-Clang build is therefore **silent** about a
+    missed arm. Everything measured above was Apple clang; if this project ever
+    builds on Linux CI, that silence is what someone will be relying on without
+    knowing it.
 
 **Check the number against arithmetic, not just against a second build.** The 25
 is self-checking, and the check would have caught the scoped-probe error without
@@ -469,6 +518,122 @@ MAR-186 did **not** fix this; it is a pre-existing serializer property, recorded
 here rather than in that story's section because the next person to hit it will
 not be reading about diagnostics.
 
+### `normalize_mesh_weights` does not validate its target, it CREATES one
+
+`ensure_weight_edit` (`authoring.cpp:4503`) looks up
+`find_mesh_weight_attachment_edit(skin, slot, attachment)` and, when it misses,
+**pushes a fresh `MeshWeightAttachmentEdit` at those coordinates** seeded from
+`mesh_weight_edit_from_runtime`. It never cross-checks the target against the
+`AttachmentData&` it is handed alongside it, and neither does
+`normalize_mesh_weights`, `set_mesh_vertex_weights` or anything else on that
+path. Measured in MAR-187 on `mage`/`body`/`mage_body`:
+
+```
+CORRECT target -> ok=1 error='' vertex_count=4 affected=1
+SWAPPED target -> ok=1 error='' vertex_count=4 affected=1     <- indistinguishable
+mesh_weight_attachment_edits: skin='body' slot='mage' attachment='mage_body'
+save_project = 1 ; load_project = 1
+diagnostics: overlay.orphan_weight_target|body|mage|mage_body
+```
+
+The project still saves and loads, and the only symptom is a **brand-new
+`overlay.orphan_weight_target` Warning** where a problem was meant to go away.
+`AttachmentSelection` is `{slot, skin, attachment}` and `MeshWeightTarget` is
+`{skin, slot, attachment}` -- **transposed** -- so aggregate-initializing one
+from the other is the natural way to hit this.
+
+**The consequence for a test:** a `!result` assertion, an "the issue
+disappeared" assertion, and any assertion on codes, counts or identities ALL
+pass under a swapped target. What sees it is the record's own coordinates, or
+`changed`. MAR-187's X4 asserts both.
+
+Pre-existing; MAR-187 did **not** fix it, and confined itself to not calling it
+wrongly (it builds the target from `OverlayRecordKey`, whose fields are in the
+record's own order, and names every field explicitly).
+
+### A document has two kinds of sentence, and only one of them may be corrected
+
+Every validation record in this file mixes two kinds of claim, and the sweep that
+updates one must not touch the other:
+
+- a **present-tense claim** — "this is how you validate the repo", "the registry
+  is 66" — which is about the tree as it stands and is simply *wrong* once it
+  drifts. `## Current Validation` is entirely this kind;
+- a **historical measurement** — "`marrow_agent_dispatch_smoke` prints 408
+  `[ OK ]` cases against 64 operations" — which is a per-story record of what was
+  observed **at that story's own commit**. Every `## MAR-NNN … Validation
+  Results` section is this kind.
+
+**Correcting the second kind falsifies the record.** MAR-185's 64→66 sweep
+updated the C++ and the Python and missed prose in two places; MAR-187 was told
+to fix both and fixed only the first, because the second is MAR-183's accurate
+measurement of its own run. The right repair for a historical line that has
+become confusing is to make its anchoring **explicit** — name the commit, and put
+today's value beside it — never to overwrite the number.
+
+**Two agents reached this independently, and both landed on the same repair**,
+which is why it is a rule here rather than a judgement call in one story's table.
+MAR-186's own Tip row reads *"`68720d9` **at Task 0** … It was amended once more
+during implementation and MAR-185's final SHA is `711231c`"* — the measurement
+kept, the anchoring made explicit, today's value named beside it. MAR-187 applied
+that identical shape to MAR-183's 408 without having seen it. MAR-185's D25 had already noticed the same shape from a third direction when
+it recorded that its anchor checker's *"remaining flags are all correctly
+historical."*
+
+*Rule: before "fixing" a number in this file, decide which kind of sentence it is.
+If it sits under a `## MAR-NNN` heading it is almost certainly a measurement, and
+the edit you want is a clarifying parenthetical, not a new value.*
+
+### A correction relayed from conversation is not a correction to the document
+
+**How a wrong claim enters a document nobody ever measured against the code.** A
+reviewer and a lead discuss a case, the lead relays "entry X says Y, narrow it",
+and the implementer applies it — to text that does not exist, or that already
+says the right thing. Nothing in that chain ever ran `grep`.
+
+Measured instance: MAR-187 was asked to narrow a durable entry called **`F-4`**
+whose characterisation of `std::sort` was said to be over-broad.
+`grep -rn "F-4"` over `AGENTS.md`, `docs/superpowers/` and the sources resolves
+to **exactly one hit: the MAR-187 errors-table row recording this finding.** (That
+is worth stating, because a future reader will run that grep, see a hit, and
+needs to know it is this record and not the entry being described.) No text
+anywhere makes the claim being corrected — while the
+record already states the sort's real detectors correctly (MAR-186's I3: deleting
+the sort is caught by **G1**, with G9(c) independent). Two further claims in the
+same message — that MAR-187 had added an eighth `DiagnosticOverlayFamily` value,
+and that `safe_fix.hpp` carried `OverlayRecordKey` — were also inferences from a
+diffstat and a summary, and `diff` and `grep -c` refuted both. Applying the first
+would have put a phantom eighth identity into G1 and broken a passing assertion.
+
+This is MAR-185's **D24** in a new setting: *a pattern entry whose own examples
+cannot be verified is the very failure it describes.* D24's own first draft was
+dropped for citing an "R1" that MAR-185 never had.
+
+**A corollary about the evidence itself, which cost this entry two rewrites:
+an entry that cites a search as its evidence becomes part of that search's
+results.** The line above wanted to read *"`grep -rn "F-4"` returns nothing"* —
+and writing that sentence into `AGENTS.md` is what made the grep return
+something. Anyone verifying the entry would run the command, see a hit, and
+conclude the entry was wrong. The fix is to say *what* the hits are, not how
+many there should be. The same trap catches any document that quotes a symbol
+name, an error string or a magic number as proof of its absence.
+
+**And the constructive half, which is the part that scales.** "Check
+everything" does not: nothing in this chain has the budget for it. What actually
+made four wrong premises cost minutes rather than an investigation is that each
+one **named a checkable artefact** — an entry id, a diffstat line, an enum
+value, a prose string. A claim phrased that way is self-checking: refuting it is
+one command. A claim phrased as "the sort keeps the payload stable" or "the
+assert protects the list" is not, and those are the ones that survive unexamined
+for several stories. So the obligation runs both ways — resolve the claims you
+receive, and phrase the claims you issue so that resolving them is cheap.
+
+*Rule: a correction names an artefact, so resolve it in the artefact before
+applying it — `grep` the identifier, `diff` the construct. A correction whose
+referent does not resolve is a finding to report, not an instruction to follow;
+and refusing it is cheaper than the assertion it would have broken. When you
+record such a finding, remember that your record joins the corpus it cites.*
+
 ### An identity collision needs a token whose neighbours are unconstrained
 
 MAR-186 escapes `|` and `\` in every identity token, and the reason a collision
@@ -530,6 +695,367 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-187 Add the Problems View and Safe Fixes Validation Results
+
+Validated 2026-09-01 against a from-scratch `rm -rf build` tree at MAR-186's
+final commit `687ed4f`. MAR-187 gives the editor a **Problems** window that
+groups and filters MAR-186's diagnostics by severity, navigates to a problem's
+typed target, and offers exactly three allowlisted repairs — each through one
+validated transaction producing exactly one undo entry.
+
+**Three layers, and the boundary is the build graph rather than a claim.**
+`problems_model` and `safe_fix` compile into `marrow_editor`, which contains no
+`shell_*.cpp` and links no ImGui, so the model layer *physically cannot* reach
+`ShellState`, an ImGui symbol or a window title. `shell_problems.cpp` reads a
+`ProblemsView`, emits widgets, and on a click calls `plan_issue_navigation` or
+`apply_safe_fix` — Task 9 greps it for `begin_edit`, `transaction`, `std::sort`
+and `.erase(` and finds none.
+
+**Nothing about the file format moved.** `.marrow` gains no key, `.mskl` stays
+version 1, `.mbin` stays version 2, the C ABI is untouched, no fixture was
+edited, no runtime file was touched. The agent registry is **unchanged at 66** —
+MAR-187 adds no operation and no MCP tool, so the count sweep is a **non-effect**
+gate — and `ctest -N` is **22** before and after. `CMakeLists.txt` gains exactly
+three lines, naming three new sources inside two existing targets; no new target,
+no new test, no new include directory.
+
+### The downstream amendment to MAR-186, and the gap that forced it
+
+MAR-186 shipped `DiagnosticCode` and `DiagnosticOverlayFamily` as typed members
+of `DiagnosticIssue` — the `D6` this story's design called blocking — so a fix
+can find the right **vector** without splitting `identity` on `|`. **That answers
+"which of the eight vectors" completely and does not answer "which record within
+the vector",** and neither story's documents ever posed the second question.
+
+Measured, by writing the repair and finding it had nothing typed to work from:
+
+| Family | Record key | `DiagnosticTarget` carries | Sufficient |
+| --- | --- | --- | --- |
+| `Transform` | animation, bone, **channel** | animation, `BoneSelection` | **NO** |
+| `Deform` | animation, slot, **attachment** | animation, `SlotSelection` | **NO** |
+| `PreviewStaleSkin` | the **skin name** | a panel, and nothing else | **NO** |
+| Inherit / DrawOrder / Event / SlotColor / SlotAttachment / MeshWeight | — | — | yes |
+
+`collect_orphan_animation_overlays` says the first one in as many words: *"The
+channel token is part of the key: two channels on one bone are two independent
+overlays."* Two transform overlays on one bone in one phantom animation produce
+two issues with **identical** `DiagnosticTarget`s. The third is the sharpest,
+because `preview.stale_skin` is not an overlay at all and its target carries only
+a panel — the skin name it is about exists **nowhere** but inside `identity` and
+the message prose.
+
+MAR-187 therefore added `OverlayRecordKey` to `include/marrow/editor/diagnostics.hpp`
+and populates it in `src/editor/diagnostics.cpp`. **This is a deliberate
+downstream amendment to a shipped, already-reviewed story, recorded as an event
+and not as a precedent.** Reopening MAR-186 would have invalidated a live review
+for a field MAR-186 itself never reads. Three choices inside it are load-bearing:
+
+- **It sits on `DiagnosticIssue`, beside `family`, not on `DiagnosticTarget`.**
+  A target is *where the user is taken*; two of these fields name records the
+  user is never navigated to.
+- **`make_issue`'s new parameter is REQUIRED and has no default.** A defaulted
+  one would let every existing call site keep compiling while silently emitting
+  an empty key. Making it required turned "you forgot the key" into a compile
+  error at all seven pre-existing call sites — the only half of the population
+  problem a compiler can reach.
+- **Never by parsing `identity`.** MAR-186's escaping exists precisely because a
+  `|` inside a user animation name would route an erase to the wrong record.
+
+### What the compiler polices, measured in this tree
+
+| Step | Result |
+| --- | --- |
+| Pristine, all objects deleted, all targets built | **0 warnings** |
+| A throwaway fourth `ProblemsSeverityFilter` value | **2 warnings, both `[-Wswitch]`** — `problems_model.cpp:20` (`filter_admits`) and `editor_project_smoke.cpp:17793` (the suite's own `filter_name` helper) |
+| Value removed, rebuilt | **0 warnings** |
+
+Apple clang 21.0.0, `-Wswitch` on with no flag. Every dispatch in MAR-187 is an
+exhaustive `switch` with **no `default:` arm**, and the compiler found the test
+helper too — which is why that helper is a switch rather than an if/else chain.
+
+**What is NOT policed, and it is not the `static_assert`.** MAR-186's review
+established that `static_assert(kSweptOverlayFamilyCount == 7, …)` is a
+**tautology** providing zero compile-time protection. MAR-187's header comment
+originally repeated the older "a guard, not a proof" wording and was corrected to
+match. The real guards are the cases that compare **full identity lists** —
+MAR-186's G1, and MAR-187's X1, which additionally carries a sibling record per
+key so that a fix erasing the right vector but the wrong **record** fails by name.
+
+### What was measured before any code was written
+
+Task 0 ran fourteen gates. **Four were blocking**, and three of those invalidated
+something the documents said rather than merely a line number.
+
+| Gate | Answer |
+| --- | --- |
+| Tip | **`5a9e91f`**, not the `ca277fd` the brief named — but the two trees are **byte-identical** (`a74630b9…`); only the commit message was amended. MAR-186 was amended once more during implementation, to **`687ed4f`**, which is this story's parent |
+| `ctest -N` | **22**. From-scratch rebuild of ALL targets: **0 warnings** |
+| MAR-186's D1-D5 | Present, exact signatures. **D6 shipped**, but in a **different shape** than either document specified — see below |
+| Vocabulary is new | `grep -rnE "\bProblemsView\b\|\bProblemsGroup\b\|\bSafeFixKind\b\|apply_safe_fix\|kProblemsWindowTitle"` → **0** |
+| `-Wswitch` | **Fires with no flags at all.** Compiled, not inferred |
+| Two frame bodies | **Confirmed**, and swept rather than inherited: `DockSpaceOverViewport` has **four** sites; the other two are *partial* bodies. `IniFilename = nullptr` in both; `kDockLayoutVersion` stays **4** |
+| `begin_edit` + `cancel()` (A10) | **All seven values identical**, with a NON-ZERO redo stack (1). §B.1's first uninverted entry is confirmed measurement, not assumption |
+| `adopt_runtime_sources` (A11) | **`project_revision` 2→2, `runtime_revision` 1→2, `preview_revision` 1→2**, and the report gained exactly `preview.stale_skin\|mage_arm`. V8(c)'s driver verified end to end |
+| Empty `preview_skins` (A12) | Saves and reloads with size 0; the control (an empty **name**) is refused with `preview skin names must not be empty` |
+| The transposition (A13) | **Confirmed** — and the predicted rejection **does not exist**; see the document errors below |
+| `erase_all_timeline_edits` (A14) | **Unreachable**, exactly as cited: `namespace {` `authoring.cpp:20-1309`, `:123`, `:136`, in no header |
+| Registry | **66** rows / **11** `!= 66U` guards / **2** Python `== 66` |
+| Fixture | `serialize_project` = **6111 bytes**, sha256 `c7d6c6de…`, **0** issues |
+| Re-anchor gate | 39 anchors: **34 exact, 5 drifted, 0 non-resolving** |
+
+**The tree was under concurrent mutation for the whole of Task 0**, by the review
+running MAR-186's inversion register in the shared worktree and shared `build/`.
+The first `marrow_project_smoke` run exited 1 with `MAR-186 G1: returned 6
+issues, expected 7`. That was the **reviewer's own inversion**, not a defect.
+Every measurement was re-taken against an isolated `git archive HEAD | tar -x`
+tree with its own build directory, and every source anchor was re-checked against
+`git show HEAD:` blobs rather than the worktree. The pristine tree was green.
+**Reporting that G1 failure as a finding would have been a confident, specific,
+wrong claim produced by a sweep that was correct within an unexamined scope.**
+
+### Result
+
+Every project case runs **inside the standing `player_idle.marrow` invocation**
+and builds its own throwaway project there; every shell case runs on the **main**
+rail, after the parameter-mode early return. No new command line, no new binary,
+no new CTest target.
+
+**No case asserts only a count.** Every one compares the **full sorted identity
+list** and reports a mismatch as a named set difference.
+
+| Case | What it pins | Result |
+| --- | --- | --- |
+| **V0** | An issue-free report yields an empty view; collect + build + plan move none of a session's seven observable values. Prints 6111 bytes / sha256 `c7d6c6de…` every run. **Witness** | PASS |
+| **V1** | Error group **first**, over a report whose **lowest identity is a Warning**; both groups' full identity lists; strictly increasing | PASS |
+| **V2** | An empty group is **omitted**, not emitted empty | PASS |
+| **V3** | `error_count`/`warning_count` are the **collector's** under all three filters; only `visible_count` moves | PASS |
+| **V4** | Each filter's exact identity list, as a set difference | PASS |
+| **V5** | A row identity survives an insertion that sorts before it (index 0 → 1), byte-identical; a missing identity resolves to nothing | PASS |
+| **V6** | `target_missing` with **no** selection for the orphan weight target, naming skin/slot/attachment; every other issue resolves | PASS |
+| **V7** | All **seven** `DiagnosticCode` values: panel, animation, vertex, and every typed selection read **by name**, replayed through `SelectionSet::replace` | PASS |
+| **V8** | (a) unchanged → no refresh; (b) a project edit → refresh; (c) **runtime-only** adoption bumps `runtime_revision` while `project_revision` holds, still requires a refresh, and yields a `preview.stale_skin` the old report lacked | PASS |
+| **X1** | One **record** of twelve, not one family and not one animation — including the four siblings differing only by transform **channel**, deform **attachment**, inherit **bone**, and **slot** (twice); one undo entry; byte-identical undo; redo reproduces | PASS |
+| **X2** | Twelve removals, twelve undo entries; `ghost` **absent** from the materialized skeleton after a real save → LOAD; the `preview.stale_animation` the overlays had been propping up now appears | PASS |
+| **X3** | The orphan weight target goes; the resolvable edit survives, by identity **and** by its own fields | PASS |
+| **X4** | One **vertex**, not one attachment: repairing vertex 0 leaves vertex 2 reported; no second weight record at transposed coordinates; a second application is **refused by name** | PASS |
+| **X5** | `active_animation` becomes the **substituted** value (`aim`), and survives save → LOAD | PASS |
+| **X6** | Both copies of the stale skin go; **both copies of the resolvable duplicate stay** | PASS |
+| **X7** | A **74**-string corpus (three ids, `""`, four near misses, all 66 registry names): exactly three accepted, as a sorted set difference, and `safe_fix_kind_for` agrees with `is_allowlisted_safe_fix` on every entry. **Asserts no number about the registry** | PASS |
+| **X8** | Three rejection arms, each on its **message**, each leaving `serialize_project()`, `undo_count()` and `redo_count()` untouched | PASS |
+| **X9** | A fresh open of a ten-problem project: not dirty, no history, **identity list equal to what was written**; three collections agree | PASS |
+| **S1** | Timeline activation: bone selected, animation named, Timeline focus requested | PASS |
+| **S2** | Weight activation: `AttachmentSelection` by name, `WeightPaint` mode, FFD selection narrowed to one vertex, Properties focus | PASS |
+| **S3** | Preview activation: Project focus, selection **unchanged** | PASS |
+| **S4** | A removed target leaves `BoneSelection{spine}` standing and says what is gone | PASS |
+| **S5** | A fix through the shell path: one history entry, the shell catches up, the list shrinks, and the vanished row's identity is **cleared** | PASS |
+| **S6** | Ten idle refreshes run **zero** collections and move none of **seven** session values | PASS |
+| **F1** | The Problems window is **on screen**: the severity filter and the Fix button located by a real mouse sweep, clicked, one undo entry, that row gone and the second non-canonical vertex still reported | PASS |
+
+### Inversions run
+
+**Twenty-three recorded mutations.** Every one was applied, built with **all**
+relevant object files deleted, run, restored, and rebuilt with the objects
+deleted again. Attribution is by **run order**, not authoring order.
+
+| # | Mutation | First detector | Measured failure |
+| --- | --- | --- | --- |
+| **I1** | Recompute the view's counts from the visible rows | **V3** | `under ErrorsOnly the view reported error_count 1 warning_count 0, expected 1 and 2 (the collector's)` |
+| **I2** | Groups in first-encountered order | **V1** | `group 0 has severity 'warning', expected 'error'` — and this is the mutation the design's own V1 fixture could not have caught (see D2) |
+| **I3** | Emit an empty group instead of omitting it | **V0** *(plan said V2)* | `an issue-free report produced 2 group(s) … expected 0/0/0/0`. **V2 is an independent detector**, demonstrated by neutering V0's group assertion with the call preserved: `WarningsOnly over an errors-only report produced 1 group(s)` |
+| **I4** | Swap the `ErrorsOnly` and `WarningsOnly` arms | **V2** | `WarningsOnly over an errors-only report produced 1 group(s) and 7 visible row(s), expected 0 and 0` |
+| **I5** | Resolve a row by position rather than identity | **V5** | `the remembered row resolved to index 0, expected 1` |
+| **I6** | Skip `selection_item_exists` and always carry the selection | **V6** | `'overlay.orphan_weight_target\|mesh_base\|body\|ghost_mesh' reported target_missing 0, expected 1` |
+| **I7** | Build `MeshWeightTarget` in `AttachmentSelection`'s field order | **X4** | `applying the fix … reported ok=1 changed=0`. **The measured consequence is not the predicted one** — see D3 |
+| **I8** | Skip the freshness re-collection | **X4's control arm** *(plan said X8(c))* | `re-applying an already-applied fix reported ok=1 error=''` |
+| **I10** | A **whole-animation** erase, as reusing `erase_all_timeline_edits` would give | **X1(a)** | `got 1 identities, expected 10` |
+| **I10-bone** | A **bone-blind** inherit erase | **X1(a)** | `Missing: overlay.orphan_animation\|inherit\|ghost\|spine`. **Did not bite before the bone sibling was added to the fixture** |
+| **I11-channel** | A **channel-blind** transform erase — the defect the amendment exists to prevent | **X1(b)** | `Missing: overlay.orphan_animation\|transform\|ghost\|arm_l\|translate` … `Both issues carry BoneSelection{arm_l} and animation 'ghost'; only the channel distinguishes them` |
+| **I11-attachment** | An **attachment-blind** deform erase | **X1(c)** | `Missing: overlay.orphan_animation\|deform\|ghost\|body\|mage_body` |
+| **I11-draworder-event** | Swap the DrawOrder and Event arms' bodies | **X2** *(plan said X1)* | `the session does not carry 'overlay.orphan_animation\|event\|ghost'` |
+| **I11-slotcolor-slotattachment** | Swap the SlotColor and SlotAttachment arms' bodies | **X2** *(plan said X1)* | `the session does not carry 'overlay.orphan_animation\|slot_color\|ghost\|body'` |
+| **I11-meshweight** | Transpose skin and slot in the MeshWeight arm's predicate | **X3** | `applying the fix … reported ok=1 changed=0` |
+| **I12** | `reset_preview_reference` **clears** `active_animation` | **X5** | `active_animation is '' after the reset, expected 'aim'` |
+| **I13** | Rebuild `preview_skins` from `preview_state().skin_names` | **X6** | `preview_skins is [default], expected [default, default]` |
+| **I14** | Accept any non-empty id (drop the string table) | **X4** *(plan said X7)* | `got 1 identities, expected 2`. X7 is the intended detector and I15 proves it detects a fourth id |
+| **I15** | Add a fourth reachable id (`rebind_weights`) | **X7** | `safe_fix_kind_for('rebind_weights') returned 1 while MAR-186's is_allowlisted_safe_fix returned 0` |
+| **I16** | A preflight rejection that opens, mutates and **commits** before returning | **X8(a)** | `a rejected fix changed the session -- bytes, undo_count 0 -> 1` |
+| **I17** | `problems_view_needs_refresh` compares only `project_revision` | **V8(c)** | `after adopt_runtime_sources() bumped runtime_revision 1 -> 2 with project_revision unchanged at 2, the view reported no refresh needed. AC3 names BOTH revisions.` |
+| **I18** | `problems_view_needs_refresh` returns `true` unconditionally | **V8(a)** | `an unchanged session reported that a refresh was needed`. **A quiescence property, not a correctness one** — an always-refresh implementation is behaviourally correct, which is exactly why it needs its own assertion |
+| **I19** | The shell activates a row but never calls `SelectionSet::replace` | **S1** | `activating the transform-overlay row left the selection empty` |
+| **I20** | `focus_window_for_panel` returns the Timeline for every panel | **S2** | `the focus request is 'Timeline', expected 'Properties'` |
+| **I21** | Omit `apply_shell_mode(WeightPaint)` | **S2** | `shell_mode is not WeightPaint after activating a weight issue` |
+| **I22** | Replace the selection even for a `target_missing` plan | **S4** | `activating the orphan weight-target row replaced the selection with an identity no runtime resolves` |
+| **I23** | `const_cast` the session and `seek(0.5)` in the refresh path | **S6** | `refreshing the Problems view moved a session revision -- preview_revision 9 -> 19`. **Did not bite on the first attempt** — see D6 |
+| **I24** | Delete `draw_problems_window`'s body, keeping the function and both call sites | **F1** | `no Problems window exists after two frames`. **S1-S6 all pass unchanged**, which is the whole reason F1 exists |
+| **I25-scope** | Pass an **empty** scope to `normalize_mesh_weights` — the real "one attachment, not one vertex" defect | **X4**, and **F1** at the frame layer | `Missing: weights.non_canonical\|mesh_base\|body\|body_mesh\|2`; and `clicking Fix on vertex 0 also repaired vertex 2` |
+
+**Two mutations did not reproduce and are recorded as such rather than replaced
+with convenient substitutes:** I25 as the plan specifies it (see D4), and the
+first placement of I23 (D6).
+
+### Methodology
+
+- **Every verification build deleted the object files** — never `touch`. The
+  generator is `Unix Makefiles` with **GNU Make 3.81**, whose one-second mtime
+  granularity produced MAR-184's nine false readings.
+- **The harness ABORTS on a failed build.** The first I2 attempt did not compile,
+  and the harness ran the **stale pristine binary**, which passed. That is H1's
+  false-pass direction produced by the harness rather than by mtime, and it was
+  caught only because the build failure was printed in the same output. The
+  harness now refuses to run the suite unless the mutated build succeeded.
+- **A restore is only as good as the copy it restores from.** Restoring
+  `safe_fix.cpp` from a pristine copy captured at **Task 1** silently reverted the
+  finished implementation to its stub, and the next inversion ran against it. The
+  harness now **verifies the copy matches the tree before mutating** and refuses
+  otherwise, and a `snapshot.sh` refreshes the copies after every implementation
+  step. This is H1's hazard wearing a different coat: not a stale *object*, a
+  stale *source baseline*.
+- **Both guards above are now committed**, at `tools/inversion/`, rather than
+  described. A guard living only in one agent's scratch directory is the same
+  shape as the `awk` gate that was reported but never landed (D18), and both
+  hazards were hit independently by the review as well as by this story. Their
+  exit codes are distinct and exercised: **2** for a mutation that does not
+  compile, **3** for a stale baseline.
+- **Restores were verified by `cmp`** against independently kept copies. No
+  `git checkout`, `git restore`, `git stash` or `git reset` was run against a
+  tracked file at any point.
+- **All development and verification ran in an isolated `git archive HEAD` tree**
+  while the shared worktree was under concurrent mutation by MAR-186's review,
+  and the work was landed only after that review committed.
+- **A numeric sweep that stops at a file-type boundary.** MAR-185's 64→66 sweep
+  updated the C++ and the Python and missed **prose**, in two places. One of them
+  (`AGENTS.md:207`, in `## Current Validation`) was genuinely stale and is fixed
+  here; the other is a per-story historical measurement and is correctly left
+  alone (D16). This is the third distinct place this chain has found a sweep that
+  was correct **within the file types it examined** — D25's scope lesson, in the
+  one scope a `grep -rn "!= 64U" src/` can never reach.
+- **Quote your globs.** Task 9's `apply_safe_fix` sweep printed
+  `no matches found: --include=*.cpp` because zsh glob-expanded the unquoted
+  pattern — the same failure MAR-186 recorded, in the same story that recorded it.
+  A "no hits" result is evidence only once the command is known to have run.
+
+### Document errors found
+
+| # | Source | Claim | Measured |
+| --- | --- | --- | --- |
+| **D1** | Design §0.2.1, plan Task 1.2 | `DiagnosticIssue` gains `code_kind` **plus** a retained `std::string code`, and `std::optional<DiagnosticOverlayFamily> overlay_family` | **The shipped shape is different and better.** MAR-186 shipped `DiagnosticCode code` and `DiagnosticOverlayFamily family` with **no string twin at all** (the wire spelling comes from `diagnostic_code_name`) and a `None` enumerator instead of an optional, plus a ninth `MeshWeight` value neither document anticipated. Plan Task 1.2's instruction to "assert `code_kind` and `code` agree" is **unwritable** — there is no second representation to drift — and was deleted rather than replaced |
+| **D2** | Design §6.2 V1 | V1's fixture carries one orphan weight target, one uncanonicalizable weight and **two `overlay.orphan_animation`** | **That fixture cannot detect I2, the mutation V1 exists for.** Identity begins with the code, so `overlay.orphan_animation\|…` sorts before everything else, and it is an **Error** — so "groups in first-encountered order" gives the same answer as "Error group first". The fixture contradicts design §2.2's own worked reasoning, which names the `overlay.orphan_weight_target` / `weights.uncanonicalizable` pair precisely because their report order is inverted relative to severity. Rebuilt from that pair plus a `weights.non_canonical`, so the **lowest identity is a Warning** |
+| **D3** | Plan §B I7, design §2.9, Task 0.10 | Calling `normalize_mesh_weights` with skin and slot swapped returns a quotable rejection, which is I7's predicted text | **There is no rejection.** Measured: `CORRECT -> ok=1 error=''` and `SWAPPED -> ok=1 error=''`, indistinguishable by return value. `ensure_weight_edit` creates a record at whatever coordinates it is handed. In isolation the swapped call writes a `MeshWeightAttachmentEdit` at bogus coordinates that saves, loads, and manufactures a fresh `overlay.orphan_weight_target`. **In the shipped composition the damage is different again**: the bogus record's vertices are already canonical, so `affected` is 0, the transaction cancels, and the symptom is that *the repair silently does nothing*. X4 catches it on `changed`, not on the record count |
+| **D4** | Plan §B I25, design §2.9/R7 | Wiring the Fix button to `normalize_weights_command` repairs every vertex | **Non-reproducing.** The command needs a resolved weight-paint context that a Problems-row click does not establish, so from the button it is a no-op and the suite stays green. The **property** is real and is covered by the mutation that models it — an empty scope passed to `normalize_mesh_weights` — which bites X4 and F1. Recorded as a non-reproduction, not converted into a convenient bite |
+| **D5** | Plan Task 0.9, plan standing rules | Call `validate_project_for_save` directly to prove an empty `preview_skins` is savable | **It cannot be called.** `project.cpp:5825` is inside that file's **anonymous namespace** (`:24-6862`). The gate goes through `save_project`, which reaches it internally, with an empty-**name** control that is refused |
+| **D6** | Plan §B I23 | A `const_cast` in the refresh path makes V0's seven-value snapshot non-vacuous | **V0 cannot be its detector, and S6 could not see it either at first.** No MAR-187 *project-layer* function receives a session — `build_problems_view`, `plan_issue_navigation` and `find_issue_by_identity` all take `const&` values — so there is nothing for such a mutation to bite there; V0's zero-mutation half is **structural**. Moved to the shell, where `refresh_problems_if_revised` does hold a session. It then **still** did not bite: S6 snapshotted four values and `seek()` moves `preview_revision`, which none of them read, and the mutation sat after an early return. S6 now snapshots **seven** values and the mutation is placed where it runs. **H4 in this story's own test code** |
+| **D7** | Design §2.12, and MAR-187's own Task 9 | The two-file grep is backed up by "F1, which fails outright if the smoke's body is missing the call" | **False on BOTH halves, and the committed grep does not catch either.** Measured by deleting each call in turn and rebuilding: with the **application's** call gone the whole shell smoke passes green, and with the **smoke's shared draw list** call gone (`shell_smoke_frames.cpp:79`) it *also* passes green — F1 included both times, because F1 renders through a scenario-local lambda (`:1987`) and therefore backs **neither** body. Worse, that lambda leaves `draw_problems_window` present in `shell_smoke_frames.cpp`, so the committed two-file `grep -n` **returns hits from both files and PASSES on the broken tree.** An earlier version of this row recorded only the application half. Replaced by an executable check — `cmake/CheckFrameBodies.cmake`, run POST_BUILD on `marrow_editor_shell` — which compares the two draw lists as sets, is bounded so a scenario lambda cannot satisfy it, and **fails the build** (exit 2) naming the window and the direction |
+| **D8** | Plan Task 2.2 / 4.2 / 5.2 | Named which case fails first against each stub | V1 (correct), **V6** (plan said V7), **X1(a)** (correct). Attribution is by run order |
+| **D9** | Plan §A.1 row A6 | `ensure_project_loaded` at `agent_dispatch.cpp:536`, called at `:1091` | **`:542`, called at `:1097`.** MAR-186's own section already recorded `:542`; the plan row was stale against its own dependency |
+| **D10** | Plan §B I25's parenthetical | `weight_command_scope` is at `shell_weight_paint.cpp:1057-1069` | **`:1036`.** `:1057` is `normalize_weights_command`, which §A.3 anchors correctly |
+| **D11** | `AGENTS.md:207` | "Agent registry validation (**64** operations…)" | **66.** MAR-185's 64→66 sweep updated the code and `test_client.py` and missed this prose line. Fixed by this story |
+| **D12** | MAR-186's shipped header | `marrow_editor`'s PRIVATE include dir is at `CMakeLists.txt:522` | `:523-527` |
+| **D18** | **MAR-187's own report** | "Adopted the draw-list-bounded `awk` gate, and then ran the demonstration" | **The `awk` form was run ad-hoc and never committed.** What shipped in the plan's Task 9 is the older plain `grep -n` over two filenames — prose in a document, not a script, target or test. Found by review searching the artefact for a gate the report claimed existed. This is the report/artefact gap in its purest form: the demonstration was real, the conclusion was right, and **none of it was in the tree**. It matters more than an ordinary documentation slip because this gate is the only mechanism standing between a one-sided edit and a window that ships in no application — and because the text that *was* committed is additionally **fooled** by F1's lambda (D7). Closed by making the gate executable and build-enforced |
+| **D14** | The team lead's follow-up | MAR-187 "adds an eighth family", so MAR-186's G1 seven-identity list must grow or the new family has no detector | **No family was added.** `DiagnosticOverlayFamily` is **byte-identical** to MAR-186's — it already shipped nine values including `MeshWeight`. MAR-187 adds a `struct` (`OverlayRecordKey`), not an enumerator, so `kSweptOverlayFamilyCount` correctly stays **7** and G1's expected list is correctly unchanged (both verified by `diff` against `687ed4f`). Recorded because acting on it would have put a phantom eighth identity into G1 and broken it |
+| **D15** | The team lead's follow-up | The commit shows `safe_fix.hpp` "+92 **carrying `OverlayRecordKey`**", so the type may have been put in a file MAR-187 owns instead of MAR-186's header | **`grep -c OverlayRecordKey include/marrow/editor/safe_fix.hpp` → 0**; `diagnostics.hpp` → 4. `safe_fix.hpp` is +92 because it is a **new file**, carrying `SafeFixKind`, `SafeFixResult` and two declarations. B2 landed exactly where it was directed |
+| **D16** | The team lead's follow-up | `AGENTS.md`'s second stale "64 operations" site should be fixed like the first | **Only ONE of the two was stale.** `:207` is in `## Current Validation` — a present-tense claim about validating the repo today — and was genuinely wrong; fixed. The second is inside **MAR-183's own validation section**, where "408 `[ OK ]` cases against 64 operations" is that story's accurate measurement **at its own commit**. Overwriting it would falsify the record, which is the failure MAR-185's D25 explicitly flagged when it noted its checker's *"remaining flags are all correctly historical."* The number is left standing and the historical framing made explicit, with today's 66/437 named beside it. **The 408 is also stale on its own terms** — the smoke now prints **437** |
+| **D17** | The team lead's follow-up | A durable-section entry called **F-4** characterises the sort as "what keeps `issues` byte-identical across calls", and should be narrowed to shape-and-stability | **No such entry exists.** `grep -rn "F-4"` over `AGENTS.md`, `docs/superpowers/` and the sources returns **nothing**, and no text anywhere claims the sort keeps the payload byte-identical. The record already states the sort's detectors correctly, at MAR-186's I3: *"Delete the `std::sort` from `finalize`" → **G1***, with G9(c) named as an independent detector. Not applied. This is MAR-185's **D24** recurring — *"a pattern entry whose own examples cannot be verified is the very failure it describes"* — and D24's own first draft was dropped for citing an R-series MAR-185 never had |
+| **D13** | Five §A.3 anchors | `project.cpp:8258` / `:7932` / `:7712-7719`; `editor_project_smoke.cpp:16133`/`:16282`; `CMakeLists.txt:916-921` | **`:8292` / `:7966` / `~:7746`** (all +34, from MAR-186's `authored_animation_names` at `:6870`); **`:17797` / `:17945`** (+1663); **`:917-922`**. Every one still named its construct; none was a blocking finding |
+
+### Not independently covered
+
+- **The `nothing changed → cancel()` branch is unreachable.** The freshness
+  preflight two steps above it guarantees a fresh collection still reports the
+  issue, and a live issue always has something to repair: a live weight issue
+  means that vertex is non-canonical, a live orphan issue means the record is
+  still there, a live stale-preview issue means the stored value still differs
+  from the substituted one. Reaching it would need a caller passing an issue
+  whose identity is live but whose `vertex_index` points elsewhere, which nothing
+  constructs. The branch is defensive and is **not** what X4's control arm tests;
+  that arm asserts the reachable property — a second click is refused by name.
+- **V0's zero-mutation half is structural, not measured.** No MAR-187
+  project-layer function receives a session (D6). The measured half lives in S6.
+- **`plan_issue_navigation`'s `describe_missing_target` has three unreachable
+  arms.** `PreviewStaleAnimation`, `PreviewStaleSkin` and `ProjectUnsavedChanges`
+  carry no selection, so the guard above the switch returns first. Written
+  because the compiler named them.
+- **`reset_preview_reference`'s five non-preview arms are unreachable**, for the
+  same reason: MAR-186 attaches that fix id to exactly two codes.
+- **`DiagnosticPanel::Hierarchy` and `::Inspector` do not exist.** AC2 names five
+  destinations; three panels serve four of them, and a hierarchy panel focused in
+  its own right is never requested because no MAR-186 code is a hierarchy-scoped
+  problem. What the router does deliver for bone- and slot-targeted issues is the
+  **selection**, which is what makes the Hierarchy row active.
+- **Which of the eight erase arms a wrong-RECORD mutation can actually be caught
+  in, measured arm by arm rather than implied.** `OverlayRecordKey` exists to stop
+  the wrong record being erased, so "the siblings guard it" is a claim that has to
+  be per-arm. Review found the first version of X1 covered three arms while this
+  list implied all of them:
+
+  | Arm | Finer key beyond the animation | Blind-erase detector |
+  | --- | --- | --- |
+  | `Transform` | channel | **X1(b)** |
+  | `Deform` | attachment | **X1(c)** |
+  | `Inherit` | bone | **X1(a)**, via the `spine` sibling |
+  | `SlotColor` | slot | **X1(d)** — added after review measured a slot-blind erase passing the ENTIRE suite green |
+  | `SlotAttachment` | slot | **X1(e)** — same measurement |
+  | `MeshWeight` | attachment | **X3**, measured: an attachment-blind erase takes the resolvable edit too and X3 fails naming both weight issues |
+  | `DrawOrder` | **none** | n/a — `DrawOrderTimelineEdit` is `{animation_name, keyframes}` |
+  | `Event` | **none** | n/a — `EventTimelineEdit` is `{animation_name, keyframes}` |
+
+  So **every arm that has a finer key now has a detector**, and the two that do
+  not have nothing to lose: for them the animation name *is* the whole key, and a
+  "blind" erase is the correct erase. Their only failure mode is pointing at the
+  wrong vector, which the DrawOrder/Event swap inversion covers. Review put the
+  uncovered count at five; two of those five have no finer key and one was already
+  covered by X3 — measured, not argued.
+
+- **Populating `OverlayRecordKey` is not compiler-checked.** The writes live
+  inside `collect_orphan_animation_overlays`' seven-call list, and MAR-186's
+  review established that the `static_assert` beside it is a tautology. The
+  guards are X1's per-key sibling records and G1's identity list — nothing else.
+- **`ProblemsSeverityFilter::` and `DiagnosticPanel::` appear outside their
+  switch files**, as member defaults (`shell_state.hpp`, the two headers) and as
+  test expectations. The *switches* are contained: `SafeFixKind::` only in
+  `safe_fix.cpp`, MAR-187's `DiagnosticPanel` switch only in `shell_problems.cpp`,
+  `ProblemsSeverityFilter`'s only in `problems_model.cpp` and the suite's own
+  helper.
+- **F1 proves the severity filter and one Fix button are on screen.** The group
+  headers, the row Selectables' text and the counts line are covered UI-free
+  only; a regression that deleted the counts line would not be caught.
+- **The Fix button was off-window until F1 found it.** A default `Selectable`
+  spans the whole content region, so the `SameLine()` button landed past the
+  window's right edge — unreachable by a mouse and invisible to a user. Every
+  UI-free case passed the whole time. This is the MAR-178 property recurring, and
+  it is the concrete answer to "what would F1 have caught that S1-S6 would not".
+- **MAR-186's severity ASSIGNMENTS are load-bearing but unmeasured, and closing
+  that is deferred to MAR-191.** Verified in the artefact rather than relayed:
+  `check_invariants` derives its own error/warning tallies **from the same
+  `issue.severity` values** it then compares against `report.error_count` /
+  `warning_count` (`editor_project_smoke.cpp`, the two counters and the
+  `errors != report.error_count` test), so a **misassignment** — an issue emitted
+  as `Warning` where `Error` is correct, or the reverse — moves both sides of
+  that comparison together and is **invisible to it**. What would actually catch
+  one is G1's per-issue `issue.severity != DiagnosticSeverity::Error` check and
+  G10's absolute `error_count != 1U || warning_count != 2U`; neither is derivable
+  from the cross-check, so both are load-bearing **by inspection and unmeasured
+  by inversion**.
+
+  `impl-mar186` identified this and declined to add the inversion because doing
+  so meant editing `diagnostics.cpp` while MAR-187 was amending the same file.
+  MAR-187 declines it for the adjacent reason: the mutation is cheap now that
+  `diagnostics.cpp` has settled, but a review was live against this story's
+  commit and amending under one is what produced the earlier collision. It is
+  **deferred to MAR-191** ("Validate and document Editing P1", `dependsOn`
+  MAR-190), which is a validation-and-documentation story and the natural home
+  for a cross-story evidence gap.
+
+  Recorded here rather than left in a conversation deliberately: a claim that
+  lives only in a message between agents is exactly how an unverified assertion
+  enters a document nobody measured against the code — the failure the durable
+  section's *"a correction relayed from conversation"* entry names. This is that
+  entry applied to a debt rather than to a correction.
+- **Carried forward, unchanged by this story:** `shell_main.cpp`'s frame body is
+  still reachable from no test; `commit_path_choice` still has zero end-to-end
+  coverage; the runtime still accepts a negative first inherit key time; the
+  empty-edit hazard is still fixed only for the inherit family; macOS case
+  duplicates of a **missing** file remain two recent-project entries.
 
 ## MAR-186 Collect Structured Project Diagnostics Validation Results
 
@@ -1711,7 +2237,9 @@ be tempted to "fix".**
 
 All 13 test binaries pass. `ctest` **22/22**, `-L runtime` 4/4, `-L editor`
 12/12, `marrow.renderer_link_boundary` 1/1. `marrow_agent_dispatch_smoke` prints
-**408** `[ OK ]` cases against 64 operations. `tools/mcp/test_client.py`
+**408** `[ OK ]` cases against the **64**-operation registry of that commit
+(both numbers are MAR-183's own measurement and are deliberately left as
+recorded; the registry is **66** today and the smoke prints **437**). `tools/mcp/test_client.py`
 **PASSED**, and `py_compile` over the four MCP modules is clean.
 `marrow_verify_third_party` and `marrow_constraint_warning_check` both build.
 

@@ -509,6 +509,8 @@ add_library(marrow_editor STATIC
     src/editor/authoring.cpp
     src/editor/mesh_weight_model.cpp
     src/editor/diagnostics.cpp
+    src/editor/problems_model.cpp
+    src/editor/safe_fix.cpp
     src/editor/curve_auto.cpp
     src/editor/session.cpp
     src/editor/constraint_catalog.cpp
@@ -893,6 +895,7 @@ add_executable(marrow_editor_shell
     src/editor/viewport_interaction_controller.cpp
     src/editor/viewport_ffd_controller.cpp
     src/editor/shell_viewport_ui.cpp
+    src/editor/shell_problems.cpp
     src/editor/shell_project_panels.cpp
     src/editor/shell_parameters.cpp
     src/editor/shell_agent_panel.cpp
@@ -912,6 +915,28 @@ add_executable(marrow_editor_shell
     src/editor/agent_socket.cpp
     src/editor/sokol_imgui_impl.cpp
     src/editor/sokol_graphics_device.cpp
+)
+
+# MAR-187: the two hand-duplicated frame bodies must draw the same windows.
+# POST_BUILD rather than a bare custom target, and deliberately NOT a CTest test
+# (`ctest -N` stays 22): nothing compiler-checks the pair, the shell smoke passes
+# green with EITHER call missing -- including its own actual-frame case, which
+# draws through a scenario-local lambda -- and a gate that only runs when someone
+# remembers to invoke it is how MAR-187 shipped a plain two-file `grep` that a
+# lambda satisfies. Building the shell runs it.
+add_custom_command(TARGET marrow_editor_shell POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/CheckFrameBodies.cmake
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Checking the editor shell's two frame bodies agree"
+    VERBATIM
+)
+
+# The same check on demand, for anyone who wants it without a build.
+add_custom_target(marrow_frame_body_check
+    COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/CheckFrameBodies.cmake
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Checking the editor shell's two frame bodies agree"
+    VERBATIM
 )
 
 target_include_directories(marrow_editor_shell
