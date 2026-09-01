@@ -505,6 +505,7 @@ add_library(marrow_editor STATIC
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/psd_reimport_plan.cpp
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
     src/editor/mesh_weight_model.cpp
@@ -851,6 +852,11 @@ target_link_libraries(marrow_atlas_packer_smoke
 
 add_executable(marrow_psd_import_smoke
     src/samples/psd_import_smoke.cpp
+)
+
+target_include_directories(marrow_psd_import_smoke
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
 )
 
 target_link_libraries(marrow_psd_import_smoke

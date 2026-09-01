@@ -2038,7 +2038,7 @@ ProjectSaveResult EditorSession::save(const std::filesystem::path& path) {
         // that no longer opens once saved. Rebase the snapshot itself, through
         // the same single rule, and re-serialize the cached string that
         // `histories_equal` and `apply_history`'s change detection compare -- the
-        // five rebased fields are all serialized, so a cached string left alone
+        // six rebased fields are all serialized, so a cached string left alone
         // would describe a project that no longer exists.
         const auto rebase_history = [&](std::vector<Impl::HistoryEntry>* entries) {
             const auto rebase_snapshot = [&](Impl::HistorySnapshot& snapshot) {

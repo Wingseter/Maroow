@@ -572,6 +572,38 @@ struct ParameterModel {
     LipSyncMappingAuthoringDefinition* find_lip_mapping(std::string_view parameter_id);
 };
 
+/// @brief One PSD layer's stable identity and the runtime targets it produced.
+struct PsdLayerProvenance {
+    std::vector<std::string> group_path;  ///< Exact ancestor folder names, outermost first.
+    std::string layer_name;               ///< Exact PSD layer name, before slot de-duplication.
+    std::string slot_name;
+    std::string attachment_name;
+    std::string bone_name;
+    /**
+     * @brief The layer image's file NAME under `layers_directory`. Never a path.
+     *
+     * `write_imported_layers` computes every extracted image as a direct child of
+     * the layer directory, so a stored path could only ever restate that directory
+     * once per layer. Keeping this a bare name holds the story's rebase surface to
+     * TWO fields, which is small enough to enumerate by hand -- and
+     * `rebase_project_paths` is a fixed-length call list that the compiler does not
+     * police. A load-time rejection enforces the invariant rather than trusting it.
+     */
+    std::string image_file;
+};
+
+/// @brief Where a project's art came from, and what each layer became.
+struct PsdImportProvenance {
+    std::filesystem::path source_path;       ///< Project-relative `.psd`.
+    std::filesystem::path layers_directory;  ///< Project-relative extracted-layer directory.
+    std::vector<PsdLayerProvenance> layers;
+};
+
+/// @brief Optional per-format import provenance. Absent in every pre-MAR-188 project.
+struct ProjectImportSources {
+    std::optional<PsdImportProvenance> psd;
+};
+
 struct ProjectMetadata {
     std::string name;
     std::string active_animation;
@@ -580,6 +612,18 @@ struct ProjectMetadata {
     std::string notes;
     ViewportState viewport{};
     TimelineSettings timeline{};
+    /**
+     * @brief MAR-188. `$.editor.import_sources`, absent in every older project.
+     *
+     * `ProjectMetadata` is the correct home: it is what `$.editor` deserialises
+     * into, and `export_directory` -- the other `$.editor` path family -- already
+     * lives here. Note the key already round-tripped verbatim through
+     * `preserved_root` BEFORE this field existed, so a test asserting on
+     * `serialize_project()` text rather than on this struct passes on unmodified
+     * code. `build_project_value` must overwrite the preserved copy, and erase it
+     * when this is disengaged, or an in-memory edit is silently discarded.
+     */
+    std::optional<ProjectImportSources> import_sources;
 };
 
 struct ProjectData {
@@ -1022,6 +1066,24 @@ struct MinimalProjectOptions {
  */
 ProjectData create_minimal_project(const MinimalProjectOptions& options);
 /**
+ * @brief Relativizes a reference against a project file's directory.
+ *
+ * The house rule, and the same one `rebase_project_paths` uses: the result is
+ * relative when a relative form exists without `../`, and ABSOLUTE otherwise, so
+ * a reference never silently starts pointing outside the project folder.
+ *
+ * Exposed for MAR-188's provenance writer, which has to store project-relative
+ * paths and must not reimplement the rule.
+ *
+ * @param project_path Project file the result is relative to.
+ * @param referenced_path Path being stored.
+ * @return A project-relative path, or an absolute one when no relative form fits.
+ */
+std::filesystem::path project_relative_path(
+    const std::filesystem::path& project_path,
+    const std::filesystem::path& referenced_path);
+
+/**
  * @brief Rewrites project-relative references so they resolve identically from a
  *        new project-file location.
  *
@@ -1030,10 +1092,13 @@ ProjectData create_minimal_project(const MinimalProjectOptions& options);
  * without rewriting its references therefore changes what they point at, and the
  * written project stops opening. This is the single place that rewrites them.
  *
- * Five families are rebased, and they are exactly the five that are serialized
+ * Six families are rebased, and they are exactly the six that are serialized
  * from struct fields: `runtime_assets.skeleton_path`,
- * `runtime_assets.atlas_paths`, `editor_metadata.export_directory`, and every
- * `atlas_pack_definitions` entry's `atlas_path` and sprite `image_path`. Rebasing
+ * `runtime_assets.atlas_paths`, `editor_metadata.export_directory`, every
+ * `atlas_pack_definitions` entry's `atlas_path` and sprite `image_path`, and
+ * MAR-188's `editor_metadata.import_sources->psd` (`source_path` and
+ * `layers_directory` -- the per-layer `image_file` is a bare file name, not a
+ * path, and is deliberately not a family of its own). Rebasing
  * only some of them is worse than rebasing none: `find_atlas_pack_definition`
  * matches an atlas pack to a runtime atlas by RESOLVED path, so a partial rebase
  * makes the lookup miss and `export_runtime_assets` silently stops packing.
@@ -1049,9 +1114,17 @@ ProjectData create_minimal_project(const MinimalProjectOptions& options);
  * As into a sibling or subdirectory turns relative references absolute. The
  * project opens either way; the result is simply no longer portable as a folder.
  *
- * Paths stored inside `preserved_root` are round-tripped opaquely and cannot be
- * reached from here. When MAR-188 adds `$.editor.import_sources.psd` as a real
- * project-relative field, it must be registered in this function.
+ * MAR-188 added `$.editor.import_sources.psd` as a real project-relative field
+ * and it IS registered here, as the sixth family.
+ *
+ * Paths stored inside `preserved_root` are still round-tripped opaquely and
+ * cannot be reached from here, and that limitation is permanent rather than
+ * pending: `preserved_root` is by definition whatever this code does not
+ * understand, so a rule quantified over "every relative path" is quantified over
+ * a set the program cannot enumerate. Any path a future document carries under an
+ * unparsed key remains unrebased and silently stale on Save As. Closing that needs
+ * a schema-strict loader or a decision that unparsed paths are unsupported --
+ * neither of which is a change any single story should make on its own.
  *
  * @param project Project whose references resolve against its current `source_path`.
  * @param new_project_path Location the project file is about to be written to.

@@ -13486,7 +13486,7 @@ bool validate_mar180_undo_across_save_as_still_opens(
  * @brief MAR-180 S5 -- the history rebase's re-serialization is load-bearing.
  *
  * `HistorySnapshot::serialized_project` is the string `histories_equal` and
- * `apply_history`'s change detection compare, and all five rebased fields are
+ * `apply_history`'s change detection compare, and all six rebased fields are
  * serialized. Rebasing a snapshot's `ProjectData` while leaving its cached string
  * alone makes the cached string describe a project that no longer exists.
  *
@@ -19851,6 +19851,702 @@ bool validate_mar187_safe_fixes(
     return true;
 }
 
+namespace mar188 {
+
+using marrow::runtime::json::Value;
+using marrow::editor::PsdImportProvenance;
+using marrow::editor::PsdLayerProvenance;
+using marrow::editor::ProjectImportSources;
+
+using TemporaryDirectory = mar180::TemporaryDirectory;
+
+/** @brief One provenance layer, flattened for a set-difference message. */
+std::string layer_tuple(const PsdLayerProvenance& layer) {
+    std::string joined;
+    for (const std::string& segment : layer.group_path) {
+        if (!joined.empty()) {
+            joined += '/';
+        }
+        joined += segment;
+    }
+    return joined + "|" + layer.layer_name + "|" + layer.slot_name + "|" +
+        layer.attachment_name + "|" + layer.bone_name + "|" + layer.image_file;
+}
+
+/** @brief The full sorted tuple list, which is what every P-case asserts. */
+std::vector<std::string> layer_tuples(const PsdImportProvenance& provenance) {
+    std::vector<std::string> tuples;
+    tuples.reserve(provenance.layers.size());
+    for (const PsdLayerProvenance& layer : provenance.layers) {
+        tuples.push_back(layer_tuple(layer));
+    }
+    std::sort(tuples.begin(), tuples.end());
+    return tuples;
+}
+
+/** @brief `{"group_path": [...], "layer": ..., ...}` for one authored layer. */
+Value layer_value(
+    const std::vector<std::string>& group_path,
+    const std::string& layer_name,
+    const std::string& slot_name,
+    const std::string& attachment_name,
+    const std::string& bone_name,
+    const std::string& image_file) {
+    Value::Array groups;
+    for (const std::string& segment : group_path) {
+        groups.push_back(Value(segment, {}));
+    }
+    Value::Object object;
+    object.emplace("group_path", Value(std::move(groups), {}));
+    object.emplace("layer", Value(layer_name, {}));
+    object.emplace("slot", Value(slot_name, {}));
+    object.emplace("attachment", Value(attachment_name, {}));
+    object.emplace("bone", Value(bone_name, {}));
+    object.emplace("image", Value(image_file, {}));
+    return Value(std::move(object), {});
+}
+
+/** @brief `$.editor.import_sources` carrying one `psd` object. */
+Value import_sources_value(
+    const std::string& source_path,
+    const std::string& layers_directory,
+    Value::Array layers) {
+    Value::Object psd;
+    psd.emplace("path", Value(source_path, {}));
+    psd.emplace("layers_directory", Value(layers_directory, {}));
+    psd.emplace("layers", Value(std::move(layers), {}));
+    Value::Object sources;
+    sources.emplace("psd", Value(std::move(psd), {}));
+    return Value(std::move(sources), {});
+}
+
+/** @brief The P2/P5 fixture: one layer at depth 0, one at depth 2. */
+Value::Array two_layer_array() {
+    Value::Array layers;
+    layers.push_back(layer_value({}, "shadow", "shadow", "shadow", "root", "shadow.png"));
+    layers.push_back(layer_value({"torso", "upper"}, "hand_r", "hand_r", "hand_r",
+                                 "torso/upper", "hand_r.png"));
+    return layers;
+}
+
+/** @brief What `two_layer_array` must read back as, sorted. */
+std::vector<std::string> two_layer_tuples() {
+    std::vector<std::string> expected{
+        "|shadow|shadow|shadow|root|shadow.png",
+        "torso/upper|hand_r|hand_r|hand_r|torso/upper|hand_r.png",
+    };
+    std::sort(expected.begin(), expected.end());
+    return expected;
+}
+
+/**
+ * @brief Loads the fixture document and injects `$.editor.import_sources`.
+ *
+ * Injecting into the real fixture rather than authoring a document from scratch
+ * keeps every other key exactly as the loader expects, so a rejection can only
+ * come from the block under test.
+ */
+bool document_with_import_sources(
+    const std::filesystem::path& fixture_path,
+    std::string_view label,
+    const Value& import_sources,
+    marrow::runtime::json::Document* document_out) {
+    auto source = marrow::runtime::json::load_document(fixture_path);
+    if (!source) {
+        std::cerr << label << ": load_document(" << fixture_path.generic_string()
+                  << ") failed.\n";
+        return false;
+    }
+    *document_out = *source.document;
+    document_out->root.as_object()["editor"].as_object()["import_sources"] =
+        import_sources;
+    return true;
+}
+
+/** @brief Asserts a load failed AND that its message names cause and JSON path. */
+bool expect_rejection(
+    const marrow::editor::ProjectLoadResult& loaded,
+    std::string_view label,
+    std::string_view expected_message,
+    std::string_view expected_path) {
+    if (loaded) {
+        std::cerr << label << ": expected a rejection, got a successful load.\n";
+        return false;
+    }
+    const std::string text = loaded.error->format();
+    if (text.find(expected_message) == std::string::npos) {
+        std::cerr << label << ": rejection message did not contain \""
+                  << expected_message << "\". Actual: " << text << '\n';
+        return false;
+    }
+    if (text.find(expected_path) == std::string::npos) {
+        std::cerr << label << ": rejection message did not name the JSON path \""
+                  << expected_path << "\". Actual: " << text << '\n';
+        return false;
+    }
+    return true;
+}
+
+/** @brief `$.editor.import_sources` with one deliberately malformed member. */
+Value broken_sources(const std::string& key, Value replacement) {
+    Value::Object psd;
+    psd.emplace("path", Value(std::string("art/hero.psd"), {}));
+    psd.emplace("layers_directory", Value(std::string("art/hero_layers"), {}));
+    Value::Array layers;
+    layers.push_back(layer_value({"torso"}, "body", "body", "body", "torso", "body.png"));
+    psd.emplace("layers", Value(std::move(layers), {}));
+    psd[key] = std::move(replacement);
+    Value::Object sources;
+    sources.emplace("psd", Value(std::move(psd), {}));
+    return Value(std::move(sources), {});
+}
+
+/** @brief `$.editor.import_sources` whose single layer carries one bad member. */
+Value broken_layer_sources(const std::string& key, Value replacement) {
+    Value::Object layer;
+    layer.emplace("group_path", Value(Value::Array{Value(std::string("torso"), {})}, {}));
+    layer.emplace("layer", Value(std::string("body"), {}));
+    layer.emplace("slot", Value(std::string("body"), {}));
+    layer.emplace("attachment", Value(std::string("body"), {}));
+    layer.emplace("bone", Value(std::string("torso"), {}));
+    layer.emplace("image", Value(std::string("body.png"), {}));
+    layer[key] = std::move(replacement);
+    Value::Array layers;
+    layers.push_back(Value(std::move(layer), {}));
+    return import_sources_value("art/hero.psd", "art/hero_layers", std::move(layers));
+}
+
+}  // namespace mar188
+
+/**
+ * @brief MAR-188 AC1/AC2 -- typed PSD provenance and the sixth rebase family.
+ *
+ * P1 is a COMPATIBILITY WITNESS, not a gate: it is green on the pristine tree and
+ * no inversion in the register turns it red (design section 0.3.1, E8). It is kept
+ * because the backward-compatibility claim is real and nothing else makes it.
+ */
+bool validate_mar188_psd_provenance(
+    const marrow::editor::ProjectLoadResult& result,
+    const std::filesystem::path& fixture_path) {
+    using marrow::runtime::json::Value;
+    const mar188::TemporaryDirectory temporary("mar188_provenance");
+
+    // -- P1 -- WITNESS. An old project loads and gains nothing. --------------
+    {
+        if (result.project->editor_metadata.import_sources.has_value()) {
+            std::cerr << "P1: a pre-MAR-188 project must carry no import_sources, "
+                         "but the field was engaged.\n";
+            return false;
+        }
+        const std::string text = marrow::editor::serialize_project(*result.project);
+        if (text.find("import_sources") != std::string::npos) {
+            std::cerr << "P1: a project with no provenance must not serialise an "
+                         "import_sources key.\n";
+            return false;
+        }
+    }
+
+    // -- P2 -- the round trip, THROUGH THE TYPED FIELD. ----------------------
+    // Never a substring of serialize_project(): design section 0.4 P1 measured
+    // that $.editor.import_sources already round-trips verbatim through
+    // preserved_root with zero code, so a text assertion here passes on an
+    // unmodified tree. This is the story's decisive case.
+    {
+        marrow::runtime::json::Document document;
+        if (!mar188::document_with_import_sources(
+                fixture_path, "P2",
+                mar188::import_sources_value("art/hero.psd", "art/hero_layers",
+                                             mar188::two_layer_array()),
+                &document)) {
+            return false;
+        }
+        const auto loaded = marrow::editor::load_project(document);
+        if (!loaded) {
+            std::cerr << "P2: the loader rejected a well-formed provenance block: "
+                      << loaded.error->format() << '\n';
+            return false;
+        }
+        const auto& sources = loaded.project->editor_metadata.import_sources;
+        if (!sources.has_value() || !sources->psd.has_value()) {
+            std::cerr << "P2: provenance must survive a round trip through the typed "
+                         "field, but import_sources"
+                      << (sources.has_value() ? "->psd" : "") << " was absent.\n";
+            return false;
+        }
+        if (sources->psd->source_path.generic_string() != "art/hero.psd") {
+            std::cerr << "P2: source_path expected art/hero.psd, got "
+                      << sources->psd->source_path.generic_string() << ".\n";
+            return false;
+        }
+        if (sources->psd->layers_directory.generic_string() != "art/hero_layers") {
+            std::cerr << "P2: layers_directory expected art/hero_layers, got "
+                      << sources->psd->layers_directory.generic_string() << ".\n";
+            return false;
+        }
+        if (!mar187::expect_list("P2 (first load, layer tuples)",
+                                 mar188::layer_tuples(*sources->psd),
+                                 mar188::two_layer_tuples())) {
+            return false;
+        }
+
+        // Serialize -> parse -> load again. The SECOND load is what proves the
+        // serializer wrote the typed value rather than the preserved copy being
+        // re-emitted... which it cannot prove alone. P3 is what separates them.
+        const std::string text = marrow::editor::serialize_project(*loaded.project);
+        const auto reparsed = marrow::runtime::json::parse_document(text, fixture_path);
+        if (!reparsed) {
+            std::cerr << "P2: re-parsing the serialized project failed: "
+                      << reparsed.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(*reparsed.document);
+        if (!reloaded || !reloaded.project->editor_metadata.import_sources.has_value() ||
+            !reloaded.project->editor_metadata.import_sources->psd.has_value()) {
+            std::cerr << "P2: provenance did not survive serialize -> parse -> load.\n";
+            return false;
+        }
+        if (!mar187::expect_list(
+                "P2 (second load, layer tuples)",
+                mar188::layer_tuples(*reloaded.project->editor_metadata.import_sources->psd),
+                mar188::two_layer_tuples())) {
+            return false;
+        }
+    }
+
+    // -- P3 -- the typed value beats the preserved copy. ---------------------
+    // The ONLY case that can see a serializer which parses but never assigns:
+    // P2 authors and reads back the same value, which preserved_root reproduces
+    // exactly. Only an edit made BEFORE serialization separates them.
+    {
+        marrow::runtime::json::Document document;
+        if (!mar188::document_with_import_sources(
+                fixture_path, "P3",
+                mar188::import_sources_value("art/hero.psd", "art/hero_layers",
+                                             mar188::two_layer_array()),
+                &document)) {
+            return false;
+        }
+        auto loaded = marrow::editor::load_project(document);
+        if (!loaded) {
+            std::cerr << "P3: the loader rejected a well-formed provenance block: "
+                      << loaded.error->format() << '\n';
+            return false;
+        }
+        loaded.project->editor_metadata.import_sources->psd->source_path =
+            "art/other.psd";
+        loaded.project->editor_metadata.import_sources->psd->layers_directory =
+            "art/other_layers";
+        const std::string text = marrow::editor::serialize_project(*loaded.project);
+        const auto reparsed = marrow::runtime::json::parse_document(text, fixture_path);
+        if (!reparsed) {
+            std::cerr << "P3: re-parsing failed: " << reparsed.error->format() << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(*reparsed.document);
+        if (!reloaded || !reloaded.project->editor_metadata.import_sources.has_value() ||
+            !reloaded.project->editor_metadata.import_sources->psd.has_value()) {
+            std::cerr << "P3: an in-memory provenance edit did not survive "
+                         "serialization at all.\n";
+            return false;
+        }
+        const mar188::PsdImportProvenance& psd =
+            *reloaded.project->editor_metadata.import_sources->psd;
+        if (psd.source_path.generic_string() != "art/other.psd") {
+            std::cerr << "P3: an in-memory provenance edit must survive serialization "
+                         "(source_path: expected art/other.psd, got "
+                      << psd.source_path.generic_string() << ").\n";
+            return false;
+        }
+        if (psd.layers_directory.generic_string() != "art/other_layers") {
+            std::cerr << "P3: an in-memory provenance edit must survive serialization "
+                         "(layers_directory: expected art/other_layers, got "
+                      << psd.layers_directory.generic_string() << ").\n";
+            return false;
+        }
+    }
+
+    // -- P4 -- erase on empty, BOTH levels. ----------------------------------
+    {
+        marrow::runtime::json::Document document;
+        if (!mar188::document_with_import_sources(
+                fixture_path, "P4",
+                mar188::import_sources_value("art/hero.psd", "art/hero_layers",
+                                             mar188::two_layer_array()),
+                &document)) {
+            return false;
+        }
+
+        // (a) The outer optional cleared.
+        {
+            auto loaded = marrow::editor::load_project(document);
+            if (!loaded) {
+                std::cerr << "P4(a): the loader rejected the fixture: "
+                          << loaded.error->format() << '\n';
+                return false;
+            }
+            loaded.project->editor_metadata.import_sources = std::nullopt;
+            const std::string text = marrow::editor::serialize_project(*loaded.project);
+            if (text.find("import_sources") != std::string::npos) {
+                std::cerr << "P4(a): clearing provenance must remove the key "
+                             "(serialization still contains \"import_sources\").\n";
+                return false;
+            }
+            const auto reparsed =
+                marrow::runtime::json::parse_document(text, fixture_path);
+            const auto reloaded = marrow::editor::load_project(*reparsed.document);
+            if (!reloaded ||
+                reloaded.project->editor_metadata.import_sources.has_value()) {
+                std::cerr << "P4(a): a cleared provenance came back engaged after a "
+                             "reload.\n";
+                return false;
+            }
+        }
+
+        // (b) The INNER optional cleared. P4(a) cannot see this: it empties the
+        // outer optional, which the else-branch already handles.
+        {
+            auto loaded = marrow::editor::load_project(document);
+            if (!loaded) {
+                std::cerr << "P4(b): the loader rejected the fixture: "
+                          << loaded.error->format() << '\n';
+                return false;
+            }
+            loaded.project->editor_metadata.import_sources =
+                mar188::ProjectImportSources{};
+            const std::string text = marrow::editor::serialize_project(*loaded.project);
+            if (text.find("import_sources") != std::string::npos) {
+                std::cerr << "P4(b): an import_sources with no psd must serialise as "
+                             "an absent key, not as {}.\n";
+                return false;
+            }
+        }
+    }
+
+    // -- P5/P6/P7 -- the SIXTH rebase family, through save_project. ---------
+    // `rebase_project_paths` is a fixed-length call list and the compiler polices
+    // nothing about it (design section 1.3). Asserting BOTH fields BY NAME is the
+    // only detector, and I5/I6 invert them separately because a single inversion
+    // cannot distinguish "the family was added" from "the family is complete".
+    {
+        const std::filesystem::path project_directory = temporary.path / "proj";
+        const std::filesystem::path art_directory = project_directory / "art";
+        std::error_code directory_error;
+        std::filesystem::create_directories(art_directory, directory_error);
+        if (directory_error) {
+            std::cerr << "P5: could not create the scratch project directory.\n";
+            return false;
+        }
+
+        // Builds a project at <tmp>/proj/art/x.marrow carrying provenance.
+        const auto authored = [&](const std::string& source_path,
+                                  const std::string& layers_directory) {
+            marrow::editor::ProjectData project =
+                mar186::minimal_project(art_directory / "x.marrow");
+            marrow::editor::ProjectImportSources sources;
+            marrow::editor::PsdImportProvenance psd;
+            psd.source_path = source_path;
+            psd.layers_directory = layers_directory;
+            marrow::editor::PsdLayerProvenance layer;
+            layer.group_path = {"torso"};
+            layer.layer_name = "body";
+            layer.slot_name = "body";
+            layer.attachment_name = "body";
+            layer.bone_name = "torso";
+            layer.image_file = "body.png";
+            psd.layers.push_back(layer);
+            sources.psd = std::move(psd);
+            project.editor_metadata.import_sources = std::move(sources);
+            return project;
+        };
+
+        // Saves to `destination` and reloads, returning the reloaded provenance.
+        const auto save_as_and_reload =
+            [&](const marrow::editor::ProjectData& project,
+                const std::filesystem::path& destination,
+                std::string_view label,
+                marrow::editor::ProjectLoadResult* loaded_out) {
+                const auto saved = marrow::editor::save_project(project, destination);
+                if (!saved) {
+                    std::cerr << label << ": save_project failed: "
+                              << saved.error->format() << '\n';
+                    return false;
+                }
+                *loaded_out = marrow::editor::load_project(destination);
+                if (!*loaded_out) {
+                    std::cerr << label << ": load_project failed: "
+                              << loaded_out->error->format() << '\n';
+                    return false;
+                }
+                if (!loaded_out->project->editor_metadata.import_sources.has_value() ||
+                    !loaded_out->project->editor_metadata.import_sources->psd.has_value()) {
+                    std::cerr << label
+                              << ": provenance did not survive Save As at all.\n";
+                    return false;
+                }
+                return true;
+            };
+
+        // -- P5 -- into the PARENT directory: both fields rebase and stay
+        // relative. Only a parent-directory destination keeps references
+        // relative; `make_project_relative_path` returns an ABSOLUTE path whenever
+        // the relative form would need `../`, which is what P7 asserts instead.
+        {
+            const marrow::editor::ProjectData project =
+                authored("hero.psd", "hero_layers");
+            const std::filesystem::path before_source =
+                std::filesystem::weakly_canonical(project.resolve_path("hero.psd"));
+            const std::filesystem::path before_layers =
+                std::filesystem::weakly_canonical(project.resolve_path("hero_layers"));
+
+            marrow::editor::ProjectLoadResult loaded;
+            if (!save_as_and_reload(project, project_directory / "up.marrow", "P5",
+                                    &loaded)) {
+                return false;
+            }
+            const marrow::editor::PsdImportProvenance& psd =
+                *loaded.project->editor_metadata.import_sources->psd;
+
+            if (psd.source_path.generic_string() != "art/hero.psd") {
+                std::cerr << "P5: Save As must rebase source_path (expected "
+                             "art/hero.psd, got "
+                          << psd.source_path.generic_string() << ").\n";
+                return false;
+            }
+            if (psd.layers_directory.generic_string() != "art/hero_layers") {
+                std::cerr << "P5: Save As must rebase layers_directory (expected "
+                             "art/hero_layers, got "
+                          << psd.layers_directory.generic_string() << ").\n";
+                return false;
+            }
+            // The identity clauses. The string clauses above can still look
+            // plausible under a family that rebases against the ALREADY-rewritten
+            // `result.source_path`; only resolution identity sees the double
+            // rebase (I7).
+            const std::filesystem::path after_source = std::filesystem::weakly_canonical(
+                loaded.project->resolve_path(psd.source_path));
+            const std::filesystem::path after_layers = std::filesystem::weakly_canonical(
+                loaded.project->resolve_path(psd.layers_directory));
+            if (after_source != before_source) {
+                std::cerr << "P5: the rebased source_path must resolve to the same "
+                             "absolute file (expected "
+                          << before_source.generic_string() << ", got "
+                          << after_source.generic_string() << ").\n";
+                return false;
+            }
+            if (after_layers != before_layers) {
+                std::cerr << "P5: the rebased layers_directory must resolve to the "
+                             "same absolute directory (expected "
+                          << before_layers.generic_string() << ", got "
+                          << after_layers.generic_string() << ").\n";
+                return false;
+            }
+        }
+
+        // -- P6 -- an ABSOLUTE provenance path survives byte-identical.
+        // The absolute file is placed INSIDE the Save As destination directory so
+        // a relative form is always representable and temp-directory layout cannot
+        // mask the case -- MAR-180's S3 learned this the hard way.
+        {
+            const std::filesystem::path absolute_psd =
+                std::filesystem::absolute(project_directory / "abs_hero.psd");
+            const std::filesystem::path absolute_layers =
+                std::filesystem::absolute(project_directory / "abs_hero_layers");
+            const marrow::editor::ProjectData project = authored(
+                absolute_psd.generic_string(), absolute_layers.generic_string());
+
+            marrow::editor::ProjectLoadResult loaded;
+            if (!save_as_and_reload(project, project_directory / "up_abs.marrow", "P6",
+                                    &loaded)) {
+                return false;
+            }
+            const marrow::editor::PsdImportProvenance& psd =
+                *loaded.project->editor_metadata.import_sources->psd;
+            if (!psd.source_path.is_absolute() ||
+                psd.source_path.generic_string() != absolute_psd.generic_string()) {
+                std::cerr << "P6: an absolute source_path must survive Save As "
+                             "byte-identical (expected "
+                          << absolute_psd.generic_string() << ", got "
+                          << psd.source_path.generic_string() << ").\n";
+                return false;
+            }
+            if (!psd.layers_directory.is_absolute() ||
+                psd.layers_directory.generic_string() !=
+                    absolute_layers.generic_string()) {
+                std::cerr << "P6: an absolute layers_directory must survive Save As "
+                             "byte-identical (expected "
+                          << absolute_layers.generic_string() << ", got "
+                          << psd.layers_directory.generic_string() << ").\n";
+                return false;
+            }
+        }
+
+        // -- P7 -- into a SIBLING: both turn absolute, and both still resolve.
+        {
+            const marrow::editor::ProjectData project =
+                authored("hero.psd", "hero_layers");
+            const std::filesystem::path before_source =
+                std::filesystem::weakly_canonical(project.resolve_path("hero.psd"));
+            const std::filesystem::path before_layers =
+                std::filesystem::weakly_canonical(project.resolve_path("hero_layers"));
+
+            const std::filesystem::path sibling = project_directory / "sibling";
+            std::error_code sibling_error;
+            std::filesystem::create_directories(sibling, sibling_error);
+            marrow::editor::ProjectLoadResult loaded;
+            if (!save_as_and_reload(project, sibling / "moved.marrow", "P7", &loaded)) {
+                return false;
+            }
+            const marrow::editor::PsdImportProvenance& psd =
+                *loaded.project->editor_metadata.import_sources->psd;
+            if (!psd.source_path.is_absolute()) {
+                std::cerr << "P7: a sibling Save As must leave source_path absolute, "
+                             "got "
+                          << psd.source_path.generic_string() << ".\n";
+                return false;
+            }
+            if (!psd.layers_directory.is_absolute()) {
+                std::cerr << "P7: a sibling Save As must leave layers_directory "
+                             "absolute, got "
+                          << psd.layers_directory.generic_string() << ".\n";
+                return false;
+            }
+            const std::filesystem::path after_source = std::filesystem::weakly_canonical(
+                loaded.project->resolve_path(psd.source_path));
+            const std::filesystem::path after_layers = std::filesystem::weakly_canonical(
+                loaded.project->resolve_path(psd.layers_directory));
+            if (after_source != before_source || after_layers != before_layers) {
+                std::cerr << "P7: an absolute rebase must still resolve to the same "
+                             "files (source expected "
+                          << before_source.generic_string() << ", got "
+                          << after_source.generic_string() << "; layers expected "
+                          << before_layers.generic_string() << ", got "
+                          << after_layers.generic_string() << ").\n";
+                return false;
+            }
+        }
+    }
+
+    // -- P8 -- eleven rejections, each on its MESSAGE and its JSON path. -----
+    // Each arm also asserts a control project's serialize_project() is unchanged
+    // in the same scope, so a rejection that corrupted shared state is visible.
+    {
+        const std::string control =
+            marrow::editor::serialize_project(*result.project);
+
+        struct Rejection {
+            const char* label;
+            Value sources;
+            const char* message;
+            const char* json_path;
+        };
+
+        Value::Array not_strings;
+        not_strings.push_back(Value(1.0, {}));
+
+        std::vector<Rejection> rejections;
+        // (a) import_sources not an object -- require_type.
+        rejections.push_back({"P8(a)", Value(std::string("nope"), {}),
+                              "expected object", "$.editor.import_sources"});
+        // (b) psd not an object -- require_type.
+        {
+            Value::Object sources;
+            sources.emplace("psd", Value(Value::Array{}, {}));
+            rejections.push_back({"P8(b)", Value(std::move(sources), {}),
+                                  "expected object", "$.editor.import_sources.psd"});
+        }
+        // (c) path missing -- require_member.
+        {
+            Value::Object psd;
+            psd.emplace("layers_directory", Value(std::string("art/hero_layers"), {}));
+            Value::Object sources;
+            sources.emplace("psd", Value(std::move(psd), {}));
+            rejections.push_back({"P8(c)", Value(std::move(sources), {}),
+                                  "missing required member",
+                                  "$.editor.import_sources.psd.path"});
+        }
+        // (d) path empty -- domain.
+        rejections.push_back({"P8(d)", mar188::broken_sources("path", Value(std::string(), {})),
+                              "psd source paths must not be empty",
+                              "$.editor.import_sources.psd.path"});
+        // (e) layers_directory empty -- domain.
+        rejections.push_back({"P8(e)",
+                              mar188::broken_sources("layers_directory",
+                                                     Value(std::string(), {})),
+                              "psd layer directories must not be empty",
+                              "$.editor.import_sources.psd.layers_directory"});
+        // (f) layers not an array -- require_type.
+        rejections.push_back({"P8(f)",
+                              mar188::broken_sources("layers", Value(Value::Object{}, {})),
+                              "expected array", "$.editor.import_sources.psd.layers"});
+        // (g) a group_path element not a string -- require_type.
+        rejections.push_back({"P8(g)",
+                              mar188::broken_layer_sources(
+                                  "group_path", Value(std::move(not_strings), {})),
+                              "expected string",
+                              "$.editor.import_sources.psd.layers[0].group_path[0]"});
+        // (h) layer empty -- domain.
+        rejections.push_back({"P8(h)",
+                              mar188::broken_layer_sources("layer", Value(std::string(), {})),
+                              "psd layer names must not be empty",
+                              "$.editor.import_sources.psd.layers[0].layer"});
+        // (i) image empty -- domain.
+        rejections.push_back({"P8(i)",
+                              mar188::broken_layer_sources("image", Value(std::string(), {})),
+                              "psd layer image names must not be empty",
+                              "$.editor.import_sources.psd.layers[0].image"});
+        // (j) image carries a directory separator -- domain, the section 2.2 invariant.
+        rejections.push_back({"P8(j)",
+                              mar188::broken_layer_sources(
+                                  "image", Value(std::string("sub/body.png"), {})),
+                              "psd layer image names must not contain a directory separator",
+                              "$.editor.import_sources.psd.layers[0].image"});
+        // (k) two entries sharing an identity -- domain.
+        {
+            Value::Array layers;
+            layers.push_back(mar188::layer_value({"torso"}, "body", "body", "body",
+                                                 "torso", "body.png"));
+            layers.push_back(mar188::layer_value({"torso"}, "body", "body_2", "body_2",
+                                                 "torso", "body_2.png"));
+            rejections.push_back({"P8(k)",
+                                  mar188::import_sources_value(
+                                      "art/hero.psd", "art/hero_layers", std::move(layers)),
+                                  "psd layer identities must be unique",
+                                  "$.editor.import_sources.psd.layers[1]"});
+        }
+
+        for (const Rejection& rejection : rejections) {
+            marrow::runtime::json::Document document;
+            if (!mar188::document_with_import_sources(
+                    fixture_path, rejection.label, rejection.sources, &document)) {
+                return false;
+            }
+            const auto loaded = marrow::editor::load_project(document);
+            if (!mar188::expect_rejection(loaded, rejection.label, rejection.message,
+                                          rejection.json_path)) {
+                return false;
+            }
+            if (marrow::editor::serialize_project(*result.project) != control) {
+                std::cerr << rejection.label
+                          << ": a rejected load changed an unrelated project's "
+                             "serialization.\n";
+                return false;
+            }
+        }
+    }
+
+    std::cout << "MAR-188 P1-P8: typed PSD provenance round-trips through the "
+                 "struct (never through the preserved copy, which already carried "
+                 "the key before this story), an in-memory edit beats the preserved "
+                 "copy, clearing at either level removes the key rather than "
+                 "writing {}, and eleven malformed documents are each refused by "
+                 "message and JSON path while an unrelated project's serialization "
+                 "stays byte-identical; and Save As rebases BOTH provenance paths "
+                 "by name -- relative into a parent directory, absolute into a "
+                 "sibling, an already-absolute path byte-identical -- each "
+                 "resolving to the same absolute file it resolved to before.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -20046,6 +20742,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!validate_mar187_safe_fixes(
+                result, parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar188_psd_provenance(
                 result, parse_result.options.project_path)) {
             return 1;
         }

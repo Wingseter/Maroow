@@ -12,6 +12,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <system_error>
 #include <type_traits>
@@ -874,6 +875,193 @@ std::optional<LoadError> parse_animation_edits(
     return std::nullopt;
 }
 
+/**
+ * @brief Parses `$.editor.import_sources`, MAR-188's typed PSD provenance.
+ *
+ * Shape copied from `editor.viewport.onion_skin` above, the exact structural
+ * analogue: an optional object two levels under `$.editor`.
+ *
+ * `layers` ABSENT is legal and means an empty vector -- a provenance record that
+ * names a source but has no mapping yet is meaningful (a first import that has
+ * not been committed). `layers` EMPTY is likewise legal.
+ *
+ * Duplicate identities are refused HERE, at load, not at planning time: a project
+ * whose provenance cannot key itself is malformed, and the file-format layer is
+ * where this tree already refuses that class (`ids must be unique`,
+ * `atlas pack output paths must be unique`).
+ */
+std::optional<LoadError> parse_import_sources(
+    const Document& document,
+    const Value& editor,
+    std::optional<ProjectImportSources>* import_sources_out) {
+    const Value* import_sources = find_optional_member(editor, "import_sources");
+    if (import_sources == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *import_sources, Value::Type::Object, "$.editor.import_sources")) {
+        return error;
+    }
+
+    ProjectImportSources sources;
+    const Value* psd = find_optional_member(*import_sources, "psd");
+    if (psd != nullptr) {
+        if (const auto error = marrow::runtime::json::require_type(
+                document, *psd, Value::Type::Object, "$.editor.import_sources.psd")) {
+            return error;
+        }
+
+        PsdImportProvenance provenance;
+        std::string source_path;
+        if (const auto error = read_required_string(
+                document, *psd, "path", "$.editor.import_sources.psd", &source_path)) {
+            return error;
+        }
+        if (source_path.empty()) {
+            return validation_error(
+                document,
+                psd->location(),
+                "$.editor.import_sources.psd.path",
+                "psd source paths must not be empty");
+        }
+        provenance.source_path = source_path;
+
+        std::string layers_directory;
+        if (const auto error = read_optional_string(
+                document,
+                *psd,
+                "layers_directory",
+                "$.editor.import_sources.psd",
+                &layers_directory)) {
+            return error;
+        }
+        if (layers_directory.empty()) {
+            return validation_error(
+                document,
+                psd->location(),
+                "$.editor.import_sources.psd.layers_directory",
+                "psd layer directories must not be empty");
+        }
+        provenance.layers_directory = layers_directory;
+
+        if (const Value* layers = find_optional_member(*psd, "layers")) {
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, *layers, Value::Type::Array,
+                    "$.editor.import_sources.psd.layers")) {
+                return error;
+            }
+
+            // Identities are refused by exact match on (group_path, layer_name).
+            // Nothing here infers or normalises: a name is what the PSD said.
+            std::set<std::string> seen_identities;
+            provenance.layers.reserve(layers->as_array().size());
+            for (std::size_t index = 0; index < layers->as_array().size(); ++index) {
+                const Value& layer_value = layers->as_array()[index];
+                const std::string layer_path =
+                    "$.editor.import_sources.psd.layers[" + std::to_string(index) + "]";
+                if (const auto error = marrow::runtime::json::require_type(
+                        document, layer_value, Value::Type::Object, layer_path)) {
+                    return error;
+                }
+
+                PsdLayerProvenance layer;
+                if (const Value* group_path =
+                        find_optional_member(layer_value, "group_path")) {
+                    if (const auto error = marrow::runtime::json::require_type(
+                            document, *group_path, Value::Type::Array,
+                            layer_path + ".group_path")) {
+                        return error;
+                    }
+                    layer.group_path.reserve(group_path->as_array().size());
+                    for (std::size_t segment_index = 0;
+                         segment_index < group_path->as_array().size();
+                         ++segment_index) {
+                        const Value& segment = group_path->as_array()[segment_index];
+                        const std::string segment_path = layer_path + ".group_path[" +
+                            std::to_string(segment_index) + "]";
+                        if (const auto error = marrow::runtime::json::require_type(
+                                document, segment, Value::Type::String, segment_path)) {
+                            return error;
+                        }
+                        layer.group_path.push_back(segment.as_string());
+                    }
+                }
+
+                if (const auto error = read_required_string(
+                        document, layer_value, "layer", layer_path, &layer.layer_name)) {
+                    return error;
+                }
+                if (layer.layer_name.empty()) {
+                    return validation_error(
+                        document,
+                        layer_value.location(),
+                        layer_path + ".layer",
+                        "psd layer names must not be empty");
+                }
+
+                if (const auto error = read_optional_string(
+                        document, layer_value, "slot", layer_path, &layer.slot_name)) {
+                    return error;
+                }
+                if (const auto error = read_optional_string(
+                        document, layer_value, "attachment", layer_path,
+                        &layer.attachment_name)) {
+                    return error;
+                }
+                if (const auto error = read_optional_string(
+                        document, layer_value, "bone", layer_path, &layer.bone_name)) {
+                    return error;
+                }
+
+                if (const auto error = read_required_string(
+                        document, layer_value, "image", layer_path, &layer.image_file)) {
+                    return error;
+                }
+                if (layer.image_file.empty()) {
+                    return validation_error(
+                        document,
+                        layer_value.location(),
+                        layer_path + ".image",
+                        "psd layer image names must not be empty");
+                }
+                // The bare-file-name invariant, ENFORCED rather than trusted. A
+                // stored image is always a direct child of `layers_directory`, so
+                // anything carrying a separator or a `..` would name a file the
+                // rebase family cannot reach.
+                if (std::filesystem::path(layer.image_file).filename().generic_string() !=
+                    layer.image_file) {
+                    return validation_error(
+                        document,
+                        layer_value.location(),
+                        layer_path + ".image",
+                        "psd layer image names must not contain a directory separator");
+                }
+
+                std::string identity;
+                for (const std::string& segment : layer.group_path) {
+                    identity += segment;
+                    identity += '\x1f';
+                }
+                identity += layer.layer_name;
+                if (!seen_identities.insert(identity).second) {
+                    return validation_error(
+                        document,
+                        layer_value.location(),
+                        layer_path,
+                        "psd layer identities must be unique");
+                }
+
+                provenance.layers.push_back(std::move(layer));
+            }
+        }
+
+        sources.psd = std::move(provenance);
+    }
+
+    *import_sources_out = std::move(sources);
+    return std::nullopt;
+}
+
 std::optional<LoadError> parse_editor_metadata(
     const Document& document,
     const Value& root,
@@ -1123,6 +1311,11 @@ std::optional<LoadError> parse_editor_metadata(
                 return error;
             }
         }
+    }
+
+    if (const auto error =
+            parse_import_sources(document, *editor, &metadata.import_sources)) {
+        return error;
     }
 
     *metadata_out = std::move(metadata);
@@ -4779,6 +4972,44 @@ Value build_constraint_edits_value(
     return make_object_value(std::move(constraint_edits));
 }
 
+/**
+ * @brief Builds `$.editor.import_sources` from MAR-188's typed provenance.
+ *
+ * Paths go through `.generic_string()`, matching every other serialized path
+ * family in this function. `image_file` is a bare name by construction and is
+ * emitted verbatim.
+ */
+Value build_import_sources_value(const ProjectImportSources& sources) {
+    Value::Object sources_object;
+    if (sources.psd.has_value()) {
+        Value::Object psd_object;
+        psd_object["path"] = make_string_value(sources.psd->source_path.generic_string());
+        psd_object["layers_directory"] =
+            make_string_value(sources.psd->layers_directory.generic_string());
+
+        Value::Array layers;
+        layers.reserve(sources.psd->layers.size());
+        for (const PsdLayerProvenance& layer : sources.psd->layers) {
+            Value::Object layer_object;
+            Value::Array group_path;
+            group_path.reserve(layer.group_path.size());
+            for (const std::string& segment : layer.group_path) {
+                group_path.push_back(make_string_value(segment));
+            }
+            layer_object["group_path"] = make_array_value(std::move(group_path));
+            layer_object["layer"] = make_string_value(layer.layer_name);
+            layer_object["slot"] = make_string_value(layer.slot_name);
+            layer_object["attachment"] = make_string_value(layer.attachment_name);
+            layer_object["bone"] = make_string_value(layer.bone_name);
+            layer_object["image"] = make_string_value(layer.image_file);
+            layers.push_back(make_object_value(std::move(layer_object)));
+        }
+        psd_object["layers"] = make_array_value(std::move(layers));
+        sources_object["psd"] = make_object_value(std::move(psd_object));
+    }
+    return make_object_value(std::move(sources_object));
+}
+
 Value build_atlas_pack_definitions_value(
     const std::vector<AtlasPackDefinition>& atlas_pack_definitions) {
     Value::Array definitions;
@@ -5086,6 +5317,27 @@ Value build_project_value(const ProjectData& project) {
         make_boolean_value(project.editor_metadata.viewport.debug_overlay.bounding_boxes);
     viewport_object["debug_overlay"] = make_object_value(std::move(debug_overlay_object));
     editor_object["viewport"] = make_object_value(std::move(viewport_object));
+    // MAR-188. BOTH arms are load-bearing, and neither is a no-op.
+    //
+    // `$.editor.import_sources` already round-tripped verbatim through
+    // `preserved_root` before this field existed, and the preserved copy is still
+    // sitting in `editor_object` right now. Assigning without erasing leaves a
+    // cleared provenance on disk forever; parsing without assigning silently
+    // discards every in-memory edit and writes the STALE preserved copy instead,
+    // which would make Save As worse than before the field existed. The
+    // erase-on-empty idiom is the one already used for `constraint_edits`,
+    // `parameter_model` and `atlas_packs` below.
+    //
+    // The same rule applies one level down: an `import_sources` whose `psd` is
+    // disengaged serialises as an ABSENT key, not as `{}`.
+    if (project.editor_metadata.import_sources.has_value() &&
+        project.editor_metadata.import_sources->psd.has_value()) {
+        editor_object["import_sources"] =
+            build_import_sources_value(*project.editor_metadata.import_sources);
+    } else {
+        editor_object.erase("import_sources");
+    }
+
     root["editor"] = make_object_value(std::move(editor_object));
 
     if (project.snap_settings.has_value()) {
@@ -7759,6 +8011,12 @@ ProjectData create_minimal_project(const MinimalProjectOptions& options) {
     return project;
 }
 
+std::filesystem::path project_relative_path(
+    const std::filesystem::path& project_path,
+    const std::filesystem::path& referenced_path) {
+    return make_project_relative_path(project_path, referenced_path);
+}
+
 ProjectData rebase_project_paths(
     const ProjectData& project,
     const std::filesystem::path& new_project_path) {
@@ -7792,6 +8050,22 @@ ProjectData rebase_project_paths(
         for (auto& sprite : definition.sprites) {
             sprite.image_path = rebase(sprite.image_path);
         }
+    }
+    // The sixth family (MAR-188). Two paths, both project-relative; the per-layer
+    // `image_file` is a bare file name and is deliberately NOT a path, which holds
+    // this family to two fields -- see `PsdLayerProvenance::image_file`.
+    //
+    // Reads from `project` and writes to `result`, matching the five above: the
+    // lambda captures `project` by reference precisely because `result.source_path`
+    // was already overwritten at the top of this function, and rebasing against the
+    // new location would resolve every reference into the NEW directory.
+    if (result.editor_metadata.import_sources.has_value() &&
+        result.editor_metadata.import_sources->psd.has_value()) {
+        const PsdImportProvenance& source =
+            *project.editor_metadata.import_sources->psd;
+        PsdImportProvenance& target = *result.editor_metadata.import_sources->psd;
+        target.source_path = rebase(source.source_path);
+        target.layers_directory = rebase(source.layers_directory);
     }
 
     return result;

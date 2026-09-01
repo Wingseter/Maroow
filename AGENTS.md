@@ -15,6 +15,31 @@
 - If a build or test workflow is introduced, document the exact commands here.
 - The checked-in PRD already expands the renderer, runtime, and editor roadmap from `docs/root1/discription.md`. Prefer updating that PRD rather than inventing parallel plans.
 
+### Story commit checklist
+
+- Stage **only your own paths**, explicitly named. Once a path is shared with
+  another in-flight story, that is not enough -- stage only your own **hunks**
+  with `git apply --cached` (see the durable section).
+- Every story commit carries **both** trailers, in **one contiguous block with no
+  blank line between them**:
+
+  ```
+  Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+  Claude-Session: <the session URL>
+  ```
+
+  A blank line between them makes git parse only the last, which is how MAR-186
+  lost the session trailer the first time. Copy the session value from the parent
+  commit: `git log -1 --format='%(trailers)' HEAD`.
+
+  **MAR-186, MAR-187 and MAR-188 each shipped without `Claude-Session:` and each
+  needed a follow-up amend.** Three independent agents making the same omission is
+  a missing procedure step, not three mistakes -- which is why the convention is
+  written here now rather than left to be inferred from `git log`.
+- Verify before committing, and re-measure every baseline number **at the commit's
+  actual parent**. Numbers do not survive a baseline change; that is the same
+  class as a stale line anchor.
+
 ## Documentation Entry Points
 
 - Architecture source of truth: `docs/root1/discription.md`
@@ -108,6 +133,35 @@
   collections (S1-S6), plus the actual-frame case that locates the severity
   filter and a row's Fix button with a real mouse and clicks it (F1):
   `MARROW_CONFIG_HOME=/tmp/mar187-cfg ./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 2`
+- MAR-188's typed PSD provenance and the sixth rebase family: a pre-MAR-188
+  project gains nothing and serialises byte-identically (a compatibility WITNESS,
+  green before the story and with no story-owned inversion -- never read it as
+  vindication); provenance round-trips through the TYPED STRUCT rather than
+  through `preserved_root`, which already carried the key verbatim before this
+  story and makes any text-level assertion pass on unmodified code; an in-memory
+  edit beats the preserved copy; clearing at either level removes the key rather
+  than writing `{}`; eleven malformed documents are each refused by message AND
+  JSON path while an unrelated project's serialization stays byte-identical; and
+  Save As rebases BOTH provenance paths by name -- relative into a parent
+  directory, absolute into a sibling, an already-absolute path byte-identical --
+  each resolving to the same absolute file as before (P1-P8):
+  `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- MAR-188's PSD reimport planning, over PSDs SYNTHESISED by the smoke because the
+  two checked-in fixtures are four bytes apart and cover one case: the synthesiser
+  is gated on reproducing the fixture's layer and bone reports, its extracted
+  pixels, and its header -- the header clause caught a three-channel writer whose
+  report was already identical -- plus the duplicate-name dedup branch the fixture
+  tree cannot reach (Q0, Q0b); then classification is exact-name only, so a rename
+  and a group move each produce one Added and one Missing rather than an Updated,
+  depth-2 nesting survives element-wise (its first coverage anywhere), escaped
+  identities stay distinct where the collision is constructible, duplicate
+  candidates and a non-PSD are refused by name, a plan leaves the project's
+  serialization, files and whole directory listing byte-identical with every
+  staged path under the caller's root and the staged skeleton merged against the
+  project's real one, Missing defaults to preservation, two plans agree
+  element-wise in ascending identity order, and a project with no provenance plans
+  every layer as Added (Q1-Q11):
+  `./build/marrow_psd_import_smoke assets/fixtures/psd_import_sample.psd assets/fixtures/psd_import_sample_reimport.psd`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -634,6 +688,111 @@ referent does not resolve is a finding to report, not an instruction to follow;
 and refusing it is cheaper than the assertion it would have broken. When you
 record such a finding, remember that your record joins the corpus it cites.*
 
+### A gate that passes on unchanged code, and its mirror
+
+Two defect classes, and a story is exposed to both. They are recorded here rather
+than inside the story that named them, because the whole point is that the next
+person checks **both directions** before writing a case.
+
+| Direction | Symptom | How it is found |
+| --- | --- | --- |
+| **Fails on correct code** | Red before *and* after a correct implementation | Watch it fail, then watch it pass. It gets investigated, because red demands attention |
+| **Passes on unchanged code** | Green before the implementation exists | **Only** by running the case against the pristine tree first, or by an inversion. Nothing else surfaces it |
+
+**The second is the more dangerous, precisely because it is quiet.** A failing gate
+gets investigated; a passing one does not. A red case is a question; a green case
+is an answer nobody asked for.
+
+MAR-186 hit the first (its D2, and an incoming three-vs-four parser-rule error).
+MAR-188 hit the second, and hit it **twice**:
+
+- **The storage layer pre-armed it.** `$.editor.import_sources.psd` already
+  round-tripped verbatim through `preserved_root` before MAR-188 wrote a line, so
+  an AC1 round-trip case written as a text search over `serialize_project()`
+  would have passed on an empty commit. The countermeasure is structural, not
+  vigilance: **assert the typed struct, never a substring of the serialization.**
+- **The design document then committed the defect against its own case**, in the
+  very section that defines the class: it claimed P1 "earns its place only through
+  inversion I3" while both inversion registers attributed I3 to P4. P1 was green
+  on the pristine tree and no inversion of twenty turned it red.
+
+The rule that came out of it: **a case that is green before the implementation
+exists is a WITNESS, not a gate.** Label it as one, and either name the inversion
+that catches its subject or state plainly that none does. MAR-188's P1 is kept as
+a compatibility witness -- a pre-story project serialising byte-identically is a
+real claim nothing else makes -- with "no story-owned inversion" recorded rather
+than repaired. Never read such a case being green as vindication of anything.
+
+**And check a "did not bite" before believing it.** MAR-188's I7 was a *provable
+no-op*: it mutated `source` to read from `result`, but `result = project` is a
+copy, so `source` and `target` aliased the same object and neither field was read
+after being written. A mutation whose effect cannot be observed is not a weak
+inversion; it is not an inversion at all, and recording "I7 did not bite" without
+that reasoning would have told the next reader nothing.
+
+### A stale line anchor fails to resolve. A stale RESTORE TARGET resolves perfectly and destroys work.
+
+The team lead instructed an agent to park its edits by restoring three files from
+`git show <sha>:<path>`, naming a SHA that was current when the message was
+written. **HEAD moved before the message was read.** One of the three files had
+just received another story's required review fix, so the restore would have
+reverted it -- leaving a clean tree, a passing suite, and two inversions that had
+just been made to fail by name silently passing again. It was caught only because
+the story that shipped the fix recognised its own committed guard about to fire
+against its own change.
+
+- **Never restore from a copy taken before the current HEAD.** Re-derive from
+  `git show <current-HEAD>:<path>` **at the moment of restoring**, and `cmp`
+  against **that blob** rather than against the copy.
+- **Never pin a SHA inside an instruction that will be executed later.** Name the
+  file and say "current HEAD".
+
+**"Stage only your own paths" stops working the moment a path is shared.** The
+hazard is another agent's uncommitted **hunks inside a file you own**: MAR-187's
+landing was about to overwrite ~493 lines of MAR-188's in-progress work in
+`src/samples/editor_project_smoke.cpp`, because git stages whole files. The
+technique is **`git apply --cached`** -- stage your own *hunks*, landing the change
+as a unified diff proven byte-identical to the tree you actually built and ran,
+never as a file copy. Use it whenever two stories hold the same path.
+
+### Two agents share one scratchpad, and a restore is only verified by an absolute path
+
+Both were measured in MAR-188's Task 0 and both silently produce a *confident wrong
+answer* rather than an error.
+
+**The session scratchpad is shared across every agent in the session.** MAR-188's
+implementer extracted an isolated tree into `<scratchpad>/t188` and found it
+already populated: the planner agent had used the same path and left a `build/`
+directory and its own probe sources there. `git archive HEAD | tar -x` **overlays**
+rather than replaces, so the extraction landed on top of another agent's build
+output. A tree seeded that way can compile against stale objects and report either
+colour wrongly.
+
+**Name the directory after your own agent or task, never after the story.** Every
+agent working a story reaches for the story's own number, which is exactly why
+they collide. If a directory you did not create is already there, discard it --
+`rm -rf` and re-extract -- rather than trusting it.
+
+The same reasoning applies to the shared worktree itself: while a review is live it
+mutates and restores tracked files continuously (MAR-188 watched
+` M src/editor/safe_fix.cpp` appear and vanish twice). A build tree seeded from
+`git archive HEAD` and overlaid with **only your own story's files** is immune to
+that, and is what MAR-188 used for every one of its verification builds.
+
+**A restore is only verified if the `cmp` names an ABSOLUTE path.** MAR-188 neutered
+four assertions, ran a probe, restored them, and got `cmp ... IDENTICAL`. The
+restore had in fact written into the *build tree*, because an earlier `cd` in the
+same shell command was still in effect, and the `cmp` then compared the baseline
+against the copy it had just made. The assertions stayed neutered for two more
+inversions, which is what made their attribution wrong -- and the wrongness was
+only visible because a later inversion blamed the wrong case.
+
+Relative paths in a restore step follow whatever `cd` ran earlier in the same
+command. Use absolute paths for the file, the baseline and the `cmp`, and prefer a
+script over an inline shell sequence: MAR-188's `invert.py` used absolute paths
+throughout and every one of its twenty restores is trustworthy for that reason
+alone.
+
 ### An identity collision needs a token whose neighbours are unconstrained
 
 MAR-186 escapes `|` and `\` in every identity token, and the reason a collision
@@ -695,6 +854,270 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-188 Plan Provenance-Aware PSD Reimports Validation Results
+
+Baseline `bb3652f`. Every verification build was made in an isolated tree seeded
+from `git archive HEAD` and overlaid with **only this story's own files**, because
+a review of MAR-187 was live and mutating tracked files throughout. The shared
+`./build` was never used.
+
+**`bb3652f` is not in the log, and that is expected.** MAR-187's review amended its
+commit mid-story, to `f3a3768`, adding `cmake/CheckFrameBodies.cmake`, the
+`marrow_frame_body_check` target and `tools/inversion/`. Task 0's measurements
+below were taken at `bb3652f` and are **left exactly as measured** -- a historical
+measurement is not rewritten to match a later tree. What was re-run against the
+amended base is the *final* verification: clean all-target build with **0
+warnings**, `ctest` **22/22**, every smoke green, `agent_dispatch` **437**
+`[ OK ]`, and MAR-187's own frame-body check passing both POST_BUILD and on
+demand.
+
+**Every baseline number was re-measured at the actual parent `f3a3768`, not
+carried across the baseline change** -- a number does not survive a rebase any
+better than a line anchor does. Measured there: **0** warnings, `ctest -N` **22**,
+`agent_dispatch` **437** `[ OK ]`, registry **66** at `agent_dispatch_smoke.cpp:42`,
+**11** `!= 66U` guards. All identical to the `bb3652f` figures. The `[ OK ]` count
+was expected to have moved and had **not**: MAR-187 added its cases to
+`editor_project_smoke.cpp`, which `marrow_agent_dispatch_smoke` does not build. MAR-188 reverted none of that amendment; the single line it changed in the
+amended `editor_project_smoke.cpp` is the `five`->`six` prose fix recorded as E13.
+
+### What was measured before any code was written
+
+Task 0 ran ten gates. The results that changed the story are first.
+
+- **`$.editor.import_sources.psd` already round-tripped verbatim, with zero code.**
+  `preserved_root` stores the whole parsed tree (`project.cpp:7953`),
+  `build_project_value` seeds the editor block from it (`:5023`) and re-emits it
+  wholesale (`:5089`). A probe injected the key, loaded, and re-serialized: the
+  **entire subtree came back**, nested `group_path` array and all. The
+  consequence is the story's defining hazard — **an AC1 round-trip case written as
+  a text search over `serialize_project()` passes on an empty commit.**
+- **`rebase_project_paths` left it stale**, because it starts `ProjectData result
+  = project;` and walks only the five struct families. That is AC2's detector.
+- **Both rebase arms measured.** Into a **parent** directory references stay
+  relative (`fixtures/player_idle.mskl`); into a **sibling** they come back
+  absolute, because `make_project_relative_path` returns the absolute form
+  whenever the relative one would need `../`. P5 and P7 author both.
+- **`create_minimal_project`'s `preserved_root` is an empty OBJECT, not null**
+  (`is_object=1 is_null=0`). A case shaped as `is_null()` would **fail on correct
+  code**. Test `is_object() && as_object().empty()`, which is the shape
+  `build_project_value` itself uses at `:5007-5009`.
+- **The pristine baselines**: 0 warnings, `ctest -N` 22, 22/22 green,
+  `marrow_agent_dispatch_smoke` **437** `[ OK ]`, registry **66** with **11**
+  `!= 66U` guards split **7 graph / 2 constraints / 2 timeline**,
+  `agent_dispatch_smoke.cpp:42` (**not** `:39`), `test_client.py:53,55`.
+- **`-Wswitch` re-measured at `bb3652f`: 25 warnings, 18 `authoring.cpp` / 6
+  `agent_handlers_editing.cpp` / 1 `timeline_controller.cpp`** — reproducing
+  MAR-185's figure and its per-file split exactly, after MAR-187 added ~6,500
+  lines. Build exit **0**: it warns, it does not fail.
+- **The two PSD fixtures differ in exactly 4 bytes**, at offsets 286/290/294/298,
+  all in `body`'s bounding box. Layer sets identical. Confirmed with `cmp -l`.
+- **`format-spec.md:685-707` already documents `$.editor`'s optional keys**, so
+  `import_sources` joins them. That turned a predicted no-op into real work.
+
+### The re-anchor gate: six findings, one blocking
+
+- **BLOCKING — `assign_slot_names` does not exist.** Both documents cited
+  `psd_import.cpp:814-826` as that symbol; `git grep assign_slot_names HEAD`
+  returns **nothing repo-wide**. The lines and the described behaviour are right;
+  the enclosing function is `parse_psd_document` (`:625`). A fictional primary
+  anchor is exactly how MAR-185's D23 let a third parser escape a name-based
+  sweep. Corrected in all three sites.
+- `editor_project_smoke.cpp:17948-17951` (MAR-186's registration, and MAR-188's
+  insertion point) → **`:19985-19988`**, +2037. **Correct at `687ed4f`**, verified
+  against that blob; MAR-187 added 2045 lines. MAR-188 registers after `:19996`.
+- `ScopedRenameCallback` `:13025` → **`:13034`**; `CMakeLists.txt:812`/`:850` →
+  **`:814`**/**`:852`**, and `add_library(marrow_editor …)` is now `:499-523`;
+  `AGENTS.md:2337`/`:2348` → **`:2719`**/**`:2730`**, all correct at `687ed4f`.
+- **MAR-187 touched none of this story's core files.** `git diff --stat 687ed4f
+  bb3652f` over `project.{cpp,hpp}`, `psd_import.{cpp,hpp}`, `session.cpp`,
+  `json.cpp`, `skeleton_parse.cpp` and `psd_import_smoke.cpp` is **empty**. The
+  only real merge points were `CMakeLists.txt` and `editor_project_smoke.cpp`.
+- **All six of MAR-180's path-family citations re-verified as stale** at
+  `bb3652f`, none naming its construct. Measured drift **+59 to +512** — a range
+  the incoming brief had reported as "+288..+303", a figure that appears in
+  neither planning document.
+
+### Result
+
+`$.editor.import_sources` is a typed, parsed, validated project field; Save As
+rebases it as the sixth path family; and `plan_psd_reimport` returns a
+deterministic added/updated/missing diff without touching anything outside a
+caller-supplied staging root.
+
+- **The provenance vocabulary** — `PsdLayerProvenance`, `PsdImportProvenance`,
+  `ProjectImportSources`, and `ProjectMetadata::import_sources`. Eleven load
+  rejections, each asserted on its **message and its JSON path**.
+- **Serialization does BOTH halves.** Parsing without emitting would silently
+  discard every in-memory edit and write the stale preserved copy — making Save As
+  *worse* than before the story. Emitting without erasing would leave a cleared
+  provenance on disk forever. `build_project_value` assigns or erases, and an
+  `import_sources` whose `psd` is disengaged serialises as an **absent key**.
+- **The sixth rebase family** (`project.cpp:8056-8069`), two paths, reading from
+  `project` and writing to `result` like the five before it.
+- **`plan_psd_reimport`** in a new `psd_reimport_plan.{hpp,cpp}` pair — a new pair
+  rather than an addition to `psd_import.hpp`, which deliberately does not depend
+  on the project layer. The caller supplies a staging **root**, never an output
+  path: `write_imported_layers` `remove_all`s whatever directory it is handed, so
+  an API that cannot be handed a directory cannot be handed the wrong one.
+- **A PSD synthesiser** in `psd_import_smoke.cpp`, because every classification
+  case needed input that did not exist.
+
+### The PSD synthesiser, and the gate that made it trustworthy
+
+The repository contains **two** PSDs, four bytes apart, with identical layer sets:
+no added, removed or renamed layer, no group move, no duplicate name, and **no
+group nested deeper than one level anywhere**. Eight cases needed inputs that did
+not exist, and no generator existed either. Hand-authoring six more ~19KB opaque
+binaries was rejected: a reviewer could not see what a fixture contained without
+running something.
+
+**Q0 gates the synthesiser, and its extra clauses caught a real defect on their
+first run.** The single-clause form originally specified — "reproduce the fixture's
+layer and bone report" — **passed completely** against a synthesiser emitting
+**3 channels** where the checked-in fixture is **RGBA, 4**. The layer report and
+bone report were already identical; only the added header comparison saw it. That
+is precisely the "plausible but wrong PSD" the gate exists to stop, and Q1's
+`proposed_image_file` clause would have rested on it. The four clauses:
+
+1. **Report** — layers, groups, slots, attachments, bones, **`image_file`** and
+   boxes, compared against the checked-in fixture's own output measured **at run
+   time** rather than hard-coded.
+2. **Pixels** — the extracted PNG is compared byte for byte against the same RGBA
+   re-encoded through the importer's **own** `write_rgba_png`. Comparing files
+   rather than decoding one keeps the gate free of a second image codec, the same
+   objection that ruled out teaching the synthesiser PackBits.
+3. **Header** — signature, version, channel count, depth and colour mode against
+   the fixture's own bytes. Synthesised **3182** bytes against the fixture's
+   **19636**; the difference is the composite image-data and image-resource
+   sections, which the parser never reads.
+4. **Q0b — the duplicate-name branch.** `parse_psd_document:814-826` takes the
+   joined-path dedup only when the document-global census exceeds 1, and Q0's tree
+   has no duplicates — so that branch was **ungated** while Q5 and Q6 are the only
+   cases living in it. Q0b asserts the slot names resolve to `torso/body` and
+   `body`.
+
+Q0 and Q0b run **first**, so a synthesiser regression is attributed to the gate
+rather than to whichever case notices.
+
+### Inversions -- actual outcomes, not predictions
+
+Twenty run. Each: mutate → delete objects → build **all** targets → run → record
+the actual text → restore → rebuild → `cmp`. Seventeen bit as designed.
+
+| # | Mutation | Outcome |
+| --- | --- | --- |
+| I1 | Drop the `parse_import_sources` call | **P2**, `provenance must survive a round trip through the typed field` |
+| I2 | Parse but never assign `editor_object["import_sources"]` | **P3**, `expected art/other.psd, got art/hero.psd` |
+| I3 | Assign but never erase on `nullopt` | **P4(a)** |
+| I4 | Serialise `psd == nullopt` as `{}` | **P4(b)** |
+| I5 | Sixth family rebases `source_path` only | **P5**, `layers_directory` clause by name |
+| I6 | Sixth family rebases `layers_directory` only | **P5**, `source_path` clause by name |
+| **I7** | Read `source` from `result` instead of `project` | **DID NOT BITE, and cannot.** `result = project` is a copy, so `source` and `target` **alias**, and neither field is read after being written. A provable no-op. See below |
+| I7b | The shared lambda captures `result` | Bites at **MAR-180 S2** — shared code, like I8 |
+| I8 | Remove `is_absolute()` from the shared lambda | Bites at **MAR-180 S3**, which runs before MAR-188's cases. P6's subject confirmed directly on the artefact instead: against an I8 build an absolute provenance path returns as `abs_hero.psd`, neither absolute nor byte-identical |
+| P8 d,e,h,i,j,k | Remove each domain rejection, one at a time | Each fails **its own** P8 arm |
+| I9 | Stage into the project's own directory | Bites — but on the planner's **own containment guard** (`staged outputs escaped the staging root`), not on Q8's directory listing as designed. The guard makes the mutation unreachable at the listing level |
+| **I10** | Leave `existing_skeleton_path` unset | **Did not bite as designed.** Every `proposed_*` target comes from the CANDIDATE parse, not from the staged merge, so the plan is identical either way. A Q8 clause asserting the staged skeleton carries the project's authored animations was added, and I10 then bites: `the staged skeleton must carry the project's authored animation 'attack'` |
+| I11 | Fall back to `slot_name` when the identity misses | **Q3**, `expected body -> Added, got body -> Updated` |
+| I12 | A similarity matcher before classification | **Q2**, `expected torso\|arm_left -> Added, got torso\|arm_left -> Updated` |
+| I13 | Remove identity escaping | **Q5** — and note the *mechanism* differs from the prediction: the two layers now collide and are **refused** by the duplicate check rather than silently collapsing to one |
+| I14 | Pair candidate duplicates positionally | **Q6**, `duplicate candidate identities must be refused, got a successful plan` |
+| I15 | `preserve{false}` | **Q9**, `torso\|arm_l: preserve expected true, got false` |
+| I16 | Emit in candidate-record order | **Q10/Q1 ordered clause**, `first order difference at index 1` |
+| I17 | Accumulate counts in a parallel loop missing an arm | **Q1's redundant count clause, and nothing else** — the demonstration that the clause is redundant but not decorative |
+| I18 | Divider written before the group's children | **Q0**, `PSD folder end marker appeared without an open folder.` |
+| I19 | Drop `bone_name` from the provenance copy | **Q1's full-tuple clause**, `bone='' expected torso` |
+
+**I7 is not a valid inversion of this implementation and should not be carried
+forward.** The property the design wanted — never resolve against the
+already-overwritten `result.source_path` — lives in the **shared lambda**, which
+I7b and I8 mutate; the sixth family cannot express it. P5's two `weakly_canonical`
+identity clauses are still worth keeping, but nothing MAR-188 owns alone detects
+them.
+
+### P1 is a compatibility witness, not a gate
+
+**The design shipped an instance of the defect class it defines.** §0.3.1 names
+"a gate that passes on unchanged code" and then claimed P1 "earns its place only
+through inversion I3" — while §7 and the plan's §B both attribute **I3 to P4**.
+P1 was measured **green on the pristine tree** and no inversion of the twenty
+turns it red.
+
+P1 is kept and **relabelled**. Its claim is real and nothing else makes it: a
+pre-MAR-188 project serialises **byte-identically** after the story —
+`player_idle.marrow`, **6111 bytes**, `cmp`-clean against a baseline captured
+before a line was written. What it is not is evidence that any MAR-188 code
+works. **P1 has no story-owned inversion, by design, and that is recorded rather
+than repaired.** Never read "P1 green" as vindication.
+
+The rule this produced: **a case that is green before the implementation exists is
+a witness, not a gate, and must be labelled as one** — with the inversion that
+would catch its subject named, or its absence stated.
+
+### Document errors found (7)
+
+| # | Where | Error | Resolution |
+|---|---|---|---|
+| E8 | Design §0.3.1 | P1 "earns its place only through inversion I3", contradicting §7 and §B, which attribute I3 to P4 | P1 relabelled a compatibility witness; §0.3.1 corrected and now carries the class's first *self-inflicted* instance |
+| E9 | Design §9, plan §A.3 | `assign_slot_names` — a symbol that exists nowhere | Re-worded to `parse_psd_document`'s document-global slot dedup. **Blocking**; found by the re-anchor gate |
+| E10 | The incoming brief | MAR-187 "put `OverlayRecordKey` in its own `safe_fix.hpp`, leaving `diagnostics.hpp` unmodified" | **False.** `diagnostics.hpp` +71, and the key is at `diagnostics.hpp:163`. A prediction about a then-unlanded story, so corrected rather than preserved. No effect on MAR-188 |
+| E11 | The incoming brief | MAR-180's citations drift "+288..+303" | The staleness re-verifies; the **figure was invented** and appears in neither planning document. Measured **+59..+512** |
+| E12 | The incoming brief | "your two documents are the only untracked files" | A third, `build-specrev187/`, existed |
+| E13 | Design §2.5 | Names **three** prose sites saying "five families" | There are **four**: `editor_project_smoke.cpp:13489`, MAR-180 S5's own doc comment, is in neither document. Found by Task 7's `grep`, which is why that sweep is in the plan rather than left to attention |
+| E14 | Design §2.6 | `make_psd_provenance` can use `make_project_relative_path` | That function is **inside `project.cpp`'s anonymous namespace** and unreachable. A thin public `project_relative_path` wrapper was added to `project.hpp` rather than duplicating the house rule |
+
+### Not independently covered
+
+- **`make_psd_provenance` and `plan_psd_reimport` have no production caller.**
+  Both are exercised only by the smoke. MAR-189 owns the commit path that calls
+  them, and MAR-190 the GUI. Verified by `grep`: the only call sites outside the
+  new source file are in `psd_import_smoke.cpp`.
+- **`preserve` is exposed and nothing consumes it.** MAR-190 owns the checklist
+  that lets a user opt into deletion.
+- **Photoshop's real layer-record order is unverified and unverifiable here.** The
+  parser requires each group's `lsct` 1/2 header **before** its children and the
+  `lsct` 3 divider **after**; both checked-in fixtures are authored that way and
+  the synthesiser follows them. There is no Photoshop-authored PSD in the
+  repository and none can be produced in this environment. If the real order is
+  the inverse, every group-bearing real-world PSD fails at `psd_import.cpp:734` —
+  a **pre-existing** property of the importer, not something MAR-188 introduced.
+  Flagged to MAR-189/190, which own the real import path.
+- **Slot names remain unstable across imports.** Adding a layer can rename an
+  untouched slot, because the dedup uses a document-global census. MAR-188 records
+  what the names *were* and keys on something else; it does not make the importer's
+  naming stable. A user will see it as `proposed_slot_name` differing from
+  `current_slot_name` on an `Updated` row.
+- **No save-time validation of `image_file`.** Every write path constructs it from
+  `filename()` and structurally cannot produce a separator, so a
+  `validate_project_for_save` rule would have no reachable failing input —
+  "correct by inspection, unreachable by test".
+- **`marrow_psd_import_smoke` is still not in CTest.**
+
+### MAR-180's deferred criterion: discharged as worded, PERMANENTLY OPEN as generalised
+
+MAR-180 could not satisfy "Save As rebases the PSD provenance path" because no
+such field existed. **That clause is now discharged in full**: AC1 creates the
+typed field, AC2 registers it as the sixth family, and P5/P6/P7 with I5/I6 prove
+it.
+
+A precision MAR-180 could not state, because it had not measured it: the criterion
+was unsatisfiable **not** because the data could not be stored — it already
+round-tripped — but because it was stored **opaquely**. MAR-188 discharges it
+precisely by moving the key out of the opaque copy into a typed field.
+
+**MAR-180 also generalised it to "rebases every relative path", and that clause
+can never close.** MAR-188 makes it six known families and seven rebased fields
+out of an **unbounded** document. `preserved_root` is *defined* as "whatever this
+code does not understand", so a rule quantified over every relative path is
+quantified over a set the program cannot enumerate. Any path a future document
+carries under an unparsed key remains unrebased and silently stale on Save As.
+
+**This is not a MAR-188 deliverable and must not be written up as one.** Closing it
+needs a decision nobody has taken — a schema-strict loader, or a declaration that
+unparsed paths are unsupported — and each is a story in its own right with its own
+compatibility cost. Recorded here as permanently open, stated plainly rather than
+quietly rescoped into "six families, done".
 
 ## MAR-187 Add the Problems View and Safe Fixes Validation Results
 
@@ -2859,6 +3282,14 @@ and the rename cannot clean up, and one `*.tmp.*` file may remain beside the
 project. Nothing removes it. There is no crash-injection test for this: killing a
 process mid-`rename` is not reproducible in this suite, and the injected rename
 failure is the strongest mechanically testable proxy.
+
+**Discharged by MAR-188, except one clause that can never close.** See MAR-188's
+section: AC1 created `$.editor.import_sources.psd` as a typed, parsed, validated
+field and AC2 registered it in `rebase_project_paths` as the **sixth** family, so
+"no such field exists" is now false and the criterion below is executable as
+worded. Its *generalisation* -- "rebases every relative path" -- remains
+**PERMANENTLY OPEN**, by exactly the amount `preserved_root` is opaque. Do not
+write this up as "six families, done".
 
 **One acceptance criterion cannot be satisfied as written.** The story requires
 Save As to rebase a "PSD provenance path". No such field exists:

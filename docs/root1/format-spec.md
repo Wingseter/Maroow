@@ -693,6 +693,7 @@ Common fields:
 - `notes`
 - `viewport`
 - `timeline`
+- `import_sources`
 
 `viewport` currently includes:
 
@@ -705,6 +706,39 @@ Common fields:
 `timeline` is optional and currently stores `fps`, a finite positive editor
 display/snap rate. It defaults to `60` for existing projects. Timeline zoom and
 pan are presentation state and do not alter animation duration.
+
+`import_sources` is optional and absent from every project written before
+MAR-188. It records where a project's art came from and which PSD layer became
+which runtime target. Only `psd` is defined today; the object exists so a second
+source format can be added without moving the ones already stored. An
+`import_sources` with no `psd` is written as an ABSENT key rather than as `{}`.
+
+```json
+"import_sources": {
+  "psd": {
+    "path": "art/hero.psd",
+    "layers_directory": "art/hero_layers",
+    "layers": [
+      { "group_path": ["torso"], "layer": "body",
+        "slot": "body", "attachment": "body", "bone": "torso",
+        "image": "body.png" }
+    ]
+  }
+}
+```
+
+- `path` and `layers_directory` are **project-relative** and are rewritten by a
+  Save As, as the sixth path family. Both are required and neither may be empty.
+- `layers` is optional; absent and empty both mean "no mapping yet", which is a
+  real state for a source that has been named but not yet committed.
+- A layer's identity is `(group_path, layer_name)` — the exact strings Photoshop
+  stored, before slot de-duplication. Two entries sharing an identity are refused
+  at load, because a provenance record that cannot key itself is malformed.
+- `image` is a bare file NAME resolved against `layers_directory`, never a path.
+  A value containing a directory separator is refused at load. An extracted layer
+  image is always a direct child of the layer directory, so a stored path could
+  only ever restate the directory once per layer; keeping it a name holds the
+  Save As rebase surface to two fields.
 
 ### `snap`
 
