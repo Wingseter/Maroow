@@ -1367,10 +1367,12 @@ order**. The predicted case is the design's; the text is what actually printed.
 | **I15** | `apply_agent_review` ignores `request.allowed` | A6 | **A6(rejected)** -- `approving a whitelist-rejected request must refuse; got ok=0 code='psd_changed_since_review'` |
 | **I16** | the dry run leaves its staging root behind | A1 | **A1** -- `the dry run left '/tmp/mar189_agent/a1_staging/plan-1' behind` |
 | **I17** | the staging root is not whitelist-checked | A3 | **A3** -- `expected forbidden_path …; got ok=0 code='psd_plan_failed' message='… staging root could not be created'`. **The mutation still fails the operation** -- `/usr/local` is unwritable -- so a `!result` assertion would have passed here and recorded a false "did not bite". Only asserting the CODE sees it |
+| **I17b** | delete ONE of `ValidateRequest`'s two name guards (found by review) | R1c | **A second live instance of I17's shape.** With the `staged_image != image` guard gone the *other* guard fires -- the staged texture is `staged.png` and the target's `image` is `bundle_tex.png` -- so the op still fails, for a different reason, and `!result` would be green. **R1c sees it only because it asserts the full message.** Two independent instances in one story is why "assert the message" is not style advice |
 | **I18** | `rollback_advance` inverts the seam's polarity | R6b | **R3/OpenJournal** -- `the commit must roll back cleanly; rollback_error='rollback of OpenJournal failed: injected failure: '`. Earlier than intended: a spurious rollback error reddens the sweep long before the case that reads the error's text |
 | **I18b** | `rollback_advance` consults the seam and **discards its message**, so the rollback still stops and reports nothing | R6b | **R6b** -- `a failing rollback must NAME the step it was undoing. Expected 'rollback of PlaceAtlas failed: injected failure: disk went away'; got ''`. R3 stays green, because nothing there reads `rollback_error`'s content. This is the arm that makes the rollback seam load-bearing |
 | **I19** | derive the target texture from the ATLAS's stem instead of the atlas document's `image` -- the "obvious wrong fix" -- with both `ValidateRequest` name guards disabled so it reaches placement | R1b | **R1** -- `the committed texture ('…/bundle_tex.png') must equal the staged bytes; sizes 137 and 117`. R1's byte clause overlaps R1b's subject for any mutation that misplaces content; see the note below |
 | **STRAY** | plant `planted_orphan.png` beside the atlas after a successful commit | R1b | **R1b** -- `appeared: …/r1b/planted_orphan.png` |
+| **I22** | delete the exclusion of prune-requested identities from `lost` | R5(c) | **R5(c)** -- `a preserve=false deletion must not be refused as destruction by the very step that performed it`. **R2(d) still refuses under the same mutation**, so the exclusion narrows the check without disarming it |
 | **I20** | delete the structural `<skin>/<slot>` comparison, leaving the runtime build | R2(d) | **R2(d)** -- `a staged bundle that erases a hand-authored skin must be refused even when NOTHING references it; the commit reported success`. **R2(c) passes unchanged under the same mutation**, on its own deform message -- which is what makes R2(d) the unique detector for the structural half |
 
 **I17 is the clearest instance in this story of why `!result` is not an
@@ -1516,8 +1518,12 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   loss.
 
   R2(c)'s refusal is triggered by a deform timeline that **names** the lost
-  attachment; the runtime build cannot see a loss nothing references, which is why
-  a **structural** comparison was added rather than a runtime-build one.
+  attachment -- and its mesh is named something no slot names, because with
+  `skins` absent the parser synthesises a default skin from the slots' own
+  `attachment` members (`skeleton_parse.cpp:4933-4935`), so a mesh named after the
+  slot's attachment would still resolve. The runtime build cannot see a loss
+  nothing references, which is why a **structural** comparison was added rather
+  than a runtime-build one.
   `ValidateStagedBundle` now compares the current skeleton file's
   `<skin>/<slot>` identity set against the staged one's and refuses on the
   difference, naming it:
@@ -1541,10 +1547,33 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   skin ordering, or anything outside `$.skins`. It is a check against *losing* an
   attachment identity, not against *altering* one.
 
-  **Blast radius:** a skeleton produced by a PSD import has no `skins` at all, so
-  the comparison never fires for the projects this story creates. It engages only
-  where the current skeleton **has** skins the staged one lacks -- exactly the
-  population that was losing data.
+  **Blast radius, corrected -- the refusal is UNCONDITIONAL.** The first version of
+  this paragraph said the check "engages only where the current skeleton has skins
+  the staged one lacks", which is true and misleading: `build_skeleton_document`
+  erases `skins` **wholesale**, so the staged set is **always empty**. The
+  difference is therefore the whole of the current set, and the consequence, in
+  plain words:
+
+  > **Reimport is permanently blocked for any project that has ever had a
+  > hand-authored skin.** Including a reimport whose only purpose is a
+  > `preserve=false` deletion. There is no override -- `PsdReimportCommitOptions`
+  > carries `project_path` and `update_provenance` and nothing else.
+
+  It remains the right trade against silent unrecoverable loss, and it is a
+  consequence rather than a footnote. The refusal says so itself rather than
+  implying a flag that does not exist: *"There is no override in this version: to
+  reimport anyway, first remove those attachments from the project's skeleton,
+  which makes the loss an edit you chose rather than one the commit performed."*
+  A refusal that implies a remedy it does not provide is its own small dishonesty.
+
+  **An informed override is backlogged, not designed here.** It needs a decision
+  about what is confirmed and how the consequence is shown, which belongs with the
+  review UI rather than with the committer. Owner: **MAR-190's successor**, raised
+  by MAR-189 and explicitly *not* added to MAR-190.
+
+  For projects this story creates the comparison never fires, because a
+  PSD-derived skeleton has no `skins` at all. That is the only population it is
+  quiet for.
 
   **Ordering is deliberate:** the structural comparison runs **after** the runtime
   build, so a project failing both keeps the more specific diagnosis. R2(c) still
@@ -1566,29 +1595,27 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   `std::make_error_code(std::errc::cross_device_link).message()` after any
   `Place*` step exercises the rollback for it. Not written, because it would
   assert the rollback and not the EXDEV path itself.
-- **The skins loss is now covered by its own case, `R2(c)` -- this row is
-  discharged, not deferred.** `build_skeleton_document` calls `root->erase("skins")`
-  (`psd_import.cpp:1041`), so a committed reimport erases every skin and attachment
-  definition. R2(b) refuses on `$.ik[0].bones[0]: ik constraint references unknown
-  bone 'torso'`, which is a consequence of the *bones* replacement and therefore
-  proves nothing about skins. R2(c) makes the skins loss the **only** thing wrong:
-  the candidate is the SAME layer tree as the initial import, so the bone and slot
-  sets are identical and nothing bone- or slot-shaped can refuse; the project's
-  skeleton carries a skin holding a MESH attachment plus a deform timeline
-  targeting it, and the importer preserves `animations` verbatim while erasing
-  `skins`. Measured refusal:
+- **The naming rule has TWO implementations, kept in sync by hand.**
+  `plan_scenario` (`psd_import_smoke.cpp`) re-derives the staged atlas name from
+  the target atlas's `image` stem instead of calling `plan_project_reimport`, which
+  is the production site. Q13 does not close this either -- it passes the names in
+  as literals. **A5 is the only detector**, and only because the A-cases go through
+  the real dispatcher. This is the fixture-blindness class one level up: two
+  parallel implementations agree by construction until somebody edits one, and the
+  test half agreeing with itself proves nothing about the production half. The
+  reviewer confirmed it bites in both directions -- reverting the production naming
+  site reddens **A5**, reverting the committer's derivation reddens **R1** -- so
+  the coverage exists; what does not exist is a single source for the rule.
 
-  ```
-  ValidateStagedBundle: the staged bundle does not build with the project's overlays:
-    $.animations.idle.deform.shadow.shadow_mesh:
-    deform timeline references unknown attachment 'shadow_mesh'
-  ```
+- **R1b's `image` clause is a witness for a structural reason, not for want of
+  looking.** The earlier wording ("no mutation reddens it first") understated it.
+  The clause has exactly one degree of freedom left: the committed atlas's *bytes*
+  are pinned by R1, its *location* is pinned by R1b's own path-set clause, and all
+  that remains is the staged atlas's **name** -- which is supplied by **test code**
+  in every R-case. *A clause whose only free variable is set by the test cannot be
+  falsified by mutating the product.* R1c carries the evidence, by asserting the
+  refusal message.
 
-  The attachment is named something no slot names, because with `skins` absent the
-  parser synthesises a default skin from the slots' own `attachment` members
-  (`skeleton_parse.cpp:4933-4935`) -- name the mesh after the slot's attachment and
-  the refusal becomes *"deform timelines require a mesh attachment target"*, which
-  is still skins-specific but less direct.
 - **A5/A6 do not go through the C ABI.** `MarrowProject` is opaque outside
   `marrow_c.cpp` and approval needs the session and the review queue, so A1-A6
   drive `AgentCommandDispatcher` and `apply_agent_review` directly from

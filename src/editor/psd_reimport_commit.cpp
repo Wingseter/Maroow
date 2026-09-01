@@ -361,6 +361,9 @@ private:
     Journal journal_;
     runtime::json::Document staged_document_;
     bool staged_document_loaded_{false};
+    /// @brief `<skin>/<slot>` entries PruneUnpreserved removed, so validation does
+    /// not report a requested deletion as destruction.
+    std::vector<std::string> pruned_skin_identities_;
 };
 
 bool CommitRun::validate_request() {
@@ -539,7 +542,22 @@ bool CommitRun::prune_unpreserved() {
                 if (!skin.second.is_object()) {
                     continue;
                 }
-                skin.second.as_object().erase(layer.current_slot_name);
+                if (skin.second.as_object().erase(layer.current_slot_name) > 0U) {
+                    // RECORDED, because the next step refuses on exactly this
+                    // shape. `ValidateStagedBundle` compares the staged skins
+                    // against the current ones and treats a missing identity as
+                    // destruction -- which is right for the importer's wholesale
+                    // erase and wrong for a deletion the user asked for. Without
+                    // this, step 2's own action would trip step 3's refusal.
+                    //
+                    // Inert today: this importer erases `skins` outright, so there
+                    // is never anything here to prune. It stops being inert the
+                    // moment any importer preserves skins, and a defect that is
+                    // latent only because another component is currently broken is
+                    // worth closing while it is visible.
+                    pruned_skin_identities_.push_back(
+                        skin.first + "/" + layer.current_slot_name);
+                }
             }
         }
     }
@@ -641,6 +659,19 @@ bool CommitRun::validate_staged_bundle() {
         staged_skins.begin(),
         staged_skins.end(),
         std::back_inserter(lost));
+    // A deletion the user asked for is not destruction. `PruneUnpreserved` removes
+    // the skin entry of every `Missing && !preserve` layer, and that removal must
+    // not be reported back as a loss by the very next step.
+    std::vector<std::string> requested = pruned_skin_identities_;
+    std::sort(requested.begin(), requested.end());
+    std::vector<std::string> destroyed;
+    std::set_difference(
+        lost.begin(),
+        lost.end(),
+        requested.begin(),
+        requested.end(),
+        std::back_inserter(destroyed));
+    lost = std::move(destroyed);
     if (!lost.empty()) {
         std::string identities;
         for (const std::string& identity : lost) {
@@ -651,7 +682,10 @@ bool CommitRun::validate_staged_bundle() {
              "defines (" +
                  identities +
                  "); a PSD reimport replaces bones, slots and skins wholesale, so "
-                 "committing it would destroy hand-authored attachments");
+                 "committing it would destroy hand-authored attachments. There is "
+                 "no override in this version: to reimport anyway, first remove "
+                 "those attachments from the project's skeleton, which makes the "
+                 "loss an edit you chose rather than one the commit performed");
         return false;
     }
     return advance(PsdCommitStep::ValidateStagedBundle);

@@ -2474,6 +2474,94 @@ bool add_shadow_mesh_skin(const std::filesystem::path& skeleton_path, bool with_
     return true;
 }
 
+/**
+ * @brief Plants `skins.default.<slot>` as a mesh attachment, and optionally the slot.
+ *
+ * @param region Atlas region the mesh points at -- must exist in the atlas that
+ *        document will be validated against, or the runtime build fails for a
+ *        reason that has nothing to do with the case using this.
+ * @param with_slot Also append `<slot>` to `$.slots`, which a staged document
+ *        needs before the prune has anything to remove.
+ */
+bool plant_skin_attachment(
+    const std::filesystem::path& skeleton_path,
+    const std::string& slot,
+    const std::string& attachment,
+    const std::string& region,
+    bool with_slot) {
+    marrow::runtime::json::LoadResult loaded =
+        marrow::runtime::json::load_document(skeleton_path);
+    if (!loaded) {
+        std::cerr << "plant_skin_attachment: " << skeleton_path.generic_string()
+                  << " did not parse.\n";
+        return false;
+    }
+    marrow::runtime::json::Value::Object& root = loaded.document->root.as_object();
+
+    marrow::runtime::json::Value::Object mesh;
+    mesh.emplace("attachment", make_string_value(attachment));
+    mesh.emplace("type", make_string_value("mesh"));
+    mesh.emplace("region", make_string_value(region));
+    mesh.emplace(
+        "vertices",
+        make_array_value({make_number_value(-8.0), make_number_value(-4.0),
+                          make_number_value(8.0), make_number_value(-4.0),
+                          make_number_value(8.0), make_number_value(4.0),
+                          make_number_value(-8.0), make_number_value(4.0)}));
+    mesh.emplace(
+        "triangles",
+        make_array_value({make_number_value(0.0), make_number_value(1.0),
+                          make_number_value(2.0), make_number_value(2.0),
+                          make_number_value(3.0), make_number_value(0.0)}));
+    mesh.emplace(
+        "uvs",
+        make_array_value({make_number_value(0.0), make_number_value(0.0),
+                          make_number_value(1.0), make_number_value(0.0),
+                          make_number_value(1.0), make_number_value(1.0),
+                          make_number_value(0.0), make_number_value(1.0)}));
+    marrow::runtime::json::Value::Array weights;
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        marrow::runtime::json::Value::Object bind;
+        bind.emplace("bone", make_string_value("root"));
+        bind.emplace("x", make_number_value(0.0));
+        bind.emplace("y", make_number_value(0.0));
+        bind.emplace("weight", make_number_value(1.0));
+        weights.push_back(make_array_value({make_object_value(std::move(bind))}));
+    }
+    mesh.emplace("weights", make_array_value(std::move(weights)));
+
+    marrow::runtime::json::Value* existing =
+        marrow::runtime::json::find_member(loaded.document->root, "skins");
+    marrow::runtime::json::Value::Object skins =
+        existing != nullptr && existing->is_object()
+        ? existing->as_object()
+        : marrow::runtime::json::Value::Object{};
+    marrow::runtime::json::Value::Object default_skin;
+    if (const auto found = skins.find("default");
+        found != skins.end() && found->second.is_object()) {
+        default_skin = found->second.as_object();
+    }
+    default_skin[slot] = make_object_value(std::move(mesh));
+    skins["default"] = make_object_value(std::move(default_skin));
+    root["skins"] = make_object_value(std::move(skins));
+
+    if (with_slot) {
+        marrow::runtime::json::Value* slots =
+            marrow::runtime::json::find_member(loaded.document->root, "slots");
+        if (slots == nullptr || !slots->is_array()) {
+            std::cerr << "plant_skin_attachment: no slots array.\n";
+            return false;
+        }
+        marrow::runtime::json::Value::Object entry;
+        entry.emplace("name", make_string_value(slot));
+        entry.emplace("bone", make_string_value("root"));
+        entry.emplace("attachment", make_string_value(attachment));
+        slots->as_array().push_back(make_object_value(std::move(entry)));
+    }
+    return write_text_file(
+        skeleton_path, marrow::runtime::json::serialize_pretty(loaded.document->root));
+}
+
 std::string atlas_image_of(const std::filesystem::path& atlas_path) {
     return atlas_member(atlas_path, "image");
 }
@@ -3036,7 +3124,10 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
             "ValidateStagedBundle: the staged skeleton drops skin attachments the "
             "project's skeleton defines (default/shadow); a PSD reimport replaces "
             "bones, slots and skins wholesale, so committing it would destroy "
-            "hand-authored attachments";
+            "hand-authored attachments. There is no override in this version: to "
+            "reimport anyway, first remove those attachments from the project's "
+            "skeleton, which makes the loss an edit you chose rather than one the "
+            "commit performed";
         if (result) {
             std::cerr << "R2(d): a staged bundle that erases a hand-authored skin must "
                          "be refused even when NOTHING references it; the commit "
@@ -3657,6 +3748,79 @@ bool validate_mar189_commit_rollback(const std::filesystem::path& scratch) {
         if (!mar189::expect_rows_equal(
                 drop_without_paths, kept_without_paths, "R5(drop, other rows)")) {
             return false;
+        }
+    }
+
+    // ---- R5(c) -- a REQUESTED deletion is not reported as destruction ---------
+    //
+    // Steps 2 and 3 disagree by construction unless one of them is told about the
+    // other. `PruneUnpreserved` erases the skin entry of a `Missing && !preserve`
+    // layer; `ValidateStagedBundle` then compares staged skins against current
+    // ones and treats a missing identity as destruction. Without the exclusion,
+    // step 2's own action trips step 3's refusal and a deletion the user asked for
+    // becomes impossible.
+    //
+    // Inert against today's importer, which erases `skins` outright so there is
+    // never anything to prune -- which is exactly why this case plants the
+    // entries by hand. An untested branch that is only correct because a
+    // neighbouring component is broken is not correct, it is unobserved.
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(
+                scratch, "r5_skins", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        const std::filesystem::path project_skeleton =
+            scenario.directory / (std::string(mar189::kBundleStem) + ".mskl");
+        // The project owns a hand-authored skin on the slot that is about to go.
+        if (!mar189::plant_skin_attachment(project_skeleton, "shadow", "shadow_mesh",
+                                           "shadow", false)) {
+            return false;
+        }
+        if (!mar189::plan_scenario(&scenario, "R5(c)")) {
+            return false;
+        }
+        // The staged bundle carries the same identity. Its region is one the
+        // CANDIDATE atlas actually has, because the runtime build still has to
+        // succeed -- the point of this case is the structural comparison, not a
+        // parse failure.
+        if (!mar189::plant_skin_attachment(scenario.plan.staged_skeleton_path, "shadow",
+                                           "shadow_mesh", "body", true)) {
+            return false;
+        }
+        for (marrow::editor::PsdPlannedLayer& layer : scenario.plan.layers) {
+            if (layer.change == marrow::editor::PsdLayerChangeKind::Missing) {
+                layer.preserve = false;
+            }
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (!result) {
+            std::cerr << "R5(c): a preserve=false deletion must not be refused as "
+                         "destruction by the very step that performed it; got '"
+                      << result.error << "'.\n";
+            return false;
+        }
+        const marrow::runtime::json::LoadResult committed =
+            marrow::runtime::json::load_document(
+                scenario.session.project()->resolved_skeleton_path());
+        if (!committed) {
+            std::cerr << "R5(c): the committed skeleton did not parse.\n";
+            return false;
+        }
+        const marrow::runtime::json::Value* skins =
+            marrow::runtime::json::find_member(committed.document->root, "skins");
+        if (skins != nullptr && skins->is_object()) {
+            const marrow::runtime::json::Value* skin =
+                marrow::runtime::json::find_member(*skins, "default");
+            if (skin != nullptr && skin->is_object() &&
+                marrow::runtime::json::find_member(*skin, "shadow") != nullptr) {
+                std::cerr << "R5(c): the deleted identity's skin entry must be gone "
+                             "from the committed skeleton.\n";
+                return false;
+            }
         }
     }
 
