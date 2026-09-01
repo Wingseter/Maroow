@@ -3124,10 +3124,13 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
             "ValidateStagedBundle: the staged skeleton drops skin attachments the "
             "project's skeleton defines (default/shadow); a PSD reimport replaces "
             "bones, slots and skins wholesale, so committing it would destroy "
-            "hand-authored attachments. There is no override in this version: to "
-            "reimport anyway, first remove those attachments from the project's "
-            "skeleton, which makes the loss an edit you chose rather than one the "
-            "commit performed";
+            "hand-authored attachments. There is no override in this version. Two "
+            "ways forward, and the first is not destructive: mark those layers for "
+            "deletion in the reimport plan, which tells the commit the loss is "
+            "intended. Otherwise you can remove the attachments from the project's "
+            "skeleton by hand -- but that DESTROYS the same authored data this "
+            "refusal is protecting, is undoable only through the editor's undo, and "
+            "should be preceded by a backup";
         if (result) {
             std::cerr << "R2(d): a staged bundle that erases a hand-authored skin must "
                          "be refused even when NOTHING references it; the commit "
@@ -3819,6 +3822,93 @@ bool validate_mar189_commit_rollback(const std::filesystem::path& scratch) {
                 marrow::runtime::json::find_member(*skin, "shadow") != nullptr) {
                 std::cerr << "R5(c): the deleted identity's skin entry must be gone "
                              "from the committed skeleton.\n";
+                return false;
+            }
+        }
+    }
+
+    // ---- R5(d) -- marking a layer for deletion UNBLOCKS its skin -------------
+    //
+    // R5(c) needs a planted staged entry to reach the exclusion at all. This is the
+    // shape that occurs with the importer as it actually is: the current skeleton
+    // has a hand-authored skin, the staged one has none (they are erased
+    // wholesale), and the ONLY difference between refusing and committing is
+    // whether the user marked that layer for deletion.
+    //
+    // Both arms, because the pair is the assertion. One arm alone would pass on a
+    // commit that ignored `preserve` in either direction.
+    for (const bool preserve : {true, false}) {
+        const std::string label =
+            std::string("R5(d)/") + (preserve ? "preserve" : "delete");
+        Scenario scenario;
+        if (!mar189::open_scenario(
+                scratch, std::string("r5_intent_") + (preserve ? "keep" : "drop"),
+                initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        const std::filesystem::path project_skeleton =
+            scenario.directory / (std::string(mar189::kBundleStem) + ".mskl");
+        if (!mar189::plant_skin_attachment(project_skeleton, "shadow", "shadow_mesh",
+                                           "shadow", false)) {
+            return false;
+        }
+        if (!mar189::plan_scenario(&scenario, label.c_str())) {
+            return false;
+        }
+        bool marked = false;
+        for (marrow::editor::PsdPlannedLayer& layer : scenario.plan.layers) {
+            if (layer.change == marrow::editor::PsdLayerChangeKind::Missing) {
+                layer.preserve = preserve;
+                marked = true;
+            }
+        }
+        if (!marked) {
+            std::cerr << label << ": the plan must carry a Missing layer.\n";
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+
+        if (preserve) {
+            // Kept: losing the attachment is destruction, and it is refused.
+            if (result) {
+                std::cerr << label << ": a preserved layer's hand-authored skin must "
+                             "not be destroyed; the commit succeeded.\n";
+                return false;
+            }
+            if (result.error.find("default/shadow") == std::string::npos) {
+                std::cerr << label << ": the refusal must name the identity; got '"
+                          << result.error << "'.\n";
+                return false;
+            }
+            continue;
+        }
+        // Deleted: losing the attachment is the outcome the user asked for.
+        if (!result) {
+            std::cerr << label << ": marking the layer for deletion must let the "
+                         "reimport proceed -- losing that attachment is the requested "
+                         "outcome, not destruction. Got '"
+                      << result.error << "'.\n";
+            return false;
+        }
+        const marrow::runtime::json::LoadResult committed =
+            marrow::runtime::json::load_document(
+                scenario.session.project()->resolved_skeleton_path());
+        if (!committed) {
+            std::cerr << label << ": the committed skeleton did not parse.\n";
+            return false;
+        }
+        // And the deletion really happened, rather than the check being skipped.
+        const marrow::runtime::json::Value* skins =
+            marrow::runtime::json::find_member(committed.document->root, "skins");
+        if (skins != nullptr && skins->is_object()) {
+            const marrow::runtime::json::Value* skin =
+                marrow::runtime::json::find_member(*skins, "default");
+            if (skin != nullptr && skin->is_object() &&
+                marrow::runtime::json::find_member(*skin, "shadow") != nullptr) {
+                std::cerr << label << ": the deleted layer's skin entry must be gone.\n";
                 return false;
             }
         }

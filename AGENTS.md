@@ -1005,6 +1005,100 @@ technique is **`git apply --cached`** -- stage your own *hunks*, landing the cha
 as a unified diff proven byte-identical to the tree you actually built and ran,
 never as a file copy. Use it whenever two stories hold the same path.
 
+### An editing tool's cached file state is a stale restore target
+
+The entry above is about a stale SHA and a stale line anchor. This is the same
+class with **no SHA to be suspicious of and no anchor that fails to resolve**,
+which is why it is worse than either.
+
+**The mechanism.** An implementer read `src/samples/psd_import_smoke.cpp`, and
+some minutes later edited it with an editing tool. The edit's anchor was correct
+and unique, the edit reported success -- and the **write-back used the content the
+tool had cached at read time**, silently reverting the rewrite another agent had
+committed to that file in between. Nothing in the edit was wrong. The base it was
+applied to was.
+
+**The detector is free, and it is the reason this was caught at all.** *On an
+append-only edit, a non-zero deletion count in `git diff --numstat` is always a
+bug.* No judgement, no cost, works every time. Run it after **every** edit to a
+file another story is touching, and re-read the file immediately before each
+edit rather than relying on a read from earlier in the task. Better still, on a
+contended file, make the edit through a tool that reads from disk at write time.
+
+**A red run is evidence only once the TREE is known to be what you think it is** --
+not merely once the build is sound. This is the sharpening the incident forced.
+The clobber made another story's case fail *before* the implementer's own code
+ran, and it was nearly filed as a broken tip. The build was sound; the tree was
+wrong. The same story then hit the identical symptom from a **second** cause an
+hour later (below), and the correct diagnosis differed both times.
+
+**The repair trap, which is the subtle half.** The instinct is to rebuild the file
+as `HEAD + my hunks`. That is wrong whenever the other agent has **staged** work:
+it discards their staged content a second time, by a different route, and the
+first repair attempt here did exactly that. **The correct base for a shared file
+is `git show :<path>` -- the INDEX, not HEAD.** Verify afterwards that the result
+is a pure insertion: every hunk in the `@@ -N,0 +M,K @@` form and zero deletions.
+
+*Rule: on a contended file, re-read immediately before editing, `git diff --numstat`
+immediately after, and repair from the index rather than from HEAD.*
+
+**The family, and what caught every member of it.** MAR-190 hit four distinct
+routes to *a green or red run that describes a tree you are not looking at*: an
+editing tool's cached write-back, `git archive`'s commit-time mtimes, a tree
+assembled from two reads of "HEAD", and a regenerated file left stale when its
+anchor stopped resolving (build and suite both **green on a file 132 lines behind
+HEAD**). **Every one was caught by an assertion about the TREE, not about the
+product** -- a deletion count, an mtime, a pristine rebuild of the same SHA, a
+`deletions vs HEAD` check. None of the product's own assertions could see any of
+them, because from the suite's point of view nothing was wrong. Budget a cheap
+tree-assertion beside every verification run; the product's assertions cannot
+cover this class even in principle.
+
+### `git archive | tar -x` restores commit-time mtimes, so an existing build tests stale code
+
+Measured in MAR-190 immediately after the entry above, from the identical
+symptom -- another story's case failing before this story's code ran -- and with a
+completely different cause, which is why both are recorded rather than one.
+
+An isolated verification tree is refreshed with `rm -rf tree && git archive HEAD |
+tar -x`. **`git archive` stamps each file with the commit's timestamp**, not the
+current time. Against a build directory whose objects were compiled minutes ago,
+those sources are *older* than their own `.o` files, `make` considers them up to
+date, and the binary keeps linking the **previous tip's** object files. The suite
+then reports failures belonging to code that is no longer in the tree, with the
+sources on disk provably correct -- and a pristine build of the same commit passes,
+which is the measurement that separates this from a genuine regression.
+
+Measured: source `22:04:48`, its object `22:16:53`, no recompilation, a red case
+that a fresh build of the same SHA ran green.
+
+- **`touch` the tree after extracting it**, or delete the objects **scoped**:
+  `find "<build>/CMakeFiles" -name '*.o' -delete`. The unscoped
+  `find <build> -name '*.o' -delete` also deletes vendored SDL3's objects,
+  `libSDL3.a` is re-created incrementally at 96 bytes, and the link then fails
+  with the story's sources untouched.
+- **When a case outside your story fails, build the same SHA pristine before
+  reporting anything.** It costs one build and it is the difference between "the
+  tip is broken" and "my build directory is lying to me".
+
+**The nastiest part is that the extraction is the thing people do to be safe.**
+`git archive` into a scratch tree is the standard way to verify a story in
+isolation, and it is sound -- but **only while the build directory is fresh too**,
+and neither half of that is obvious from either half. A reviewer who extracts into
+a *new* build directory every time is immune by luck rather than by design; the
+moment a build directory is reused across two extractions, the guarantee is gone
+and nothing announces it.
+
+**A third route to the same place, measured in the same task: a tree assembled
+from two reads of "HEAD".** Regenerating one file from current HEAD while the rest
+of the tree came from an earlier extraction produced a tree whose *case* expected a
+message its *production code* did not yet emit -- a red run attributable to **no
+commit that exists**, and one whose first symptom (every concurrent run failing)
+pointed at a race that was not there. A single run reproduced it, which is what
+broke the wrong hypothesis. Capture the SHA **once**, with
+`SHA="$(git rev-parse HEAD)"`, and derive the tree and every regenerated file from
+that one value.
+
 ### Two agents share one scratchpad, and a restore is only verified by an absolute path
 
 Both were measured in MAR-188's Task 0 and both silently produce a *confident wrong
@@ -1372,7 +1466,9 @@ order**. The predicted case is the design's; the text is what actually printed.
 | **I18b** | `rollback_advance` consults the seam and **discards its message**, so the rollback still stops and reports nothing | R6b | **R6b** -- `a failing rollback must NAME the step it was undoing. Expected 'rollback of PlaceAtlas failed: injected failure: disk went away'; got ''`. R3 stays green, because nothing there reads `rollback_error`'s content. This is the arm that makes the rollback seam load-bearing |
 | **I19** | derive the target texture from the ATLAS's stem instead of the atlas document's `image` -- the "obvious wrong fix" -- with both `ValidateRequest` name guards disabled so it reaches placement | R1b | **R1** -- `the committed texture ('…/bundle_tex.png') must equal the staged bytes; sizes 137 and 117`. R1's byte clause overlaps R1b's subject for any mutation that misplaces content; see the note below |
 | **STRAY** | plant `planted_orphan.png` beside the atlas after a successful commit | R1b | **R1b** -- `appeared: …/r1b/planted_orphan.png` |
-| **I22** | delete the exclusion of prune-requested identities from `lost` | R5(c) | **R5(c)** -- `a preserve=false deletion must not be refused as destruction by the very step that performed it`. **R2(d) still refuses under the same mutation**, so the exclusion narrows the check without disarming it |
+| **I23** | record the deletion intent only when the prune observably erased something -- i.e. revert to contract (a) | R5(d)/delete | **R5(d)/delete** -- `marking the layer for deletion must let the reimport proceed -- losing that attachment is the requested outcome, not destruction`. The two contracts are indistinguishable without this case |
+| **I24** | forgive EVERY lost identity, not only deleted slots | R2(d) | **R2(d)** -- `a staged bundle that erases a hand-authored skin must be refused even when NOTHING references it; the commit reported success`. A quietly widened exclusion is not green |
+| **I22** | delete the exclusion of requested deletions from `lost` | R5(c) | **R5(c)** -- `a preserve=false deletion must not be refused as destruction by the very step that performed it`. **R2(d) still refuses under the same mutation**, so the exclusion narrows the check without disarming it |
 | **I20** | delete the structural `<skin>/<slot>` comparison, leaving the runtime build | R2(d) | **R2(d)** -- `a staged bundle that erases a hand-authored skin must be refused even when NOTHING references it; the commit reported success`. **R2(c) passes unchanged under the same mutation**, on its own deform message -- which is what makes R2(d) the unique detector for the structural half |
 
 **I17 is the clearest instance in this story of why `!result` is not an
@@ -1560,11 +1656,24 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   > carries `project_path` and `update_provenance` and nothing else.
 
   It remains the right trade against silent unrecoverable loss, and it is a
-  consequence rather than a footnote. The refusal says so itself rather than
-  implying a flag that does not exist: *"There is no override in this version: to
-  reimport anyway, first remove those attachments from the project's skeleton,
-  which makes the loss an edit you chose rather than one the commit performed."*
-  A refusal that implies a remedy it does not provide is its own small dishonesty.
+  consequence rather than a footnote. **The first version of the message then made
+  a second mistake, caught in review: the remedy it prescribed was itself
+  destructive and it did not say so.** It told the user to *"first remove those
+  attachments from the project's skeleton"* -- so a user following the instruction
+  destroys, by their own hand, exactly the data the refusal exists to protect.
+
+  The message now leads with the **non-destructive** route and labels the other one:
+
+  > There is no override in this version. Two ways forward, and the first is not
+  > destructive: **mark those layers for deletion in the reimport plan**, which
+  > tells the commit the loss is intended. Otherwise you can remove the
+  > attachments from the project's skeleton by hand -- but that **DESTROYS** the
+  > same authored data this refusal is protecting, is undoable only through the
+  > editor's undo, and should be preceded by a backup.
+
+  *A refusal that implies a remedy it does not provide is a small dishonesty; one
+  that prescribes a destructive remedy without saying so is worse than no guidance
+  at all.*
 
   **An informed override is backlogged, not designed here.** It needs a decision
   about what is confirmed and how the consequence is shown, which belongs with the
@@ -1595,6 +1704,36 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   `std::make_error_code(std::errc::cross_device_link).message()` after any
   `Place*` step exercises the rollback for it. Not written, because it would
   assert the rollback and not the EXDEV path itself.
+- **The prune/validate exclusion had two possible contracts and now has one,
+  stated.** `ValidateStagedBundle` forgives some lost `<skin>/<slot>` identities.
+  Which ones was genuinely ambiguous, and review found the ambiguity by mutating
+  the guard and watching **nothing** go red:
+
+  - *(a) an identity the PRUNE removed* -- what the code originally implemented,
+    via `if (erase(...) > 0U)`;
+  - *(b) an identity the USER asked to delete* -- every `Missing && !preserve`
+    layer, whatever the staged document happens to contain.
+
+  They diverge exactly where the staged document does not carry the entry --
+  **which, with this importer, is always**, because it erases `skins` wholesale and
+  rebuilds `slots` from the candidate. So (a) was dead code reachable only by a
+  planted fixture, and worse, it **refused to delete something the user had
+  explicitly marked for deletion**.
+
+  **(b) is now the contract**, recorded above every `continue` in the prune loop and
+  before the staged document is consulted at all, so the decision cannot depend on
+  what an importer left behind. The first attempt put it one line too low -- below
+  two `continue`s -- which is the same defect in a new place and is noted at the
+  site. The practical consequence is that `preserve` becomes the non-destructive
+  way past the unconditional refusal above.
+
+  Both directions are pinned: **I23** (revert to reading (a)) reddens
+  **R5(d)/delete**, and **I24** (forgive every lost identity) reddens **R2(d)**, so
+  the exclusion can neither be narrowed into uselessness nor widened into
+  disarming the check. **R5(d)** is the case that distinguishes the readings, on
+  the shape the importer actually produces; **R5(c)** covers the planted shape a
+  future skin-preserving importer would create.
+
 - **The naming rule has TWO implementations, kept in sync by hand.**
   `plan_scenario` (`psd_import_smoke.cpp`) re-derives the staged atlas name from
   the target atlas's `image` stem instead of calling `plan_project_reimport`, which

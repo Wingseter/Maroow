@@ -361,9 +361,9 @@ private:
     Journal journal_;
     runtime::json::Document staged_document_;
     bool staged_document_loaded_{false};
-    /// @brief `<skin>/<slot>` entries PruneUnpreserved removed, so validation does
-    /// not report a requested deletion as destruction.
-    std::vector<std::string> pruned_skin_identities_;
+    /// @brief Slots the user marked for deletion, so validation does not report a
+    /// requested deletion as destruction. Intent, not an observed side effect.
+    std::vector<std::string> deleted_slot_names_;
 };
 
 bool CommitRun::validate_request() {
@@ -504,6 +504,23 @@ bool CommitRun::prune_unpreserved() {
         if (layer.change != PsdLayerChangeKind::Missing || layer.preserve) {
             continue;
         }
+        // THE CONTRACT, and it was ambiguous until it was written down.
+        //
+        // Two readings were possible for what `ValidateStagedBundle` should
+        // forgive: an identity the PRUNE removed, or an identity the USER asked to
+        // delete. They differ exactly where the staged document does not carry the
+        // entry -- which, with this importer, is ALWAYS, because it erases `skins`
+        // wholesale and rebuilds `slots` from the candidate. The first reading is
+        // therefore dead code only a planted fixture can reach, and worse, it
+        // refuses to delete something the user explicitly marked for deletion.
+        //
+        // This is the second reading: `preserve == false` is the user's intent, and
+        // losing that layer's attachment is the OUTCOME THEY ASKED FOR, not
+        // destruction. Recorded HERE -- above every `continue` below, and before
+        // the staged document is consulted at all -- because the decision must not
+        // depend on what some importer happened to leave behind. Placing it lower
+        // is the same defect one line over, and that is where it was first written.
+        deleted_slot_names_.push_back(layer.current_slot_name);
         // An ABSENT slot is not an error, and this is the one place in the design
         // that measurement moved. `build_skeleton_document` assigns
         // `(*root)["slots"]` from the candidate and erases `skins` outright
@@ -542,22 +559,7 @@ bool CommitRun::prune_unpreserved() {
                 if (!skin.second.is_object()) {
                     continue;
                 }
-                if (skin.second.as_object().erase(layer.current_slot_name) > 0U) {
-                    // RECORDED, because the next step refuses on exactly this
-                    // shape. `ValidateStagedBundle` compares the staged skins
-                    // against the current ones and treats a missing identity as
-                    // destruction -- which is right for the importer's wholesale
-                    // erase and wrong for a deletion the user asked for. Without
-                    // this, step 2's own action would trip step 3's refusal.
-                    //
-                    // Inert today: this importer erases `skins` outright, so there
-                    // is never anything here to prune. It stops being inert the
-                    // moment any importer preserves skins, and a defect that is
-                    // latent only because another component is currently broken is
-                    // worth closing while it is visible.
-                    pruned_skin_identities_.push_back(
-                        skin.first + "/" + layer.current_slot_name);
-                }
+                skin.second.as_object().erase(layer.current_slot_name);
             }
         }
     }
@@ -659,18 +661,21 @@ bool CommitRun::validate_staged_bundle() {
         staged_skins.begin(),
         staged_skins.end(),
         std::back_inserter(lost));
-    // A deletion the user asked for is not destruction. `PruneUnpreserved` removes
-    // the skin entry of every `Missing && !preserve` layer, and that removal must
-    // not be reported back as a loss by the very next step.
-    std::vector<std::string> requested = pruned_skin_identities_;
-    std::sort(requested.begin(), requested.end());
+    // A deletion the user asked for is not destruction. The identity is
+    // `<skin>/<slot>` and the intent is expressed per SLOT, so a slot marked for
+    // deletion is forgiven in every skin that defines it -- the user deleted the
+    // layer, not one skin's view of it.
     std::vector<std::string> destroyed;
-    std::set_difference(
-        lost.begin(),
-        lost.end(),
-        requested.begin(),
-        requested.end(),
-        std::back_inserter(destroyed));
+    for (const std::string& identity : lost) {
+        const std::size_t separator = identity.find('/');
+        const std::string slot = separator == std::string::npos
+            ? std::string()
+            : identity.substr(separator + 1U);
+        if (std::find(deleted_slot_names_.begin(), deleted_slot_names_.end(), slot) ==
+            deleted_slot_names_.end()) {
+            destroyed.push_back(identity);
+        }
+    }
     lost = std::move(destroyed);
     if (!lost.empty()) {
         std::string identities;
@@ -683,9 +688,13 @@ bool CommitRun::validate_staged_bundle() {
                  identities +
                  "); a PSD reimport replaces bones, slots and skins wholesale, so "
                  "committing it would destroy hand-authored attachments. There is "
-                 "no override in this version: to reimport anyway, first remove "
-                 "those attachments from the project's skeleton, which makes the "
-                 "loss an edit you chose rather than one the commit performed");
+                 "no override in this version. Two ways forward, and the first is "
+                 "not destructive: mark those layers for deletion in the reimport "
+                 "plan, which tells the commit the loss is intended. Otherwise you "
+                 "can remove the attachments from the project's skeleton by hand -- "
+                 "but that DESTROYS the same authored data this refusal is "
+                 "protecting, is undoable only through the editor's undo, and "
+                 "should be preceded by a backup");
         return false;
     }
     return advance(PsdCommitStep::ValidateStagedBundle);
