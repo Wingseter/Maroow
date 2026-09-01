@@ -2175,6 +2175,47 @@ bool open_scenario(
         return false;
     }
 
+    // The tracked fixture's `player_idle.matl` declares
+    // `"image": "player_fixture.png"` -- the atlas stem and the texture name do
+    // NOT agree. An import produces a bundle where they do, so a scenario built
+    // straight from one cannot tell "derive the texture from the atlas's stem"
+    // apart from "derive it from the atlas document's own `image` member", and
+    // every case below would be blind to the defect this story exists to prevent.
+    // Renaming the texture and repointing the document reproduces the divergence.
+    {
+        const std::filesystem::path packed_texture =
+            out->directory / (std::string(kBundleStem) + ".png");
+        const std::filesystem::path renamed_texture =
+            out->directory / (std::string(kBundleStem) + "_tex.png");
+        std::error_code rename_error;
+        std::filesystem::rename(packed_texture, renamed_texture, rename_error);
+        if (rename_error) {
+            std::cerr << name << ": the texture could not be renamed: "
+                      << rename_error.message() << '\n';
+            return false;
+        }
+        marrow::runtime::json::LoadResult atlas =
+            marrow::runtime::json::load_document(import_options.atlas_output_path);
+        if (!atlas) {
+            std::cerr << name << ": the packed atlas did not parse.\n";
+            return false;
+        }
+        marrow::runtime::json::Value* atlas_object =
+            marrow::runtime::json::find_member(atlas.document->root, "atlas");
+        if (atlas_object == nullptr || !atlas_object->is_object()) {
+            std::cerr << name << ": the packed atlas has no 'atlas' object.\n";
+            return false;
+        }
+        atlas_object->as_object()["image"] =
+            make_string_value(renamed_texture.filename().generic_string());
+        if (!write_text_file(
+                import_options.atlas_output_path,
+                marrow::runtime::json::serialize_pretty(atlas.document->root))) {
+            std::cerr << name << ": the repointed atlas could not be written.\n";
+            return false;
+        }
+    }
+
     out->project_path = out->directory / (std::string(kBundleStem) + ".marrow");
     marrow::editor::MinimalProjectOptions project_options;
     project_options.project_path = out->project_path;
@@ -2212,8 +2253,16 @@ bool plan_scenario(Scenario* out, const char* label) {
     plan_options.staging_root = out->staging_root;
     // The TARGET's own names. This is what makes placement a byte copy whose
     // result still resolves.
-    plan_options.staged_skeleton_filename = std::string(kBundleStem) + ".mskl";
-    plan_options.staged_atlas_filename = std::string(kBundleStem) + ".matl";
+    plan_options.staged_skeleton_filename =
+        out->session.project()->resolved_skeleton_path().filename().generic_string();
+    // From the CURRENT TEXTURE's stem, not the atlas's. The packer writes the
+    // atlas document's `image` from the staged atlas path, so this is what makes
+    // the committed `image` still name the file that is actually beside it.
+    const std::filesystem::path target_atlas =
+        out->session.project()->resolved_atlas_paths().front();
+    plan_options.staged_atlas_filename =
+        std::filesystem::path(atlas_member(target_atlas, "image")).stem().generic_string() +
+        ".matl";
     out->plan = marrow::editor::plan_psd_reimport(*out->session.project(), plan_options);
     if (!out->plan) {
         std::cerr << label << ": the reimport plan failed: " << out->plan.error->format() << '\n';
@@ -2588,8 +2637,8 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
             marrow::editor::commit_psd_reimport(scenario.session, plan, options);
         const std::string expected =
             "ValidateRequest: the staged atlas references image 'staged.png' but the "
-            "project atlas 'bundle.matl' references 'bundle.png'; committing it would "
-            "name a texture that is not beside it";
+            "project atlas 'bundle.matl' references 'bundle_tex.png'; committing it "
+            "would name a texture that is not beside it";
         if (result || result.error != expected) {
             std::cerr << "R1c: a staged bundle naming a different texture must be refused "
                          "with '"
@@ -2723,6 +2772,144 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
             return false;
         }
         std::cout << "R2(b): refused with -- " << result.error << '\n';
+    }
+
+    // ---- R2(c) -- the SKINS LOSS refuses on its own message ------------------
+    //
+    // R2(b) refuses on `$.ik[0].bones[0]: ik constraint references unknown bone`,
+    // which is a consequence of the BONES replacement. `build_skeleton_document`
+    // also calls `root->erase("skins")` (`psd_import.cpp:1041`), erasing every
+    // skin and attachment definition -- and nothing above proves that half is
+    // caught, because the IK check trips first.
+    //
+    // This case makes the skins loss the ONLY thing wrong. It keeps every bone
+    // the candidate produces, so no bone reference can fail, and adds a skin
+    // holding a MESH attachment plus a deform timeline that targets it. The
+    // importer preserves `animations` verbatim while erasing `skins`, so the
+    // timeline survives into the staged document and its target does not. With
+    // skins absent the parser synthesises a default skin from the slots' own
+    // `attachment` names, which is why the mesh is named something no slot names.
+    {
+        Scenario scenario;
+        // The candidate is the SAME tree as the initial import, so it produces the
+        // identical bone and slot sets. Nothing bone-shaped and nothing
+        // slot-shaped can be what refuses, which is what leaves the erased skin
+        // as the only difference.
+        if (!mar189::open_scenario(scratch, "r2c", initial_tree, initial_tree, &scenario)) {
+            return false;
+        }
+        const std::filesystem::path skeleton_path =
+            scenario.directory / (std::string(mar189::kBundleStem) + ".mskl");
+        {
+            marrow::runtime::json::LoadResult loaded =
+                marrow::runtime::json::load_document(skeleton_path);
+            if (!loaded) {
+                std::cerr << "R2(c): the bundle skeleton did not parse.\n";
+                return false;
+            }
+            marrow::runtime::json::Value::Object& root = loaded.document->root.as_object();
+
+            marrow::runtime::json::Value::Object mesh;
+            mesh.emplace("attachment", make_string_value("shadow_mesh"));
+            mesh.emplace("type", make_string_value("mesh"));
+            mesh.emplace("region", make_string_value("shadow"));
+            mesh.emplace(
+                "vertices",
+                make_array_value({make_number_value(-8.0), make_number_value(-4.0),
+                                  make_number_value(8.0), make_number_value(-4.0),
+                                  make_number_value(8.0), make_number_value(4.0),
+                                  make_number_value(-8.0), make_number_value(4.0)}));
+            mesh.emplace(
+                "triangles",
+                make_array_value({make_number_value(0.0), make_number_value(1.0),
+                                  make_number_value(2.0), make_number_value(2.0),
+                                  make_number_value(3.0), make_number_value(0.0)}));
+            mesh.emplace(
+                "uvs",
+                make_array_value({make_number_value(0.0), make_number_value(0.0),
+                                  make_number_value(1.0), make_number_value(0.0),
+                                  make_number_value(1.0), make_number_value(1.0),
+                                  make_number_value(0.0), make_number_value(1.0)}));
+            // One weight per vertex, bound to `root` -- the only bone every
+            // candidate tree in this suite produces.
+            marrow::runtime::json::Value::Array weights;
+            for (const auto& corner : std::vector<std::pair<double, double>>{
+                     {-8.0, -4.0}, {8.0, -4.0}, {8.0, 4.0}, {-8.0, 4.0}}) {
+                marrow::runtime::json::Value::Object bind;
+                bind.emplace("bone", make_string_value("root"));
+                bind.emplace("x", make_number_value(corner.first));
+                bind.emplace("y", make_number_value(corner.second));
+                bind.emplace("weight", make_number_value(1.0));
+                weights.push_back(
+                    make_array_value({make_object_value(std::move(bind))}));
+            }
+            mesh.emplace("weights", make_array_value(std::move(weights)));
+            // `skins.<skin>.<slot>` IS the attachment object, named by its own
+            // `attachment` member -- one per slot per skin, not a map of names.
+            marrow::runtime::json::Value::Object default_skin;
+            default_skin.emplace("shadow", make_object_value(std::move(mesh)));
+            marrow::runtime::json::Value::Object skins;
+            skins.emplace("default", make_object_value(std::move(default_skin)));
+            root["skins"] = make_object_value(std::move(skins));
+
+            marrow::runtime::json::Value::Array keys;
+            for (const double time : {0.0, 0.5}) {
+                marrow::runtime::json::Value::Object key;
+                key.emplace("time", make_number_value(time));
+                key.emplace(
+                    "vertices",
+                    make_array_value({make_number_value(0.0), make_number_value(0.0),
+                                      make_number_value(0.0), make_number_value(0.0),
+                                      make_number_value(0.0), make_number_value(0.0),
+                                      make_number_value(0.0), make_number_value(0.0)}));
+                key.emplace("curve", make_string_value("linear"));
+                keys.push_back(make_object_value(std::move(key)));
+            }
+            marrow::runtime::json::Value::Object attachment_deform;
+            attachment_deform.emplace("shadow_mesh", make_array_value(std::move(keys)));
+            marrow::runtime::json::Value::Object slot_deform;
+            slot_deform.emplace("shadow", make_object_value(std::move(attachment_deform)));
+            marrow::runtime::json::Value::Object deform_holder;
+            deform_holder.emplace("deform", make_object_value(std::move(slot_deform)));
+            marrow::runtime::json::Value::Object animations;
+            animations.emplace("idle", make_object_value(std::move(deform_holder)));
+            root["animations"] = make_object_value(std::move(animations));
+
+            if (!write_text_file(
+                    skeleton_path,
+                    marrow::runtime::json::serialize_pretty(loaded.document->root))) {
+                std::cerr << "R2(c): the patched skeleton could not be written.\n";
+                return false;
+            }
+        }
+        if (!mar189::plan_scenario(&scenario, "R2(c)")) {
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (result) {
+            std::cerr << "R2(c): a staged bundle that erases the skin holding a deform "
+                         "target must be refused; the commit reported success.\n";
+            return false;
+        }
+        const std::string expected =
+            "ValidateStagedBundle: the staged bundle does not build with the project's "
+            "overlays: $.animations.idle.deform.shadow.shadow_mesh: deform timeline "
+            "references unknown attachment 'shadow_mesh'";
+        if (result.error != expected) {
+            std::cerr << "R2(c): the refusal must name the lost ATTACHMENT, not a bone. "
+                         "Expected '"
+                      << expected << "'; got '" << result.error << "'.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "R2(c)")) {
+            return false;
+        }
+        std::cout << "R2(c): refused with -- " << result.error << '\n';
     }
 
     std::cout << "MAR-189 R0-R2: a clean commit walks the whole step enum in order and "
@@ -3374,6 +3561,85 @@ bool validate_mar189_commit_rollback(const std::filesystem::path& scratch) {
         // something is wrong; only this says where.
         if (result.steps_rolled_back.empty()) {
             std::cerr << "R6: the rollback ledger must record the steps it undid.\n";
+            return false;
+        }
+    }
+
+    // ---- R6b -- the ROLLBACK seam, and `rollback_error` reachable -------------
+    //
+    // Until this case existed the rollback seam was declared and never fired, and
+    // `rollback_error` was only ever asserted EMPTY -- so "the rollback reports
+    // its own failures" was a claim with no evidence behind it. `advance()` runs
+    // only in the commit body and can never fire while the rollback is running,
+    // which is exactly why the second, independent seam exists. MAR-190's AC6
+    // depends on this being real.
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r6b", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R6b")) {
+            return false;
+        }
+        const mar189::PreCommitWitness before = mar189::capture(scenario.session);
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        marrow::editor::PsdReimportCommitResult result;
+        {
+            // The commit fails after PlaceSkeleton; the ROLLBACK then fails while
+            // undoing PlaceAtlas. Two seams, two different failures, and only the
+            // second one is what this case is about.
+            const mar189::ScopedCommitFailpoint commit_seam(
+                mar189::fail_after(PsdCommitStep::PlaceSkeleton));
+            const mar189::ScopedRollbackFailpoint rollback_seam(
+                [](PsdCommitStep undone) -> std::string {
+                    return undone == PsdCommitStep::PlaceAtlas ? "disk went away" : std::string();
+                });
+            result = marrow::editor::commit_psd_reimport(
+                scenario.session, scenario.plan, options);
+        }
+        if (result) {
+            std::cerr << "R6b: the commit must fail.\n";
+            return false;
+        }
+        const std::string expected =
+            "rollback of PlaceAtlas failed: injected failure: disk went away";
+        if (result.rollback_error != expected) {
+            std::cerr << "R6b: a failing rollback must NAME the step it was undoing. "
+                         "Expected '"
+                      << expected << "'; got '" << result.rollback_error << "'.\n";
+            return false;
+        }
+        // The ledger is the only thing that says WHICH undo steps ran. Reverse
+        // order, starting at the last placement the commit completed, and stopping
+        // where the seam fired -- a byte map can say something is wrong and never
+        // say where.
+        const std::vector<std::string> expected_undo = {"PlaceSkeleton", "PlaceAtlas"};
+        if (!mar189::expect_steps(
+                mar189::step_names(result.steps_rolled_back), expected_undo, "R6b(ledger)")) {
+            return false;
+        }
+        // And the honest consequence, asserted against the PRE-COMMIT map rather
+        // than against a map captured after the fact -- comparing the bundle to
+        // itself always passes, which is the same shape as a `cmp` of a file
+        // against itself.
+        //
+        // A rollback that stopped half way did NOT restore the bundle. This is the
+        // one place in the suite where a byte map is expected to DIFFER: if it
+        // matched, `rollback_error` would be reporting a failure that did not
+        // happen, and every other case's "restored byte-for-byte" clause would be
+        // meaningless.
+        bool restored = true;
+        const ByteMap after = mar189::bundle_bytes(*scenario.session.project());
+        for (const auto& entry : before.bytes) {
+            const auto found = after.find(entry.first);
+            if (found == after.end() || found->second != entry.second) {
+                restored = false;
+                break;
+            }
+        }
+        if (restored) {
+            std::cerr << "R6b: the rollback reported '" << result.rollback_error
+                      << "' but the bundle came back byte-identical anyway -- then the "
+                         "error is describing a failure that did not happen.\n";
             return false;
         }
     }

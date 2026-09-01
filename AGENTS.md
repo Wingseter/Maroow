@@ -825,7 +825,7 @@ So the widened rule, which subsumes both causes:
 > **A zero is evidence only once you have confirmed the pattern matches a
 > known-present instance.**
 
-Two mechanisms, one discipline:
+Three mechanisms, one discipline:
 
 - **the shell can eat the pattern** — quote every glob, every `*`, every
   `--include=`;
@@ -833,7 +833,23 @@ Two mechanisms, one discipline:
   mean different things in BRE, ERE and fixed-string mode, and a *malformed*
   construct fails to match rather than erroring. Prefer **`grep -F`** whenever the
   needle is a literal, which is most of the time in this tree, and reach for `-E`
-  deliberately rather than by default.
+  deliberately rather than by default;
+- **the SUBJECT can be split even when the pattern is perfect.** `grep` is
+  line-based and C++ concatenates adjacent string literals, so an asserted message
+  long enough to wrap is not on any single line. Measured in MAR-189, verifying
+  that its own record quoted the case correctly:
+
+  ```
+  grep -c "deform timeline references unknown attachment" src/samples/psd_import_smoke.cpp   ->  0
+  ```
+
+  while the assertion is plainly there, wrapped as `"… deform timeline "` /
+  `"references unknown attachment 'shadow_mesh'"`. The zero was about to be read
+  as "the case does not exist". The check that works joins the literals first —
+  `python3 -c "import re; print(re.sub(r'\"\s*\n\s*\"','',open(f).read()).count(needle))"` —
+  and it returned **1**. This is the mechanism that bites hardest in *this* repo
+  specifically, because the house style is long asserted messages and those are
+  exactly the strings a reviewer greps for.
 
 The cheap countermeasure, and the one this chain should adopt: **run every
 "expect zero" gate once against a deliberately planted hit, then remove it.** A
@@ -1100,6 +1116,7 @@ every number below was re-derived rather than copied.
 | `ctest -N` / `ctest` | 22 / 22 passed | **23 / 23 passed, 0 failed** |
 | `marrow_agent_dispatch_smoke` `[ OK ]` | 437 | **437** |
 | `marrow_psd_import_smoke` | green, absent from CTest | green, registered as **`marrow.psd_import_smoke`** |
+| the "built but never run by CTest" row | open since MAR-176 | **discharged** -- `ctest -N` 22 -> 23 |
 | registry / guards / `test_client.py` | 66 / 11 (7/2/2) / 53,55 | **unchanged** |
 | `git status --porcelain assets/fixtures/` | empty | **empty** |
 
@@ -1165,6 +1182,29 @@ running. It does **not** close §9.2's corner: a failure *inside*
 `adopt_runtime_sources` during the re-adopt needs a seam inside `EditorSession`.
 **The seam exists and it stops at the session boundary.**
 
+### The scenario fixture could not exercise this story's headline hazard, and did not until it was fixed
+
+Recorded as a correction to this section's own first version, because it is the
+sharpest instance of a gate measuring nothing. Every R-case builds its bundle by
+running a real import, and an import names the atlas and its texture from **one**
+path -- `bundle.matl` and `bundle.png`. The tracked fixture does not:
+`player_idle.matl` declares `"image": "player_fixture.png"`. So on a
+same-stem bundle, *"derive the target texture from the atlas's stem"* and
+*"derive it from the atlas document's own `image` member"* return the **same
+answer**, and every case was blind to the difference between them -- which is the
+one difference this story exists to get right.
+
+It surfaced only when inversion **I19** mutated the committer to the stem rule and
+the suite had to be checked for what would catch it. `open_scenario` now renames
+the packed texture to `bundle_tex.png` and repoints the atlas document at it, so
+the two rules disagree in every scenario. **R1c's asserted message changed as a
+direct result** (`references 'bundle_tex.png'`, not `'bundle.png'`), which is the
+evidence that the fixture change is load-bearing rather than cosmetic.
+
+*The general form: a fixture built by the same code path that the production code
+uses will agree with that code about anything the two derive together. Reproduce
+the property the REAL data has, not the one the generator happens to produce.*
+
 ### The byte map is a recursive listing, not an enumerated set
 
 An enumerated five-item map cannot see a file the commit newly created beside the
@@ -1173,6 +1213,12 @@ ones it knew about -- an orphaned texture under an unpredicted name, a surviving
 recursive listing of the project directory **and** the resolved layers directory,
 so "paths only in after" catches all three for free, and only because nothing
 decides in advance what to look at.
+
+**Demonstrated, not assumed.** A throwaway mutation planted
+`planted_orphan.png` beside the atlas after a successful commit -- exactly the
+shape a wrongly-named texture or a surviving `.bak` takes -- and R1b reported
+`appeared: …/r1b/planted_orphan.png`. An enumerated five-item map would have
+returned green.
 
 ### Inversions -- actual outcomes, not predictions
 
@@ -1199,6 +1245,10 @@ order**. The predicted case is the design's; the text is what actually printed.
 | **I15** | `apply_agent_review` ignores `request.allowed` | A6 | **A6(rejected)** -- `approving a whitelist-rejected request must refuse; got ok=0 code='psd_changed_since_review'` |
 | **I16** | the dry run leaves its staging root behind | A1 | **A1** -- `the dry run left '/tmp/mar189_agent/a1_staging/plan-1' behind` |
 | **I17** | the staging root is not whitelist-checked | A3 | **A3** -- `expected forbidden_path …; got ok=0 code='psd_plan_failed' message='… staging root could not be created'`. **The mutation still fails the operation** -- `/usr/local` is unwritable -- so a `!result` assertion would have passed here and recorded a false "did not bite". Only asserting the CODE sees it |
+| **I18** | `rollback_advance` inverts the seam's polarity | R6b | **R3/OpenJournal** -- `the commit must roll back cleanly; rollback_error='rollback of OpenJournal failed: injected failure: '`. Earlier than intended: a spurious rollback error reddens the sweep long before the case that reads the error's text |
+| **I18b** | `rollback_advance` consults the seam and **discards its message**, so the rollback still stops and reports nothing | R6b | **R6b** -- `a failing rollback must NAME the step it was undoing. Expected 'rollback of PlaceAtlas failed: injected failure: disk went away'; got ''`. R3 stays green, because nothing there reads `rollback_error`'s content. This is the arm that makes the rollback seam load-bearing |
+| **I19** | derive the target texture from the ATLAS's stem instead of the atlas document's `image` -- the "obvious wrong fix" -- with both `ValidateRequest` name guards disabled so it reaches placement | R1b | **R1** -- `the committed texture ('…/bundle_tex.png') must equal the staged bytes; sizes 137 and 117`. R1's byte clause overlaps R1b's subject for any mutation that misplaces content; see the note below |
+| **STRAY** | plant `planted_orphan.png` beside the atlas after a successful commit | R1b | **R1b** -- `appeared: …/r1b/planted_orphan.png` |
 
 **I17 is the clearest instance in this story of why `!result` is not an
 assertion.** Removing the whitelist check does not make the operation succeed; it
@@ -1239,6 +1289,27 @@ either.** Guard 3 did not exist while those runs happened, which is precisely wh
 the independent re-verification was done rather than asserted. **I6 alone ran
 through the committed `invert.sh`.** E16's *"both of the harness's guards"* below
 is accurate as of that row's own writing; there are three as of this commit.
+
+### R1b is a gate for one clause and a witness for the other, and the difference was measured
+
+**R1b's path-set clause bites**: the planted stray above is caught, so the clause
+is demonstrably capable of failing.
+
+**R1b's `image`-comparison clause has no single-file mutation that reddens it
+FIRST**, and the reason is structural rather than an oversight. Any mutation that
+changes what gets *placed* is caught by R1's byte clause, which runs earlier; the
+only mutation that leaves the bytes correct and the *name-to-content relationship*
+wrong is the planner-naming revert -- and that trips **Q13** first, because Q13
+asserts the planner honours the requested names. So the `image` clause is the only
+statement of the invariant anywhere in the tree, and nothing in this story's
+register reddens it on its own.
+
+What does carry evidence for it is **R1c**, the refusal: with the naming reverted
+the commit stops at `ValidateRequest` with the two names quoted, and R1c asserts
+that message. Recorded this way rather than claiming a bite the register cannot
+produce -- which is the same discipline as *"a case green before the
+implementation exists is a witness, not a gate"*, applied one level down to a
+clause rather than a case.
 
 ### Deliberately uninverted, by name
 
@@ -1299,7 +1370,12 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   `apply_agent_review`) was offered and not taken.
 - **§9.2's irreversible window.** A failure inside `adopt_runtime_sources` during
   the rollback's re-adopt. The rollback seam added here can fail a rollback
-  *step*; it cannot fail the session call inside one.
+  *step* -- and now **does**, in `R6b`, which asserts `rollback_error` names the
+  step it was undoing and that `steps_rolled_back` records the reverse order
+  (`PlaceSkeleton`, `PlaceAtlas`). It cannot fail the session call inside one.
+  Until R6b existed the seam was declared and never fired and `rollback_error` was
+  only ever asserted **empty**, which is a seam with no evidence behind it;
+  **I18b** is the arm that proves R6b sees a discarded message.
 - **EXDEV, and it is narrower than "unmeasured".** One volume on this machine, so
   a real cross-device rename could not be produced. But `write_file_atomically`
   places its temporary in the **destination's own directory**
@@ -1311,13 +1387,33 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   `std::make_error_code(std::errc::cross_device_link).message()` after any
   `Place*` step exercises the rollback for it. Not written, because it would
   assert the rollback and not the EXDEV path itself.
-- **The skins loss.** `build_skeleton_document` calls `root->erase("skins")`, so a
-  committed reimport erases every skin and attachment definition and replaces
-  bones and slots wholesale. Validation **does** refuse -- measured as
-  `$.ik[0].bones[0]: ik constraint references unknown bone 'torso'` -- but that is
-  a consequence of the *bones* replacement. **The skins loss is not what refuses
-  and is not independently validated.** A property of the importer; MAR-189
-  changes no importer and the commit path refuses rather than shipping it.
+- **The skins loss is now covered by its own case, `R2(c)` -- this row is
+  discharged, not deferred.** `build_skeleton_document` calls `root->erase("skins")`
+  (`psd_import.cpp:1041`), so a committed reimport erases every skin and attachment
+  definition. R2(b) refuses on `$.ik[0].bones[0]: ik constraint references unknown
+  bone 'torso'`, which is a consequence of the *bones* replacement and therefore
+  proves nothing about skins. R2(c) makes the skins loss the **only** thing wrong:
+  the candidate is the SAME layer tree as the initial import, so the bone and slot
+  sets are identical and nothing bone- or slot-shaped can refuse; the project's
+  skeleton carries a skin holding a MESH attachment plus a deform timeline
+  targeting it, and the importer preserves `animations` verbatim while erasing
+  `skins`. Measured refusal:
+
+  ```
+  ValidateStagedBundle: the staged bundle does not build with the project's overlays:
+    $.animations.idle.deform.shadow.shadow_mesh:
+    deform timeline references unknown attachment 'shadow_mesh'
+  ```
+
+  The attachment is named something no slot names, because with `skins` absent the
+  parser synthesises a default skin from the slots' own `attachment` members
+  (`skeleton_parse.cpp:4933-4935`) -- name the mesh after the slot's attachment and
+  the refusal becomes *"deform timelines require a mesh attachment target"*, which
+  is still skins-specific but less direct. **What remains uncovered is narrower:**
+  a project whose skins are lost with no deform timeline pointing into them is
+  refused by nothing, because the erasure is then not observable in the runtime
+  build. The importer's behaviour is unchanged by this story; the commit path
+  refuses rather than shipping it wherever the loss is observable at all.
 - **A5/A6 do not go through the C ABI.** `MarrowProject` is opaque outside
   `marrow_c.cpp` and approval needs the session and the review queue, so A1-A6
   drive `AgentCommandDispatcher` and `apply_agent_review` directly from
