@@ -813,6 +813,21 @@ Found by review during MAR-189, and the way it was found is the point:
 isolated rerun and three direct reruns. The reviewer investigated instead of
 re-running until green.
 
+> **An intermittent failure is evidence about the HARNESS as often as about the
+> code, and re-running until green destroys the evidence.** A failure that
+> reproduces is a bug you can chase; a failure that does not is a fact about the
+> conditions, and the conditions are the thing you have just learned something
+> about. The rerun that passes is not a second opinion -- it is the deletion of
+> the only run that had information in it.
+
+This is the missing direction of two rules already here. *"A red run is evidence
+only once the build is known sound"* and *"a zero is evidence only once the
+pattern can match"* both say **do not trust a result until you trust the harness**.
+This one says the converse: **a result you distrust is itself information about
+the harness**, and the instinct to re-roll is what throws it away. The same
+instinct, resisted, is what found the fixture class in the entry below -- an
+inversion that "did not bite", investigated rather than recorded.
+
 Every scratch root in `psd_import_smoke.cpp` was a **fixed** path
 (`$TMPDIR/{marrow_psd_import_smoke,mar188_q0,mar188_plan,mar189_naming,mar189_commit}`,
 `/tmp/mar189_agent`) and the cases `remove_all` their root on entry, so two
