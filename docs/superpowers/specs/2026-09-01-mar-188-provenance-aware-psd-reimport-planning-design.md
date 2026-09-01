@@ -1115,10 +1115,18 @@ whole report while every extracted PNG is wrong, which would silently corrupt Q1
    `layer.original_name` when the document-global census is 1 and
    `join_path(group_path, name)` (separator `/`, `psd_import.cpp:574-591`) when it
    is greater. Q0's document has no duplicates, so **the `join_path` branch is
-   ungated** — while Q5 and Q6 are the two cases that live in it and have no other
-   gate. Q0b synthesises two layers named `body`, one in `torso` and one at root,
-   and asserts the resulting slot names are exactly `torso/body` and `body`. Task
-   0 identified this as the gap most likely to bite.
+   ungated**. Q0b synthesises two layers named `body`, one in `torso` and one at
+   root, and asserts the resulting slot names are exactly `torso/body` and `body`.
+
+   **Corrected after review.** This paragraph originally justified Q0b by saying
+   "Q5 and Q6 are the two cases that live in that branch and have no other gate".
+   **Neither does.** Q5's layer names (`b|c` and `c`) are distinct, so the
+   document-global census is 1 for each and the branch is never entered — Q5
+   exercises the planner's `|`-escaping, a different mechanism entirely. Q6 reaches
+   the branch at import time but asserts on `build_identity(group_path, name)`,
+   which reads the original layer name and never `slot_name`. **Q0b is therefore
+   the branch's only gate anywhere**, which is a stronger justification than the
+   one first given. The decision was right for the wrong reason.
 
 **Q1 — classification, full list.** Provenance from the fixture import.
 Candidate = synthesised: `shadow` unchanged, `torso/body` moved, `torso/arm_l`

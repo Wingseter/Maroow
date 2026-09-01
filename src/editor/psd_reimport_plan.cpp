@@ -144,6 +144,18 @@ PsdReimportPlan plan_psd_reimport(
     plan.staged_atlas_path = options.staging_root / "staged.matl";
     plan.staged_layers_directory = options.staging_root / "staged_layers";
 
+    // Every staged path is under the caller's root, checked BEFORE the importer
+    // runs. Placement is the whole point: this began as a post-hoc check after
+    // `import_psd_to_runtime_bundle`, where it correctly REPORTED an escape that
+    // had already happened -- `write_imported_layers` had already `remove_all`ed
+    // and rewritten the destination by the time it fired. A guard on "nothing
+    // outside the staging root is written" has to run before the writing.
+    if (!is_within(plan.staging_root, plan.staged_skeleton_path) ||
+        !is_within(plan.staging_root, plan.staged_atlas_path) ||
+        !is_within(plan.staging_root, plan.staged_layers_directory)) {
+        return make_error_plan(options, "staged outputs escaped the staging root");
+    }
+
     PsdImportOptions import_options;
     import_options.psd_path = options.psd_path;
     import_options.skeleton_output_path = plan.staged_skeleton_path;
@@ -249,12 +261,6 @@ PsdReimportPlan plan_psd_reimport(
         }
     }
 
-    // Every staged path is under the caller's root, checked rather than assumed.
-    if (!is_within(plan.staging_root, plan.staged_skeleton_path) ||
-        !is_within(plan.staging_root, plan.staged_atlas_path) ||
-        !is_within(plan.staging_root, plan.staged_layers_directory)) {
-        return make_error_plan(options, "staged outputs escaped the staging root");
-    }
     return plan;
 }
 

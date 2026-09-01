@@ -12,7 +12,7 @@ guard.** Both hazards below were hit independently by more than one agent.
 | Script | What it does |
 | --- | --- |
 | `snapshot.sh` | Copies the files you are about to mutate into a pristine baseline directory |
-| `rebuild.sh` | Deletes the named object files, then builds |
+| `rebuild.sh` | Deletes object files, then builds. With no object arguments -- which is how `invert.sh` calls it -- deletes every object under `<build-dir>/CMakeFiles` |
 | `invert.sh` | mutate -> rebuild -> run -> record -> restore -> rebuild, with both guards |
 
 ## The two guards, and why each exists
@@ -29,6 +29,24 @@ finished work, and the next inversion then runs against the stub. `invert.sh`
 refuses to mutate unless the baseline copy is byte-identical to the tree, so a
 stale baseline is an error rather than a silent revert. Run `snapshot.sh` after
 every implementation step.
+
+## The guard was committed unwired, and is now wired
+
+**Between its first commit and MAR-188, `rebuild.sh` deleted nothing when called
+the way `invert.sh` calls it.** Both call sites (`invert.sh:21` in `restore` and
+`:28` in GUARD 1) pass only the build directory; `rebuild.sh` then `shift`ed and
+ran its `for` loop over an empty `$@`. Every inversion therefore fell back to
+make's mtime comparison -- the precise hazard the harness was written to prevent.
+
+Measured before the fix: **130 objects present, 130 after, 0 files recompiled.**
+After: **123 files recompiled**, objects deleted and rebuilt, `libSDL3.a` intact at
+13.9 MB because the deletion is scoped to `CMakeFiles`.
+
+Two agents found this independently, which is the useful part. **A guard that is
+committed but not wired is worse than one that is absent**, because a README then
+asserts it is working and every reader downstream believes it -- the same shape as
+a frame-body gate that passes on a broken tree. When you commit a guard, run the
+thing it guards against and watch it fire; "the code is present" is not the check.
 
 ## Why object deletion rather than `touch`
 

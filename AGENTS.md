@@ -993,9 +993,20 @@ is precisely the "plausible but wrong PSD" the gate exists to stop, and Q1's
    sections, which the parser never reads.
 4. **Q0b — the duplicate-name branch.** `parse_psd_document:814-826` takes the
    joined-path dedup only when the document-global census exceeds 1, and Q0's tree
-   has no duplicates — so that branch was **ungated** while Q5 and Q6 are the only
-   cases living in it. Q0b asserts the slot names resolve to `torso/body` and
-   `body`.
+   has no duplicates, so that branch was **ungated**. Q0b asserts the slot names
+   resolve to `torso/body` and `body`.
+
+   **The reason originally given for Q0b was wrong, and the truth strengthens it.**
+   Both this story's brief and its design said "Q5 and Q6 live in that branch and
+   have no other gate". Measured: **neither does.** Q5's layer names are `b|c` and
+   `c` — *distinct*, so the census is 1 for each and the branch is never entered;
+   Q5 exercises the planner's `|`-escaping, an unrelated mechanism. Q6 does reach
+   the branch at import time, but asserts on `build_identity(group_path, name)`,
+   which reads the **original** layer name and never `slot_name`. So **Q0b is that
+   branch's only gate anywhere** — a stronger claim than the one used to justify
+   it. Recorded because the conclusion was right for the wrong reason, which is
+   its own defect: a correct decision resting on a false premise survives only
+   until someone checks the premise.
 
 Q0 and Q0b run **first**, so a synthesiser regression is attributed to the gate
 rather than to whichever case notices.
@@ -1017,7 +1028,7 @@ the actual text → restore → rebuild → `cmp`. Seventeen bit as designed.
 | I7b | The shared lambda captures `result` | Bites at **MAR-180 S2** — shared code, like I8 |
 | I8 | Remove `is_absolute()` from the shared lambda | Bites at **MAR-180 S3**, which runs before MAR-188's cases. P6's subject confirmed directly on the artefact instead: against an I8 build an absolute provenance path returns as `abs_hero.psd`, neither absolute nor byte-identical |
 | P8 d,e,h,i,j,k | Remove each domain rejection, one at a time | Each fails **its own** P8 arm |
-| I9 | Stage into the project's own directory | Bites — but on the planner's **own containment guard** (`staged outputs escaped the staging root`), not on Q8's directory listing as designed. The guard makes the mutation unreachable at the listing level |
+| I9 | Stage into the project's own directory | Bites on the planner's **own containment guard**, not on Q8's directory listing as designed. Review found the guard sat **after** `import_psd_to_runtime_bundle`, so it **reported an escape that had already happened** -- the project directory really was polluted. MAR-188 moved it **before** the import, where it prevents. Either way the listing clause is never reached, so it is a WITNESS -- see below |
 | **I10** | Leave `existing_skeleton_path` unset | **Did not bite as designed.** Every `proposed_*` target comes from the CANDIDATE parse, not from the staged merge, so the plan is identical either way. A Q8 clause asserting the staged skeleton carries the project's authored animations was added, and I10 then bites: `the staged skeleton must carry the project's authored animation 'attack'` |
 | I11 | Fall back to `slot_name` when the identity misses | **Q3**, `expected body -> Added, got body -> Updated` |
 | I12 | A similarity matcher before classification | **Q2**, `expected torso\|arm_left -> Added, got torso\|arm_left -> Updated` |
@@ -1035,6 +1046,35 @@ already-overwritten `result.source_path` — lives in the **shared lambda**, whi
 I7b and I8 mutate; the sixth family cannot express it. P5's two `weakly_canonical`
 identity clauses are still worth keeping, but nothing MAR-188 owns alone detects
 them.
+
+### Two witnesses, not one: `expect_inert`'s directory listing is the second
+
+Applying this story's own rule to the rest of its own suite found a second case
+that is green before the implementation exists and that **no inversion in the
+register turns red**.
+
+| Case / clause | Inversion that turns it red | Status |
+| --- | --- | --- |
+| P1 (byte-identical serialization of a pre-story project) | **none** | **Witness.** Its claim -- backward compatibility -- is real and nothing else makes it |
+| `expect_inert` clause 5 (full recursive directory listing) | **none** | **Witness.** I9 was designed to be its detector and never reaches it |
+| Every other P- and Q- clause | I1-I6, I7b, I8, P8 d/e/h/i/j/k, I9-I19 | Gate |
+
+**Why clause 5 has no detector.** I9 stages into the project's own directory, which
+should pollute it and fail the listing. It never gets that far: the containment
+guard refuses first, so the listing clause is unreachable *by construction*. It is
+kept because a plan silently writing into a project directory is exactly the
+failure AC3 is about, and a future change that removes or weakens the guard would
+have nothing else watching -- but **it is a witness today and must be labelled
+one**, by the same rule that relabelled P1.
+
+**A guard placed after the operation it guards REPORTS rather than PREVENTS.**
+MAR-188 originally checked containment at the end of `plan_psd_reimport`, after
+the importer had already run. The check was correct and its message was accurate,
+and it was still the wrong guard: `write_imported_layers` had already `remove_all`ed
+and rewritten the destination by the time it fired. The error text is what gives it
+away -- an escape can only be *reported* if the work that escaped already
+completed. The fix is placement, not logic. **When a guard's claim is "nothing
+outside X is written", read where it sits relative to the writing.**
 
 ### P1 is a compatibility witness, not a gate
 
