@@ -397,6 +397,22 @@ produces a silently wrong test rather than a loud failure if you get it wrong.
   the frame is the only mechanism that can see it — demonstrated by deleting
   `draw_constraint_catalog_buttons()`'s body, which left MAR-178's own scenario
   printing its full success line while the frame smoke failed by name.
+- **Escape does not close a MODAL, so "close the dialog" is not a free path.**
+  `NavUpdateCancelRequest` (`external/imgui/imgui.cpp:14844`) reaches its
+  popup-closing arm only under
+  `!(g.OpenPopupStack.back().Window->Flags & ImGuiWindowFlags_Modal)` (`:14873`),
+  and `BeginPopupModal` sets `ImGuiWindowFlags_Modal` unconditionally at
+  `:13103`. A non-modal popup closes on Escape; a modal never does. The path
+  exists **only if the modal is given a `bool*`**: `BeginPopupModal(name, p_open,
+  flags)` forwards it to `Begin` (`:13104`), which draws a title-bar close
+  control, and calls `ClosePopupToLevel` when it goes false (`:13105-13109`).
+  Measured while planning MAR-190, whose AC3 requires *"modal close"* as a path
+  distinct from *"cancel"* — **without the `bool*` that criterion is not failed,
+  it is unimplementable**, and nothing would have said so. Combine with the
+  existing entry above: a modal stays open until something calls
+  `CloseCurrentPopup()`, and an open modal blocks every later click in the
+  scenario. If you add a modal and a test must close it by a route other than its
+  own Cancel button, pass the `bool*` when you write it, not when a case needs it.
 
 ## Repo facts that outlive their story
 
@@ -634,9 +650,33 @@ that identical shape to MAR-183's 408 without having seen it. MAR-185's D25 had 
 it recorded that its anchor checker's *"remaining flags are all correctly
 historical."*
 
-*Rule: before "fixing" a number in this file, decide which kind of sentence it is.
-If it sits under a `## MAR-NNN` heading it is almost certainly a measurement, and
-the edit you want is a clarifying parenthetical, not a new value.*
+**The missing half, and it is the half that makes the rule safe.** "Do not edit a
+historical measurement" has a consequence nobody had stated: **a lesson recorded
+only inside story sections can never be generalised in place.** It accumulates as
+instances — each one individually unmaintainable, because none may be edited —
+and the *n*th instance then reads as a fresh measurement rather than as a
+recurrence. Measured while planning MAR-190, on the rule *"a 'no hits' result is
+evidence only once the command is known to have run"*: it had been recorded
+**twice** inside `## MAR-186` and `## MAR-187` and referenced once as a
+parenthetical, and was therefore durable **zero** times. A third instance arrived
+with a different cause (a malformed BRE interval rather than zsh glob expansion)
+and was nearly read as a new finding instead of the recurrence it was. The
+general form now lives at *"A zero result is evidence only once the pattern is
+known to match something"*, in this section, where it can be widened without
+falsifying anything.
+
+So the two halves work only together. The first without the second quietly
+guarantees that recurring lessons stay invisible, since the only places they are
+written are the only places that may not be touched.
+
+*Rule, both halves: before "fixing" a number in this file, decide which kind of
+sentence it is — if it sits under a `## MAR-NNN` heading it is almost certainly a
+measurement, and the edit you want is a clarifying parenthetical, not a new value.
+**And when you notice a second instance of the same lesson in a second story
+section, lift its general form to `## Repo facts that outlive their story`,
+citing both instances.** Leave the originals untouched: the durable entry is the
+maintainable one, and the story sections stay the record of what each story
+actually saw.*
 
 ### A correction relayed from conversation is not a correction to the document
 
@@ -729,6 +769,52 @@ copy, so `source` and `target` aliased the same object and neither field was rea
 after being written. A mutation whose effect cannot be observed is not a weak
 inversion; it is not an inversion at all, and recording "I7 did not bite" without
 that reasoning would have told the next reader nothing.
+
+### A zero result is evidence only once the pattern is known to match something
+
+The rule *"a 'no hits' result is evidence only once the command is known to have
+run"* has been recorded twice inside story sections (MAR-186's and MAR-187's, both
+about **zsh glob-expanding an unquoted `--include=*.cpp`** before `grep` ever saw
+it) and referenced once as the mirror of *"a RED run is evidence only once the
+build is known sound"*. It has never had a durable entry, which is why a third
+instance arrived with a different cause and was nearly read as a real measurement.
+
+**The command executing is not sufficient. The pattern must also be able to
+match.** Measured while planning MAR-190, against the committed
+`tools/inversion/rebuild.sh`, which plainly contains the string:
+
+```
+grep -c  'find "${build_dir}/CMakeFiles"' tools/inversion/rebuild.sh   ->  0
+grep -cF 'find "${build_dir}/CMakeFiles"' tools/inversion/rebuild.sh   ->  1
+```
+
+`grep` ran, exited 1 for "no match", and printed a confident `0`. BSD `grep`
+reads `{build_dir}` as a malformed BRE interval, so the pattern cannot match
+anything. The probe was a Task 0 gate deciding whether an isolated tree had the
+fixed inversion harness; a `0` read at face value would have selected the wrong
+branch and silently disabled object deletion for every inversion in the story.
+
+So the widened rule, which subsumes both causes:
+
+> **A zero is evidence only once you have confirmed the pattern matches a
+> known-present instance.**
+
+Two mechanisms, one discipline:
+
+- **the shell can eat the pattern** — quote every glob, every `*`, every
+  `--include=`;
+- **the regex engine can reject it** — `{`, `}`, `+`, `?`, `|`, `(` and `)` all
+  mean different things in BRE, ERE and fixed-string mode, and a *malformed*
+  construct fails to match rather than erroring. Prefer **`grep -F`** whenever the
+  needle is a literal, which is most of the time in this tree, and reach for `-E`
+  deliberately rather than by default.
+
+The cheap countermeasure, and the one this chain should adopt: **run every
+"expect zero" gate once against a deliberately planted hit, then remove it.** A
+gate that has never returned non-zero has not been shown to be capable of it —
+which is the same argument as *"a case that is green before the implementation
+exists is a witness, not a gate"*, one section up, applied to a shell command
+instead of to a test.
 
 ### A stale line anchor fails to resolve. A stale RESTORE TARGET resolves perfectly and destroys work.
 
@@ -1028,6 +1114,7 @@ the actual text → restore → rebuild → `cmp`. Seventeen bit as designed.
 | I7b | The shared lambda captures `result` | Bites at **MAR-180 S2** — shared code, like I8 |
 | I8 | Remove `is_absolute()` from the shared lambda | Bites at **MAR-180 S3**, which runs before MAR-188's cases. P6's subject confirmed directly on the artefact instead: against an I8 build an absolute provenance path returns as `abs_hero.psd`, neither absolute nor byte-identical |
 | P8 d,e,h,i,j,k | Remove each domain rejection, one at a time | Each fails **its own** P8 arm |
+| I9b | Remove the pre-check **and** stage into the project's own directory | **Q6**, `planning changed the project directory`, set difference naming four created/missing files. The detector for `expect_inert` clause 5, and the proof the guard and the listing are independent layers |
 | I9 | Stage into the project's own directory | Bites on the planner's **own containment guard**, not on Q8's directory listing as designed. Review found the guard sat **after** `import_psd_to_runtime_bundle`, so it **reported an escape that had already happened** -- the project directory really was polluted. MAR-188 moved it **before** the import, where it prevents. Either way the listing clause is never reached, so it is a WITNESS -- see below |
 | **I10** | Leave `existing_skeleton_path` unset | **Did not bite as designed.** Every `proposed_*` target comes from the CANDIDATE parse, not from the staged merge, so the plan is identical either way. A Q8 clause asserting the staged skeleton carries the project's authored animations was added, and I10 then bites: `the staged skeleton must carry the project's authored animation 'attack'` |
 | I11 | Fall back to `slot_name` when the identity misses | **Q3**, `expected body -> Added, got body -> Updated` |
@@ -1047,25 +1134,39 @@ I7b and I8 mutate; the sixth family cannot express it. P5's two `weakly_canonica
 identity clauses are still worth keeping, but nothing MAR-188 owns alone detects
 them.
 
-### Two witnesses, not one: `expect_inert`'s directory listing is the second
+### One witness, not two -- and the difference was decided by running it
 
-Applying this story's own rule to the rest of its own suite found a second case
-that is green before the implementation exists and that **no inversion in the
-register turns red**.
+Applying this story's own P1 rule to the rest of its own suite raised a candidate
+second witness -- and **measuring it refuted the label**. The sequence is worth
+keeping, because the wrong answer was the plausible one.
 
 | Case / clause | Inversion that turns it red | Status |
 | --- | --- | --- |
 | P1 (byte-identical serialization of a pre-story project) | **none** | **Witness.** Its claim -- backward compatibility -- is real and nothing else makes it |
-| `expect_inert` clause 5 (full recursive directory listing) | **none** | **Witness.** I9 was designed to be its detector and never reaches it |
+| `expect_inert` clause 5 (full recursive directory listing) | **I9b** | **Gate.** Fails at **Q6** by run order: `Q6: planning changed the project directory.` with a set difference naming four files |
 | Every other P- and Q- clause | I1-I6, I7b, I8, P8 d/e/h/i/j/k, I9-I19 | Gate |
 
-**Why clause 5 has no detector.** I9 stages into the project's own directory, which
-should pollute it and fail the listing. It never gets that far: the containment
-guard refuses first, so the listing clause is unreachable *by construction*. It is
-kept because a plan silently writing into a project directory is exactly the
-failure AC3 is about, and a future change that removes or weakens the guard would
-have nothing else watching -- but **it is a witness today and must be labelled
-one**, by the same rule that relabelled P1.
+**What was nearly recorded, and why it was wrong.** With the containment guard in
+its original post-hoc position, I9 failed at the guard and clause 5 was never
+reached, so "no inversion turns it red" looked true and the review asked for the
+witness label. Once the guard was moved to run BEFORE the import, the right
+question changed: not "does I9 reach the listing" but "if the guard were gone,
+does anything else watch". **I9b** answers it -- remove the pre-check *and* stage
+into the project directory, so writes really escape -- and the listing turns red
+naming the created files by path and size.
+
+So the two layers are independent, which is the shape defence in depth is supposed
+to have: the guard prevents the escape, and if the guard is ever removed or
+weakened the inertness listing still catches it. Recording clause 5 as a witness
+would have understated the coverage and left a future reader believing a real
+detector did not exist.
+
+**The general lesson is about the question, not the answer.** "This clause has no
+detector" and "this clause has a detector only because the guard was fixed" are
+different facts, and fixing a defect can *create* coverage that did not exist a
+commit earlier. **Re-run the coverage question after changing the code it is a
+question about** -- a coverage row measured against the previous implementation is
+as stale as a line anchor, and it goes stale silently.
 
 **A guard placed after the operation it guards REPORTS rather than PREVENTS.**
 MAR-188 originally checked containment at the end of `plan_psd_reimport`, after

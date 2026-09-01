@@ -38,9 +38,19 @@ the way `invert.sh` calls it.** Both call sites (`invert.sh:21` in `restore` and
 ran its `for` loop over an empty `$@`. Every inversion therefore fell back to
 make's mtime comparison -- the precise hazard the harness was written to prevent.
 
-Measured before the fix: **130 objects present, 130 after, 0 files recompiled.**
-After: **123 files recompiled**, objects deleted and rebuilt, `libSDL3.a` intact at
-13.9 MB because the deletion is scoped to `CMakeFiles`.
+Demonstrated on one unchanged tree, three ways -- the point being a rebuild that
+*would otherwise have been skipped*:
+
+| Invocation, unchanged tree | Files recompiled |
+| --- | --- |
+| `cmake --build build -j8` (what make does alone) | **0** |
+| `rebuild.sh build` **before** the fix | **0** -- indistinguishable from doing nothing |
+| `rebuild.sh build` **after** the fix | **123** |
+
+Objects go 130 -> 130 across the fixed run because they are deleted and rebuilt;
+`libSDL3.a` stays intact at 13.9 MB because the deletion is scoped to
+`CMakeFiles`. The middle row is the whole defect: the harness's central guard was
+byte-for-byte as effective as not calling it.
 
 Two agents found this independently, which is the useful part. **A guard that is
 committed but not wired is worse than one that is absent**, because a README then
