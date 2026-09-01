@@ -355,12 +355,16 @@ AgentDispatchResult handle_inspection_operation(
         }
 
         json::Value::Object diagnostics;
-        // The four legacy members keep their exact names, types and
-        // expressions. `error_count` and `warning_count` are now severity
-        // counts, which is what makes them numerically identical to the shipped
-        // values on a project with no other issues: a clean project is 0/0 and
-        // a dirty one is 0/1, because `collect_session_diagnostics` emits a
-        // `project.unsaved_changes` Warning exactly when `session.dirty()`.
+        // The four legacy members keep their exact names and JSON types. Two of
+        // them keep their exact expressions as well -- `project_dirty` and
+        // `review_queue_count`, below -- but `error_count` and `warning_count`
+        // do NOT: they were a hardcoded `0` and `session.dirty() ? 1 : 0`, and
+        // they are now severity counts over the report. What is preserved is
+        // their VALUE, not their expression, and only on a project with no
+        // other issues: a clean project is 0/0 and a dirty one is 0/1, because
+        // `collect_session_diagnostics` emits a `project.unsaved_changes`
+        // Warning exactly when `session.dirty()`. Every project any shipped
+        // suite runs against is one of those two.
         diagnostics.emplace("error_count", number_value(report->error_count));
         diagnostics.emplace("warning_count", number_value(report->warning_count));
         diagnostics.emplace("project_dirty", bool_value(session.dirty()));

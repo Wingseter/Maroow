@@ -534,7 +534,7 @@ required by MAR-210.
 ## MAR-186 Collect Structured Project Diagnostics Validation Results
 
 Validated 2026-09-01 against a from-scratch `rm -rf build` tree at MAR-185's
-commit `68720d9`. MAR-186 gives the editor a **UI-free, read-only** function
+commit `711231c`. MAR-186 gives the editor a **UI-free, read-only** function
 that walks an opened project and returns a deterministic, stably-identified list
 of problems — each with a typed code, a typed overlay family, a severity, a
 message, a typed navigation target, and, only where a repair is actually safe,
@@ -637,7 +637,7 @@ those were cases that would have **failed on correct code**.
 
 | Gate | Answer |
 | --- | --- |
-| Tip | **`68720d9`**, not the `380479a` the brief named nor the `5a56663` the documents named. MAR-185's commit had been amended at least twice; all three hashes still resolve |
+| Tip | **`68720d9` at Task 0**, not the `380479a` the brief named nor the `5a56663` the documents named. MAR-185's commit had been amended at least twice by then; all three hashes still resolve. It was amended once more during implementation and **MAR-185's final SHA is `711231c`**, which is this story's parent — that amendment touched `AGENTS.md` only, so the source tree measured at Task 0 is the one validated against |
 | `ctest -N` | **22**. From-scratch rebuild of ALL targets: **0 warnings** |
 | MAR-185 landed | Yes. `rename_all_timeline_edits` (`authoring.cpp:123`) and `erase_all_timeline_edits` (`:136`) both cover all **seven** vectors; `erase_all`'s own comment describes MAR-186's orphan-animation mechanism verbatim |
 | Vocabulary is new | `grep -rnw` on the six names → **0**. The `-w` is load-bearing: `SpineImportDiagnosticSeverity` has 25 uses, so an unanchored grep can never return zero |
@@ -686,8 +686,8 @@ implementer hunting a regression that is not there:
    G7 uses `1 − 1e-12`, **in memory only** — the perturbation does not survive a
    file at all (see the serializer fact in *Repo facts that outlive their story*).
 3. **A fifth shipped assertion on the `project.diagnostics` payload, recorded
-   nowhere.** `agent_dispatch_smoke.cpp:1132` captures the **whole compacted
-   `scene_delta`** and `:1310-1314` asserts it byte-identical after a run of
+   nowhere.** `agent_dispatch_smoke.cpp:1476` captures the **whole compacted
+   `scene_delta`** and `:1655-1658` asserts it byte-identical after a run of
    dry-run operations. That binds AC3 far harder than "the four legacy members
    survive" — it pins the entire payload — and it is simultaneously a **free
    pre-existing detector for payload non-determinism**, which is a gain rather
@@ -857,10 +857,10 @@ rather than rediscovered, and Task 0 plus implementation found **eight more**.
 
 | # | Source | Claim | Measured |
 | --- | --- | --- | --- |
-| **D1** | The team lead's brief | HEAD is `380479a` | **`68720d9`.** MAR-185's commit has been amended at least twice — `5a56663` (the documents' baseline) → `380479a` (the brief) → `68720d9`. All three still resolve; only the tip moved |
+| **D1** | The team lead's brief | HEAD is `380479a` | **`68720d9` at Task 0, `711231c` at commit time.** MAR-185's commit was amended repeatedly — `5a56663` (the documents' baseline) → `380479a` (the brief) → `68720d9` (Task 0) → `711231c` (final). Every one still resolves, and the last amendment touched `AGENTS.md` only, so no source measurement moved |
 | **D2** | Design §6.2 G7, plan Task 4.1 | "The edit untouched → **zero** issues" is the control that makes the other sub-cases mean something | **False, and it fails on correct code.** `mesh_weight_edit_from_runtime` over `mesh_base`/`body`/`body_mesh` returns a vertex 2 that is already non-canonical (`[spine=0.25, arm_l=0.75]`, ascending). The control yields one issue, and each perturbation sub-case yields **two**. Fixed by canonicalizing the baseline first. Same class as the incoming three-vs-four parser-rule error: a gate that fails on a correct tree |
 | **D3** | Plan §B I7, design §5 | A **one-ULP** perturbation distinguishes an exact `==` from a `1e-9` tolerance; the failure text is "produced 0 issues, expected 1" | **The mutation is undemonstrable that way and the text describes CORRECT behaviour.** One ULP of 1.0 is `DBL_EPSILON/2 ≈ 1.11e-16`, inside `kMeshWeightSumTolerance` (`4·DBL_EPSILON ≈ 8.88e-16`), so the canonicalizer skips the division and correct code emits nothing. Replaced with a `1 − 1e-12` scale, measured into the gap between the two tolerances |
-| **D4** | Design §1.1's table, plan §A.3 | Four sites assert on the `project.diagnostics` payload | **Five.** `agent_dispatch_smoke.cpp:1132` captures the WHOLE compacted `scene_delta` and `:1310-1314` asserts it byte-identical after a run of dry-runs. It binds AC3 harder than either document states, and it is a free pre-existing detector for payload non-determinism |
+| **D4** | Design §1.1's table, plan §A.3 | Four sites assert on the `project.diagnostics` payload | **Five.** `agent_dispatch_smoke.cpp:1476` captures the WHOLE compacted `scene_delta` and `:1655-1658` asserts it byte-identical after a run of dry-runs. It binds AC3 harder than either document states, and it is a free pre-existing detector for payload non-determinism |
 | **D5** | Design §6.2 G12, plan Task 3.1 | An identity **collision** can be built in the orphan-animation families, and asserting a count of two catches the resulting deletion | **Not constructible there, so the count assertion was vacuous.** Each family's identity has fixed arity and the family token is a literal, so absorbing a separator changes the arity; of the remaining tokens only the animation name is unconstrained, because a bone or slot that does not resolve is a hard load error. Split into G12a (escaping observable by identity, in that family) and **G12b** on `overlay.orphan_weight_target`, whose three tokens are all free — where the collapse from two issues to one was then measured |
 | **D6** | Plan Task 3.1 G3 | Two round-tripped projects with the orphan first and last detect an index-derived identity | **They do not.** `.marrow` keys overlays by animation name and `Value::Object` is a `std::map`, so a reload normalises the vector order and the orphan lands at index 0 in both. Found by applying the index mutation and watching G3 pass its own comparison. G3 now collects in memory |
 | **D7** | Plan §B I3 → G9(c) | Without the sort, the duplicate `preview.stale_skin` survives | **Not with the specified fixture.** `["default","ghost_skin","ghost_skin"]` emits its two issues *consecutively* (`default` emits nothing), so adjacent-unique de-duplication collapses them with or without the sort. Fixed by interleaving a second distinct stale skin, which also makes G9(c) an independent detector of the de-duplication |
@@ -934,10 +934,36 @@ right decision still misleads:
   the same diagnostic**, so a non-Clang build of this tree is silent about a
   missed exhaustive-switch arm. The `-Werror=switch` recipe is recorded above as
   a deferred mitigation, never as coverage.
-- **No compiler checks `collect_orphan_animation_overlays`' seven family calls.**
-  An eighth `ProjectData` overlay vector added without an eighth call produces no
-  diagnostic and no failure from any shipped case. The `static_assert` beside the
-  list is a guard, not a proof.
+- **No compiler checks `collect_orphan_animation_overlays`' seven family calls,
+  and the `static_assert` beside them provides ZERO compile-time protection.**
+  This is stronger than "a guard, not a proof", and it was measured rather than
+  reasoned. `constexpr std::size_t kSweptOverlayFamilyCount = 7` is initialised
+  from the same literal the assert compares it against, two lines above it, so
+  `static_assert(kSweptOverlayFamilyCount == 7, …)` is a **tautology**: it can
+  only fire if someone edits the constant. Review deleted the entire
+  bone-inherit loop, left the constant at 7, removed every object file and built
+  all targets — **the build succeeded with no diagnostic.**
+
+  **G1's seven-identity assertion is the actual guard.** It is what caught all
+  seven of the I2a–g call-drop mutations, each by name
+  (`Missing: overlay.orphan_animation|inherit|ghost|arm_l`). The `static_assert`
+  earns its place only by putting the number in the editor's path; it detects
+  nothing on its own. **MAR-187 is adding an eighth family and must not rely on
+  it** — the thing to extend is G1's expected identity list.
+- **No inversion exercises severity ASSIGNMENT, and G1/G10's absolute count
+  assertions are largely subsumed.** A small evidence gap rather than a coverage
+  gap, and disclosed rather than papered over with an invented inversion. Every
+  case's `check_invariants` recomputes the severity totals from `report.issues`
+  with logic identical to `finalize`'s, so it subsumes any pure *counting* bug —
+  which is why I14 (swapped accumulators) fires at G1 and is over-determined.
+  What that cross-check cannot see is a detector assigning the **wrong severity**
+  to an issue, because the list and the counts then stay consistent with each
+  other. Such a flip *would* still fail — G1 checks each orphan issue's severity
+  individually, and G10's absolute `1 Error / 2 Warnings` is not derivable from
+  the cross-check — but **no mutation in that class was run**, so those two
+  assertions are load-bearing by inspection rather than by measurement. Adding
+  one was not cheap here: it means editing `diagnostics.cpp`, which
+  `impl-mar187` is concurrently amending, so it is recorded instead of run.
 - **Nothing is persisted.** A diagnostic is recomputed on demand; a project that
   is opened, inspected and closed leaves no trace of what was found — which is
   also what makes AC2's "read-only" total.
