@@ -880,6 +880,42 @@ the same way at the pre-fix commit, and `agent_dispatch_smoke` writes to fixed
 because the next validation sweep over this suite needs to know that "run the
 tests twice at once" is not yet a supported operation.
 
+### A non-biting inversion and a bad error message can be the same defect
+
+Two symptoms arrived in MAR-189 as separate review items and turned out to be one
+finding. Recorded because neither symptom, alone, identifies what is wrong -- one
+reads as a wording problem and the other as an untestable corner:
+
+- **A user-facing message with no good remedy to offer.** The skins refusal told
+  the user to *"first remove those attachments from the project's skeleton"* --
+  instructing them to destroy, by hand, exactly the data the refusal existed to
+  protect.
+- **An inversion that did not bite.** Dropping a `> 0U` guard in the prune's
+  exclusion left the whole suite green.
+
+The single cause: `if (erase(...) > 0U)` implemented *"the identity the prune
+removed"* when the contract is *"the identity the user asked to delete"*, and
+those diverge exactly where this importer always lands -- it erases `skins`
+wholesale, so the prune never observes a removal. So the code **refused to delete
+something the user had explicitly marked for deletion**, and the branch that
+should have forgiven it was unreachable.
+
+> **The message was bad because the good remedy was broken; the inversion did not
+> bite because the broken code was unreachable.** A refusal whose advice is
+> unhelpful is worth reading as evidence about the product, not about the prose --
+> the missing remedy may be missing because it does not work.
+
+Fixing it made the refusal message *better* as a side effect, because there was
+now a non-destructive route to offer -- which is the tell that the wording was
+never the problem.
+
+**And the repair went wrong in a way worth naming: the corrected line was first
+placed one `continue` too low**, inside the loop body it had just been diagnosed
+out of, minutes after the diagnosis. A contract that must be evaluated **before**
+an early exit is exactly the kind that gets reintroduced by the next person
+restructuring the loop, so the reason lives in a comment at the site rather than
+only in this file.
+
 ### A fixture in which two candidate rules agree cannot distinguish them
 
 The three degenerate gate shapes recorded above are all properties of the
@@ -1115,6 +1151,66 @@ pointed at a race that was not there. A single run reproduced it, which is what
 broke the wrong hypothesis. Capture the SHA **once**, with
 `SHA="$(git rev-parse HEAD)"`, and derive the tree and every regenerated file from
 that one value.
+
+### A tree assembled from two reads of "HEAD" belongs to no commit that exists
+
+The two entries above describe a tree that is **some** real commit -- an older one.
+This one describes a tree that is **none of them**, which is worse, because every
+instinct that says *"work out which commit this is"* fails.
+
+Measured in MAR-190. An isolated verification tree was refreshed from
+`git archive HEAD`, and one file inside it was separately regenerated from
+`git show HEAD:<path>` a few minutes later. Another story committed in between. The
+result was a tree whose **case** expected a rejection message the newer commit
+introduced, and whose **production code** still emitted the older one -- a red run
+that no commit in the repository would ever produce, and that no amount of asking
+"is the tip broken?" could explain.
+
+**The symptom pointed away from the cause, and one measurement redirected it.**
+The first observation was *eight concurrent runs, eight failures*, which reads
+unmistakably as a race. What settled it was that **a single run reproduced it**.
+That discriminator belongs beside the one in the entry above:
+
+- a fresh build of the same SHA passes and the incremental one fails -> **stale objects**;
+- a single run reproduces what looked like a concurrency failure -> **not a race**;
+  suspect the tree before the timing.
+
+*Rule: capture the SHA ONCE -- `SHA="$(git rev-parse HEAD)"` -- and derive the tree
+and every regenerated file from that one value. In a worktree with other agents in
+it, "HEAD" is not a constant, and two reads of it minutes apart are two different
+trees.*
+
+### A passing result is evidence only once you have seen the failing form fail
+
+This chain has written this rule three times in three vocabularies without
+noticing it was one rule:
+
+- **"a case green before the implementation exists is a WITNESS"** -- test-side;
+- **"a zero result is evidence only once the pattern is known to match something"**,
+  hence running every "expect zero" gate against a **planted hit** -- grep-side;
+- **a fix verified by a negative control** -- MAR-190 made a scratch root
+  per-process and measured **both** forms: the fixed root gave **3 passes, 5
+  failures of 8, 0 distinct roots**; the per-process one gave **8 passes, 8
+  distinct roots**. Without the first row, the second is a story about timing
+  rather than a measurement of the fix.
+
+They are the same idea, and a reader meeting the **fourth** instance in a fourth
+vocabulary will not recognise it as a recurrence -- which is precisely the failure
+the "lift the general form" half of the historical-measurement rule exists to
+prevent.
+
+**The general form: a green result carries information only in proportion to what
+would have made it red.** Before believing a pass, name the version of the world
+that fails and run it. If you cannot construct one, the check is a witness and
+must be labelled one.
+
+**Its shell-side twin, which is the same shape once seen.** A concurrency harness
+reported `passes=0 failures=1` because zsh's `nomatch` aborted the command before
+`wait` ever ran; the numbers described no execution at all. And a pattern-based
+hunk filter reporting "clean" is trustworthy exactly as far as its patterns are.
+**A filter reporting clean, a vacuous clause reporting pass, and an aborted
+harness reporting a count are one failure**: success reported about a check that
+never executed. Assert that the check ran before reading what it says.
 
 ### Two agents share one scratchpad, and a restore is only verified by an absolute path
 
@@ -1679,10 +1775,24 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   difference is therefore the whole of the current set, and the consequence, in
   plain words:
 
-  > **Reimport is permanently blocked for any project that has ever had a
-  > hand-authored skin.** Including a reimport whose only purpose is a
-  > `preserve=false` deletion. There is no override -- `PsdReimportCommitOptions`
-  > carries `project_path` and `update_provenance` and nothing else.
+  > **Blocked for a project whose hand-authored skins sit on layers the PSD STILL
+  > PRODUCES.** `preserve` reaches only `Missing` layers, so a skin on a layer that
+  > is still present has no escape short of editing the skeleton by hand. There is
+  > no override -- `PsdReimportCommitOptions` carries `project_path` and
+  > `update_provenance` and nothing else.
+
+  **This row was wider before and is narrower now, which is the interesting part.**
+  It first read *"permanently blocked for any project that has ever had a
+  hand-authored skin, including a reimport whose only purpose is a `preserve=false`
+  deletion"* -- accurate when it was written, and made false **in the reader's
+  favour** by fixing the exclusion contract two paragraphs down: `preserve=false`
+  is now a working non-destructive escape for layers the PSD has dropped. The old
+  wording would have sent someone to a backlog row when a checkbox would have
+  solved their problem.
+
+  *Understating a remedy is its own kind of inaccuracy, and it is the more likely
+  one to survive: nobody re-reads a limitation to check whether it got smaller.*
+  When you fix something, re-read what you previously wrote about being unable to.
 
   It remains the right trade against silent unrecoverable loss, and it is a
   consequence rather than a footnote. **It is also CERTAIN, not merely reasoned:**
@@ -1698,21 +1808,33 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
 
   The message now leads with the **non-destructive** route and labels the other one:
 
-  > There is no override in this version. Two ways forward, and the first is not
-  > destructive: **mark those layers for deletion in the reimport plan**, which
-  > tells the commit the loss is intended. Otherwise you can remove the
-  > attachments from the project's skeleton by hand -- but that **DESTROYS** the
-  > same authored data this refusal is protecting, is undoable only through the
-  > editor's undo, and should be preceded by a backup.
+  > There is no override in this version. If the affected layers are **GONE** from
+  > the PSD, **mark them for deletion in the reimport plan** -- that is not
+  > destructive and it tells the commit the loss is intended. If they are still
+  > **IN** the PSD there is no non-destructive route: removing the attachments from
+  > the project's skeleton by hand **DESTROYS** the same authored data this refusal
+  > is protecting, is undoable only through the editor's undo, and should be
+  > preceded by a backup.
+
+  The message carried the same overstatement as the row until it was re-read
+  alongside it: it offered *"mark those layers for deletion"* to everyone, when
+  `preserve` reaches only `Missing` layers. It now says which case each route
+  applies to. A per-identity version -- the committer knows which lost slots belong
+  to `Missing` layers and could say so for each -- is a refinement under the same
+  backlog owner, not written here.
 
   *A refusal that implies a remedy it does not provide is a small dishonesty; one
   that prescribes a destructive remedy without saying so is worse than no guidance
   at all.*
 
-  **An informed override is backlogged, not designed here.** It needs a decision
-  about what is confirmed and how the consequence is shown, which belongs with the
-  review UI rather than with the committer. Owner: **MAR-190's successor**, raised
-  by MAR-189 and explicitly *not* added to MAR-190.
+  **An informed override is backlogged, not designed here, and its scope is the
+  REMAINING gap rather than the original one.** What is left after the contract fix
+  is narrow and specific: *a hand-authored skin on a layer the PSD still produces.*
+  `preserve` cannot reach it, because a still-produced layer is `Updated`, not
+  `Missing`. That is the case an informed override exists for -- it needs a
+  decision about what is confirmed and how the consequence is shown, which belongs
+  with the review UI rather than with the committer. Owner: **MAR-190's
+  successor**, raised by MAR-189 and explicitly *not* added to MAR-190.
 
   For projects this story creates the comparison never fires, because a
   PSD-derived skeleton has no `skins` at all. That is the only population it is

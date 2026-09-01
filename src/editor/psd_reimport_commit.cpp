@@ -687,14 +687,14 @@ bool CommitRun::validate_staged_bundle() {
              "defines (" +
                  identities +
                  "); a PSD reimport replaces bones, slots and skins wholesale, so "
-                 "committing it would destroy hand-authored attachments. There is "
-                 "no override in this version. Two ways forward, and the first is "
-                 "not destructive: mark those layers for deletion in the reimport "
-                 "plan, which tells the commit the loss is intended. Otherwise you "
-                 "can remove the attachments from the project's skeleton by hand -- "
-                 "but that DESTROYS the same authored data this refusal is "
-                 "protecting, is undoable only through the editor's undo, and "
-                 "should be preceded by a backup");
+                 "committing it would destroy hand-authored attachments. There is no "
+                 "override in this version. If the affected layers are GONE from the "
+                 "PSD, mark them for deletion in the reimport plan -- that is not "
+                 "destructive and it tells the commit the loss is intended. If they "
+                 "are still IN the PSD there is no non-destructive route: removing "
+                 "the attachments from the project's skeleton by hand DESTROYS the "
+                 "same authored data this refusal is protecting, is undoable only "
+                 "through the editor's undo, and should be preceded by a backup");
         return false;
     }
     return advance(PsdCommitStep::ValidateStagedBundle);

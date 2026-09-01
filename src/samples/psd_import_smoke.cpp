@@ -3166,13 +3166,14 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
             "ValidateStagedBundle: the staged skeleton drops skin attachments the "
             "project's skeleton defines (default/shadow); a PSD reimport replaces "
             "bones, slots and skins wholesale, so committing it would destroy "
-            "hand-authored attachments. There is no override in this version. Two "
-            "ways forward, and the first is not destructive: mark those layers for "
-            "deletion in the reimport plan, which tells the commit the loss is "
-            "intended. Otherwise you can remove the attachments from the project's "
-            "skeleton by hand -- but that DESTROYS the same authored data this "
-            "refusal is protecting, is undoable only through the editor's undo, and "
-            "should be preceded by a backup";
+            "hand-authored attachments. There is no override in this version. If "
+            "the affected layers are GONE from the PSD, mark them for deletion in "
+            "the reimport plan -- that is not destructive and it tells the commit "
+            "the loss is intended. If they are still IN the PSD there is no "
+            "non-destructive route: removing the attachments from the project's "
+            "skeleton by hand DESTROYS the same authored data this refusal is "
+            "protecting, is undoable only through the editor's undo, and should be "
+            "preceded by a backup";
         if (result) {
             std::cerr << "R2(d): a staged bundle that erases a hand-authored skin must "
                          "be refused even when NOTHING references it; the commit "
@@ -4855,10 +4856,6 @@ int main(int argc, char** argv) {
     // (`agent_dispatch.cpp:626-629`) does not whitelist -- so an A-case sited there
     // is refused as a forbidden input path before it can test anything. The two
     // sets are disjoint, and the safety gate accepts both.
-    // NOT wrapped in `ScratchRoot` yet: that class is MAR-189's UNCOMMITTED work
-    // and this story must not depend on code that is not in HEAD. The case
-    // disposes of its own root on success instead, and keeps it on failure, which
-    // is the same contract self-contained. Adopt the guard once it lands.
     {
         ScratchRoot root(agent_scratch_root());
         if (!validate_mar189_agent_operation(root.path())) {
