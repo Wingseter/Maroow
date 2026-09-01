@@ -40,7 +40,12 @@
 - Viewport interaction data-kernel tests: `./build/marrow_viewport_interaction_tests`
 - Timeline data-model and authoring-boundary tests: `./build/marrow_timeline_model_tests`
 - Timeline scalar-graph projection/geometry/view/drag-math tests: `./build/marrow_timeline_graph_model_tests`
-- Editor project authoring smoke including `offset_keyframe_scalars`: `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- Editor project authoring smoke including `offset_keyframe_scalars` and MAR-184's
+  stepped inherit overlays (schema round trip, all five modes, the five parser
+  rejections, the curve rejection, the `ensure` accessor, base-backed /
+  project-only / empty materialization, the merge primitive's four rejections and
+  all three collision arms, and `.mskl`/`.mbin` export equivalence -- P1-P13):
+  `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - `marrow_project_smoke` asserts only what the project it is pointed at actually contains. The viewport debug-overlay gate keys on whether the document authors `editor.viewport.debug_overlay` (round-tripping it value for value when present, asserting the `DebugOverlaySettings` defaults when absent, plus an alternating-pattern round trip that catches two toggles wired to each other's key — which an all-`true` fixture cannot), and the `player_idle`-specific editing suites run only for a project carrying their markers (bones `spine`/`arm_l`, animations `attack`/`aim`, skin `mesh_base`). A project matching NONE of them prints a named skip and still runs the shape and export checks; a project matching SOME of them ABORTS, because a partial match is a corrupted fixture rather than a project to skip
 - Constraint parameter model-layer coverage (eleven IK/physics fields at their boundaries through save -> LOAD -> materialize, the three-layer refusal of an out-of-range physics value, the deliberate `softness < 0` compatibility case, and `.mskl`/`.mbin` agreement after `.mbin` v2's float32 narrowing): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
 - Atomic project save, cross-directory Save As rebasing, history rebasing, session `create`/`close`, and failure-safe runtime-source adoption (S1-S10): `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
@@ -286,6 +291,293 @@ required by MAR-210.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
 
+## MAR-184 Add Stepped Inherit Timeline Overlays Validation Results
+
+Validated 2026-09-01. **The title is the first thing to correct.** "Overlay"
+here is `ProjectData::*_timeline_edits` -- additive `.marrow` data layered over
+an imported `.mskl` at materialization time -- **not** rendering. MAR-184 draws
+nothing. It ships a file-format family and a UI-free merge primitive, and every
+one of the story's six acceptance criteria names the project, materialization,
+export or test layer; not one names the timeline panel, the graph, the
+dopesheet, the playhead, or selection.
+
+What this story did **not** touch, proved by empty `git diff --stat`: no ImGui,
+no widget, no frame smoke, no shell file, `timeline_model.{hpp,cpp}`,
+`timeline_graph_model.cpp`, `timeline_controller.cpp`, `session.cpp`,
+`include/marrow/c/`, `src/c/`, `include/marrow/runtime/`, `src/runtime/`,
+`assets/fixtures/`, `CMakeLists.txt`, and the whole agent registry
+(`agent_dispatch.cpp`, `agent_handlers_*.cpp`, `agent_dispatch_smoke.cpp`,
+`tools/`). `.mskl` stays version **1**, `.mbin` stays version **2**, the C ABI is
+untouched, `.marrow` still has no version field, and the registry is unchanged at
+**64**. No new translation unit and no new CTest target: `ctest -N` is **22**
+before and after. The whole diff is **additive** -- 2006 insertions, **zero**
+deletions, across six files.
+
+The runtime layer was already complete and genuinely stepped, and was
+deliberately left alone. Two project-side validation rules are **stronger** than
+the runtime's own parser (a finite non-negative time, and the refusal of `curve`
+data on a stepped key), and both live on the overlay rather than in
+`skeleton_parse.cpp` **on purpose**: adding either to the runtime would make
+previously valid `.mskl` files stop loading, which AC5's "retaining current
+format versions" forbids.
+
+### What was measured before any code was written
+
+| Claim | Measured |
+|---|---|
+| `ctest -N` total | **22**, unchanged at the end |
+| Registry and its witnesses | **64** rows; **1** `std::array<OperationExpectation, 64>` at `agent_dispatch_smoke.cpp:39`; **10** `!= 64U` guards; **2** python `== 64` assertions. All four unmoved |
+| `grep -c "nherit" src/editor/project.cpp` | **0**. `include/marrow/editor/project.hpp` had exactly one hit, `:442`, an unrelated linked-mesh doc comment |
+| `grep -c "nherit" src/runtime/binary.cpp` | **0** -- inherit rides the generic document codec, so `.mbin` needed no new code |
+| `grep -c "TimelineTrackKind::" src/editor/shell_timeline.cpp` | **0** -- the panel iterates rows generically |
+| `serialize_project(load_project("assets/fixtures/player_idle.marrow"))` | **6111** bytes, sha256 `c7d6c6de6a0badf8171772ebb75884785c1b203c86ff4fd4553344029953616b`. Asserted and printed by P4 every run |
+| Fixture inventory | `skin_inherit_constraints.mskl` carries the tree's ONLY inherit timeline: `toggle_inherit`/`child`, keys `0.0 normal`, `0.25 noRotationOrReflection`, `0.5 onlyTranslation`, `1.0 normal`. All five bones (`root`, `controller`, `child`, `constrained`, `cape_target`) omit `inherit`, i.e. setup `Normal`. `player_idle.mskl` has **zero**. `toggle_inherit`'s `bones` object names **only** `child` |
+| `.marrow` files carrying `bones.*.inherit` | **zero**, all three checked |
+
+#### The M-gate: the pruning trap is REAL, and it shaped every fixture here
+
+The single most consequential measurement. `prune_constant_timelines`
+(`skeleton_animation.cpp:275-279`) deletes an inherit timeline of exactly one key
+at `t=0` whose mode equals the bone's setup inherit, during skeleton
+construction -- i.e. inside `build_project_runtime`. A test authoring
+`[{time: 0, inherit: "normal"}]` on a bone of this fixture and then asserting the
+timeline exists **fails, and the overlay code is not the reason.**
+
+`marrow_inspect` prints nothing about inherit timelines, so the plan's
+`marrow_inspect | grep -i inherit` gate cannot answer this either way (document
+error D9). A throwaway probe linking `libmarrow_runtime.a` was used instead:
+
+```
+=== lone {0.0, normal} on 'controller' ===
+animation 'toggle_inherit': 1 inherit timelines
+  bone_index=2 name='child' keys=4: (0,0) (0.25,2) (0.5,1) (1,0)
+        -> 'controller' is ABSENT. Pruned.
+
+=== {0.0, noScale} + {0.4, normal} on 'controller' ===
+animation 'toggle_inherit': 2 inherit timelines
+  bone_index=2 name='child' keys=4: (0,0) (0.25,2) (0.5,1) (1,0)
+  bone_index=1 name='controller' keys=2: (0,3) (0.4,0)
+        -> survives.
+```
+
+Every project-only overlay in this story is therefore `{0.0, noScale}` +
+`{0.4, normal}`: two keys, neither a lone origin key matching setup.
+
+#### Does the runtime witness exercise all five modes? **No -- three.**
+
+`validate_runtime_inherit_timeline_and_skin_constraints`
+(`runtime_fixture_smoke.cpp:1883`) samples `toggle_inherit` at `0.0`, `0.25`,
+`0.5` and `1.0`, and the fixture's four keys carry only `Normal`,
+`NoRotationOrReflection` and `OnlyTranslation`. **`NoScale` and
+`NoScaleOrReflection` are not exercised there.** It was deliberately **not**
+widened -- `git diff --stat -- src/samples/runtime_fixture_smoke.cpp` is empty --
+because AC6's "all five modes" is met **more strongly** by this story's own
+cases. P3 and P12 do not merely exercise the project's mode table: each saves,
+then **loads**, so all five tokens are written by the project serializer and read
+back by the runtime's own `parse_bone_inherit`, and P12 does it again through
+`.mskl` **and** `.mbin`. The fixture is also asserted on by other suites.
+`runtime_fixture_smoke` runs as an unchanged regression witness.
+
+### Results
+
+All thirteen cases run inside the **standing** `player_idle.marrow` invocation.
+There is exactly **one** invocation, not two: every editing suite sits inside
+`main()`'s marker-gated `else` (`editor_project_smoke.cpp:14056-14203`), so
+pointing the binary at a project built over `skin_inherit_constraints.mskl` would
+take the `markers.present.empty()` **skip** branch and run none of it. The cases
+build their throwaway projects **inside** the standing run, as MAR-177 and
+MAR-178 already do. No new command line was added; `AGENTS.md:43` gained a clause.
+
+| Case | Assertion | Result |
+|---|---|---|
+| P4 | The old-project non-effect witness: `player_idle.marrow` loads with **zero** inherit edits and serializes to **exactly** 6111 bytes / sha256 `c7d6c6de…`. Both printed every run | PASS |
+| P1 | Save -> **LOAD** round trip of a two-key overlay on `controller`: one edit, right animation and bone, two keys, times within `1e-9`, modes `NoScale`/`Normal` | PASS |
+| P2a-e | Five parser rejections, each asserting the **full** JSON path AND the message text: negative time; non-increasing times; `1e39` (over float32); unknown token `noScales`; empty array | PASS |
+| P6 | A `curve` member on a stepped inherit key is refused by path and message | PASS |
+| P3 | All **five** modes as five keys survive save -> load -> materialization as the matching `runtime::BoneInherit`, in order | PASS |
+| P13 | `ensure_bone_inherit_timeline_edit` materializes `child`'s **4** base keys with exact times and modes; a second call returns the SAME pointer and appends nothing; `controller` (no base track) yields an **empty** edit; an unknown bone and an unknown animation each return `nullptr` and append nothing | PASS |
+| P7 | A project-only overlay materializes, and `timeline_model::build_tracks` emits an `Inherit` `TrackRow` for that bone with the overlay's key times. **Model-layer, not frame coverage** -- see "Not independently covered" | PASS |
+| P8 | With an inherit overlay on `controller` and an unrelated rotate overlay on `root`, the materialized animation has **two** inherit timelines -- `child`'s untouched 4-key base track and `controller`'s new one -- and `root`'s rotate track survives | PASS |
+| P9a | An `ensure`d but empty edit materializes **successfully** and produces **no** timeline for `controller` | PASS |
+| P9b | The same project writes a `.marrow` with **no** `inherit` member, and that file reloads | PASS |
+| P5 | The same three keys merged in **two request orders** serialize byte-identically; stored times are strictly increasing, asserted **in memory with no save and no reload** so the runtime's own guard cannot stand in for it; counts 3/0/3 | PASS |
+| P10a-d | Four merge rejections, each `changed == false` with the offending value named: unknown animation, unknown bone, invalid mode, `quiet_NaN()` time. **P10c and P10d additionally assert `serialize_project` byte-identity**; P10a/P10b deliberately do not, because `ensure` returns `nullptr` there and such an assertion could not fail | PASS |
+| P11 | Collision, all three arms on `child` (4-key base track, **no project edit yet** -- load-bearing, and asserted): a default collision is refused with the project byte-identical; `replace_existing_times` overwrites the **mode** while keeping the **stored** `0.25` rather than the requested `0.2500001`; and re-requesting exactly what is stored reports `changed == false` with an **empty** error and writes nothing | PASS |
+| P12 | A base-backed overlay **merged through the primitive** exports to `.mskl` and `.mbin`; both reload with 5 keys at equal times (float32 tolerance) and identical modes; `.mskl` `version` is **1** and the `.mbin` varint after the `MBIN` magic is **2** | PASS |
+
+`ctest` **22/22**, `-L runtime` 4/4, `-L editor` 12/12,
+`marrow.renderer_link_boundary` 1/1, all against a from-scratch `rm -rf build`.
+Nine model-layer binaries, `marrow_fixture_smoke`, and
+`marrow_editor_shell --auto-close 2` (C4-C25 regression) all pass.
+`marrow_agent_dispatch_smoke` prints **408** `[ OK ]` cases against 64
+operations. `marrow_inspect --compare` reports `matches`.
+`tools/mcp/test_client.py` **PASSED** and `py_compile` over the four MCP modules
+is clean. `marrow_verify_third_party` and `marrow_constraint_warning_check` both
+build. `~/Library/Application Support/Marrow` is **ABSENT** after the whole run.
+
+The count sweep over the diff returned exactly **two** lines, both inspected by
+hand and neither a registry count: `kRoundConstants[64]` and `schedule[64]`,
+the round table and message schedule of the test-local SHA-256 P4 uses. SHA-256
+genuinely has 64 rounds.
+
+### Inversions -- actual outcomes, not predictions
+
+**Twenty** mutations, in two passes. Sixteen were run **against the from-scratch
+build**, each restored with `touch` plus a forced rebuild, each failure text
+captured to a file and compared with `cmp` against the first run's (H2).
+**Fifteen reproduced byte-identically**; the sixteenth (I2) differs only because
+its first run predates the deliberate strengthening of P2's expected path, and
+the re-run text is authoritative. A review pass then added **four** more (R1-R4),
+which close every case that had no attributed inversion except P10a and P10b.
+The R-rows were run once each with the **object file deleted before every
+build**, so no mtime comparison was involved; the texts below are this run's own.
+
+| # | Mutation | Bit | Exact failure text |
+|---|---|---|---|
+| **I9** | Drop the seventh `!empty()` disjunct at the `build_timeline_edits_value` call site | **P1** | `MAR-184 P1: the reloaded project carries 0 inherit edits, expected 1. A serializer that never emits the family loses every overlay on save, and no other case notices because no other project has one.` |
+| **I2** | Weaken the non-negative rejection to `time < -1.0` | **P2a** | `MAR-184 P2a: expected a load error naming '$.timeline_edits.animations.toggle_inherit.bones.controller.inherit[0].time', got a successful load. …` |
+| **I2b** | Delete the `finite_animation_scalar` call, keep `>= 0` | **P2c** | `MAR-184 P2c: expected message '$.timeline_edits.…inherit[0].time: inherit keyframe time must be finite and non-negative', got '$.animations.toggle_inherit.bones.controller.inherit[0].time: number is outside the runtime float32 range'.` |
+| **I7** | `inherit_mode_from_key` returns `Normal` for an unknown token | **P2d** | `MAR-184 P2d: expected a load error naming '$.timeline_edits.…inherit[0].inherit', got a successful load. …` |
+| **I1** | Delete the `curve`-member rejection | **P6** | `MAR-184 P6: expected a load error naming '$.timeline_edits.…inherit[0].curve', got a successful load. …` |
+| **I11** | `ensure` skips copying the base track's keys | **P13** | `MAR-184 P13: ensure on 'child' produced 0 keyframes, expected the base track's 4. …` |
+| **I3** | Delete the inherit branch from `build_runtime_document` | **P3**, *not* P7 | `MAR-184 P3: the materialized animation carries 0 inherit keys for 'controller', expected 5.` |
+| **I3** (P7 uniqueness) | Same mutation, with P3 neutered to `if (false)` | **P7** | `MAR-184 P7: the materialized animation has no inherit timeline for 'controller'. A project overlay that never reaches build_runtime_document is authored, saved, reloaded -- and invisible to the runtime.` |
+| **I3b** | Replace the animation's whole `bones` object instead of assigning into it | **P8** | `MAR-184 P8: 'child' lost its base inherit timeline; the animation has 1 inherit timeline(s), expected 2. …` |
+| **I6** | Remove the empty-edit skip from `build_runtime_document` | **P9a** | `MAR-184 P9a: materialization failed: …skin_inherit_constraints.mskl:1:1: $.animations.toggle_inherit.bones.controller.inherit: inherit timeline must contain at least one keyframe` |
+| **I6b** | Remove the empty-edit skip from `build_timeline_edits_value` | **P9b, only after the case was STRENGTHENED** | `MAR-184 P9b: the written .marrow carries an inherit member for an EMPTY edit. The project parser refuses an empty array, so such a file saves and can never be reopened.` |
+| **I5** | Sort the merged keys **descending** | **P5** | `MAR-184 P5: stored times are not strictly increasing: 0.5 0.3 0.1.` -- and P5's **byte-identity half did not fire**, exactly as designed: both request orders still agree under a descending sort. The strictly-increasing half is the biting half |
+| **I7c** | `continue` past an unknown mode token in the primitive | **P10c** | `MAR-184 P10c: expected an error naming 'noScales', got changed=false with error ''.` |
+| **I4** | Remove the candidate copy; hoist `ensure` above the **collision check**, as the plan words it | **P11 arm 1**, *not* P10c | `MAR-184 P11 arm 1: the rejected merge changed serialize_project(). A collision refused AFTER ensure has materialized the base track leaves the project modified by a call that reported failure.` |
+| **I4-top** | The stronger variant: hoist `ensure` above the **per-key validation** too | **P10c** | `MAR-184 P10c: the rejected merge changed serialize_project() (954 -> 1555 bytes). Validation must complete before ANY write, so a rejection leaves the project bytewise as it was.` |
+| **I4b** | The replace arm writes the **requested** time onto the existing key | **P11 arm 2** | `MAR-184 P11 arm 2: the replaced key drifted to 0.2500001, expected the stored 0.25. An overwrite that writes the REQUESTED time lets the 1e-6 identity window walk a key one merge at a time.` |
+| **I13** | `kBinaryVersionPackedAnimations = 3` | **P12** | `MAR-184 P12: .mbin version is 3, expected 2.` The `.mbin` still round-tripped its data at version 3, so P12's version assertion is the **exclusive** detector |
+| **R1** | Delete the strictly-increasing rejection from `parse_inherit_keyframes` | **P2b** | `MAR-184 P2b: expected message '$.timeline_edits.…controller.inherit[1].time: inherit timeline edit keyframe times must be strictly increasing', got '$.animations.toggle_inherit.bones.controller.inherit[1].time: timeline keyframe times must be strictly increasing'.` **A second, previously unrecorded instance of the I2b trap, in new code**: the load still fails, but with the RUNTIME's wording at `$.animations.…` instead of the project's at `$.timeline_edits.…`, so a case asserting only `!result` would have passed |
+| **R2** | Delete the empty-array rejection from `parse_inherit_keyframes` | **P2e** | `MAR-184 P2e: expected a load error naming '$.timeline_edits.…controller.inherit', got a successful load. …` The load succeeds outright -- the empty edit is then skipped by both serializers, so nothing reaches the runtime to object |
+| **R3** | Drop `finite_animation_scalar` from `merge_inherit_timeline`'s per-key loop, keep `< 0.0` | **P10d** | `MAR-184 P10d: expected an error naming 'finite and non-negative', got changed=true with error ''.` R1's mirror on the C++ side: `NaN < 0.0` is **false**, so a NaN time survives the sign check silently and is inserted as a key |
+| **R4** | Delete the `match->inherit == key.inherit` no-op short-circuit | **P11 arm 3** | `MAR-184 P11 arm 3: re-requesting exactly what is stored must report changed=false with an EMPTY error and write nothing; got changed=true error ''.` |
+| **I8** | Add `Inherit` to `track_is_editable` | **Task 6's diff** | `git diff --stat -- src/editor/timeline_model.cpp` becomes `1 file changed, 3 insertions(+)`. **Not a test** -- a scope check, and recorded as one rather than counted as coverage |
+
+**One inversion did not bite as written, and the CASE was strengthened, never the
+gate.** **I6b**: the serializer's call site gates the whole `timeline_edits`
+object on the *effective* edits, so a project whose ONLY edit is the empty
+inherit edit writes no `timeline_edits` at all and `build_timeline_edits_value`
+never runs. P9b now carries an unrelated **non-empty** transform overlay, which
+is stated in the case as load-bearing; the object is then written and the
+builder's own skip is the only thing between an empty edit and `"inherit": []`
+on disk.
+
+### Document errors found during implementation (9)
+
+Every story in this arc has found errors in its own governing documents (175
+three, 176 seven, 177 six, 178 six, 179 six, 180 seven, 181 four plus a later
+fifth, 182 six, 183 six). The plan's §A already catalogued **eight** errors in
+the design spec; all eight were re-verified and **hold**, and are not repeated
+here. The nine below are new, and are errors in the **plan**.
+
+| # | Where | Error | Resolution |
+|---|---|---|---|
+| D1 | Plan header and §A1 | Baseline commit is `25bf694` | HEAD is **`a2981b8`** -- `25bf694` plus MAR-183's review pass, which touched `AGENTS.md`, `shell_file_paths.cpp` and `shell_smoke_project.cpp`. None is in MAR-184's territory, and **every** `file:line` anchor in the plan still resolved |
+| D2 | Plan §1.4 | "Reuse `finite_animation_scalar` (`src/editor/authoring.cpp:322`) rather than open-coding `std::isfinite`" | **Not reachable.** That helper is in `authoring.cpp`'s **anonymous namespace** and is declared in no header, so `project.cpp` cannot call it. The repo already carries **two** file-local copies (`authoring.cpp:322`, `curve_auto.cpp:40`), so a third in `project.cpp`'s anonymous namespace follows the existing convention rather than inventing a shared header. The semantics the rule depends on -- the float32 bound, which is what makes the check reachable from a file at all -- are preserved exactly |
+| D3 | Plan §B | Attributes **I3** to P7, "the first case that reads a materialized `SkeletonData`" | **P3 reads one too, and runs earlier** (Task 1 vs Task 3). Measured: I3 fails P3. P7 was proved an **independent** detector by neutering P3 with `if (false)` and re-running -- not by reasoning about it |
+| D4 | Plan §B, §4.5, §R5 | Attributes **I4** to P10c and calls P11 arm 1 "a second detector … over-determined" | **Backwards, for the mutation as the plan words it.** Hoisting `ensure` above the *collision check* leaves it below the unknown-mode check, so P10c returns before `ensure` ever runs and **cannot** bite; **P11 arm 1 is the exclusive detector**. Only the stronger variant that hoists above the per-key validation reaches P10c. Both were run and both are in the table |
+| D5 | Plan Tasks 1 and 3 | Puts **P3** (an assertion on the materialized skeleton) in Task 1, but the `build_runtime_document` branch it needs in Task 3 | Task 1 cannot be green as written. Followed as TDD instead: P3 was watched failing with `carries 0 inherit keys`, and that failure is what drove the materialization branch in |
+| D6 | Plan §B | Predicts **I6b** bites P9b as written | It did not -- see the inversion table. The case was strengthened |
+| D7 | Plan §B | Predicts I6b fails with `P9b: reload failed: $.timeline_edits.…must contain at least one keyframe` | P9b catches it one step **earlier**, at the written `.marrow` text, which is the more diagnostic detector |
+| D8 | Plan §B | Predicts I7c fails with `got changed=true` | Actual is `got changed=false with error ''` -- the `continue` drops the request's only key, so nothing changes and nothing errors |
+| D9 | Plan §0.5 (the M-gate) | Answer the pruning gate with `./build/marrow_inspect /tmp/…mskl \| grep -i inherit` | `marrow_inspect` prints **nothing** about inherit timelines -- its output is counts, animation names, skins -- so that command cannot answer the gate in either direction, and an absent grep hit would have been read as confirmation. A throwaway probe linking `libmarrow_runtime.a` and printing `bone_inherit_timelines` was used instead, and its output is pasted above |
+
+### Methodology: H1 bit this session, in a form `touch` does not fix
+
+`AGENTS.md`'s hazard **H1** says to `touch` a source file after restoring it,
+because a `cp` restore landing in the same mtime second makes `make` skip the
+rebuild. **`touch` is not sufficient when inversion runs are back to back.**
+
+Sixteen inversions were re-run from a script, each one restoring, `touch`ing and
+rebuilding before the next mutated, `touch`ed and rebuilt. **Nine of them
+reported "did not bite"** -- including six that had demonstrably bitten minutes
+earlier with recorded failure text. The cause is H1's mechanism from the other
+side: `touch` sets the source's mtime to *now*, and the object file written by
+the immediately preceding restore-build is also from *now*. At GNU Make 3.81's
+one-second granularity the object is not older than the source, so the rebuild is
+skipped and the run exercises the **restored** binary.
+
+**An earlier revision of this section claimed the failure is one-directional --
+that a stale binary can only produce a false pass -- and concluded that every
+"it bit" reading was therefore sound. That is wrong, and the error is worth more
+than the finding.** It holds only when the stale object is the *pristine* one,
+i.e. when the **mutation** build is skipped; then the cost is a missed inversion.
+If the **restore** build is the one skipped, the stale object is the **mutated**
+one, and the next inversion in a **different translation unit** compiles and
+links cleanly against it -- so its failure is attributed to the **wrong
+mutation**. That is a false **positive** from a single skipped build, and
+MAR-184's sixteen mutations span four translation units (`project.cpp`,
+`authoring.cpp`, `timeline_model.cpp`, and the `.mbin` version constant), so it
+was reachable here rather than hypothetical.
+
+What makes this story's inversion table trustworthy is therefore **not** the
+asymmetry. It is **H2**: every message was captured to a file and compared with
+`cmp` against an independently recorded first-run text, and fifteen of sixteen
+were byte-identical (the sixteenth, I2, differs only by a deliberate
+strengthening of P2's expected path between the two runs). A misattributed
+failure would have to reproduce another mutation's exact text to survive that.
+
+*Rule: do not rely on mtime at all. **Delete the object file** before every
+verification build (`rm -f build/CMakeFiles/<target>.dir/<path>.o`), which
+removes the comparison from the question entirely. `touch` remains correct for a
+single interactive restore; it is not sufficient for an automated loop. Verify
+by `cmp` against recorded text, not by an argument about which direction the
+staleness runs.* After the harness was fixed, all nine bit, and all nine messages
+were `cmp`-identical to their first runs.
+
+### Not independently covered
+
+- **No pixel is asserted.** P7 proves an `Inherit` `TrackRow` is *produced* from
+  a project-materialized skeleton by `timeline_model::build_tracks`, a pure
+  function over `SkeletonData` with no ImGui and no shell. It does **not** prove
+  the dopesheet draws it. MAR-184 adds no drawing code -- the row and its
+  renderer both predate this story -- but a regression that deleted the lane's
+  draw call would not be caught here. MAR-185 ships UI and is where a real-mouse
+  scenario belongs. Do not describe P7 as UI coverage.
+- **P4 and the equivalence half of P12 have no story-owned inversion.** P4 is a
+  non-effect witness -- an unchanged project must serialize to unchanged bytes --
+  and there is no mutation of MAR-184's own code that makes it fail without
+  failing something louder first. P12's `.mskl`/`.mbin` equivalence rides
+  pre-existing generic-codec code this story does not touch; only its version
+  assertion has an inversion (I13). Neither row was filled with an invented
+  inversion.
+- **The "finite" half of AC1 is only partially reachable from a file.** JSON has
+  no NaN literal and `json.cpp:302-307` refuses an out-of-range exponent at the
+  **tokenizer**, so from a `.marrow` the rule bites only on a finite magnitude
+  over float32 max (P2c, `1e39`). NaN and infinity reach it only through
+  `merge_inherit_timeline`'s `double` parameter, from C++ (P10d).
+- **P10a and P10b have no clean inversion, and the reason is stated rather than
+  left bare.** Dropping the **bone** check makes P10b fail with the *same*
+  message by a different route -- `ensure_bone_inherit_timeline_edit` returns
+  `nullptr` for an unresolvable bone and the primitive's own guard reports
+  `bone '<name>' does not exist` -- so the mutation is not observable from the
+  case. Dropping the **animation** check leaves `animation` null, and the later
+  `animation->find_inherit_timeline(*bone_index)` dereferences it, so the
+  mutation **crashes** rather than failing a case. Both are honest "no clean
+  inversion exists" rows, not untested behaviour: each rejection is asserted, and
+  each asserts `changed == false` with the offending name in the message.
+- **The runtime still accepts a negative first inherit key time**, and a `.mskl`
+  may still carry inert `curve` data on an inherit key which Marrow ignores.
+  Only the project layer refuses either, deliberately (§2.5 of the design). A
+  `.mskl` authored by another tool can carry both.
+- **The empty-edit hazard is fixed only for inherit.** The sibling families keep
+  the pre-existing behaviour: an empty `ensure_slot_attachment_timeline_edit`
+  reaching export would still emit `"attachment": []` and produce an unloadable
+  `.mskl`. Out of scope, recorded, not fixed.
+- **`replace_existing_times` has no product caller** until MAR-185's
+  `set_inherit_keyframe`. P11 covers all three arms, so it is not dead in the
+  untested sense, but no product surface exercises it.
+- **`marrow_inspect --compare` is a regression witness only** for this story: it
+  runs over `player_idle`, which carries no inherit data. P12 is the actual AC5
+  coverage.
+- **`shell_main.cpp`'s frame body is still reachable from no test**, and
+  **`commit_path_choice` still has zero end-to-end coverage**. Both carried
+  forward from MAR-183 unchanged -- MAR-184 adds **no line** to either.
+
 ## MAR-183 Persist and Manage Recent Projects Validation Results
 
 Validated 2026-08-30. MAR-183 closes the project-I/O arc with a bounded,
@@ -446,8 +738,32 @@ run silently exercises the *inverted* binary. This bit once:
 `marrow_preference_tests` reported two failures against a pristine source tree,
 and C23 assertion 3 failed for the same reason. Every "the inversion bit" claim
 across this whole chain rests on the restore actually rebuilding.
-*Rule: `touch` after every restore, and run final verification against a
-from-scratch `rm -rf build`.*
+**MAR-184 found that `touch` is not sufficient, and that the failure is not
+one-directional.** `touch` sets the source's mtime to *now*, and the object
+written by the immediately preceding build is also from *now*; at one-second
+granularity the object is not older than the source, so an automated loop that
+restores, `touch`es, rebuilds, then mutates, `touch`es and rebuilds skips builds
+anyway. Nine of sixteen inversions read as "did not bite" from this alone.
+
+**Both directions are reachable, and the difference matters.** If the *mutation*
+build is skipped, the stale object is the pristine one and the run is a false
+**pass** -- a missed inversion. But if the *restore* build is skipped, the stale
+object is the **mutated** one, and the next inversion in a **different**
+translation unit compiles and links cleanly against it; its failure is then
+attributed to the wrong mutation. That is a false **positive**, from a single
+skipped build. MAR-184's mutations spanned four translation units, so this was
+reachable rather than hypothetical. Do **not** reason that a stale binary can
+only cost you a missed inversion -- under that belief, skipping the deletion when
+you are in a hurry looks free, and it is not.
+
+*Rule: do not rely on mtime. **Delete the object file before every verification
+build** (`rm -f build/CMakeFiles/<target>.dir/<path>.o`), which removes the
+comparison from the question entirely; `touch` is sufficient for a single
+interactive restore and is **not** sufficient in an automated loop. Run final
+verification against a from-scratch `rm -rf build`. What makes an inversion table
+trustworthy is not any asymmetry argument but **H2** -- comparing each message
+with `cmp` against an independently recorded first-run text. See the MAR-184
+section for the nine-false-negative worked example.*
 
 **H2 -- a hand-sliced reference line.** Comparing a measured message against a
 recorded one with `sed -n '3p'` pulled the **wrong line** out of the reference

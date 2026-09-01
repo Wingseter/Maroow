@@ -21,6 +21,7 @@
 #include "marrow/editor/authoring.hpp"
 #include "atomic_file_write.hpp"
 #include "mesh_weight_model.hpp"
+#include "timeline_model.hpp"
 #include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "marrow/runtime/animation_compare.hpp"
@@ -14025,6 +14026,1246 @@ bool validate_mar180_lifecycle_refuses_active_transaction(
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// MAR-184 -- stepped inherit timeline overlays.
+//
+// Every case below runs inside the standing `player_idle.marrow` invocation.
+// The editing suites live in `main()`'s marker-gated `else`, so pointing this
+// binary at a project built over `skin_inherit_constraints.mskl` would take the
+// skip branch and run NONE of them. The base-backed inherit fixture is
+// therefore reached by building throwaway projects over it here, exactly as
+// MAR-177 and MAR-178 already do.
+// ---------------------------------------------------------------------------
+namespace mar184 {
+
+/** @brief A scratch directory removed when the case returns. */
+struct TemporaryDirectory {
+    std::filesystem::path path;
+
+    explicit TemporaryDirectory(std::string_view label) {
+        const auto unique_suffix =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path() /
+            ("marrow-mar184-" + std::string(label) + "-" +
+             std::to_string(unique_suffix));
+        std::error_code ignored;
+        std::filesystem::create_directories(path, ignored);
+    }
+
+    TemporaryDirectory(const TemporaryDirectory&) = delete;
+    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
+
+    ~TemporaryDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path, ignored);
+    }
+};
+
+/**
+ * @brief Minimal SHA-256, for P4's non-effect witness only.
+ *
+ * A byte length alone would not notice a same-length reordering, and the
+ * witness this story is held to is "an unchanged project serializes to the
+ * bytes it always did". Test-local by design; nothing in the product hashes.
+ */
+std::string sha256_hex(const std::string& input) {
+    static constexpr std::uint32_t kRoundConstants[64] = {
+        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U,
+        0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
+        0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U,
+        0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+        0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U,
+        0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U,
+        0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U, 0xa2bfe8a1U, 0xa81a664bU,
+        0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+        0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU,
+        0x5b9cca4fU, 0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+        0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U};
+
+    std::uint32_t state[8] = {
+        0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+        0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
+
+    std::vector<std::uint8_t> message(input.begin(), input.end());
+    const std::uint64_t bit_length = static_cast<std::uint64_t>(input.size()) * 8U;
+    message.push_back(0x80U);
+    while (message.size() % 64U != 56U) {
+        message.push_back(0x00U);
+    }
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        message.push_back(static_cast<std::uint8_t>((bit_length >> shift) & 0xffU));
+    }
+
+    const auto rotate_right = [](std::uint32_t value, std::uint32_t count) {
+        return (value >> count) | (value << (32U - count));
+    };
+    for (std::size_t chunk = 0; chunk < message.size(); chunk += 64U) {
+        std::uint32_t schedule[64] = {};
+        for (std::size_t index = 0; index < 16U; ++index) {
+            schedule[index] =
+                (static_cast<std::uint32_t>(message[chunk + index * 4U]) << 24U) |
+                (static_cast<std::uint32_t>(message[chunk + index * 4U + 1U]) << 16U) |
+                (static_cast<std::uint32_t>(message[chunk + index * 4U + 2U]) << 8U) |
+                static_cast<std::uint32_t>(message[chunk + index * 4U + 3U]);
+        }
+        for (std::size_t index = 16U; index < 64U; ++index) {
+            const std::uint32_t s0 = rotate_right(schedule[index - 15U], 7U) ^
+                rotate_right(schedule[index - 15U], 18U) ^ (schedule[index - 15U] >> 3U);
+            const std::uint32_t s1 = rotate_right(schedule[index - 2U], 17U) ^
+                rotate_right(schedule[index - 2U], 19U) ^ (schedule[index - 2U] >> 10U);
+            schedule[index] = schedule[index - 16U] + s0 + schedule[index - 7U] + s1;
+        }
+
+        std::uint32_t a = state[0];
+        std::uint32_t b = state[1];
+        std::uint32_t c = state[2];
+        std::uint32_t d = state[3];
+        std::uint32_t e = state[4];
+        std::uint32_t f = state[5];
+        std::uint32_t g = state[6];
+        std::uint32_t h = state[7];
+        for (std::size_t index = 0; index < 64U; ++index) {
+            const std::uint32_t s1 =
+                rotate_right(e, 6U) ^ rotate_right(e, 11U) ^ rotate_right(e, 25U);
+            const std::uint32_t choice = (e & f) ^ (~e & g);
+            const std::uint32_t temp1 =
+                h + s1 + choice + kRoundConstants[index] + schedule[index];
+            const std::uint32_t s0 =
+                rotate_right(a, 2U) ^ rotate_right(a, 13U) ^ rotate_right(a, 22U);
+            const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+            const std::uint32_t temp2 = s0 + majority;
+            h = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+        state[0] += a;
+        state[1] += b;
+        state[2] += c;
+        state[3] += d;
+        state[4] += e;
+        state[5] += f;
+        state[6] += g;
+        state[7] += h;
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (const std::uint32_t word : state) {
+        out << std::setw(8) << word;
+    }
+    return out.str();
+}
+
+/// @brief Offset of the `.mbin` version varint, straight after the `MBIN` magic.
+constexpr std::size_t kBinaryVersionOffset = 4U;
+
+/// @brief Byte length of `serialize_project(load_project(player_idle.marrow))`.
+constexpr std::size_t kPlayerIdleSerializedBytes = 6111U;
+/// @brief SHA-256 of the same string, measured before any MAR-184 code existed.
+constexpr std::string_view kPlayerIdleSerializedSha =
+    "c7d6c6de6a0badf8171772ebb75884785c1b203c86ff4fd4553344029953616b";
+
+/** @brief Builds a throwaway project over the base-backed inherit fixture. */
+marrow::editor::ProjectData minimal_project(const std::filesystem::path& project_path) {
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/skin_inherit_constraints.mskl");
+    // The fixture ships no atlas and `load_project()` requires at least one, so
+    // the project borrows `player_idle.matl`. Nothing cross-validates the pair.
+    options.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    options.name = "mar184_inherit";
+    options.active_animation = "toggle_inherit";
+    return marrow::editor::create_minimal_project(options);
+}
+
+std::string_view mode_name(marrow::runtime::BoneInherit mode) {
+    switch (mode) {
+    case marrow::runtime::BoneInherit::Normal:
+        return "normal";
+    case marrow::runtime::BoneInherit::OnlyTranslation:
+        return "onlyTranslation";
+    case marrow::runtime::BoneInherit::NoRotationOrReflection:
+        return "noRotationOrReflection";
+    case marrow::runtime::BoneInherit::NoScale:
+        return "noScale";
+    case marrow::runtime::BoneInherit::NoScaleOrReflection:
+        return "noScaleOrReflection";
+    }
+    return "<unknown>";
+}
+
+/**
+ * @brief Writes a `.marrow` whose only overlay is a hand-built inherit body.
+ *
+ * The project's `runtime.skeleton_path` resolves to the REAL fixture. A bogus
+ * path would make `load_project` fail later at `load_skeleton_document`, and a
+ * rejection case asserting only `!result` would then pass under its own
+ * inversion -- the exact trap the plan's I1/I2b entries call out. Every
+ * rejection case here therefore asserts the message TEXT, not merely failure.
+ */
+bool write_hand_built_project(
+    const std::filesystem::path& path,
+    std::string_view bone_name,
+    std::string_view keyframes_json,
+    std::string_view label) {
+    const marrow::editor::ProjectData project = minimal_project(path);
+    std::string text = marrow::editor::serialize_project(project);
+    const auto brace = text.find('{');
+    if (brace == std::string::npos) {
+        std::cerr << label << ": serialize_project produced no root object.\n";
+        return false;
+    }
+    std::string overlay = "\n  \"timeline_edits\": {\n    \"animations\": {\n"
+                          "      \"toggle_inherit\": {\n        \"bones\": {\n"
+                          "          \"";
+    overlay += bone_name;
+    overlay += "\": {\n            \"inherit\": ";
+    overlay += keyframes_json;
+    overlay += "\n          }\n        }\n      }\n    }\n  },";
+    text.insert(brace + 1U, overlay);
+
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    std::ofstream out(path);
+    out << text;
+    out.close();
+    if (!std::filesystem::exists(path)) {
+        std::cerr << label << ": failed to write " << path << ".\n";
+        return false;
+    }
+    return true;
+}
+
+/** @brief Asserts a hand-built overlay is refused with both message halves. */
+bool expect_load_rejection(
+    const std::filesystem::path& directory,
+    std::string_view sub_case,
+    std::string_view bone_name,
+    std::string_view keyframes_json,
+    std::string_view expected_path,
+    std::string_view expected_message) {
+    const std::filesystem::path path =
+        directory / (std::string(sub_case) + ".marrow");
+    if (!write_hand_built_project(path, bone_name, keyframes_json, sub_case)) {
+        return false;
+    }
+    const auto result = marrow::editor::load_project(path);
+    if (result) {
+        std::cerr << "MAR-184 " << sub_case
+                  << ": expected a load error naming '" << expected_path
+                  << "', got a successful load. The project parser is the only "
+                     "gate on this value; without it the overlay reaches the "
+                     "runtime or is silently dropped.\n";
+        return false;
+    }
+    const std::string message = result.error->message;
+    if (message.find(expected_path) == std::string::npos ||
+        message.find(expected_message) == std::string::npos) {
+        std::cerr << "MAR-184 " << sub_case << ": expected message '"
+                  << expected_path << ": " << expected_message << "', got '"
+                  << message << "'.\n";
+        return false;
+    }
+    return true;
+}
+
+bool times_equal(double left, double right) {
+    return std::abs(left - right) <= 1e-9;
+}
+
+/**
+ * @brief Compares a project time against one that has been through the runtime.
+ *
+ * Project time is `double`; `AnimationScalar` is `float`. `0.4` narrows to
+ * `0.4000000059604645`, which is 6e-9 away and fails an exact-ish comparison.
+ * Every assertion that reads a MATERIALIZED time must use this tolerance; the
+ * 1e-9 form above is only valid against the reloaded project.
+ */
+bool float32_times_equal(double left, double right) {
+    return std::abs(left - right) <= 1e-6;
+}
+
+}  // namespace mar184
+
+/**
+ * @brief MAR-184 P1-P13: the stepped inherit overlay, end to end.
+ *
+ * `fixture_result` is the standing `player_idle.marrow` load; only P4 reads it.
+ * Every other case builds its own project over `skin_inherit_constraints.mskl`,
+ * whose `toggle_inherit` animation carries the tree's ONLY base inherit track
+ * (`child`, 4 keys) and whose `controller` bone has none.
+ *
+ * Project-only test data is `{0.0, noScale} + {0.4, normal}` throughout, and
+ * that is load-bearing rather than arbitrary: `prune_constant_timelines`
+ * deletes a timeline of exactly one key at t=0 whose mode equals the bone's
+ * setup inherit, and every bone in this fixture has setup `Normal`. A lone
+ * `{0.0, normal}` overlay is therefore erased by the runtime before any
+ * assertion can see it -- measured, not assumed.
+ */
+bool validate_mar184_inherit_overlays(
+    const marrow::editor::ProjectLoadResult& fixture_result) {
+    using marrow::runtime::BoneInherit;
+    const mar184::TemporaryDirectory temporary("overlays");
+
+    // -- P4 -- the old-project non-effect witness. ---------------------------
+    if (!fixture_result.project->bone_inherit_timeline_edits.empty()) {
+        std::cerr << "MAR-184 P4: a project authored before this story must load "
+                     "with ZERO inherit edits, got "
+                  << fixture_result.project->bone_inherit_timeline_edits.size()
+                  << ".\n";
+        return false;
+    }
+    {
+        const std::string serialized =
+            marrow::editor::serialize_project(*fixture_result.project);
+        const std::string digest = mar184::sha256_hex(serialized);
+        std::cout << "MAR-184 P4: serialize_project(player_idle.marrow) = "
+                  << serialized.size() << " bytes, sha256 " << digest << ".\n";
+        if (serialized.size() != mar184::kPlayerIdleSerializedBytes ||
+            digest != mar184::kPlayerIdleSerializedSha) {
+            std::cerr << "MAR-184 P4: adding the inherit schema must not change one "
+                         "byte of an existing project's serialization. Expected "
+                      << mar184::kPlayerIdleSerializedBytes << " bytes / "
+                      << mar184::kPlayerIdleSerializedSha << ", measured "
+                      << serialized.size() << " bytes / " << digest << ".\n";
+            return false;
+        }
+    }
+
+    // -- P1 -- save -> LOAD round trip. A passing save proves nothing. -------
+    {
+        const std::filesystem::path path = temporary.path / "p1.marrow";
+        marrow::editor::ProjectData project = mar184::minimal_project(path);
+        project.bone_inherit_timeline_edits.push_back(
+            marrow::editor::BoneInheritTimelineEdit{
+                "toggle_inherit",
+                "controller",
+                {{0.0, BoneInherit::NoScale}, {0.4, BoneInherit::Normal}}});
+        const auto saved = marrow::editor::save_project(project, path);
+        if (!saved) {
+            std::cerr << "MAR-184 P1: the project failed to save: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(path);
+        if (!reloaded) {
+            std::cerr << "MAR-184 P1: the saved project failed to reload: "
+                      << reloaded.error->message << '\n';
+            return false;
+        }
+        const auto& edits = reloaded.project->bone_inherit_timeline_edits;
+        if (edits.size() != 1U) {
+            std::cerr << "MAR-184 P1: the reloaded project carries " << edits.size()
+                      << " inherit edits, expected 1. A serializer that never "
+                         "emits the family loses every overlay on save, and no "
+                         "other case notices because no other project has one.\n";
+            return false;
+        }
+        if (edits[0].animation_name != "toggle_inherit" ||
+            edits[0].bone_name != "controller" || edits[0].keyframes.size() != 2U) {
+            std::cerr << "MAR-184 P1: the reloaded edit is '"
+                      << edits[0].animation_name << "'/'" << edits[0].bone_name
+                      << "' with " << edits[0].keyframes.size()
+                      << " keyframes, expected 'toggle_inherit'/'controller' with 2.\n";
+            return false;
+        }
+        if (!mar184::times_equal(edits[0].keyframes[0].time, 0.0) ||
+            !mar184::times_equal(edits[0].keyframes[1].time, 0.4) ||
+            edits[0].keyframes[0].inherit != BoneInherit::NoScale ||
+            edits[0].keyframes[1].inherit != BoneInherit::Normal) {
+            std::cerr << "MAR-184 P1: the reloaded keys are ("
+                      << edits[0].keyframes[0].time << ", "
+                      << mar184::mode_name(edits[0].keyframes[0].inherit) << ") and ("
+                      << edits[0].keyframes[1].time << ", "
+                      << mar184::mode_name(edits[0].keyframes[1].inherit)
+                      << "), expected (0, noScale) and (0.4, normal).\n";
+            return false;
+        }
+    }
+
+    // -- P2 -- the parser's rejections, each asserted on the MESSAGE. --------
+    if (!mar184::expect_load_rejection(
+            temporary.path,
+            "P2a",
+            "controller",
+            "[{ \"time\": -0.5, \"inherit\": \"normal\" }]",
+            "$.timeline_edits.animations.toggle_inherit.bones.controller.inherit[0].time",
+            "inherit keyframe time must be finite and non-negative")) {
+        return false;
+    }
+    if (!mar184::expect_load_rejection(
+            temporary.path,
+            "P2b",
+            "controller",
+            "[{ \"time\": 0.4, \"inherit\": \"normal\" },"
+            " { \"time\": 0.2, \"inherit\": \"noScale\" }]",
+            "$.timeline_edits.animations.toggle_inherit.bones.controller.inherit[1].time",
+            "inherit timeline edit keyframe times must be strictly increasing")) {
+        return false;
+    }
+    // 1e39 is a perfectly finite double that no float32 can hold. It is the
+    // ONLY non-finite-ish value reachable from a file: JSON has no NaN literal
+    // and the tokenizer refuses an out-of-range exponent outright. Deleting the
+    // finiteness call still produces an error here -- the runtime's own float32
+    // guard fires during materialization -- so this case must assert the TEXT.
+    if (!mar184::expect_load_rejection(
+            temporary.path,
+            "P2c",
+            "controller",
+            "[{ \"time\": 1e39, \"inherit\": \"normal\" }]",
+            "$.timeline_edits.animations.toggle_inherit.bones.controller.inherit[0].time",
+            "inherit keyframe time must be finite and non-negative")) {
+        return false;
+    }
+    if (!mar184::expect_load_rejection(
+            temporary.path,
+            "P2d",
+            "controller",
+            "[{ \"time\": 0.0, \"inherit\": \"noScales\" }]",
+            "$.timeline_edits.animations.toggle_inherit.bones.controller.inherit[0].inherit",
+            "inherit mode must be one of normal, onlyTranslation, "
+            "noRotationOrReflection, noScale, or noScaleOrReflection")) {
+        return false;
+    }
+    if (!mar184::expect_load_rejection(
+            temporary.path,
+            "P2e",
+            "controller",
+            "[]",
+            "$.timeline_edits.animations.toggle_inherit.bones.controller.inherit",
+            "inherit timeline edits must contain at least one keyframe")) {
+        return false;
+    }
+
+    // -- P6 -- inherit keys are stepped; a curve member is refused. ----------
+    if (!mar184::expect_load_rejection(
+            temporary.path,
+            "P6",
+            "controller",
+            "[{ \"time\": 0.0, \"inherit\": \"noScale\", \"curve\": [0, 0, 1, 1] }]",
+            "$.timeline_edits.animations.toggle_inherit.bones.controller.inherit[0].curve",
+            "inherit keys are stepped and must not carry curve data")) {
+        return false;
+    }
+
+    // -- P3 -- all five modes survive save -> load -> materialization. -------
+    {
+        const std::filesystem::path path = temporary.path / "p3.marrow";
+        marrow::editor::ProjectData project = mar184::minimal_project(path);
+        const std::array<BoneInherit, 5> modes{
+            BoneInherit::Normal,
+            BoneInherit::OnlyTranslation,
+            BoneInherit::NoRotationOrReflection,
+            BoneInherit::NoScale,
+            BoneInherit::NoScaleOrReflection};
+        marrow::editor::BoneInheritTimelineEdit edit;
+        edit.animation_name = "toggle_inherit";
+        edit.bone_name = "controller";
+        for (std::size_t index = 0; index < modes.size(); ++index) {
+            edit.keyframes.push_back(marrow::editor::InheritKeyframeEdit{
+                static_cast<double>(index) * 0.1, modes[index]});
+        }
+        project.bone_inherit_timeline_edits.push_back(std::move(edit));
+        const auto saved = marrow::editor::save_project(project, path);
+        if (!saved) {
+            std::cerr << "MAR-184 P3: the project failed to save: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(path);
+        if (!reloaded) {
+            std::cerr << "MAR-184 P3: the saved project failed to reload: "
+                      << reloaded.error->message << '\n';
+            return false;
+        }
+        const auto bone_index =
+            reloaded.skeleton_data->find_bone_index("controller");
+        const auto* animation =
+            reloaded.skeleton_data->find_animation("toggle_inherit");
+        if (!bone_index.has_value() || animation == nullptr) {
+            std::cerr << "MAR-184 P3: the materialized skeleton lost 'controller' or "
+                         "'toggle_inherit'.\n";
+            return false;
+        }
+        const auto* timeline = animation->find_inherit_timeline(*bone_index);
+        if (timeline == nullptr || timeline->keyframes.size() != modes.size()) {
+            std::cerr << "MAR-184 P3: the materialized animation carries "
+                      << (timeline == nullptr ? 0U : timeline->keyframes.size())
+                      << " inherit keys for 'controller', expected " << modes.size()
+                      << ".\n";
+            return false;
+        }
+        for (std::size_t index = 0; index < modes.size(); ++index) {
+            if (timeline->keyframes[index].inherit != modes[index]) {
+                std::cerr << "MAR-184 P3: key " << index << " materialized as "
+                          << mar184::mode_name(timeline->keyframes[index].inherit)
+                          << ", expected " << mar184::mode_name(modes[index])
+                          << ". All five tokens must survive the project layer's own "
+                             "table in BOTH directions.\n";
+                return false;
+            }
+        }
+    }
+
+    // -- P13 -- `ensure` materializes the base track on first touch. --------
+    {
+        const std::filesystem::path path = temporary.path / "p13.marrow";
+        marrow::editor::ProjectData project = mar184::minimal_project(path);
+        const auto saved = marrow::editor::save_project(project, path);
+        if (!saved) {
+            std::cerr << "MAR-184 P13: the project failed to save: "
+                      << saved.error->message << '\n';
+            return false;
+        }
+        const auto loaded = marrow::editor::load_project(path);
+        if (!loaded) {
+            std::cerr << "MAR-184 P13: the project failed to load: "
+                      << loaded.error->message << '\n';
+            return false;
+        }
+        const marrow::runtime::SkeletonData& skeleton = *loaded.skeleton_data;
+        marrow::editor::ProjectData& working = *loaded.project;
+
+        marrow::editor::BoneInheritTimelineEdit* base_backed =
+            marrow::editor::ensure_bone_inherit_timeline_edit(
+                working, skeleton, "toggle_inherit", "child");
+        if (base_backed == nullptr) {
+            std::cerr << "MAR-184 P13: ensure on 'child' returned nullptr; the "
+                         "fixture's only base inherit track lives there.\n";
+            return false;
+        }
+        const std::array<double, 4> base_times{0.0, 0.25, 0.5, 1.0};
+        const std::array<BoneInherit, 4> base_modes{
+            BoneInherit::Normal,
+            BoneInherit::NoRotationOrReflection,
+            BoneInherit::OnlyTranslation,
+            BoneInherit::Normal};
+        if (base_backed->keyframes.size() != base_times.size()) {
+            std::cerr << "MAR-184 P13: ensure on 'child' produced "
+                      << base_backed->keyframes.size()
+                      << " keyframes, expected the base track's "
+                      << base_times.size()
+                      << ". An ensure that creates an EMPTY edit for a bone that "
+                         "already has an imported track makes the first merge "
+                         "silently REPLACE that track instead of extending it.\n";
+            return false;
+        }
+        for (std::size_t index = 0; index < base_times.size(); ++index) {
+            if (!mar184::times_equal(
+                    base_backed->keyframes[index].time, base_times[index]) ||
+                base_backed->keyframes[index].inherit != base_modes[index]) {
+                std::cerr << "MAR-184 P13: materialized key " << index << " is ("
+                          << base_backed->keyframes[index].time << ", "
+                          << mar184::mode_name(base_backed->keyframes[index].inherit)
+                          << "), expected (" << base_times[index] << ", "
+                          << mar184::mode_name(base_modes[index]) << ").\n";
+                return false;
+            }
+        }
+
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                working, skeleton, "toggle_inherit", "child") != base_backed ||
+            working.bone_inherit_timeline_edits.size() != 1U) {
+            std::cerr << "MAR-184 P13: a second ensure on 'child' must return the "
+                         "SAME edit and append nothing; the project now holds "
+                      << working.bone_inherit_timeline_edits.size() << " edits.\n";
+            return false;
+        }
+
+        const marrow::editor::BoneInheritTimelineEdit* project_only =
+            marrow::editor::ensure_bone_inherit_timeline_edit(
+                working, skeleton, "toggle_inherit", "controller");
+        if (project_only == nullptr || !project_only->keyframes.empty() ||
+            working.bone_inherit_timeline_edits.size() != 2U) {
+            std::cerr << "MAR-184 P13: ensure on 'controller', which has no base "
+                         "track, must create an EMPTY edit -- that is what a "
+                         "project-only timeline is before its first key.\n";
+            return false;
+        }
+
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                working, skeleton, "toggle_inherit", "nosuchbone") != nullptr ||
+            marrow::editor::ensure_bone_inherit_timeline_edit(
+                working, skeleton, "nosuchanim", "child") != nullptr ||
+            working.bone_inherit_timeline_edits.size() != 2U) {
+            std::cerr << "MAR-184 P13: an unresolvable bone or animation must "
+                         "return nullptr and append nothing; the project now holds "
+                      << working.bone_inherit_timeline_edits.size() << " edits.\n";
+            return false;
+        }
+    }
+
+    // -- P7 -- a project-only overlay materializes into a dopesheet row. ----
+    {
+        const std::filesystem::path path = temporary.path / "p7.marrow";
+        marrow::editor::ProjectData project = mar184::minimal_project(path);
+        project.bone_inherit_timeline_edits.push_back(
+            marrow::editor::BoneInheritTimelineEdit{
+                "toggle_inherit",
+                "controller",
+                {{0.0, BoneInherit::NoScale}, {0.4, BoneInherit::Normal}}});
+        if (!marrow::editor::save_project(project, path)) {
+            std::cerr << "MAR-184 P7: the project failed to save.\n";
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(path);
+        if (!reloaded) {
+            std::cerr << "MAR-184 P7: the project failed to reload: "
+                      << reloaded.error->message << '\n';
+            return false;
+        }
+        const auto bone_index = reloaded.skeleton_data->find_bone_index("controller");
+        const auto* animation =
+            reloaded.skeleton_data->find_animation("toggle_inherit");
+        if (!bone_index.has_value() || animation == nullptr) {
+            std::cerr << "MAR-184 P7: the materialized skeleton lost 'controller' or "
+                         "'toggle_inherit'.\n";
+            return false;
+        }
+        const auto* timeline = animation->find_inherit_timeline(*bone_index);
+        if (timeline == nullptr) {
+            std::cerr << "MAR-184 P7: the materialized animation has no inherit "
+                         "timeline for 'controller'. A project overlay that never "
+                         "reaches build_runtime_document is authored, saved, "
+                         "reloaded -- and invisible to the runtime.\n";
+            return false;
+        }
+        if (timeline->keyframes.size() != 2U ||
+            timeline->keyframes[0].inherit != BoneInherit::NoScale ||
+            timeline->keyframes[1].inherit != BoneInherit::Normal) {
+            std::cerr << "MAR-184 P7: the materialized timeline carries "
+                      << timeline->keyframes.size()
+                      << " keys, expected 2 (noScale, normal).\n";
+            return false;
+        }
+
+        // The dopesheet row is PRODUCED by a pure function over SkeletonData.
+        // This is a model-layer assertion and deliberately not frame coverage:
+        // it does not prove a pixel is drawn. MAR-184 adds no drawing code.
+        const std::vector<marrow::editor::timeline_model::TrackRow> tracks =
+            marrow::editor::timeline_model::build_tracks(
+                *reloaded.skeleton_data, *animation);
+        const auto row = std::find_if(
+            tracks.begin(),
+            tracks.end(),
+            [&](const marrow::editor::timeline_model::TrackRow& track) {
+                return track.kind ==
+                        marrow::editor::timeline_model::TimelineTrackKind::Inherit &&
+                    track.bone_index == bone_index;
+            });
+        if (row == tracks.end()) {
+            std::cerr << "MAR-184 P7: build_tracks produced no Inherit row for "
+                         "'controller'.\n";
+            return false;
+        }
+        if (row->key_times.size() != 2U ||
+            !mar184::float32_times_equal(row->key_times[0], 0.0) ||
+            !mar184::float32_times_equal(row->key_times[1], 0.4)) {
+            std::cerr << "MAR-184 P7: the Inherit row for 'controller' carries "
+                      << row->key_times.size()
+                      << " key times, expected the overlay's 0 and 0.4.\n";
+            return false;
+        }
+    }
+
+    // -- P8 -- the base document's unrelated data survives materialization. -
+    {
+        const std::filesystem::path path = temporary.path / "p8.marrow";
+        marrow::editor::ProjectData project = mar184::minimal_project(path);
+        project.bone_inherit_timeline_edits.push_back(
+            marrow::editor::BoneInheritTimelineEdit{
+                "toggle_inherit",
+                "controller",
+                {{0.0, BoneInherit::NoScale}, {0.4, BoneInherit::Normal}}});
+        marrow::editor::TransformTimelineEdit rotate_edit;
+        rotate_edit.animation_name = "toggle_inherit";
+        rotate_edit.bone_name = "root";
+        rotate_edit.channel = marrow::editor::TransformTimelineChannel::Rotate;
+        rotate_edit.keyframes.push_back(marrow::editor::TransformKeyframeEdit{0.0, 0.0});
+        rotate_edit.keyframes.push_back(marrow::editor::TransformKeyframeEdit{0.5, 30.0});
+        project.transform_timeline_edits.push_back(std::move(rotate_edit));
+        if (!marrow::editor::save_project(project, path)) {
+            std::cerr << "MAR-184 P8: the project failed to save.\n";
+            return false;
+        }
+        const auto reloaded = marrow::editor::load_project(path);
+        if (!reloaded) {
+            std::cerr << "MAR-184 P8: the project failed to reload: "
+                      << reloaded.error->message << '\n';
+            return false;
+        }
+        const auto* animation =
+            reloaded.skeleton_data->find_animation("toggle_inherit");
+        if (animation == nullptr) {
+            std::cerr << "MAR-184 P8: the materialized skeleton lost "
+                         "'toggle_inherit'.\n";
+            return false;
+        }
+        if (animation->bone_inherit_timelines.size() != 2U) {
+            std::cerr << "MAR-184 P8: 'child' lost its base inherit timeline; the "
+                         "animation has "
+                      << animation->bone_inherit_timelines.size()
+                      << " inherit timeline(s), expected 2. Replacing the "
+                         "animation's whole `bones` object instead of assigning "
+                         "into it discards every sibling the project does not "
+                         "override.\n";
+            return false;
+        }
+        const auto child_index = reloaded.skeleton_data->find_bone_index("child");
+        const auto root_index = reloaded.skeleton_data->find_bone_index("root");
+        if (!child_index.has_value() || !root_index.has_value()) {
+            std::cerr << "MAR-184 P8: the materialized skeleton lost a bone.\n";
+            return false;
+        }
+        const auto* base_track = animation->find_inherit_timeline(*child_index);
+        const std::array<double, 4> base_times{0.0, 0.25, 0.5, 1.0};
+        const std::array<BoneInherit, 4> base_modes{
+            BoneInherit::Normal,
+            BoneInherit::NoRotationOrReflection,
+            BoneInherit::OnlyTranslation,
+            BoneInherit::Normal};
+        if (base_track == nullptr || base_track->keyframes.size() != base_times.size()) {
+            std::cerr << "MAR-184 P8: 'child' base inherit track did not survive.\n";
+            return false;
+        }
+        for (std::size_t index = 0; index < base_times.size(); ++index) {
+            if (std::abs(static_cast<double>(base_track->keyframes[index].time) -
+                         base_times[index]) > 1e-6 ||
+                base_track->keyframes[index].inherit != base_modes[index]) {
+                std::cerr << "MAR-184 P8: 'child' base key " << index
+                          << " changed under an unrelated bone's overlay.\n";
+                return false;
+            }
+        }
+        const auto* rotate_track = animation->find_rotate_timeline(*root_index);
+        if (rotate_track == nullptr || rotate_track->keyframes.size() != 2U) {
+            std::cerr << "MAR-184 P8: the unrelated 'root' rotate overlay did not "
+                         "survive alongside the inherit overlay.\n";
+            return false;
+        }
+    }
+
+    // -- P9 -- an empty edit reaches neither serializer. ---------------------
+    {
+        const std::filesystem::path path = temporary.path / "p9.marrow";
+        marrow::editor::ProjectData seed = mar184::minimal_project(path);
+        if (!marrow::editor::save_project(seed, path)) {
+            std::cerr << "MAR-184 P9: the seed project failed to save.\n";
+            return false;
+        }
+        const auto loaded = marrow::editor::load_project(path);
+        if (!loaded) {
+            std::cerr << "MAR-184 P9: the seed project failed to load: "
+                      << loaded.error->message << '\n';
+            return false;
+        }
+        marrow::editor::ProjectData& working = *loaded.project;
+        if (marrow::editor::ensure_bone_inherit_timeline_edit(
+                working, *loaded.skeleton_data, "toggle_inherit", "controller") ==
+            nullptr) {
+            std::cerr << "MAR-184 P9: ensure on 'controller' returned nullptr.\n";
+            return false;
+        }
+        // The unrelated rotate overlay is load-bearing, not scenery. The
+        // serializer gates the whole `timeline_edits` object on the effective
+        // edits, so a project whose ONLY edit is the empty inherit one writes no
+        // `timeline_edits` at all and `build_timeline_edits_value` never runs --
+        // which would leave the builder's own empty-edit skip untested. With a
+        // second family present the object IS written, and the skip is the only
+        // thing standing between an empty edit and an `"inherit": []` on disk.
+        marrow::editor::TransformTimelineEdit unrelated_rotate;
+        unrelated_rotate.animation_name = "toggle_inherit";
+        unrelated_rotate.bone_name = "root";
+        unrelated_rotate.channel = marrow::editor::TransformTimelineChannel::Rotate;
+        unrelated_rotate.keyframes.push_back(
+            marrow::editor::TransformKeyframeEdit{0.0, 0.0});
+        unrelated_rotate.keyframes.push_back(
+            marrow::editor::TransformKeyframeEdit{0.5, 30.0});
+        working.transform_timeline_edits.push_back(std::move(unrelated_rotate));
+
+        // P9a -- materialization in memory, no save.
+        const auto runtime_result = marrow::editor::build_project_runtime(
+            working, *loaded.base_skeleton_document);
+        if (!runtime_result) {
+            std::cerr << "MAR-184 P9a: materialization failed: "
+                      << runtime_result.error->format()
+                      << ". An empty inherit edit that reaches the runtime "
+                         "document writes `\"inherit\": []`, which the runtime "
+                         "parser refuses outright.\n";
+            return false;
+        }
+        const auto controller_index =
+            runtime_result.skeleton_data->find_bone_index("controller");
+        const auto* materialized_animation =
+            runtime_result.skeleton_data->find_animation("toggle_inherit");
+        if (!controller_index.has_value() || materialized_animation == nullptr ||
+            materialized_animation->find_inherit_timeline(*controller_index) !=
+                nullptr) {
+            std::cerr << "MAR-184 P9a: an empty edit must materialize NO timeline "
+                         "for 'controller'.\n";
+            return false;
+        }
+
+        // P9b -- the same project through save and LOAD.
+        const std::filesystem::path empty_path = temporary.path / "p9b.marrow";
+        if (!marrow::editor::save_project(working, empty_path)) {
+            std::cerr << "MAR-184 P9b: the project failed to save.\n";
+            return false;
+        }
+        std::ifstream written(empty_path);
+        const std::string written_text(
+            (std::istreambuf_iterator<char>(written)),
+            std::istreambuf_iterator<char>());
+        if (written_text.find("\"inherit\"") != std::string::npos) {
+            std::cerr << "MAR-184 P9b: the written `.marrow` carries an `inherit` "
+                         "member for an EMPTY edit. The project parser refuses an "
+                         "empty array, so such a file saves and can never be "
+                         "reopened.\n";
+            return false;
+        }
+        const auto empty_reloaded = marrow::editor::load_project(empty_path);
+        if (!empty_reloaded) {
+            std::cerr << "MAR-184 P9b: reload failed: "
+                      << empty_reloaded.error->format() << '\n';
+            return false;
+        }
+    }
+
+    // -- P5 -- the merge is deterministic regardless of request order. ------
+    {
+        const auto build_merged = [&](bool reversed,
+                                      std::string* serialized_out,
+                                      std::vector<marrow::editor::InheritKeyframeEdit>*
+                                          keys_out,
+                                      marrow::editor::InheritTimelineMergeResult*
+                                          result_out) -> bool {
+            const std::filesystem::path path =
+                temporary.path / (reversed ? "p5b.marrow" : "p5a.marrow");
+            marrow::editor::ProjectData seed = mar184::minimal_project(path);
+            if (!marrow::editor::save_project(seed, path)) {
+                std::cerr << "MAR-184 P5: the seed project failed to save.\n";
+                return false;
+            }
+            const auto loaded = marrow::editor::load_project(path);
+            if (!loaded) {
+                std::cerr << "MAR-184 P5: the seed project failed to load: "
+                          << loaded.error->message << '\n';
+                return false;
+            }
+            marrow::editor::InheritTimelineMergeRequest request;
+            request.animation_name = "toggle_inherit";
+            request.bone_name = "controller";
+            request.keys = {
+                {0.5, "noScale"}, {0.1, "normal"}, {0.3, "onlyTranslation"}};
+            if (reversed) {
+                std::reverse(request.keys.begin(), request.keys.end());
+            }
+            *result_out = marrow::editor::merge_inherit_timeline(
+                loaded.project.get(), *loaded.skeleton_data, request);
+            if (!*result_out) {
+                std::cerr << "MAR-184 P5: the merge was rejected: "
+                          << result_out->error << '\n';
+                return false;
+            }
+            *serialized_out = marrow::editor::serialize_project(*loaded.project);
+            const auto* edit = loaded.project->find_bone_inherit_timeline_edit(
+                "toggle_inherit", "controller");
+            if (edit == nullptr) {
+                std::cerr << "MAR-184 P5: the merge stored no edit.\n";
+                return false;
+            }
+            *keys_out = edit->keyframes;
+            return true;
+        };
+
+        std::string forward_text;
+        std::string reverse_text;
+        std::vector<marrow::editor::InheritKeyframeEdit> forward_keys;
+        std::vector<marrow::editor::InheritKeyframeEdit> reverse_keys;
+        marrow::editor::InheritTimelineMergeResult forward_result;
+        marrow::editor::InheritTimelineMergeResult reverse_result;
+        if (!build_merged(false, &forward_text, &forward_keys, &forward_result) ||
+            !build_merged(true, &reverse_text, &reverse_keys, &reverse_result)) {
+            return false;
+        }
+        if (forward_text != reverse_text) {
+            std::cerr << "MAR-184 P5: the same three keys merged in two request "
+                         "orders must serialize BYTE-IDENTICALLY; the two runs "
+                         "produced "
+                      << forward_text.size() << " and " << reverse_text.size()
+                      << " bytes.\n";
+            return false;
+        }
+        // Asserted on the IN-MEMORY vector, with no save and no reload, so the
+        // runtime's own strictly-increasing guard cannot stand in for it: a
+        // descending sort would be caught by the loader, never by this story.
+        for (std::size_t index = 1; index < forward_keys.size(); ++index) {
+            if (forward_keys[index].time <= forward_keys[index - 1U].time) {
+                std::cerr << "MAR-184 P5: stored times are not strictly increasing:";
+                for (const auto& key : forward_keys) {
+                    std::cerr << ' ' << key.time;
+                }
+                std::cerr << ".\n";
+                return false;
+            }
+        }
+        if (forward_keys.size() != 3U ||
+            !mar184::times_equal(forward_keys[0].time, 0.1) ||
+            !mar184::times_equal(forward_keys[1].time, 0.3) ||
+            !mar184::times_equal(forward_keys[2].time, 0.5) ||
+            forward_keys[0].inherit != BoneInherit::Normal ||
+            forward_keys[1].inherit != BoneInherit::OnlyTranslation ||
+            forward_keys[2].inherit != BoneInherit::NoScale) {
+            std::cerr << "MAR-184 P5: the merged keys are not (0.1 normal), "
+                         "(0.3 onlyTranslation), (0.5 noScale).\n";
+            return false;
+        }
+        if (forward_result.added_key_count != 3U ||
+            forward_result.replaced_key_count != 0U ||
+            forward_result.effective_key_count != 3U ||
+            !forward_result.changed) {
+            std::cerr << "MAR-184 P5: counts are added="
+                      << forward_result.added_key_count << " replaced="
+                      << forward_result.replaced_key_count << " effective="
+                      << forward_result.effective_key_count
+                      << ", expected 3/0/3.\n";
+            return false;
+        }
+    }
+
+    // -- P10 -- every rejection is decided BEFORE anything is written. ------
+    {
+        const auto reject = [&](std::string_view sub_case,
+                                std::string_view animation_name,
+                                std::string_view bone_name,
+                                double time,
+                                std::string_view mode,
+                                std::string_view expected_a,
+                                std::string_view expected_b,
+                                bool assert_byte_identity) -> bool {
+            const std::filesystem::path path =
+                temporary.path / (std::string(sub_case) + ".marrow");
+            marrow::editor::ProjectData seed = mar184::minimal_project(path);
+            if (!marrow::editor::save_project(seed, path)) {
+                std::cerr << "MAR-184 " << sub_case << ": the seed failed to save.\n";
+                return false;
+            }
+            const auto loaded = marrow::editor::load_project(path);
+            if (!loaded) {
+                std::cerr << "MAR-184 " << sub_case << ": the seed failed to load.\n";
+                return false;
+            }
+            const std::string before =
+                marrow::editor::serialize_project(*loaded.project);
+            marrow::editor::InheritTimelineMergeRequest request;
+            request.animation_name = std::string(animation_name);
+            request.bone_name = std::string(bone_name);
+            request.keys = {{time, std::string(mode)}};
+            const auto result = marrow::editor::merge_inherit_timeline(
+                loaded.project.get(), *loaded.skeleton_data, request);
+            if (result || result.changed) {
+                std::cerr << "MAR-184 " << sub_case
+                          << ": expected an error naming '" << expected_a
+                          << "', got changed=" << (result.changed ? "true" : "false")
+                          << " with error '" << result.error << "'.\n";
+                return false;
+            }
+            if (result.error.find(expected_a) == std::string::npos ||
+                result.error.find(expected_b) == std::string::npos) {
+                std::cerr << "MAR-184 " << sub_case << ": expected the error to name '"
+                          << expected_a << "' and '" << expected_b << "', got '"
+                          << result.error << "'.\n";
+                return false;
+            }
+            if (assert_byte_identity) {
+                const std::string after =
+                    marrow::editor::serialize_project(*loaded.project);
+                if (after != before) {
+                    std::cerr << "MAR-184 " << sub_case
+                              << ": the rejected merge changed serialize_project() ("
+                              << before.size() << " -> " << after.size()
+                              << " bytes). Validation must complete before ANY "
+                                 "write, so a rejection leaves the project "
+                                 "bytewise as it was.\n";
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // P10a and P10b deliberately assert NO byte identity: for an
+        // unresolvable animation or bone `ensure` returns nullptr and writes
+        // nothing regardless, so such an assertion could not fail.
+        if (!reject("P10a", "nosuchanim", "child", 0.2, "normal",
+                    "nosuchanim", "does not exist", false)) {
+            return false;
+        }
+        if (!reject("P10b", "toggle_inherit", "nosuchbone", 0.2, "normal",
+                    "nosuchbone", "does not exist", false)) {
+            return false;
+        }
+        // P10c uses `child`, whose base track is NON-EMPTY. On `controller`
+        // `ensure` would create an EMPTY edit, which the serializer's gate skips
+        // -- so the byte-identity assertion would be vacuous there.
+        if (!reject("P10c", "toggle_inherit", "child", 0.2, "noScales",
+                    "noScales", "inherit mode must be one of", true)) {
+            return false;
+        }
+        if (!reject("P10d", "toggle_inherit", "child",
+                    std::numeric_limits<double>::quiet_NaN(), "normal",
+                    "finite and non-negative", "key time", true)) {
+            return false;
+        }
+    }
+
+    // -- P11 -- collision, both arms, and the no-op contract. ----------------
+    {
+        const std::filesystem::path path = temporary.path / "p11.marrow";
+        marrow::editor::ProjectData seed = mar184::minimal_project(path);
+        if (!marrow::editor::save_project(seed, path)) {
+            std::cerr << "MAR-184 P11: the seed project failed to save.\n";
+            return false;
+        }
+        const auto loaded = marrow::editor::load_project(path);
+        if (!loaded) {
+            std::cerr << "MAR-184 P11: the seed project failed to load.\n";
+            return false;
+        }
+        marrow::editor::ProjectData* project = loaded.project.get();
+        // `child` carries a 4-key base track and NO project edit yet. Both
+        // halves are load-bearing: with an edit already present `ensure` would
+        // be a no-op and arm 1's byte-identity assertion could not fail.
+        if (project->find_bone_inherit_timeline_edit("toggle_inherit", "child") !=
+            nullptr) {
+            std::cerr << "MAR-184 P11: the seed already carries a 'child' edit, "
+                         "which would make arm 1's byte-identity check vacuous.\n";
+            return false;
+        }
+
+        marrow::editor::InheritTimelineMergeRequest colliding;
+        colliding.animation_name = "toggle_inherit";
+        colliding.bone_name = "child";
+        colliding.keys = {{0.25, "noScale"}};
+        const std::string before = marrow::editor::serialize_project(*project);
+        const auto rejected = marrow::editor::merge_inherit_timeline(
+            project, *loaded.skeleton_data, colliding);
+        if (rejected || rejected.changed ||
+            rejected.error.find("a key already exists at time") == std::string::npos ||
+            rejected.error.find("0.25") == std::string::npos) {
+            std::cerr << "MAR-184 P11 arm 1: a key landing on an existing key must "
+                         "be refused by default; got changed="
+                      << (rejected.changed ? "true" : "false") << " error '"
+                      << rejected.error << "'.\n";
+            return false;
+        }
+        if (marrow::editor::serialize_project(*project) != before) {
+            std::cerr << "MAR-184 P11 arm 1: the rejected merge changed "
+                         "serialize_project(). A collision refused AFTER `ensure` "
+                         "has materialized the base track leaves the project "
+                         "modified by a call that reported failure.\n";
+            return false;
+        }
+
+        marrow::editor::InheritTimelineMergeRequest replacing = colliding;
+        replacing.replace_existing_times = true;
+        replacing.keys = {{0.2500001, "noScale"}};
+        const auto replaced = marrow::editor::merge_inherit_timeline(
+            project, *loaded.skeleton_data, replacing);
+        if (!replaced || !replaced.changed || replaced.replaced_key_count != 1U ||
+            replaced.added_key_count != 0U || replaced.effective_key_count != 4U) {
+            std::cerr << "MAR-184 P11 arm 2: the replacing merge reported changed="
+                      << (replaced.changed ? "true" : "false") << " added="
+                      << replaced.added_key_count << " replaced="
+                      << replaced.replaced_key_count << " effective="
+                      << replaced.effective_key_count
+                      << " error '" << replaced.error << "', expected 1 replaced of "
+                         "4 effective.\n";
+            return false;
+        }
+        const auto* edit =
+            project->find_bone_inherit_timeline_edit("toggle_inherit", "child");
+        if (edit == nullptr || edit->keyframes.size() != 4U) {
+            std::cerr << "MAR-184 P11 arm 2: the replaced timeline is missing or no "
+                         "longer carries the base track's four keys.\n";
+            return false;
+        }
+        if (edit->keyframes[1].inherit != BoneInherit::NoScale) {
+            std::cerr << "MAR-184 P11 arm 2: the replaced key's mode is "
+                      << mar184::mode_name(edit->keyframes[1].inherit)
+                      << ", expected noScale.\n";
+            return false;
+        }
+        if (edit->keyframes[1].time != 0.25) {
+            std::cerr << "MAR-184 P11 arm 2: the replaced key drifted to "
+                      << std::setprecision(10) << edit->keyframes[1].time
+                      << ", expected the stored 0.25. An overwrite that writes the "
+                         "REQUESTED time lets the 1e-6 identity window walk a key "
+                         "one merge at a time.\n";
+            return false;
+        }
+
+        marrow::editor::InheritTimelineMergeRequest no_op = replacing;
+        no_op.keys = {{0.25, "noScale"}};
+        const std::string settled = marrow::editor::serialize_project(*project);
+        const auto unchanged = marrow::editor::merge_inherit_timeline(
+            project, *loaded.skeleton_data, no_op);
+        if (!unchanged || unchanged.changed || !unchanged.error.empty() ||
+            marrow::editor::serialize_project(*project) != settled) {
+            std::cerr << "MAR-184 P11 arm 3: re-requesting exactly what is stored "
+                         "must report changed=false with an EMPTY error and write "
+                         "nothing; got changed="
+                      << (unchanged.changed ? "true" : "false") << " error '"
+                      << unchanged.error << "'.\n";
+            return false;
+        }
+    }
+
+    // -- P12 -- runtime export, `.mskl` and `.mbin`, versions unmoved. ------
+    {
+        const std::filesystem::path path = temporary.path / "p12.marrow";
+        marrow::editor::ProjectData seed = mar184::minimal_project(path);
+        if (!marrow::editor::save_project(seed, path)) {
+            std::cerr << "MAR-184 P12: the seed project failed to save.\n";
+            return false;
+        }
+        const auto loaded = marrow::editor::load_project(path);
+        if (!loaded) {
+            std::cerr << "MAR-184 P12: the seed project failed to load.\n";
+            return false;
+        }
+        // Merged rather than hand-authored, so the export path exercises the
+        // primitive end to end. `child` is base-backed, so this also proves an
+        // imported track survives export with the merge layered onto it.
+        marrow::editor::InheritTimelineMergeRequest request;
+        request.animation_name = "toggle_inherit";
+        request.bone_name = "child";
+        request.keys = {{0.75, "noScaleOrReflection"}};
+        const auto merged = marrow::editor::merge_inherit_timeline(
+            loaded.project.get(), *loaded.skeleton_data, request);
+        if (!merged || !merged.changed || merged.effective_key_count != 5U) {
+            std::cerr << "MAR-184 P12: the export fixture merge failed: "
+                      << merged.error << '\n';
+            return false;
+        }
+
+        marrow::editor::ProjectExportOptions export_options;
+        export_options.skeleton_output_path = temporary.path / "p12_export.mskl";
+        export_options.binary_output_path = temporary.path / "p12_export.mbin";
+        const auto exported = marrow::editor::export_runtime_assets(
+            *loaded.project, *loaded.base_skeleton_document, export_options);
+        if (!exported || !exported.binary_path.has_value()) {
+            std::cerr << "MAR-184 P12: export failed.\n";
+            return false;
+        }
+
+        const std::array<double, 5> expected_times{0.0, 0.25, 0.5, 0.75, 1.0};
+        const std::array<BoneInherit, 5> expected_modes{
+            BoneInherit::Normal,
+            BoneInherit::NoRotationOrReflection,
+            BoneInherit::OnlyTranslation,
+            BoneInherit::NoScaleOrReflection,
+            BoneInherit::Normal};
+        const auto check_exported = [&](const std::filesystem::path& file,
+                                        std::string_view label) -> bool {
+            const auto skeleton = marrow::runtime::load_skeleton_data(file);
+            if (!skeleton) {
+                std::cerr << "MAR-184 P12: the exported " << label
+                          << " failed to load: " << skeleton.error->format() << '\n';
+                return false;
+            }
+            const auto bone_index = skeleton.skeleton_data->find_bone_index("child");
+            const auto* animation =
+                skeleton.skeleton_data->find_animation("toggle_inherit");
+            if (!bone_index.has_value() || animation == nullptr) {
+                std::cerr << "MAR-184 P12: the exported " << label
+                          << " lost 'child' or 'toggle_inherit'.\n";
+                return false;
+            }
+            const auto* timeline = animation->find_inherit_timeline(*bone_index);
+            if (timeline == nullptr ||
+                timeline->keyframes.size() != expected_times.size()) {
+                std::cerr << "MAR-184 P12: the exported " << label << " carries "
+                          << (timeline == nullptr ? 0U : timeline->keyframes.size())
+                          << " inherit keys, expected " << expected_times.size()
+                          << ".\n";
+                return false;
+            }
+            for (std::size_t index = 0; index < expected_times.size(); ++index) {
+                // Float32 tolerance is mandatory: project time is `double` and
+                // `AnimationScalar` is `float`, and `.mbin` v2 narrows again.
+                if (!mar184::float32_times_equal(
+                        static_cast<double>(timeline->keyframes[index].time),
+                        expected_times[index]) ||
+                    timeline->keyframes[index].inherit != expected_modes[index]) {
+                    std::cerr << "MAR-184 P12: exported " << label << " key " << index
+                              << " is (" << timeline->keyframes[index].time << ", "
+                              << mar184::mode_name(timeline->keyframes[index].inherit)
+                              << "), expected (" << expected_times[index] << ", "
+                              << mar184::mode_name(expected_modes[index]) << ").\n";
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!check_exported(exported.path, ".mskl") ||
+            !check_exported(*exported.binary_path, ".mbin")) {
+            return false;
+        }
+
+        // The formats do not move. `.mskl` stays 1 and `.mbin` stays 2; inherit
+        // rides the generic document codec, which this story does not touch.
+        const auto exported_document =
+            marrow::runtime::json::load_document(exported.path);
+        const marrow::runtime::json::Value* version_value =
+            exported_document
+            ? marrow::runtime::json::find_member(
+                  exported_document.document->root, "version")
+            : nullptr;
+        if (version_value == nullptr || !version_value->is_number() ||
+            version_value->as_number() != 1.0) {
+            std::cerr << "MAR-184 P12: the exported `.mskl` version is not 1.\n";
+            return false;
+        }
+        std::ifstream binary(*exported.binary_path, std::ios::binary);
+        std::array<char, 5> header{};
+        binary.read(header.data(), static_cast<std::streamsize>(header.size()));
+        if (header[0] != 'M' || header[1] != 'B' || header[2] != 'I' ||
+            header[3] != 'N') {
+            std::cerr << "MAR-184 P12: the exported `.mbin` has no MBIN magic, so "
+                         "the byte read below would not be a version.\n";
+            return false;
+        }
+        const int binary_version = static_cast<int>(
+            static_cast<unsigned char>(header[mar184::kBinaryVersionOffset]));
+        if (binary_version != 2) {
+            std::cerr << "MAR-184 P12: .mbin version is " << binary_version
+                      << ", expected 2.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-184 P1-P13: a stepped inherit overlay round-trips through "
+                 "save and LOAD, all five modes materialize, and the parser refuses "
+                 "a negative, out-of-float32, non-increasing, unknown-mode, empty, "
+                 "and curve-carrying key by JSON path; `ensure` materializes the "
+                 "base track once and refuses an unknown animation or bone; "
+                 "materialization keeps every unrelated timeline and skips an empty "
+                 "edit in BOTH serializers; the merge primitive is deterministic in "
+                 "either request order, reports a missing animation/bone, an invalid "
+                 "mode and a non-finite time before writing a byte, and keeps the "
+                 "STORED time when it replaces a key; and export carries the merged "
+                 "timeline into `.mskl` v1 and `.mbin` v2 alike.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     const ParseResult parse_result = parse_arguments(argc, argv);
     if (parse_result.status == ParseStatus::Help) {
@@ -14203,6 +15444,9 @@ int main(int argc, char** argv) {
         }
         if (!validate_mar180_lifecycle_refuses_active_transaction(
                 parse_result.options.project_path)) {
+            return 1;
+        }
+        if (!validate_mar184_inherit_overlays(result)) {
             return 1;
         }
     }

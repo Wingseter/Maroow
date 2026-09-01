@@ -2445,6 +2445,146 @@ TimelineScaleResult scale_keyframe_times(
             resolved.size(), moved_key_count, std::move(previous_times)};
 }
 
+InheritTimelineMergeResult merge_inherit_timeline(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    const InheritTimelineMergeRequest& request) {
+    // The same 1e-6 window `find_keyframe_near_time` and
+    // `timeline_model::kKeyTimeEpsilon` already use, so the editor, the model
+    // and this primitive cannot disagree about which key a time names.
+    constexpr double kTimeEpsilon = 1e-6;
+
+    if (project == nullptr) {
+        return {missing_project_result()};
+    }
+    if (request.keys.empty()) {
+        return {{false, "inherit merge requires at least one key"}};
+    }
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(request.animation_name);
+    if (animation == nullptr) {
+        return {{false,
+                 "animation '" + request.animation_name + "' does not exist"}};
+    }
+    const auto bone_index = effective_skeleton.find_bone_index(request.bone_name);
+    if (!bone_index.has_value()) {
+        return {{false, "bone '" + request.bone_name + "' does not exist"}};
+    }
+
+    std::vector<InheritKeyframeEdit> requested;
+    requested.reserve(request.keys.size());
+    for (const InheritKeyRequest& key : request.keys) {
+        if (!finite_animation_scalar(key.time) || key.time < 0.0) {
+            return {{false, "inherit key time must be finite and non-negative"}};
+        }
+        const auto inherit = inherit_mode_from_key(key.mode);
+        if (!inherit.has_value()) {
+            return {{false,
+                     "inherit mode must be one of normal, onlyTranslation, "
+                     "noRotationOrReflection, noScale, or noScaleOrReflection, "
+                     "got '" + key.mode + "'"}};
+        }
+        requested.push_back(InheritKeyframeEdit{key.time, *inherit});
+    }
+
+    // Sorted copy, so the reported collision time is the same whichever order
+    // the caller happened to hand the keys in.
+    std::vector<InheritKeyframeEdit> sorted_request = requested;
+    std::sort(
+        sorted_request.begin(),
+        sorted_request.end(),
+        [](const InheritKeyframeEdit& left, const InheritKeyframeEdit& right) {
+            return left.time < right.time;
+        });
+    for (std::size_t index = 1; index < sorted_request.size(); ++index) {
+        if (std::abs(sorted_request[index].time - sorted_request[index - 1U].time) <=
+            kTimeEpsilon) {
+            return {{false,
+                     "requested keys collide at time " +
+                         std::to_string(sorted_request[index].time)}};
+        }
+    }
+
+    // The effective timeline, read the way `ensure` materializes it but WITHOUT
+    // calling `ensure` -- nothing above this line may touch the project.
+    std::vector<InheritKeyframeEdit> effective;
+    if (const BoneInheritTimelineEdit* existing =
+            project->find_bone_inherit_timeline_edit(
+                request.animation_name, request.bone_name)) {
+        effective = existing->keyframes;
+    } else if (const auto* base = animation->find_inherit_timeline(*bone_index)) {
+        effective.reserve(base->keyframes.size());
+        for (const auto& source : base->keyframes) {
+            effective.push_back(InheritKeyframeEdit{
+                static_cast<double>(source.time), source.inherit});
+        }
+    }
+
+    const auto find_existing = [&](double time) -> std::size_t {
+        for (std::size_t index = 0; index < effective.size(); ++index) {
+            if (std::abs(effective[index].time - time) <= kTimeEpsilon) {
+                return index;
+            }
+        }
+        return effective.size();
+    };
+    if (!request.replace_existing_times) {
+        for (const InheritKeyframeEdit& key : sorted_request) {
+            if (find_existing(key.time) != effective.size()) {
+                return {{false,
+                         "a key already exists at time " +
+                             std::to_string(key.time)}};
+            }
+        }
+    }
+
+    // ---- Everything above this line touches nothing. ----------------------
+    ProjectData candidate = *project;
+    BoneInheritTimelineEdit* edit = ensure_bone_inherit_timeline_edit(
+        candidate, effective_skeleton, request.animation_name, request.bone_name);
+    if (edit == nullptr) {
+        return {{false, "bone '" + request.bone_name + "' does not exist"}};
+    }
+
+    std::size_t added_key_count = 0U;
+    std::size_t replaced_key_count = 0U;
+    for (const InheritKeyframeEdit& key : sorted_request) {
+        const auto match = std::find_if(
+            edit->keyframes.begin(),
+            edit->keyframes.end(),
+            [&](const InheritKeyframeEdit& stored) {
+                return std::abs(stored.time - key.time) <= kTimeEpsilon;
+            });
+        if (match != edit->keyframes.end()) {
+            if (match->inherit == key.inherit) {
+                continue;
+            }
+            // MODE only. Keeping the stored time is what stops the 1e-6
+            // identity window from walking a key across repeated merges.
+            match->inherit = key.inherit;
+            ++replaced_key_count;
+            continue;
+        }
+        const auto position = std::lower_bound(
+            edit->keyframes.begin(),
+            edit->keyframes.end(),
+            key.time,
+            [](const InheritKeyframeEdit& stored, double time) {
+                return stored.time < time;
+            });
+        edit->keyframes.insert(position, key);
+        ++added_key_count;
+    }
+
+    if (added_key_count == 0U && replaced_key_count == 0U) {
+        // No revision moves and no undo entry is worth recording.
+        return {{false, {}}, 0U, 0U, effective.size()};
+    }
+    const std::size_t effective_key_count = edit->keyframes.size();
+    *project = std::move(candidate);
+    return {{true, {}}, added_key_count, replaced_key_count, effective_key_count};
+}
+
 TimelineScalarOffsetResult offset_keyframe_scalars(
     ProjectData* project,
     const std::vector<TimelineKeySelector>& selectors,

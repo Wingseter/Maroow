@@ -1444,6 +1444,67 @@ std::optional<TransformTimelineChannel> transform_channel_from_key(std::string_v
     return std::nullopt;
 }
 
+// MAR-184: the five stepped inherit tokens, both directions, from ONE table.
+// The vocabulary is exactly the runtime's (`skeleton_parse.cpp:494-511`), whose
+// `parse_bone_inherit` lives in an anonymous namespace and has no inverse -- so
+// it cannot be reached from here, and a one-way copy would be free to drift.
+// The namespace-scope wrappers below this file's anonymous namespace forward to
+// these rows, so the `.marrow` parser, both serializers, and
+// `merge_inherit_timeline` in `authoring.cpp` all read the same vocabulary.
+struct InheritModeRow {
+    std::string_view key;
+    runtime::BoneInherit inherit;
+};
+
+constexpr std::array<InheritModeRow, 5> kInheritModeTable{{
+    {"normal", runtime::BoneInherit::Normal},
+    {"onlyTranslation", runtime::BoneInherit::OnlyTranslation},
+    {"noRotationOrReflection", runtime::BoneInherit::NoRotationOrReflection},
+    {"noScale", runtime::BoneInherit::NoScale},
+    {"noScaleOrReflection", runtime::BoneInherit::NoScaleOrReflection},
+}};
+
+constexpr std::string_view kInheritModeMessage =
+    "inherit mode must be one of normal, onlyTranslation, "
+    "noRotationOrReflection, noScale, or noScaleOrReflection";
+
+std::optional<runtime::BoneInherit> inherit_mode_from_key_impl(std::string_view key) {
+    for (const InheritModeRow& row : kInheritModeTable) {
+        if (row.key == key) {
+            return row.inherit;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string_view inherit_mode_json_key_impl(runtime::BoneInherit inherit) {
+    for (const InheritModeRow& row : kInheritModeTable) {
+        if (row.inherit == inherit) {
+            return row.key;
+        }
+    }
+    return kInheritModeTable[0].key;
+}
+
+/**
+ * @brief Reports whether `value` is finite and fits a runtime float32 key.
+ *
+ * A file-local copy of the helper `authoring.cpp:322` and `curve_auto.cpp:40`
+ * each already carry: both live in their own anonymous namespaces and neither
+ * is declared in a header, so a third file-local copy follows the repo's
+ * existing convention rather than inventing one. The float32 bound is what
+ * makes the check reachable from a `.marrow` at all -- JSON has no NaN literal
+ * and `json.cpp:302-307` refuses an out-of-range exponent at the tokenizer, so
+ * an over-large finite magnitude such as `1e39` is the only value a file can
+ * present. NaN and infinity reach the same rule only through
+ * `merge_inherit_timeline`'s `double` parameter, from C++.
+ */
+bool finite_animation_scalar(double value) {
+    return std::isfinite(value) &&
+        std::abs(value) <=
+            static_cast<double>(std::numeric_limits<runtime::AnimationScalar>::max());
+}
+
 std::string_view onion_skin_mode_json_key(OnionSkinMode mode) {
     switch (mode) {
     case OnionSkinMode::Frame:
@@ -2781,6 +2842,191 @@ std::optional<LoadError> parse_slot_attachment_keyframes(
     }
 
     *keyframes_out = std::move(keyframes);
+    return std::nullopt;
+}
+
+/**
+ * @brief Parses one project-owned stepped inherit timeline.
+ *
+ * Two rules here are strictly stronger than the runtime's own parser and are
+ * deliberate. The runtime accepts a NEGATIVE first key -- its
+ * `has_previous_time` starts false, so nothing compares the first key against
+ * zero -- and it reads exactly `time` and `inherit`, silently ignoring a
+ * `curve` member. The overlay refuses both: the editor is the only thing that
+ * writes one, and a `.marrow` keyframe object has never preserved unknown
+ * members, so accepting easing here would mean dropping it on the next save.
+ * Adding either rule to the runtime parser instead would make previously valid
+ * `.mskl` files stop loading, which the story's format-version guarantee
+ * forbids.
+ */
+std::optional<LoadError> parse_inherit_keyframes(
+    const Document& document,
+    const Value& timeline_value,
+    std::string_view json_path,
+    std::vector<InheritKeyframeEdit>* keyframes_out) {
+    if (const auto error = marrow::runtime::json::require_type(
+            document, timeline_value, Value::Type::Array, json_path)) {
+        return error;
+    }
+    if (timeline_value.as_array().empty()) {
+        return validation_error(
+            document,
+            timeline_value.location(),
+            std::string(json_path),
+            "inherit timeline edits must contain at least one keyframe");
+    }
+
+    std::vector<InheritKeyframeEdit> keyframes;
+    keyframes.reserve(timeline_value.as_array().size());
+    double previous_time = 0.0;
+    bool has_previous_time = false;
+    for (std::size_t keyframe_index = 0;
+         keyframe_index < timeline_value.as_array().size();
+         ++keyframe_index) {
+        const Value& keyframe_value = timeline_value.as_array()[keyframe_index];
+        const std::string keyframe_path =
+            std::string(json_path) + "[" + std::to_string(keyframe_index) + "]";
+        if (const auto error = marrow::runtime::json::require_type(
+                document, keyframe_value, Value::Type::Object, keyframe_path)) {
+            return error;
+        }
+
+        InheritKeyframeEdit keyframe;
+        if (const auto error = read_required_number(
+                document, keyframe_value, "time", keyframe_path, &keyframe.time)) {
+            return error;
+        }
+        if (!finite_animation_scalar(keyframe.time) || keyframe.time < 0.0) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".time",
+                "inherit keyframe time must be finite and non-negative");
+        }
+
+        const Value* mode_value = nullptr;
+        if (const auto error = marrow::runtime::json::require_member(
+                document,
+                keyframe_value,
+                "inherit",
+                Value::Type::String,
+                keyframe_path,
+                &mode_value)) {
+            return error;
+        }
+        const auto inherit = inherit_mode_from_key_impl(mode_value->as_string());
+        if (!inherit.has_value()) {
+            return validation_error(
+                document,
+                mode_value->location(),
+                keyframe_path + ".inherit",
+                std::string(kInheritModeMessage));
+        }
+        keyframe.inherit = *inherit;
+
+        if (const Value* curve_value = find_optional_member(keyframe_value, "curve");
+            curve_value != nullptr) {
+            return validation_error(
+                document,
+                curve_value->location(),
+                keyframe_path + ".curve",
+                "inherit keys are stepped and must not carry curve data");
+        }
+
+        if (has_previous_time && keyframe.time <= previous_time) {
+            return validation_error(
+                document,
+                keyframe_value.location(),
+                keyframe_path + ".time",
+                "inherit timeline edit keyframe times must be strictly increasing");
+        }
+        previous_time = keyframe.time;
+        has_previous_time = true;
+        keyframes.push_back(keyframe);
+    }
+
+    *keyframes_out = std::move(keyframes);
+    return std::nullopt;
+}
+
+/**
+ * @brief Collects every `timeline_edits.animations.<a>.bones.<b>.inherit` lane.
+ *
+ * Walks the same tree `parse_transform_timeline_edits` walks and picks only the
+ * `inherit` member, skipping the four transform channel keys rather than
+ * erroring on them -- the mirror image of the transform parser, which has
+ * always skipped `inherit`.
+ */
+std::optional<LoadError> parse_bone_inherit_timeline_edits(
+    const Document& document,
+    const Value& root,
+    std::vector<BoneInheritTimelineEdit>* edits_out) {
+    const Value* timeline_edits = find_optional_member(root, "timeline_edits");
+    if (timeline_edits == nullptr) {
+        edits_out->clear();
+        return std::nullopt;
+    }
+    if (const auto error = marrow::runtime::json::require_type(
+            document, *timeline_edits, Value::Type::Object, "$.timeline_edits")) {
+        return error;
+    }
+
+    const Value* animations = nullptr;
+    if (const auto error = marrow::runtime::json::require_member(
+            document,
+            *timeline_edits,
+            "animations",
+            Value::Type::Object,
+            "$.timeline_edits",
+            &animations)) {
+        return error;
+    }
+
+    std::vector<BoneInheritTimelineEdit> edits;
+    for (const auto& [animation_name, animation_value] : animations->as_object()) {
+        const std::string animation_path =
+            "$.timeline_edits.animations." + animation_name;
+        if (const auto error = marrow::runtime::json::require_type(
+                document, animation_value, Value::Type::Object, animation_path)) {
+            return error;
+        }
+
+        const Value* bones = find_optional_member(animation_value, "bones");
+        if (bones == nullptr) {
+            continue;
+        }
+        if (const auto error = marrow::runtime::json::require_type(
+                document, *bones, Value::Type::Object, animation_path + ".bones")) {
+            return error;
+        }
+
+        for (const auto& [bone_name, bone_value] : bones->as_object()) {
+            const std::string bone_path = animation_path + ".bones." + bone_name;
+            if (const auto error = marrow::runtime::json::require_type(
+                    document, bone_value, Value::Type::Object, bone_path)) {
+                return error;
+            }
+
+            const Value* timeline_value = find_optional_member(bone_value, "inherit");
+            if (timeline_value == nullptr) {
+                continue;
+            }
+
+            BoneInheritTimelineEdit edit;
+            edit.animation_name = animation_name;
+            edit.bone_name = bone_name;
+            if (const auto error = parse_inherit_keyframes(
+                    document,
+                    *timeline_value,
+                    bone_path + ".inherit",
+                    &edit.keyframes)) {
+                return error;
+            }
+            edits.push_back(std::move(edit));
+        }
+    }
+
+    *edits_out = std::move(edits);
     return std::nullopt;
 }
 
@@ -4197,6 +4443,27 @@ Value build_slot_attachment_keyframes_value(const SlotAttachmentTimelineEdit& ed
     return make_array_value(std::move(keyframes));
 }
 
+/**
+ * @brief Encodes one stepped inherit timeline.
+ *
+ * ONE builder serves both `.marrow` and `.mskl`. Transform and slot color each
+ * need a `build_runtime_*` variant to strip `curve_mode`/`curve_driver`;
+ * inherit carries no project-only member, so the two encodings are the same.
+ */
+Value build_inherit_keyframes_value(const BoneInheritTimelineEdit& edit) {
+    Value::Array keyframes;
+    keyframes.reserve(edit.keyframes.size());
+    for (const InheritKeyframeEdit& keyframe : edit.keyframes) {
+        Value::Object keyframe_object;
+        keyframe_object.emplace("time", make_number_value(keyframe.time));
+        keyframe_object.emplace(
+            "inherit",
+            make_string_value(std::string(inherit_mode_json_key_impl(keyframe.inherit))));
+        keyframes.push_back(make_object_value(std::move(keyframe_object)));
+    }
+    return make_array_value(std::move(keyframes));
+}
+
 Value build_ik_constraint_edits_value(const std::vector<IkConstraintEdit>& edits) {
     Value::Array constraints;
     constraints.reserve(edits.size());
@@ -4380,6 +4647,7 @@ Value build_loop_sync_value(
 
 Value build_timeline_edits_value(
     const std::vector<TransformTimelineEdit>& transform_edits,
+    const std::vector<BoneInheritTimelineEdit>& bone_inherit_edits,
     const std::vector<MeshDeformTimelineEdit>& mesh_deform_edits,
     const std::vector<DrawOrderTimelineEdit>& draw_order_edits,
     const std::vector<EventTimelineEdit>& event_edits,
@@ -4397,6 +4665,26 @@ Value build_timeline_edits_value(
         if (bone_value != nullptr) {
             bone_value->as_object()[std::string(transform_channel_json_key(edit.channel))] =
                 build_transform_keyframes_value(edit);
+        }
+    }
+
+    for (const BoneInheritTimelineEdit& edit : bone_inherit_edits) {
+        if (edit.keyframes.empty()) {
+            // `ensure_bone_inherit_timeline_edit` legitimately creates an empty
+            // edit for a bone with no base track -- that is what a project-only
+            // timeline is before its first key lands. Writing `"inherit": []`
+            // would produce a `.marrow` this parser itself refuses to reload.
+            continue;
+        }
+        auto& animation_value = animations_object[edit.animation_name];
+        if (!animation_value.is_object()) {
+            animation_value = make_object_value();
+        }
+
+        Value* bones_value = ensure_object_member(&animation_value, "bones");
+        Value* bone_value = ensure_object_member(bones_value, edit.bone_name);
+        if (bone_value != nullptr) {
+            bone_value->as_object()["inherit"] = build_inherit_keyframes_value(edit);
         }
     }
 
@@ -4829,7 +5117,20 @@ Value build_project_value(const ProjectData& project) {
         root.erase("animation_edits");
     }
 
+    // MAR-184 adds the SEVENTH disjunct as well as the seventh argument. The
+    // gate is what decides whether `timeline_edits` is written at all, so an
+    // inherit-only project whose family is missing from this condition
+    // serializes no overlay whatsoever -- a silent, save-side total loss with
+    // every other assertion in the suite still green. It tests the effective
+    // edits rather than the raw vector so that an all-empty inherit vector
+    // cannot make a project that previously wrote no `timeline_edits` start
+    // emitting an empty one.
+    const bool has_inherit_timeline_edits = std::any_of(
+        project.bone_inherit_timeline_edits.begin(),
+        project.bone_inherit_timeline_edits.end(),
+        [](const BoneInheritTimelineEdit& edit) { return !edit.keyframes.empty(); });
     if (!project.transform_timeline_edits.empty() ||
+        has_inherit_timeline_edits ||
         !project.mesh_deform_timeline_edits.empty() ||
         !project.draw_order_timeline_edits.empty() ||
         !project.event_timeline_edits.empty() ||
@@ -4838,6 +5139,7 @@ Value build_project_value(const ProjectData& project) {
         root["timeline_edits"] =
             build_timeline_edits_value(
                 project.transform_timeline_edits,
+                project.bone_inherit_timeline_edits,
                 project.mesh_deform_timeline_edits,
                 project.draw_order_timeline_edits,
                 project.event_timeline_edits,
@@ -5423,6 +5725,25 @@ Document build_runtime_document(
         if (bone_value != nullptr) {
             bone_value->as_object()[std::string(transform_channel_json_key(edit.channel))] =
                 build_runtime_transform_keyframes_value(edit);
+        }
+    }
+
+    for (const BoneInheritTimelineEdit& edit : project.bone_inherit_timeline_edits) {
+        if (edit.keyframes.empty()) {
+            // The runtime refuses an empty inherit array outright, so exporting
+            // one would produce an unloadable `.mskl`. An empty edit is the
+            // legitimate transient state of a project-only timeline that
+            // `ensure` has materialized but no key has landed in yet.
+            continue;
+        }
+        Value* animation_value = ensure_object_member(animations, edit.animation_name);
+        Value* bones_value = ensure_object_member(animation_value, "bones");
+        Value* bone_value = ensure_object_member(bones_value, edit.bone_name);
+        if (bone_value != nullptr) {
+            // Assigning INTO the copied base document, rather than replacing
+            // the animation's `bones` object, is what keeps every sibling bone
+            // and channel the project does not override.
+            bone_value->as_object()["inherit"] = build_inherit_keyframes_value(edit);
         }
     }
 
@@ -6736,6 +7057,16 @@ TransformTimelineEdit* ProjectData::find_transform_timeline_edit(
     return iterator == transform_timeline_edits.end() ? nullptr : &(*iterator);
 }
 
+// The one mode vocabulary, exposed for `merge_inherit_timeline`. Forwards to
+// the single bidirectional table in this file's anonymous namespace.
+std::optional<runtime::BoneInherit> inherit_mode_from_key(std::string_view key) {
+    return inherit_mode_from_key_impl(key);
+}
+
+std::string_view inherit_mode_json_key(runtime::BoneInherit inherit) {
+    return inherit_mode_json_key_impl(inherit);
+}
+
 TransformTimelineEdit* ensure_transform_timeline_edit(
     ProjectData& project,
     const runtime::SkeletonData& effective_skeleton,
@@ -6859,6 +7190,32 @@ double setup_relative_rotation_key(
               effective_skeleton.bones()[*bone_index].setup_pose.rotation)
         : 0.0;
     return absolute_local_rotation - setup_rotation;
+}
+
+const BoneInheritTimelineEdit* ProjectData::find_bone_inherit_timeline_edit(
+    std::string_view animation_name,
+    std::string_view bone_name) const {
+    const auto iterator = std::find_if(
+        bone_inherit_timeline_edits.begin(),
+        bone_inherit_timeline_edits.end(),
+        [&](const BoneInheritTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.bone_name == bone_name;
+        });
+    return iterator == bone_inherit_timeline_edits.end() ? nullptr : &(*iterator);
+}
+
+BoneInheritTimelineEdit* ProjectData::find_bone_inherit_timeline_edit(
+    std::string_view animation_name,
+    std::string_view bone_name) {
+    const auto iterator = std::find_if(
+        bone_inherit_timeline_edits.begin(),
+        bone_inherit_timeline_edits.end(),
+        [&](const BoneInheritTimelineEdit& edit) {
+            return edit.animation_name == animation_name &&
+                edit.bone_name == bone_name;
+        });
+    return iterator == bone_inherit_timeline_edits.end() ? nullptr : &(*iterator);
 }
 
 const MeshDeformTimelineEdit* ProjectData::find_mesh_deform_timeline_edit(
@@ -7185,6 +7542,38 @@ SlotAttachmentTimelineEdit* ensure_slot_attachment_timeline_edit(
     return &project.slot_attachment_timeline_edits.back();
 }
 
+BoneInheritTimelineEdit* ensure_bone_inherit_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name) {
+    if (BoneInheritTimelineEdit* existing =
+            project.find_bone_inherit_timeline_edit(animation_name, bone_name)) {
+        return existing;
+    }
+    const auto bone_index = effective_skeleton.find_bone_index(bone_name);
+    const runtime::AnimationData* animation =
+        effective_skeleton.find_animation(animation_name);
+    if (!bone_index.has_value() || animation == nullptr) return nullptr;
+
+    BoneInheritTimelineEdit materialized{
+        std::string(animation_name), std::string(bone_name), {}};
+    // MAR-185 note: the effective skeleton handed here has already been through
+    // `prune_constant_timelines`, so a base track that was a single constant key
+    // at the origin is legitimately ABSENT and materializes as empty. That is
+    // not a lost track -- it is a track the runtime proved redundant.
+    const auto* timeline = animation->find_inherit_timeline(*bone_index);
+    if (timeline != nullptr) {
+        materialized.keyframes.reserve(timeline->keyframes.size());
+        for (const auto& source : timeline->keyframes) {
+            materialized.keyframes.push_back(InheritKeyframeEdit{
+                static_cast<double>(source.time), source.inherit});
+        }
+    }
+    project.bone_inherit_timeline_edits.push_back(std::move(materialized));
+    return &project.bone_inherit_timeline_edits.back();
+}
+
 const IkConstraintEdit* ProjectData::find_ik_constraint_edit(std::string_view name) const {
     const auto iterator = std::find_if(
         ik_constraint_edits.begin(),
@@ -7418,6 +7807,15 @@ ProjectLoadResult load_project(const Document& document) {
     }
     if (const auto error = parse_transform_timeline_edits(
             document, document.root, &project.transform_timeline_edits)) {
+        result.error = error;
+        return result;
+    }
+    // Runs with the other `timeline_edits` parsers and BEFORE `parse_loop_sync`
+    // below, whose leaves cross-reference the lanes these parsers populate.
+    // Inherit authors no loop-sync leaf, but the ordering invariant that
+    // comment states is not weakened by an exception.
+    if (const auto error = parse_bone_inherit_timeline_edits(
+            document, document.root, &project.bone_inherit_timeline_edits)) {
         result.error = error;
         return result;
     }

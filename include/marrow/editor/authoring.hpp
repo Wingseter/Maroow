@@ -562,6 +562,74 @@ TimelineScaleResult scale_keyframe_times(
     TimelineScalePivot pivot,
     double scale);
 
+/** @brief One requested stepped inherit key, in its wire form. */
+struct InheritKeyRequest {
+    double time{0.0};
+    /**
+     * @brief One of the five inherit tokens; validated by the primitive.
+     *
+     * A token rather than a typed `runtime::BoneInherit` because the primitive
+     * is required to REPORT an invalid mode, and with a typed parameter an
+     * invalid mode is unrepresentable. Taking the token makes this the single
+     * place the vocabulary is enforced, and hands a future agent operation --
+     * which receives a JSON string -- its validation for free. The precedent is
+     * `upsert_lip_sync_mapping`, which takes JSON in and stores typed data.
+     */
+    std::string mode;
+};
+
+struct InheritTimelineMergeRequest {
+    std::string animation_name;
+    std::string bone_name;
+    /// @brief Any order; the stored result is always sorted ascending by time.
+    std::vector<InheritKeyRequest> keys;
+    /**
+     * @brief How a key landing on an existing key's time is treated.
+     *
+     * When false (the default) a key within 1e-6 of an existing key is an
+     * error. When true it overwrites that key's MODE in place, keeping the
+     * STORED time -- so the identity window can never walk a key across
+     * repeated merges.
+     */
+    bool replace_existing_times{false};
+};
+
+struct InheritTimelineMergeResult : AuthoringResult {
+    std::size_t added_key_count{0U};
+    std::size_t replaced_key_count{0U};
+    std::size_t effective_key_count{0U};
+};
+
+/**
+ * @brief Merges stepped inherit keys into one project-owned bone timeline.
+ *
+ * Validates completely before it writes: a missing animation or bone, a
+ * non-finite or negative time, an unknown mode token, two requested keys
+ * colliding with each other, and -- unless `replace_existing_times` is set -- a
+ * requested key colliding with the effective timeline are all reported with
+ * `*project` left bytewise as it was.
+ *
+ * The timeline is materialized through `ensure_bone_inherit_timeline_edit` on
+ * first touch, so a first merge EXTENDS the imported track rather than
+ * replacing it. Keys stay sorted ascending with strictly increasing times, so
+ * the same request in two key orders serializes byte-identically.
+ *
+ * A request whose every key already exists with that mode reports
+ * `changed == false` with an empty error and writes nothing, so a caller
+ * wrapping this in a transaction records no empty undo entry.
+ *
+ * @param project Project receiving the merge.
+ * @param effective_skeleton Skeleton the project currently materializes to.
+ *        STALE after a successful merge -- a caller that keeps editing must
+ *        rebuild it.
+ * @param request Animation, bone, keys, and collision policy.
+ * @return Counts and `changed`, or an error with the project untouched.
+ */
+InheritTimelineMergeResult merge_inherit_timeline(
+    ProjectData* project,
+    const runtime::SkeletonData& effective_skeleton,
+    const InheritTimelineMergeRequest& request);
+
 // ── Mesh vertex weights ────────────────────────────────────────────────────
 //
 // The canonical rules themselves live in `src/editor/mesh_weight_model.hpp`,

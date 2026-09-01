@@ -870,6 +870,7 @@ Optional ordered animation-catalog operations applied to the referenced base ske
 Editor-side overrides that have not yet been exported into runtime assets:
 
 - bone transform edits
+- bone inherit edits
 - mesh deform edits
 - draw-order edits
 - event edits
@@ -929,6 +930,76 @@ Keyframe objects have never preserved unknown members — the parser builds a
 fresh record and the serializer builds a fresh object — so this is the one
 `.marrow.snap` discipline MAR-171 cannot reproduce. That is pre-existing
 behaviour, unchanged here, and recorded as a known limitation.
+
+#### `inherit` (MAR-184, stepped)
+
+A bone object under `timeline_edits.animations.<animation>.bones.<bone>` may
+carry an `inherit` array beside `rotate`/`translate`/`scale`/`shear` — the same
+nesting the runtime uses, so the overlay is a direct member assignment at
+materialization time:
+
+```json
+"timeline_edits": {
+  "animations": {
+    "toggle_inherit": {
+      "bones": {
+        "child": {
+          "inherit": [
+            { "time": 0.0,  "inherit": "normal" },
+            { "time": 0.25, "inherit": "noRotationOrReflection" },
+            { "time": 0.5,  "inherit": "onlyTranslation" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+Each keyframe carries exactly `time` (a number, seconds) and `inherit` (one of
+the five runtime tokens: `normal`, `onlyTranslation`, `noRotationOrReflection`,
+`noScale`, `noScaleOrReflection`). Inherit keys are **stepped**: the runtime
+samples them piecewise-constant, and no easing is stored or read. Key identity
+is the time, compared at `1e-6`; there is no same-time ordinal, because times
+are strictly increasing by construction.
+
+Validation, with the offending keyframe's own JSON path on every row:
+
+| Condition | Message | Runtime also rejects? |
+| --- | --- | --- |
+| timeline value is not an array | `require_type` | yes |
+| array is empty | `inherit timeline edits must contain at least one keyframe` | yes |
+| keyframe is not an object | `require_type` | yes |
+| `time` missing or non-number | `read_required_number` | yes |
+| `time` not finite, outside the float32 range, or negative | `inherit keyframe time must be finite and non-negative` | **no** |
+| `inherit` missing or non-string | `require_member` | yes |
+| `inherit` not one of the five | `inherit mode must be one of normal, onlyTranslation, noRotationOrReflection, noScale, or noScaleOrReflection` | yes |
+| times not strictly increasing | `inherit timeline edit keyframe times must be strictly increasing` | yes |
+| keyframe carries a `curve` member | `inherit keys are stepped and must not carry curve data` | **no** |
+
+**Two rows are stronger than the runtime, and the asymmetry is deliberate.** The
+runtime's own inherit parser starts with no previous time, so it accepts a
+negative *first* key; and it reads exactly `time` and `inherit`, ignoring any
+other member, so a `.mskl` carrying `{"time": 0, "inherit": "normal", "curve":
+"stepped"}` loads clean today and Marrow ignores the `curve`. Adding either
+rejection to the runtime parser would make previously valid `.mskl` files stop
+loading, which the format-version guarantee forbids. The rejection therefore
+lives on the **overlay**, where it costs nothing: the editor is the only thing
+that writes one, and a `.marrow` keyframe object has never preserved unknown
+members — so accepting a `curve` here would mean silently dropping the animator's
+easing on the next save.
+
+An inherit edit whose keyframe array is empty is **skipped by both serializers**
+rather than written. `ensure_bone_inherit_timeline_edit` legitimately creates one
+for a bone with no imported track — that is what a project-only timeline is
+before its first key lands — and writing `"inherit": []` would produce a
+`.marrow` this parser refuses to reload and a `.mskl` the runtime refuses to
+load.
+
+The key is purely additive and no version moves: `.mskl` stays version 1,
+`.mbin` stays version 2, `.marrow` still has no version field, and a build that
+has never heard of `inherit` walks past it on the `continue` its transform
+parser has always taken for an unrecognised channel key — exactly as today.
 
 ### `mesh_edits`
 

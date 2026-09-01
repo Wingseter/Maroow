@@ -271,6 +271,30 @@ struct SlotAttachmentTimelineEdit {
     std::vector<SlotAttachmentKeyframeEdit> keyframes;
 };
 
+/**
+ * @brief One stepped bone-inherit key in a project overlay.
+ *
+ * Time is `double` here and `AnimationScalar` (float) in the runtime, the same
+ * narrowing every sibling family already carries.
+ */
+struct InheritKeyframeEdit {
+    double time{0.0};
+    runtime::BoneInherit inherit{runtime::BoneInherit::Normal};
+};
+
+/**
+ * @brief A project-owned bone inherit timeline, keyed by (animation, bone).
+ *
+ * Carries no `loop_sync`: a stepped lane has no boundary easing to mirror, and
+ * only transform, deform and slot color opt into MAR-172's loop sync. Carries
+ * no `curve_mode`/`curve_driver` either -- the discrete families never have.
+ */
+struct BoneInheritTimelineEdit {
+    std::string animation_name;
+    std::string bone_name;
+    std::vector<InheritKeyframeEdit> keyframes;
+};
+
 struct IkConstraintEdit {
     std::string name;
     std::vector<std::string> bone_names;
@@ -565,6 +589,9 @@ struct ProjectData {
     std::optional<ProjectSnapSettings> snap_settings;
     std::vector<AnimationEdit> animation_edits;
     std::vector<TransformTimelineEdit> transform_timeline_edits;
+    // Placed beside the transform edits because both are bone tracks, mirroring
+    // the runtime's own ordering of an animation's per-bone timelines.
+    std::vector<BoneInheritTimelineEdit> bone_inherit_timeline_edits;
     std::vector<MeshDeformTimelineEdit> mesh_deform_timeline_edits;
     std::vector<MeshWeightAttachmentEdit> mesh_weight_attachment_edits;
     std::vector<DrawOrderTimelineEdit> draw_order_timeline_edits;
@@ -626,6 +653,24 @@ struct ProjectData {
         std::string_view animation_name,
         std::string_view bone_name,
         TransformTimelineChannel channel);
+    /**
+     * @brief Finds a bone inherit timeline edit by animation and bone.
+     * @param animation_name Animation containing the edit.
+     * @param bone_name Bone targeted by the edit.
+     * @return Matching inherit edit, or `nullptr` when none exists.
+     */
+    const BoneInheritTimelineEdit* find_bone_inherit_timeline_edit(
+        std::string_view animation_name,
+        std::string_view bone_name) const;
+    /**
+     * @brief Finds a mutable bone inherit timeline edit by animation and bone.
+     * @param animation_name Animation containing the edit.
+     * @param bone_name Bone targeted by the edit.
+     * @return Matching mutable inherit edit, or `nullptr` when none exists.
+     */
+    BoneInheritTimelineEdit* find_bone_inherit_timeline_edit(
+        std::string_view animation_name,
+        std::string_view bone_name);
     /**
      * @brief Finds a mesh deform timeline edit by animation, slot, and attachment.
      * @param animation_name Animation containing the edit.
@@ -774,12 +819,52 @@ struct ProjectData {
         const std::filesystem::path& atlas_path);
 };
 
+/**
+ * @brief Maps a `.marrow` inherit token onto the runtime mode.
+ * @param key One of `normal`, `onlyTranslation`, `noRotationOrReflection`,
+ *        `noScale`, `noScaleOrReflection`.
+ * @return The matching mode, or `std::nullopt` for an unknown token.
+ *
+ * Declared at namespace scope, unlike `transform_channel_json_key`, because the
+ * merge primitive in `authoring.cpp` validates a caller-supplied token against
+ * the SAME table the parser and both serializers use. A second, one-way copy
+ * living in the authoring layer is exactly the drift this avoids.
+ */
+std::optional<runtime::BoneInherit> inherit_mode_from_key(std::string_view key);
+
+/**
+ * @brief Maps a runtime inherit mode onto its `.marrow` / `.mskl` token.
+ * @param inherit Mode to encode.
+ * @return The token, identical to the runtime parser's vocabulary.
+ */
+std::string_view inherit_mode_json_key(runtime::BoneInherit inherit);
+
 TransformTimelineEdit* ensure_transform_timeline_edit(
     ProjectData& project,
     const runtime::SkeletonData& effective_skeleton,
     std::string_view animation_name,
     std::string_view bone_name,
     TransformTimelineChannel channel);
+
+/**
+ * @brief Returns the project's inherit edit for one bone, materializing it once.
+ *
+ * On first touch the imported track's keys are copied into the project, so a
+ * first edit extends the base timeline rather than replacing it. A bone with no
+ * base track yields an edit with zero keyframes -- the legitimate transient
+ * state of a project-only timeline, which both serializers skip.
+ *
+ * @param project Project receiving the edit.
+ * @param effective_skeleton Skeleton the project currently materializes to.
+ * @param animation_name Animation to edit.
+ * @param bone_name Bone to edit.
+ * @return The edit, or `nullptr` when the animation or bone does not exist.
+ */
+BoneInheritTimelineEdit* ensure_bone_inherit_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name);
 
 MeshDeformTimelineEdit* ensure_mesh_deform_timeline_edit(
     ProjectData& project,
