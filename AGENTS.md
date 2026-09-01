@@ -1196,6 +1196,30 @@ The rule this produced: **a case that is green before the implementation exists 
 a witness, not a gate, and must be labelled as one** — with the inversion that
 would catch its subject named, or its absence stated.
 
+### A MAR-188 commit carries `plan-mar190`'s durable entries -- attribution
+
+**`3acbf58` is not solely MAR-188's work, and `git log -S` will mislead you.** Its
+`AGENTS.md` delta is **116 added lines, of which about 9 are MAR-188's** (the
+inertness coverage correction). The rest was `plan-mar190`'s uncommitted work,
+sitting dirty in the shared worktree when MAR-188 staged the file:
+
+- the ImGui modal-Escape mechanism (`imgui.cpp:13103`, `:14873`) -- **`plan-mar190`**;
+- *"A zero result is evidence only once the pattern is known to match something"*
+  -- **`plan-mar190`**;
+- the rewrite of the present-tense / historical `*Rule:*` block -- **`plan-mar190`**.
+
+Nothing was lost and nothing needs extracting; `plan-mar190`'s Task 10 checks
+whether both entries still exist and re-lands them only if a sweep dropped them.
+This note exists so that a future reader running `git log -S` on either entry
+lands on a MAR-188 commit and does **not** conclude MAR-188 authored it.
+
+**This is the shared-path hazard this same file documents, and it caught the agent
+that had just written the entry about it.** `git add <path>` stages the whole
+file including another agent's uncommitted hunks; the technique that prevents it
+is `git apply --cached`, which stages hunks rather than files. Knowing the rule
+and applying it are different things, which is the reason it is written down twice
+now -- once as guidance and once as an instance.
+
 ### Document errors found (7)
 
 | # | Where | Error | Resolution |
