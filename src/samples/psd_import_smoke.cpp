@@ -2330,6 +2330,103 @@ std::vector<std::string> journal_residue_scan(const marrow::editor::ProjectData&
     return found;
 }
 
+/**
+ * @brief Adds a skin holding a mesh attachment, optionally with a deform timeline.
+ *
+ * The attachment is named something NO SLOT names, deliberately. With `skins`
+ * absent the parser synthesises a default skin from the slots' own `attachment`
+ * members (`skeleton_parse.cpp:4933-4935`), so a mesh named after the slot's
+ * attachment would still resolve and the refusal would change character.
+ *
+ * @param skeleton_path Skeleton document to patch in place.
+ * @param with_deform When true, also adds an animation whose deform timeline
+ *        targets the mesh -- which is what makes the skin's loss OBSERVABLE to
+ *        `build_project_runtime`. When false, nothing references the skin by
+ *        name, which is the case R2(d) measures.
+ */
+bool add_shadow_mesh_skin(const std::filesystem::path& skeleton_path, bool with_deform) {
+    marrow::runtime::json::LoadResult loaded =
+        marrow::runtime::json::load_document(skeleton_path);
+    if (!loaded) {
+        std::cerr << "add_shadow_mesh_skin: the bundle skeleton did not parse.\n";
+        return false;
+    }
+    marrow::runtime::json::Value::Object& root = loaded.document->root.as_object();
+
+    marrow::runtime::json::Value::Object mesh;
+    mesh.emplace("attachment", make_string_value("shadow_mesh"));
+    mesh.emplace("type", make_string_value("mesh"));
+    mesh.emplace("region", make_string_value("shadow"));
+    mesh.emplace(
+        "vertices",
+        make_array_value({make_number_value(-8.0), make_number_value(-4.0),
+                          make_number_value(8.0), make_number_value(-4.0),
+                          make_number_value(8.0), make_number_value(4.0),
+                          make_number_value(-8.0), make_number_value(4.0)}));
+    mesh.emplace(
+        "triangles",
+        make_array_value({make_number_value(0.0), make_number_value(1.0),
+                          make_number_value(2.0), make_number_value(2.0),
+                          make_number_value(3.0), make_number_value(0.0)}));
+    mesh.emplace(
+        "uvs",
+        make_array_value({make_number_value(0.0), make_number_value(0.0),
+                          make_number_value(1.0), make_number_value(0.0),
+                          make_number_value(1.0), make_number_value(1.0),
+                          make_number_value(0.0), make_number_value(1.0)}));
+    marrow::runtime::json::Value::Array weights;
+    for (const auto& corner : std::vector<std::pair<double, double>>{
+             {-8.0, -4.0}, {8.0, -4.0}, {8.0, 4.0}, {-8.0, 4.0}}) {
+        marrow::runtime::json::Value::Object bind;
+        bind.emplace("bone", make_string_value("root"));
+        bind.emplace("x", make_number_value(corner.first));
+        bind.emplace("y", make_number_value(corner.second));
+        bind.emplace("weight", make_number_value(1.0));
+        weights.push_back(make_array_value({make_object_value(std::move(bind))}));
+    }
+    mesh.emplace("weights", make_array_value(std::move(weights)));
+
+    // `skins.<skin>.<slot>` IS the attachment object, named by its own
+    // `attachment` member -- one per slot per skin, not a map of names.
+    marrow::runtime::json::Value::Object default_skin;
+    default_skin.emplace("shadow", make_object_value(std::move(mesh)));
+    marrow::runtime::json::Value::Object skins;
+    skins.emplace("default", make_object_value(std::move(default_skin)));
+    root["skins"] = make_object_value(std::move(skins));
+
+    if (with_deform) {
+        marrow::runtime::json::Value::Array keys;
+        for (const double time : {0.0, 0.5}) {
+            marrow::runtime::json::Value::Object key;
+            key.emplace("time", make_number_value(time));
+            key.emplace(
+                "vertices",
+                make_array_value({make_number_value(0.0), make_number_value(0.0),
+                                  make_number_value(0.0), make_number_value(0.0),
+                                  make_number_value(0.0), make_number_value(0.0),
+                                  make_number_value(0.0), make_number_value(0.0)}));
+            key.emplace("curve", make_string_value("linear"));
+            keys.push_back(make_object_value(std::move(key)));
+        }
+        marrow::runtime::json::Value::Object attachment_deform;
+        attachment_deform.emplace("shadow_mesh", make_array_value(std::move(keys)));
+        marrow::runtime::json::Value::Object slot_deform;
+        slot_deform.emplace("shadow", make_object_value(std::move(attachment_deform)));
+        marrow::runtime::json::Value::Object deform_holder;
+        deform_holder.emplace("deform", make_object_value(std::move(slot_deform)));
+        marrow::runtime::json::Value::Object animations;
+        animations.emplace("idle", make_object_value(std::move(deform_holder)));
+        root["animations"] = make_object_value(std::move(animations));
+    }
+
+    if (!write_text_file(
+            skeleton_path, marrow::runtime::json::serialize_pretty(loaded.document->root))) {
+        std::cerr << "add_shadow_mesh_skin: the patched skeleton could not be written.\n";
+        return false;
+    }
+    return true;
+}
+
 std::string atlas_image_of(const std::filesystem::path& atlas_path) {
     return atlas_member(atlas_path, "image");
 }
@@ -2800,87 +2897,8 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
         }
         const std::filesystem::path skeleton_path =
             scenario.directory / (std::string(mar189::kBundleStem) + ".mskl");
-        {
-            marrow::runtime::json::LoadResult loaded =
-                marrow::runtime::json::load_document(skeleton_path);
-            if (!loaded) {
-                std::cerr << "R2(c): the bundle skeleton did not parse.\n";
-                return false;
-            }
-            marrow::runtime::json::Value::Object& root = loaded.document->root.as_object();
-
-            marrow::runtime::json::Value::Object mesh;
-            mesh.emplace("attachment", make_string_value("shadow_mesh"));
-            mesh.emplace("type", make_string_value("mesh"));
-            mesh.emplace("region", make_string_value("shadow"));
-            mesh.emplace(
-                "vertices",
-                make_array_value({make_number_value(-8.0), make_number_value(-4.0),
-                                  make_number_value(8.0), make_number_value(-4.0),
-                                  make_number_value(8.0), make_number_value(4.0),
-                                  make_number_value(-8.0), make_number_value(4.0)}));
-            mesh.emplace(
-                "triangles",
-                make_array_value({make_number_value(0.0), make_number_value(1.0),
-                                  make_number_value(2.0), make_number_value(2.0),
-                                  make_number_value(3.0), make_number_value(0.0)}));
-            mesh.emplace(
-                "uvs",
-                make_array_value({make_number_value(0.0), make_number_value(0.0),
-                                  make_number_value(1.0), make_number_value(0.0),
-                                  make_number_value(1.0), make_number_value(1.0),
-                                  make_number_value(0.0), make_number_value(1.0)}));
-            // One weight per vertex, bound to `root` -- the only bone every
-            // candidate tree in this suite produces.
-            marrow::runtime::json::Value::Array weights;
-            for (const auto& corner : std::vector<std::pair<double, double>>{
-                     {-8.0, -4.0}, {8.0, -4.0}, {8.0, 4.0}, {-8.0, 4.0}}) {
-                marrow::runtime::json::Value::Object bind;
-                bind.emplace("bone", make_string_value("root"));
-                bind.emplace("x", make_number_value(corner.first));
-                bind.emplace("y", make_number_value(corner.second));
-                bind.emplace("weight", make_number_value(1.0));
-                weights.push_back(
-                    make_array_value({make_object_value(std::move(bind))}));
-            }
-            mesh.emplace("weights", make_array_value(std::move(weights)));
-            // `skins.<skin>.<slot>` IS the attachment object, named by its own
-            // `attachment` member -- one per slot per skin, not a map of names.
-            marrow::runtime::json::Value::Object default_skin;
-            default_skin.emplace("shadow", make_object_value(std::move(mesh)));
-            marrow::runtime::json::Value::Object skins;
-            skins.emplace("default", make_object_value(std::move(default_skin)));
-            root["skins"] = make_object_value(std::move(skins));
-
-            marrow::runtime::json::Value::Array keys;
-            for (const double time : {0.0, 0.5}) {
-                marrow::runtime::json::Value::Object key;
-                key.emplace("time", make_number_value(time));
-                key.emplace(
-                    "vertices",
-                    make_array_value({make_number_value(0.0), make_number_value(0.0),
-                                      make_number_value(0.0), make_number_value(0.0),
-                                      make_number_value(0.0), make_number_value(0.0),
-                                      make_number_value(0.0), make_number_value(0.0)}));
-                key.emplace("curve", make_string_value("linear"));
-                keys.push_back(make_object_value(std::move(key)));
-            }
-            marrow::runtime::json::Value::Object attachment_deform;
-            attachment_deform.emplace("shadow_mesh", make_array_value(std::move(keys)));
-            marrow::runtime::json::Value::Object slot_deform;
-            slot_deform.emplace("shadow", make_object_value(std::move(attachment_deform)));
-            marrow::runtime::json::Value::Object deform_holder;
-            deform_holder.emplace("deform", make_object_value(std::move(slot_deform)));
-            marrow::runtime::json::Value::Object animations;
-            animations.emplace("idle", make_object_value(std::move(deform_holder)));
-            root["animations"] = make_object_value(std::move(animations));
-
-            if (!write_text_file(
-                    skeleton_path,
-                    marrow::runtime::json::serialize_pretty(loaded.document->root))) {
-                std::cerr << "R2(c): the patched skeleton could not be written.\n";
-                return false;
-            }
+        if (!mar189::add_shadow_mesh_skin(skeleton_path, true)) {
+            return false;
         }
         if (!mar189::plan_scenario(&scenario, "R2(c)")) {
             return false;
@@ -2910,6 +2928,90 @@ bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
             return false;
         }
         std::cout << "R2(c): refused with -- " << result.error << '\n';
+    }
+
+    // ---- R2(d) -- CHARACTERIZATION: skins + mesh weights, no deform ----------
+    //
+    // R2(c) proves the skins loss is refused when something in the runtime
+    // document POINTS INTO the lost skin -- a deform timeline. The realistic rig
+    // that worries a reviewer is different: hand-authored skins and mesh-weight
+    // OVERLAYS, no IK constraint and no deform timeline. Nothing in the runtime
+    // document then references the skin by name, so there may be nothing for
+    // `build_project_runtime` to fail on.
+    //
+    // This case does not assert what SHOULD happen. It records what DOES, so the
+    // limitation is a measurement in the suite rather than a sentence in a
+    // document, and so that anyone who later makes the validator refuse here sees
+    // this case go red and has to come and read why.
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(
+                scratch, "r2d", initial_tree, initial_tree, &scenario,
+                [](marrow::editor::ProjectData* project) {
+                    // A mesh-weight overlay on the skin the reimport is about to
+                    // erase. No IK constraint, and the skeleton below carries no
+                    // deform timeline.
+                    marrow::editor::MeshWeightAttachmentEdit weights;
+                    weights.skin_name = "default";
+                    weights.slot_name = "shadow";
+                    weights.attachment_name = "shadow_mesh";
+                    for (int vertex = 0; vertex < 4; ++vertex) {
+                        marrow::editor::MeshWeightInfluenceEdit influence;
+                        influence.bone_name = "root";
+                        influence.weight = 1.0;
+                        marrow::editor::MeshWeightVertexEdit edit;
+                        edit.influences.push_back(influence);
+                        weights.vertices.push_back(std::move(edit));
+                    }
+                    project->mesh_weight_attachment_edits.push_back(std::move(weights));
+                })) {
+            return false;
+        }
+        const std::filesystem::path skeleton_path =
+            scenario.directory / (std::string(mar189::kBundleStem) + ".mskl");
+        if (!mar189::add_shadow_mesh_skin(skeleton_path, false)) {
+            return false;
+        }
+        if (!mar189::plan_scenario(&scenario, "R2(d)")) {
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+
+        const marrow::runtime::json::LoadResult committed =
+            marrow::runtime::json::load_document(
+                scenario.session.project()->resolved_skeleton_path());
+        if (!committed) {
+            std::cerr << "R2(d): the committed skeleton did not parse.\n";
+            return false;
+        }
+        const bool skins_survived =
+            marrow::runtime::json::find_member(committed.document->root, "skins") != nullptr;
+
+        if (result && !skins_survived) {
+            // MEASURED, and it is the disclosure. Nothing referenced the skin by
+            // name, so the runtime build had nothing to fail on and the commit
+            // erased a hand-authored skin -- and the mesh-weight overlay that
+            // targeted it -- without the validation refusing.
+            std::cout << "R2(d) [LIMITATION, measured]: a project with hand-authored "
+                         "skins and a mesh-weight overlay but no deform timeline and no "
+                         "IK constraint is COMMITTED, and the committed skeleton has no "
+                         "'skins' member. The skins erasure is refused only when the "
+                         "runtime document references the lost skin by name (R2(c)).\n";
+            return true;
+        }
+        if (!result) {
+            std::cerr << "R2(d): the commit was REFUSED with '" << result.error
+                      << "'. This case records a known limitation; a refusal here means "
+                         "the limitation is gone and the record must be updated -- see "
+                         "the MAR-189 'Not independently covered' section.\n";
+            return false;
+        }
+        std::cerr << "R2(d): the commit succeeded AND the skins survived, which neither "
+                     "the importer nor this case expects.\n";
+        return false;
     }
 
     std::cout << "MAR-189 R0-R2: a clean commit walks the whole step enum in order and "

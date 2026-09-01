@@ -1249,6 +1249,7 @@ order**. The predicted case is the design's; the text is what actually printed.
 | **I18b** | `rollback_advance` consults the seam and **discards its message**, so the rollback still stops and reports nothing | R6b | **R6b** -- `a failing rollback must NAME the step it was undoing. Expected 'rollback of PlaceAtlas failed: injected failure: disk went away'; got ''`. R3 stays green, because nothing there reads `rollback_error`'s content. This is the arm that makes the rollback seam load-bearing |
 | **I19** | derive the target texture from the ATLAS's stem instead of the atlas document's `image` -- the "obvious wrong fix" -- with both `ValidateRequest` name guards disabled so it reaches placement | R1b | **R1** -- `the committed texture ('…/bundle_tex.png') must equal the staged bytes; sizes 137 and 117`. R1's byte clause overlaps R1b's subject for any mutation that misplaces content; see the note below |
 | **STRAY** | plant `planted_orphan.png` beside the atlas after a successful commit | R1b | **R1b** -- `appeared: …/r1b/planted_orphan.png` |
+| **I20** | give R2(d)'s project a deform timeline, i.e. make the skins loss observable | R2(d) | **R2(d)** -- `the commit was REFUSED with '… deform timeline references unknown attachment 'shadow_mesh''. This case records a known limitation; a refusal here means the limitation is gone`. Proves the characterization case is not inert |
 
 **I17 is the clearest instance in this story of why `!result` is not an
 assertion.** Removing the whitelist check does not make the operation succeed; it
@@ -1376,6 +1377,37 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   Until R6b existed the seam was declared and never fired and `rollback_error` was
   only ever asserted **empty**, which is a seam with no evidence behind it;
   **I18b** is the arm that proves R6b sees a discarded message.
+- **DISCLOSURE: the commit path can erase a user's hand-authored skins without
+  the validation refusing.** This was first written here as a reasoned aside and
+  is now a measurement, because reasoning was the wrong instrument: R2(c)'s
+  refusal is triggered by a **deform timeline that references the lost
+  attachment**, not by the skin's absence as such. The realistic rig -- skins and
+  mesh-weight overlays, **no IK constraint and no deform timeline** -- has nothing
+  in the runtime document naming the skin, so `build_project_runtime` has nothing
+  to fail on.
+
+  Built as **R2(d)** and measured: the commit **succeeds**, and the committed
+  skeleton has **no `skins` member**. The hand-authored skin and the mesh-weight
+  overlay that targeted it are both gone, and `import.psd_layers` reports success.
+  A mesh-weight overlay whose target no longer resolves degrades to the
+  `overlay.orphan_weight_target` **Warning** already recorded in this file, which
+  is a diagnostic and not a load error -- so nothing on the commit path refuses.
+
+  R2(d) is a **characterization** case, labelled as such: it asserts what the code
+  does, not what it should do, so that whoever makes the validator refuse this
+  class sees it go red and comes here to read why. **I20** proves it is not inert
+  -- giving R2(d)'s project a deform timeline makes it report
+  *"the commit was REFUSED … a refusal here means the limitation is gone"*.
+
+  The cause is the importer (`build_skeleton_document` erases `skins` wholesale)
+  and MAR-189 changes no importer. **What MAR-189 could have done and did not is
+  refuse a commit whose staged skeleton drops a `skins` member the current one
+  has** -- a structural comparison rather than a runtime-build one. That is a real
+  gap in AC1's "validated together with the current project overlay", it is one
+  step, and it is left open deliberately rather than silently: it would change the
+  contract for every project whose skeleton came from a PSD in the first place
+  (which never has skins), and that decision is not this story's to make alone.
+
 - **EXDEV, and it is narrower than "unmeasured".** One volume on this machine, so
   a real cross-device rename could not be produced. But `write_file_atomically`
   places its temporary in the **destination's own directory**
@@ -1409,11 +1441,7 @@ reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
   parser synthesises a default skin from the slots' own `attachment` members
   (`skeleton_parse.cpp:4933-4935`) -- name the mesh after the slot's attachment and
   the refusal becomes *"deform timelines require a mesh attachment target"*, which
-  is still skins-specific but less direct. **What remains uncovered is narrower:**
-  a project whose skins are lost with no deform timeline pointing into them is
-  refused by nothing, because the erasure is then not observable in the runtime
-  build. The importer's behaviour is unchanged by this story; the commit path
-  refuses rather than shipping it wherever the loss is observable at all.
+  is still skins-specific but less direct.
 - **A5/A6 do not go through the C ABI.** `MarrowProject` is opaque outside
   `marrow_c.cpp` and approval needs the session and the review queue, so A1-A6
   drive `AgentCommandDispatcher` and `apply_agent_review` directly from
