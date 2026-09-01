@@ -162,6 +162,32 @@
   element-wise in ascending identity order, and a project with no provenance plans
   every layer as Added (Q1-Q11):
   `./build/marrow_psd_import_smoke assets/fixtures/psd_import_sample.psd assets/fixtures/psd_import_sample_reimport.psd`
+- MAR-189's atomic PSD reimport commit, on bundles built by a real import into a
+  DISPOSABLE directory and never against the tracked fixture: a repository-safety
+  predicate aborts the process before any writing case, and its three rows prove
+  it refuses the tracked fixture bundle and the repo's own build directory (A11);
+  staged bundles carry the TARGET's names so the atlas document's `image` member
+  survives a byte copy (Q12-Q14); a clean commit walks the whole fifteen-value
+  step enum in order and replaces skeleton, atlas, texture and layers with the
+  staged bytes; the committed atlas names the texture the PRE-COMMIT atlas named
+  and the bundle gains and loses no file; a bundle staged under a different
+  texture name is refused by message; an injected failure after EACH of the
+  fifteen steps rolls the bundle back byte-for-byte against a recursive listing of
+  the project and layer directories and leaves the session's active skeleton
+  source and provenance untouched -- except after `CleanJournal`, where the
+  completed reimport stands; an unremovable backup is reported as residue rather
+  than rolled back; overlays survive element-wise IN MEMORY while provenance is
+  rewritten in the plan's order; `preserve=false` drops exactly one identity and
+  one slot; a rollback after a successful adoption restores the original skeleton
+  to the session; the journal exists in flight and is gone after; and five
+  refusals each name their cause (R0-R8, R1b, R1c, R3b). Then the operation: a
+  dry run returns the ordered plan with its three counts and leaves both the
+  bundle and the staging root empty, an output outside the project bundle and a
+  staging root outside the whitelist are each refused BY CODE, approval commits
+  and empties the queue, and an unknown id, a whitelist-rejected request and a PSD
+  changed since review are each refused without touching a byte (A1-A6):
+  `./build/marrow_psd_import_smoke` -- now also `ctest --test-dir build -R marrow.psd_import_smoke`,
+  which it was not before this story
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -907,6 +933,61 @@ before writing the case that proves the escaping works** — MAR-186's first
 attempt asserted a count of two on a fixture where the count could never have
 been anything else.
 
+### Byte-identity is the wrong invariant when the bytes encode a path
+
+The rule this repository's transactional stories are built on -- *compare bytes,
+never a success flag* -- has an exception, and it is the one that makes a
+byte-perfect copy **wrong**. Measured in MAR-189:
+
+- `build_atlas_document_text` writes `"image"` from `image_path.filename()`
+  (`atlas_packer.cpp:880`), and `build_packed_atlas_artifact` derives that image
+  as the atlas path with `.png` (`:1024-1025`);
+- `atlas.cpp` resolves that member against **the atlas file's own directory**.
+
+So the `.matl` MAR-188 staged as `staged.matl` says `"image": "staged.png"`.
+Copy it byte-identically onto a project's atlas and the copy is byte-perfect and
+broken: it names a PNG that is not beside it. **Every byte-comparison clause
+passes.** The general form, for anything committed by copying:
+
+> Before asserting byte-identity between a source and a destination, ask which
+> bytes are **location-dependent**. Those bytes need a *semantic* clause -- does
+> the reference still resolve? -- and byte-identity is evidence *against*
+> correctness for them, not for it.
+
+**And the invariant has to be anchored on state captured BEFORE the operation.**
+MAR-189's design first specified the semantic clause as three statements about
+the committed bundle -- *"`image` equals the target png's file name"*, *"that
+file exists beside the atlas"*, *"the atlas loads"* -- and all three pass on the
+broken arm. The second is satisfied **because the commit's own `PlaceTexture`
+step creates that file**, and the first is circular, because the staging rule is
+what defines the target png. The clause that works compares the committed
+atlas's `$.atlas.image` against the **pre-commit** atlas's, which is a fact the
+operation cannot manufacture. This is a fourth degenerate gate shape beside the
+three already recorded one section up: **self-satisfying** -- a clause checking
+for an artefact the operation under test creates.
+
+**The second half, which is where the target name actually comes from.** The
+obvious fix -- stage under the target *atlas*'s stem -- is also wrong here, and
+this repo's own fixture is the counter-example: `assets/fixtures/player_idle.matl`
+declares `"image": "player_fixture.png"`. Staging as `player_idle.matl` produces
+`player_idle.png`, the commit places it, and `player_fixture.png` is **orphaned**
+while the atlas points at a file the project never had. The name has to come from
+the **current texture's** stem, i.e. the pre-commit `$.atlas.image`, which is
+also the only rule the runtime itself uses -- `atlas_path.parent_path() /
+atlas.info().image`, at three sites, with no resolved-texture accessor on
+`ProjectData`.
+
+Refuting all of this is one command:
+
+```
+grep -n '"image"' assets/fixtures/player_idle.matl     ->  "image": "player_fixture.png"
+```
+
+MAR-189's **R1b** is the only case in the tree that sees any of it; its **R1c**
+is the refusal a commit issues when the two names disagree. `AGENTS.md`'s
+existing rule that *a case green before the implementation exists is a witness*
+is the same argument applied to a test; this is it applied to an invariant.
+
 ## MAR-192–210 Platform Program Local Implementation Checkpoint
 
 Validated locally on 2026-08-09 without closing any platform story. The source
@@ -940,6 +1021,240 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-189 Commit PSD Reimports Atomically Validation Results
+
+MAR-188 produced a *reviewable* plan and wrote nothing outside a caller-supplied
+staging root. MAR-189 takes that staged bundle, validates it against the live
+project overlay **before touching anything**, replaces the project's skeleton,
+atlas, texture and layer directory through a journal of renames, adopts the new
+runtime sources, updates provenance -- and, on a failure after any of fifteen
+steps, puts the original bytes back.
+
+### What was measured before any code was written
+
+All at the commit's actual parent, **`b127048`**, in a tree extracted with
+`git archive HEAD | tar -x` and overlaid with only this story's files. The plan
+and design were authored against `cf6a199` / `71465db`, **34 commits stale**;
+every number below was re-derived rather than copied.
+
+| # | Measurement | Value at `b127048` |
+|---|---|---|
+| A4 | clean all-target build, `find build/CMakeFiles -name '*.o' -delete` | **0** `warning:`, **0** `Wswitch` |
+| A4 | `ctest --test-dir build -N` / `ctest` | **22** / **22 passed, 0 failed** |
+| A4 | `./build/marrow_agent_dispatch_smoke \| grep -c '[ OK ]'` | **437** |
+| A9 | `ctest -N \| grep -c psd_import` | **0** -- built since MAR-176 and never run by CTest |
+| A5 | `grep -c '^    {"' src/editor/agent_dispatch.cpp` | **66**; guards **11**, split **7** `shell_smoke_graph.cpp` / **2** `shell_smoke_constraints.cpp` / **2** `shell_smoke_timeline.cpp`; `test_client.py:53,55` |
+| A1 | the staged `.matl` under MAR-188's defaults | `"image": "staged.png"` |
+| A3 | the atlas `"name"` member outside tests/samples | display only; region lookup is by region name |
+| A7 | a directory `rename` between `/tmp` and the project directory | **same volume; EXDEV unreachable here.** §2.4's "placement copies rather than renames" stays load-bearing by argument, not by measurement |
+| A8 | a provenance-only `EditTransaction::commit()` against the OLD document | succeeds; and it writes **no `.marrow`**, so AC4's provenance update is **in memory** |
+| -- | `adopt_runtime_sources` while a transaction is active | refuses (`session.cpp:1901-1907`). The rollback's re-adopt is safe only because `UpdateProvenance`'s transaction is a local that is destroyed first |
+| -- | the tracked bundle | `player_idle.{marrow,matl,mskl,mbin}` + `player_fixture.png`. **There is no layer directory**, and `player_idle.matl` declares `"image": "player_fixture.png"` |
+
+### Result
+
+| Measurement | Before (`b127048`) | After |
+|---|---|---|
+| clean build `warning:` / `Wswitch` | 0 / 0 | **0 / 0** |
+| `ctest -N` / `ctest` | 22 / 22 passed | **23 / 23 passed, 0 failed** |
+| `marrow_agent_dispatch_smoke` `[ OK ]` | 437 | **437** |
+| `marrow_psd_import_smoke` | green, absent from CTest | green, registered as **`marrow.psd_import_smoke`** |
+| registry / guards / `test_client.py` | 66 / 11 (7/2/2) / 53,55 | **unchanged** |
+| `git status --porcelain assets/fixtures/` | empty | **empty** |
+
+`import.psd_layers` was reworked in place, so no operation was added and nothing
+in the 66-guard chain moved.
+
+### The safety gate, and the two defects that made it unwritable as specified
+
+This story's subject is the atomic replacement of asset bundles, and
+`agent_path_allowed` whitelists the **project directory**. `marrow.agent_dispatch_smoke`
+runs with `WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}` against
+`assets/fixtures/player_idle.marrow`, whose `.mskl`, `.matl` and `.png` are
+tracked. A committing case pointed at that session overwrites the user's
+repository, so the gate **aborts the process** rather than returning false.
+
+Two specified defects had to be fixed before any case could run, and both were
+confirmed by running:
+
+- **The allowed set and the whitelist were disjoint.** The plan's clause 1
+  demanded `temp_directory_path()`, which on macOS is `$TMPDIR`
+  (`/var/folders/...`); `agent_path_allowed` whitelists `/tmp` and `/private/tmp`
+  and **not** `$TMPDIR` (`agent_dispatch.cpp:626-629`). Measured live: the first
+  A-case sited under `temp_directory_path()` was refused with **"Input path is
+  outside the agent whitelist."** before it could test anything. The gate's
+  allowed set is `$TMPDIR ∪ {/tmp, /private/tmp}`, and the A-cases are sited
+  under `/tmp` deliberately.
+- **Clause order decides whether a clause exists.** With the temp clause first,
+  every repository path trips it and the repository clause is dead code -- so the
+  specified message that *names the repository root* is unreachable. Checked
+  repository-first, both are live. The same trap fired one level down and was
+  caught by running the self-test: with the general repository clause before the
+  narrower fixture clause, row (b)'s message named the repository root and never
+  the tracked fixtures. The order is narrowest-first.
+
+The root is located by walking up for `assets/fixtures/player_idle.marrow`, **not**
+by `.git`: an isolated verification tree extracted with `git archive` has no
+`.git`, and a gate that cannot find its root would pass on the input it exists to
+catch. Three self-test rows run before any committing case; row (b) is the one
+that matters. The predicate is what the rows assert; the aborting wrapper is one
+unbranched call to it, and that is recorded rather than claimed as covered.
+
+### The seam, and the tension it buys
+
+`RenameCallback` (`atomic_file_write.cpp:212`) was evaluated and rejected. It
+reaches **0 of 15** steps today -- `write_file_atomically` has three production
+call sites and the importer writes staging through raw `std::ofstream` -- and at
+most 5 after this story. It is keyed on `(source, destination)`, which cannot
+distinguish two steps writing into one directory, and it fires *during* a write
+rather than *after* a completed step, which is what AC3 names.
+
+The design's own `advance(step)` seam reaches **15/15 by construction**, and the
+argument belongs beside it rather than in its favour: **the seam's reach and the
+byte-fidelity guarantee are in direct tension.** Rollback returns the original
+bytes because the original was *moved*, never read or re-encoded; every step
+added to the seam's coverage is a step whose rollback stops being a rename. The
+two `Validate*` steps and `CleanJournal` are where that costs nothing; the four
+`Place*` arms are the ones the byte map has to police.
+
+**A second, independent rollback seam was added** (`set_psd_commit_rollback_failpoint_for_testing`,
+plus a `steps_rolled_back` ledger), because `advance` runs only in the commit
+body and can never fire while the rollback -- the half AC3 is about -- is
+running. It does **not** close §9.2's corner: a failure *inside*
+`adopt_runtime_sources` during the re-adopt needs a seam inside `EditorSession`.
+**The seam exists and it stops at the session boundary.**
+
+### The byte map is a recursive listing, not an enumerated set
+
+An enumerated five-item map cannot see a file the commit newly created beside the
+ones it knew about -- an orphaned texture under an unpredicted name, a surviving
+`.bak`, a `*.tmp.*` from an interrupted atomic write. `bundle_bytes` is a
+recursive listing of the project directory **and** the resolved layers directory,
+so "paths only in after" catches all three for free, and only because nothing
+decides in advance what to look at.
+
+### Inversions -- actual outcomes, not predictions
+
+Sixteen mutations, each rebuilt with its dependent objects deleted by name and
+each restored by a `cmp` naming **absolute** paths. Attribution is by **run
+order**. The predicted case is the design's; the text is what actually printed.
+
+| # | Mutation | Predicted | Actual first failure |
+|---|---|---|---|
+| **I1** | `advance()` consults the failpoint but does not append to the ledger | R0 | **R0** -- `step ledger mismatch` / `missing: ValidateRequest …` |
+| **I2** | `advance()` appends **before** the step body runs | R2(b) | **R2(b)** -- `ValidateStagedBundle must not appear in steps_executed when it failed` |
+| **I3** | rollback re-writes the **staged** bytes instead of renaming the backup back | R3/PlaceSkeleton | **R3/BackupLayers** -- `only in after: …/bundle_layers.marrow-journal-24838-5.bak/shadow.png (78 bytes)`. Earlier in run order than predicted: `BackupLayers` is the FIRST arm at which a backup exists to restore, and the design attributed it to the first arm at which a *placement* exists |
+| **I4** | rollback removes the placed file but never renames the backup back | R3/PlaceAtlas | **R3/BackupLayers** -- same arm, same reason |
+| **I5** | `PlaceTexture` is skipped (atlas placed, texture not) | R1 | **R1** -- `the committed texture ('…/bundle.png') must equal the staged bytes; sizes 0 and 117` |
+| **I6** | revert §2.2: stage under the hardcoded `staged` stem | R1b | **Q13** -- `staged_skeleton_path must be named 'player_idle.mskl'; got '…/staged.mskl'`. The image clause is NOT the detector at planner level, and the reason is worth keeping: the packer derives BOTH the staged atlas's file name and its `image` member from `atlas_output_path`, so inside the planner they cannot disagree. Only at COMMIT level, where the atlas file is *renamed* on placement, is `image` an independent fact -- which is what R1b and R1c assert |
+| **I7** | `ValidateStagedBundle` builds against the session's **current** document | R2(b) | **not run.** Superseded: `ValidateStagedBundle` re-reads the staged document from disk and R2(b)'s refusal (`$.ik[0].bones[0]: ik constraint references unknown bone 'torso'`) is a property of the staged bones, so the mutation is the same edit as I2's family. Recorded rather than fabricated |
+| **I8** | omit the `AdoptRuntimeSources` step entirely | R0 | **R0** -- `missing: AdoptRuntimeSources` |
+| **I9** | write provenance layers in reverse plan order | R4 | **R4(provenance)** -- `index 4: expected 'torso\|body slot=body …', got 'shadow slot=shadow …'` |
+| **I10** | drop `bone_name` when copying a planned layer into provenance | R4 | **R4(provenance)** -- `index 4: … got 'torso\|body slot=body attachment=body bone= image=body.png'`. The ordered-identity clause passes; only the full tuple sees it |
+| **I11** | ignore `preserve`: never prune | R5 | **R5(drop)** -- `slot 'shadow' must be removed by a preserve=false Missing layer; the committed slots are: body arm_l shadow` |
+| **I12** | a failure after `CleanJournal` rolls the commit back | R3/CleanJournal | **R3/CleanJournal** -- `a failure after the last step must still report success; the commit reported ok=0` |
+| **I13** | rollback does not delete the backups | R3/BackupTexture | **not run, and it is a no-op by construction.** A rollback consumes each backup by renaming it back; there is no separate deletion to remove. Kept out of the register rather than recorded as "did not bite" |
+| **I14** | the digest comparison always reports equal | A6 | **A6(changed)** -- `a PSD changed since review must be refused with psd_changed_since_review; got ok=1 … 'Committed PSD reimport for review #1.'` |
+| **I15** | `apply_agent_review` ignores `request.allowed` | A6 | **A6(rejected)** -- `approving a whitelist-rejected request must refuse; got ok=0 code='psd_changed_since_review'` |
+| **I16** | the dry run leaves its staging root behind | A1 | **A1** -- `the dry run left '/tmp/mar189_agent/a1_staging/plan-1' behind` |
+| **I17** | the staging root is not whitelist-checked | A3 | **A3** -- `expected forbidden_path …; got ok=0 code='psd_plan_failed' message='… staging root could not be created'`. **The mutation still fails the operation** -- `/usr/local` is unwritable -- so a `!result` assertion would have passed here and recorded a false "did not bite". Only asserting the CODE sees it |
+
+**I17 is the clearest instance in this story of why `!result` is not an
+assertion.** Removing the whitelist check does not make the operation succeed; it
+makes it fail *later and for a different reason*. A gate written as "the dry run
+must be refused" would be green on the mutated code.
+
+**I11 was run twice, and the first run is the finding.** The planted `shadow`
+slot that makes the pruning path reachable was authored as `{name, bone}`, and
+the un-pruned document then failed validation with
+`$.slots[2].attachment: missing required member` -- so the case reddened for the
+wrong reason and never reached the slot list under test. With a valid planted
+slot the mutation is caught by the clause that is supposed to catch it. *A test
+fixture that is invalid in a way the code under test happens to notice is a gate
+measuring the validator, not the feature.*
+
+### Deliberately uninverted, by name
+
+- **The failpoint seams themselves.** Both are test-only; neutering either makes
+  R3 vacuous rather than red, which is why R0's ledger identity -- which uses no
+  seam -- exists.
+- **The `Approve` button** (`shell_agent_panel.cpp`). Unobservable; see below.
+- **`rollback_error` on the post-adoption unrecoverable corner.** Reaching it
+  needs a second failure injected *inside* `adopt_runtime_sources` during the
+  rollback of the first. The rollback seam this story added gets one step closer
+  and still stops at the session boundary.
+- **The journal manifest's contents.** R7 asserts it exists in flight and is gone
+  after; nothing replays it, so a mutation of its *fields* changes nothing
+  observable -- a provable no-op of MAR-188's I7 shape.
+
+### Witnesses, not gates
+
+**AC3 is satisfied in form by 15 arms and in evidence by 12.** R3's
+`ValidateRequest`, `PruneUnpreserved` and `ValidateStagedBundle` arms touch
+nothing in the target bundle: they stay green with the rollback entirely broken,
+because there is nothing to roll back. They are real coverage of the *ledger* and
+of the refusal path, and they are not evidence about restoration. Named here
+rather than counted.
+
+**R2(a)** is a witness in the other sense: a corrupt PSD never produces a plan,
+which is MAR-188's behaviour, green before this story, and no MAR-189 inversion
+reddens it. **Q12** likewise asserts MAR-188's defaults are unchanged.
+
+### Document errors found (17)
+
+| # | Where | Finding |
+|---|---|---|
+| E1 | both MAR-189 documents | Authored against `cf6a199` / `71465db`, **34 commits** behind `b127048`. Every baseline number re-measured |
+| E2 | design §0.3 F1, §3.1 (twice), §4's table, §7's I12 | *"fourteen steps"*. The enum, `kAllCommitSteps` and §2.7 all say **fifteen** |
+| E3 | plan §0.10 clause 1 | Demands `TMPDIR`; `agent_path_allowed` whitelists `/tmp` and `/private/tmp` and **not** `TMPDIR`. **Disjoint** -- no A-case was writable as specified, and the first one written that way was refused with *"Input path is outside the agent whitelist."* |
+| E4 | plan §0.10 clause order | Ordered as written, clause 2 is dead code and §0.10's specified message is unachievable. Reordered narrowest-first; the same trap fired once more one level down and the self-test caught it |
+| E5 | plan §0.10's premise | Names a **layer directory** in the tracked bundle. There is none: `player_idle.{marrow,matl,mskl,mbin}` + `player_fixture.png` |
+| E6 | design §2.2, §6.5 | The staged atlas is named from the target **atlas**'s stem. `player_idle.matl` declares `"image": "player_fixture.png"`, so that orphans the PNG. The name comes from the **current texture's** stem |
+| E7 | design §6.3's R1b | All three specified clauses pass on the broken arm -- one is self-satisfying (`PlaceTexture` creates the file it looks for) and one is circular. The invariant that holds compares against the **pre-commit** `$.atlas.image` |
+| E8 | design §6.2 | A fixed five-item byte map cannot see a newly created sibling, a `.bak`, or a `*.tmp.*`. Replaced by a recursive listing |
+| E9 | design §6.3's R3 | *"`runtime_revision()` unmoved"* for every rolling-back arm. False for `AdoptRuntimeSources` and `UpdateProvenance`: adoption bumps it and so does the rollback's re-adopt. Those arms assert the stronger clause -- the **active skeleton source** is byte-identical |
+| E10 | design §6.3's R3 | The `CleanJournal` row expects a non-empty `journal_residue`. An injection *after* `CleanJournal` cannot produce residue, because `CleanJournal` already succeeded. Split: the sweep arm asserts the commit stands, and a new **R3b** makes the removals genuinely fail |
+| E11 | design §6.3's R7 | Predicts **three** `.bak` at `BackupSkeleton`. The seam fires **after** a step's body, so there are **four** |
+| E12 | design §2.6 | *"A Missing layer with `preserve == true` survives because the importer merges the candidate onto the existing skeleton."* Measured: `build_skeleton_document` assigns `(*root)["slots"]` from the candidate and calls `root->erase("skins")` (`psd_import.cpp:1038-1041`). The slot is gone either way. **`preserve` governs the stored provenance identity, not the art** -- and "a `preserve == false` layer whose slot is absent is an error" would have failed every such decision against the only importer that exists |
+| E13 | plan Task 1 steps 3-4 | Mutually unsatisfiable: the containment guard runs before the import (MAR-188 moved it), but `staged_texture_path` comes from `imported.texture_path`, which does not exist yet. Resolved by deriving it before and **asserting equality after** |
+| E14 | design §2.1 vs §3.2 | `PsdCommitStep` is placed in the test-only internal header while the public result exposes `std::vector<PsdCommitStep>`. The enum is the element type of a public field and lives in the public header |
+| E15 | MAR-188's write-up | `make_psd_provenance` **still has no production caller** after MAR-189: the committer takes the plan and never re-parses, so it never holds a `PsdImportResult` |
+| E16 | plan §0.9 | `rebuild189.sh` is obsolete -- `rebuild.sh` was fixed at `23b326e`. `invert.sh` still passes no object paths, which is now *correct but slow* (a full marrow rebuild per inversion); a scoped wrapper deleting only the dependent objects was used instead, keeping both of the harness's guards |
+| E17 | plan Task 4's R3 shape | *"a size mismatch between the table and `kAllCommitSteps` is itself an asserted failure"*. A size check passes on a table with the right count and the wrong members; the table is compared to the enum **by identity** |
+
+### Not independently covered
+
+- **The `Approve` button.** `CheckFrameBodies.cmake:36` lists `draw_agent_window`
+  as app-only because the headless smoke never sets `show_agent_panel`. A5 proves
+  `apply_agent_review` commits; **nothing proves the button calls it.** The same
+  shape as MAR-181's `apply_pending_file_action` gap, and the same one-directional
+  mitigation. Task 7b (a frame-body-style script asserting the branch names
+  `apply_agent_review`) was offered and not taken.
+- **§9.2's irreversible window.** A failure inside `adopt_runtime_sources` during
+  the rollback's re-adopt. The rollback seam added here can fail a rollback
+  *step*; it cannot fail the session call inside one.
+- **EXDEV.** One volume on this machine, so §2.4's cross-filesystem placement
+  argument is reasoned and unmeasured.
+- **The skins loss.** `build_skeleton_document` calls `root->erase("skins")`, so a
+  committed reimport erases every skin and attachment definition and replaces
+  bones and slots wholesale. Validation **does** refuse -- measured as
+  `$.ik[0].bones[0]: ik constraint references unknown bone 'torso'` -- but that is
+  a consequence of the *bones* replacement. **The skins loss is not what refuses
+  and is not independently validated.** A property of the importer; MAR-189
+  changes no importer and the commit path refuses rather than shipping it.
+- **A5/A6 do not go through the C ABI.** `MarrowProject` is opaque outside
+  `marrow_c.cpp` and approval needs the session and the review queue, so A1-A6
+  drive `AgentCommandDispatcher` and `apply_agent_review` directly from
+  `psd_import_smoke`. `agent_dispatch_smoke` keeps the ABI-level dry-run and
+  review invocations and owns **A7**, which now snapshots the whole tracked bundle
+  rather than only the `.marrow`.
+- **M1-M3 are hand-run.** `test_client.py` is not in CTest and needs a live editor
+  with the agent socket listening. AC6's "MCP tests" is satisfied at that standard
+  and no higher.
+- **AC5's approval clause is read as editor-only.** MCP gets no approve tool,
+  following `agent.resume`'s *"only the editor can restore access"*. A stricter
+  reading needs a 67th operation and moves eleven guards and two Python assertions.
 
 ## MAR-188 Plan Provenance-Aware PSD Reimports Validation Results
 

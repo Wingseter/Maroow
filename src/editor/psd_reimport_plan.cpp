@@ -137,11 +137,33 @@ PsdReimportPlan plan_psd_reimport(
         return make_error_plan(options, "staging root could not be created");
     }
 
+    // MAR-189. These name FILES inside the staging root. A name carrying a
+    // separator, a parent reference or a root would silently relocate the staged
+    // bundle, and the containment check below would then be reporting an escape
+    // that had already been decided by the caller's string.
+    for (const auto& named : {
+             std::pair<const char*, const std::string*>{
+                 "staged skeleton file name", &options.staged_skeleton_filename},
+             std::pair<const char*, const std::string*>{
+                 "staged atlas file name", &options.staged_atlas_filename},
+         }) {
+        if (named.second->empty()) {
+            return make_error_plan(options, std::string(named.first) + " must not be empty");
+        }
+        const std::filesystem::path candidate(*named.second);
+        if (candidate.has_parent_path() || candidate.has_root_name() ||
+            candidate.filename() != candidate) {
+            return make_error_plan(
+                options,
+                std::string(named.first) + " must be a bare file name (" + *named.second + ")");
+        }
+    }
+
     PsdReimportPlan plan;
     plan.source_path = options.psd_path;
     plan.staging_root = options.staging_root;
-    plan.staged_skeleton_path = options.staging_root / "staged.mskl";
-    plan.staged_atlas_path = options.staging_root / "staged.matl";
+    plan.staged_skeleton_path = options.staging_root / options.staged_skeleton_filename;
+    plan.staged_atlas_path = options.staging_root / options.staged_atlas_filename;
     plan.staged_layers_directory = options.staging_root / "staged_layers";
 
     // Every staged path is under the caller's root, checked BEFORE the importer
@@ -150,8 +172,19 @@ PsdReimportPlan plan_psd_reimport(
     // had already happened -- `write_imported_layers` had already `remove_all`ed
     // and rewritten the destination by the time it fired. A guard on "nothing
     // outside the staging root is written" has to run before the writing.
+    //
+    // MAR-189 adds the texture, and it has to be derived HERE rather than copied
+    // out of the import result: `staged_texture_path` is one of the paths the
+    // guard must cover, and the import result does not exist until after the
+    // writing the guard exists to precede. The derivation is the packer's own
+    // rule (the atlas path with `.png`), and it is asserted against
+    // `PsdImportResult::texture_path` once the import has run, so the duplicate
+    // cannot drift unnoticed.
+    std::filesystem::path expected_texture_path = plan.staged_atlas_path;
+    expected_texture_path.replace_extension(".png");
     if (!is_within(plan.staging_root, plan.staged_skeleton_path) ||
         !is_within(plan.staging_root, plan.staged_atlas_path) ||
+        !is_within(plan.staging_root, expected_texture_path) ||
         !is_within(plan.staging_root, plan.staged_layers_directory)) {
         return make_error_plan(options, "staged outputs escaped the staging root");
     }
@@ -161,7 +194,10 @@ PsdReimportPlan plan_psd_reimport(
     import_options.skeleton_output_path = plan.staged_skeleton_path;
     import_options.atlas_output_path = plan.staged_atlas_path;
     import_options.extracted_layers_directory = plan.staged_layers_directory;
-    import_options.atlas_name = "staged";
+    // The stem of the staged atlas name, not the literal "staged": the packer
+    // writes this into the atlas document's `name` member, and a committed bundle
+    // that announces itself as `staged` is a wrong document that happens to load.
+    import_options.atlas_name = plan.staged_atlas_path.stem().string();
     // Set EXPLICITLY. Left unset, `effective_existing_skeleton_path` falls back to
     // the staging skeleton -- which does not exist -- and the staged merge would
     // then differ from what a real reimport produces, silently changing every
@@ -171,6 +207,20 @@ PsdReimportPlan plan_psd_reimport(
     const PsdImportResult imported = import_psd_to_runtime_bundle(import_options);
     if (!imported) {
         return make_error_plan(options, imported.error->message);
+    }
+    // Copied out of the result, never recomputed -- the packer's rule stays the
+    // only rule. The comparison against the pre-import derivation is what makes
+    // that true rather than merely intended: if the packer ever stops deriving
+    // the texture from the atlas path, the guard above was checking a path
+    // nothing writes, and this says so instead of staying silent.
+    plan.staged_texture_path = imported.texture_path;
+    if (plan.staged_texture_path.lexically_normal() !=
+        expected_texture_path.lexically_normal()) {
+        return make_error_plan(
+            options,
+            "staged texture path '" + plan.staged_texture_path.generic_string() +
+                "' does not match the guarded path '" +
+                expected_texture_path.generic_string() + "'");
     }
 
     // Candidate identities, refused rather than paired when they collide. Given

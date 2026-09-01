@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/psd_reimport_commit.hpp"
 #include "marrow/editor/session.hpp"
 #include "agent_dispatch_internal.hpp"
 #include "mesh_weight_model.hpp"
@@ -658,6 +659,8 @@ json::Value review_to_json(const AgentReviewRequest& request) {
     review.emplace("binary", bool_value(request.binary_output));
     review.emplace("allowed", bool_value(request.allowed));
     review.emplace("message", string_value(request.message));
+    review.emplace("input_path", string_value(request.input_path.string()));
+    review.emplace("plan_digest", string_value(request.plan_digest));
     return object_value(std::move(review));
 }
 
@@ -670,8 +673,12 @@ AgentDispatchResult enqueue_review(
     std::filesystem::path target_path,
     bool binary_output,
     std::vector<std::filesystem::path> target_paths,
-    std::string args_summary) {
+    std::string args_summary,
+    std::filesystem::path input_path,
+    std::string plan_digest) {
     AgentReviewRequest request;
+    request.input_path = std::move(input_path);
+    request.plan_digest = std::move(plan_digest);
     request.id = context.control.next_review_id++;
     request.kind = kind;
     request.op = std::string(op);
@@ -1189,6 +1196,92 @@ bool validate_agent_operation_registry(std::string* error_out) {
         error_out->clear();
     }
     return true;
+}
+
+AgentDispatchResult apply_agent_review(
+    EditorSession& session,
+    AgentControlState& control,
+    std::uint64_t review_id) {
+    const auto request = std::find_if(
+        control.review_queue.begin(),
+        control.review_queue.end(),
+        [review_id](const AgentReviewRequest& entry) { return entry.id == review_id; });
+    if (request == control.review_queue.end()) {
+        return agent_detail::make_error(
+            "No queued agent review with id " + std::to_string(review_id) + ".",
+            "agent.review.apply",
+            nullptr,
+            "unknown_review");
+    }
+    if (request->kind != AgentReviewKind::ImportOrPack ||
+        request->op != "import.psd_layers") {
+        return agent_detail::make_error(
+            "Agent review #" + std::to_string(review_id) +
+                " is not an executable PSD reimport.",
+            "agent.review.apply",
+            nullptr,
+            "unsupported_review");
+    }
+    // The whitelist verdict recorded at ENQUEUE time. Re-deriving it here would
+    // ask a different question -- "is it allowed now" -- and would silently
+    // approve a request that was rejected when it was made.
+    if (!request->allowed) {
+        return agent_detail::make_error(
+            "Agent review #" + std::to_string(review_id) +
+                " was rejected by the path whitelist.",
+            "agent.review.apply",
+            nullptr,
+            "forbidden_path");
+    }
+    if (!session.has_project() || session.project() == nullptr) {
+        return agent_detail::make_error(
+            "No editor project is open.", "agent.review.apply", nullptr, "no_project");
+    }
+
+    const std::filesystem::path staging_root =
+        std::filesystem::temp_directory_path() / "marrow_agent_psd_apply";
+    PsdReimportPlan plan;
+    const std::string planning_error = agent_detail::plan_project_reimport(
+        session, request->input_path, staging_root, &plan);
+    if (!planning_error.empty()) {
+        return agent_detail::make_error(
+            planning_error, "agent.review.apply", nullptr, "psd_plan_failed");
+    }
+    const std::string digest = agent_detail::psd_plan_digest(plan);
+    if (digest != request->plan_digest) {
+        std::error_code cleanup;
+        std::filesystem::remove_all(plan.staging_root, cleanup);
+        return agent_detail::make_error(
+            "The PSD changed since review #" + std::to_string(review_id) +
+                " was queued; re-run the dry run and approve the new plan.",
+            "agent.review.apply",
+            nullptr,
+            "psd_changed_since_review");
+    }
+
+    PsdReimportCommitOptions options;
+    options.project_path = session.project()->source_path;
+    const PsdReimportCommitResult committed = commit_psd_reimport(session, plan, options);
+    std::error_code cleanup;
+    std::filesystem::remove_all(plan.staging_root, cleanup);
+    if (!committed) {
+        // The request stays queued: nothing was decided, the bundle is as it was,
+        // and removing the request would lose the only record of what was asked.
+        return agent_detail::make_error(
+            "The PSD reimport was not committed: " + committed.error,
+            "agent.review.apply",
+            nullptr,
+            "commit_failed");
+    }
+
+    control.review_queue.erase(request);
+    AgentDispatchResult result = agent_detail::make_success(
+        "Committed PSD reimport for review #" + std::to_string(review_id) + ".",
+        "agent.review.apply",
+        nullptr,
+        agent_detail::psd_plan_value(plan, digest));
+    result.mutating = true;
+    return result;
 }
 
 } // namespace marrow::editor

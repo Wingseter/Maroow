@@ -1340,11 +1340,13 @@ int main(int argc, char** argv) {
             "registered operation is missing its handler");
     }
 
-    const std::array<std::filesystem::path, 5> reviewed_temp_targets{{
+    // MAR-189 removed the two `import.psd_layers` entries: that op no longer takes
+    // a caller-supplied output, so there is no deterministic temp target for it to
+    // leave behind. Its immutability clause is A1's byte map over the project
+    // bundle instead, which is a stronger statement than "this one path is absent".
+    const std::array<std::filesystem::path, 3> reviewed_temp_targets{{
         "/tmp/agent_spine_import_sample.mskl",
         "/tmp/agent_spine_import_sample.matl",
-        "/tmp/agent_psd_import_sample.mskl",
-        "/tmp/agent_psd_import_sample.matl",
         "/tmp/agent_atlas_pack_sample.matl",
     }};
     for (const auto& target : reviewed_temp_targets) {
@@ -1354,6 +1356,29 @@ int main(int argc, char** argv) {
             !error,
             "review target setup",
             "could not clear deterministic target " + target.string());
+    }
+
+    // MAR-189 A7. The whole TRACKED bundle, not just the `.marrow`. This story
+    // gives `import.psd_layers` project-derived write targets, and the one way it
+    // damages the repository is by proving it can replace a bundle while pointed at
+    // the tracked one. `assets/fixtures/player_idle.matl` declares
+    // `"image": "player_fixture.png"`, so the texture is named from the atlas
+    // document rather than from the atlas's own stem.
+    std::vector<FileSnapshot> tracked_bundle_before;
+    for (const char* tracked : {
+             "assets/fixtures/player_idle.marrow",
+             "assets/fixtures/player_idle.mskl",
+             "assets/fixtures/player_idle.matl",
+             "assets/fixtures/player_idle.mbin",
+             "assets/fixtures/player_fixture.png",
+             "assets/fixtures/psd_import_sample.psd",
+         }) {
+        FileSnapshot snapshot = snapshot_file(tracked);
+        harness.expect(
+            snapshot.exists && snapshot.bytes.has_value(),
+            "MAR-189 A7 setup",
+            std::string(tracked) + " must exist before the run");
+        tracked_bundle_before.push_back(std::move(snapshot));
     }
 
     const FileSnapshot project_file_before = snapshot_file(project_path);
@@ -1617,12 +1642,15 @@ int main(int argc, char** argv) {
         "{\"op\":\"import.spine_atlas\",\"args\":{"
         "\"input\":\"assets/fixtures/spine_import_sample.atlas\","
         "\"output\":\"/tmp/agent_spine_import_sample.matl\",\"dry_run\":true}}");
+    // MAR-189: `import.psd_layers` replaces the PROJECT's own bundle, so the
+    // targets are project-derived and a `/tmp` output is now a `not_project_bundle`
+    // refusal (A2). Only the staging root is caller-supplied, and it is
+    // whitelist-checked like any other write target.
     harness.invoke(
         "import.psd_layers dry-run",
         "{\"op\":\"import.psd_layers\",\"args\":{"
         "\"input\":\"assets/fixtures/psd_import_sample.psd\","
-        "\"output\":\"/tmp/agent_psd_import_sample.mskl\","
-        "\"atlas_output\":\"/tmp/agent_psd_import_sample.matl\",\"dry_run\":true}}");
+        "\"staging_root\":\"/tmp/agent_psd_dry_run\",\"dry_run\":true}}");
     harness.invoke(
         "atlas.pack dry-run",
         "{\"op\":\"atlas.pack\",\"args\":{"
@@ -4481,8 +4509,7 @@ int main(int argc, char** argv) {
             "import.psd_layers review",
             "{\"op\":\"import.psd_layers\",\"args\":{"
             "\"input\":\"assets/fixtures/psd_import_sample.psd\","
-            "\"output\":\"/tmp/agent_psd_import_sample.mskl\","
-            "\"atlas_output\":\"/tmp/agent_psd_import_sample.matl\",\"dry_run\":false}}"),
+            "\"staging_root\":\"/tmp/agent_psd_review\",\"dry_run\":false}}"),
         "import.psd_layers",
         "import_or_pack");
     record_review(
@@ -4523,6 +4550,9 @@ int main(int argc, char** argv) {
             target.string() + " was written before approval");
     }
     expect_file_unchanged(harness, project_file_before);
+    for (const FileSnapshot& tracked : tracked_bundle_before) {
+        expect_file_unchanged(harness, tracked);
+    }
     for (const FileSnapshot& snapshot : export_files_before) {
         expect_file_unchanged(harness, snapshot);
     }

@@ -65,6 +65,14 @@ struct PsdReimportPlan {
     std::filesystem::path staging_root;
     std::filesystem::path staged_skeleton_path;
     std::filesystem::path staged_atlas_path;
+    /// @brief MAR-189. Copied from `PsdImportResult::texture_path`, never recomputed.
+    ///
+    /// The packer derives the texture as the atlas path with `.png`
+    /// (`atlas_packer.cpp:1024-1025`) and writes that file's `filename()` into the
+    /// atlas document's `image` member (`:880`). Recomputing the texture path here
+    /// would create a second place that knows that rule, and the two could drift
+    /// silently -- the committed atlas would name a PNG the commit never placed.
+    std::filesystem::path staged_texture_path;
     std::filesystem::path staged_layers_directory;
     /// @brief Lexicographic by `identity`, ascending, over the union.
     std::vector<PsdPlannedLayer> layers;
@@ -93,6 +101,26 @@ struct PsdReimportPlan {
 struct PsdReimportPlanOptions {
     std::filesystem::path psd_path;
     std::filesystem::path staging_root;
+    /**
+     * @brief MAR-189. Bare file names the staged bundle is written under.
+     *
+     * Defaulted, so every MAR-188 caller compiles and behaves exactly as before.
+     *
+     * A committer replaces a project's real bundle by copying these files onto it,
+     * and a byte-for-byte copy is correct only when the bytes mean the same thing
+     * in both places. The atlas document's `image` member is a bare PNG name
+     * resolved against the atlas file's OWN directory, and the packer writes it
+     * from the staged atlas path's stem. Staged as `staged.matl`, the document
+     * says `"image": "staged.png"`; copied onto a project atlas, it is
+     * byte-perfect and names a file that is not there.
+     *
+     * So the committer stages under the names the TARGET already uses, and the
+     * `image` member is correct on the way out rather than rewritten on the way
+     * in. A directory separator or an empty name is refused: these name files
+     * inside `staging_root` and nothing else.
+     */
+    std::string staged_skeleton_filename{"staged.mskl"};
+    std::string staged_atlas_filename{"staged.matl"};
 };
 
 /**

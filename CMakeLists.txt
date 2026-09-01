@@ -506,6 +506,7 @@ add_library(marrow_editor STATIC
     src/editor/psd_import.cpp
     src/editor/project.cpp
     src/editor/psd_reimport_plan.cpp
+    src/editor/psd_reimport_commit.cpp
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
     src/editor/mesh_weight_model.cpp
@@ -1357,6 +1358,21 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.agent_dispatch_smoke PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;agent;smoke;noninteractive"
+    )
+
+    # MAR-189. Built since MAR-176 and never run by CTest, so MAR-188's whole
+    # planning suite and this story's commit suite were one manual invocation away
+    # from silence. The working directory is the source tree because the cases
+    # resolve `assets/fixtures/` from it -- and because the safety gate locates the
+    # repository root by walking up for that same fixture, so it can refuse to
+    # write into it.
+    add_test(
+        NAME marrow.psd_import_smoke
+        COMMAND marrow_psd_import_smoke
+    )
+    set_tests_properties(marrow.psd_import_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;psd;smoke;noninteractive"
     )
 
     add_test(

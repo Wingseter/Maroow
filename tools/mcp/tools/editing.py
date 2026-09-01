@@ -1300,7 +1300,14 @@ def get_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="import.psd_layers",
-            description="Validate or queue a reviewed PSD layer import.",
+            description=(
+                "Plan or queue a reviewed PSD reimport of the project's own bundle. "
+                "Returns scene_delta.plan with the ordered layer rows and the "
+                "added/updated/missing counts. 'output' and 'atlas_output' are "
+                "optional and must name the project's own skeleton and atlas; any "
+                "other path is refused with not_project_bundle. Approval is "
+                "editor-only, following agent.resume's precedent."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1308,6 +1315,7 @@ def get_tools() -> list[types.Tool]:
                     "output": {"type": "string"},
                     "skeleton_output": {"type": "string"},
                     "atlas_output": {"type": "string"},
+                    "staging_root": {"type": "string"},
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["input"]

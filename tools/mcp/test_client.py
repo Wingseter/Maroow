@@ -84,6 +84,21 @@ async def test(parameter_only=False):
     assert ik_properties["merge"] == {"type": "boolean"}
     assert mcp_by_name["edit_ik_constraint"].inputSchema["required"] == ["name"]
 
+    # MAR-189 M1. The registry count does not move -- `import.psd_layers` already
+    # existed -- so neither of the 66 assertions above can see this story. What
+    # moved is one PROPERTY on one existing tool, asserted against the schema
+    # object for the same reason MAR-179's four are: a wire-level call carrying
+    # `staging_root` succeeds whether or not the schema declares it, so a sequence
+    # test alone would pass with editing.py untouched.
+    psd_properties = mcp_by_name["import.psd_layers"].inputSchema["properties"]
+    assert "staging_root" in psd_properties, (
+        "import.psd_layers' MCP schema is missing 'staging_root'. The C++ handler "
+        "reads it and whitelist-checks it, so an MCP client that never sees the "
+        "property cannot choose where the plan is staged."
+    )
+    assert psd_properties["staging_root"] == {"type": "string"}
+    assert mcp_by_name["import.psd_layers"].inputSchema["required"] == ["input"]
+
     registry_by_name = {row["name"]: row for row in registry_rows}
     assert registry_by_name["parameters.list"] == {
         "name": "parameters.list",
@@ -1952,6 +1967,49 @@ async def test(parameter_only=False):
         )
     )
     require_ok("agent.resume", await client.send_command("agent.resume"))
+
+    # MAR-189 M2 -- a live dry run returns the PLAN, not a four-key preview.
+    psd_dry_run = require_ok(
+        "import.psd_layers dry run",
+        await client.send_command(
+            "import.psd_layers",
+            {
+                "input": "assets/fixtures/psd_import_sample.psd",
+                "staging_root": "/tmp/marrow_mcp_psd_plan",
+                "dry_run": True,
+            },
+        ),
+    )
+    psd_plan = psd_dry_run["scene_delta"]["plan"]
+    for count in ("added", "updated", "missing"):
+        assert count in psd_plan, (
+            f"import.psd_layers' dry run must report '{count}'; got {sorted(psd_plan)}"
+        )
+    assert isinstance(psd_plan["layers"], list) and psd_plan["layers"], (
+        "import.psd_layers' dry run must return the ordered layer rows"
+    )
+    assert psd_plan["digest"], "the dry run must return the plan digest"
+
+    # MAR-189 M3 -- a non-dry run queues a review carrying that digest. Approval
+    # is deliberately NOT reachable from MCP: it stays editor-only, following
+    # agent.resume's "only the editor can restore access" precedent.
+    psd_review = require_ok(
+        "import.psd_layers review",
+        await client.send_command(
+            "import.psd_layers",
+            {
+                "input": "assets/fixtures/psd_import_sample.psd",
+                "staging_root": "/tmp/marrow_mcp_psd_plan",
+                "dry_run": False,
+            },
+        ),
+    )
+    assert psd_review["review"]["required"] is True, (
+        "a non-dry import.psd_layers must require review"
+    )
+    assert psd_review["review"]["plan_digest"], (
+        "the queued review must carry the digest of the plan the reviewer saw"
+    )
 
     require_ok("undo", await client.send_command("undo"))
     print("mcp test_client: PASSED")

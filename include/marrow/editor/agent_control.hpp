@@ -24,6 +24,17 @@ struct AgentReviewRequest {
     bool binary_output{false};
     bool allowed{false};
     std::string message;
+    /// @brief MAR-189. The reviewed input. Empty for save and export requests.
+    std::filesystem::path input_path;
+    /**
+     * @brief MAR-189. A digest of the PLAN the reviewer saw. Empty when not applicable.
+     *
+     * Approval re-plans into a fresh staging root and refuses when this differs.
+     * Holding a staging directory open across an unbounded human wait was rejected:
+     * it leaks on reject, on quit and on crash, and it makes the review queue own a
+     * filesystem lifetime it has no way to bound.
+     */
+    std::string plan_digest;
 };
 
 struct AgentActivityEntry {

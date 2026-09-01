@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -14,8 +16,14 @@
 #include <vector>
 
 #include "atlas_packer.hpp"
+#include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/psd_reimport_commit.hpp"
 #include "marrow/editor/psd_reimport_plan.hpp"
 #include "marrow/editor/psd_import.hpp"
+#include "marrow/editor/session.hpp"
+#include "marrow/runtime/atlas.hpp"
+#include "marrow/runtime/skeleton.hpp"
+#include "psd_reimport_commit_internal.hpp"
 #include "marrow/renderer/module.hpp"
 #include "marrow/runtime/json.hpp"
 
@@ -1579,6 +1587,2358 @@ bool validate_mar188_reimport_planning(const std::filesystem::path& scratch) {
     return true;
 }
 
+namespace mar189 {
+
+/** @brief Reads one string member of a `.matl`'s `atlas` object, or `<absent>`. */
+std::string atlas_member(const std::filesystem::path& atlas_path, const char* key) {
+    const marrow::runtime::json::LoadResult loaded =
+        marrow::runtime::json::load_document(atlas_path);
+    if (!loaded) {
+        return "<unparsable: " + loaded.error->message + ">";
+    }
+    const marrow::runtime::json::Value* atlas =
+        marrow::runtime::json::find_member(loaded.document->root, "atlas");
+    if (atlas == nullptr || !atlas->is_object()) {
+        return "<no atlas object>";
+    }
+    const marrow::runtime::json::Value* member =
+        marrow::runtime::json::find_member(*atlas, key);
+    if (member == nullptr || !member->is_string()) {
+        return "<absent>";
+    }
+    return member->as_string();
+}
+
+}  // namespace mar189
+
+/**
+ * @brief Q12-Q14 -- the staged bundle is named after the bundle it will replace.
+ *
+ * Q13 is the gate. Q12 is a compatibility WITNESS: every clause in it is green
+ * before MAR-189 exists, because it asserts MAR-188's defaults are unchanged.
+ * Its one MAR-189-owned clause is the new `staged_texture_path` field, which
+ * does not compile before this story and therefore cannot witness anything
+ * either -- recorded rather than counted as coverage.
+ */
+bool validate_mar189_staged_naming(const std::filesystem::path& scratch) {
+    std::error_code directory_error;
+    std::filesystem::remove_all(scratch, directory_error);
+    directory_error.clear();
+    std::filesystem::create_directories(scratch, directory_error);
+    if (directory_error) {
+        std::cerr << "Q12-Q14: scratch directory could not be created: "
+                  << directory_error.message() << '\n';
+        return false;
+    }
+
+    const std::filesystem::path psd = scratch / "candidate.psd";
+    if (!mar188::write_synthetic_psd(psd, 64, 64, mar188::fixture_tree())) {
+        std::cerr << "Q12-Q14: the synthetic PSD could not be written.\n";
+        return false;
+    }
+    const std::filesystem::path project_path = scratch / "project" / "named.marrow";
+    const marrow::editor::ProjectData project =
+        mar188::project_with_provenance(project_path, std::nullopt);
+
+    // Q12 -- defaults unchanged. Witness.
+    {
+        marrow::editor::PsdReimportPlanOptions options;
+        options.psd_path = psd;
+        options.staging_root = scratch / "q12";
+        const marrow::editor::PsdReimportPlan plan =
+            marrow::editor::plan_psd_reimport(project, options);
+        if (!plan) {
+            std::cerr << "Q12: the default plan must succeed; got "
+                      << plan.error->format() << '\n';
+            return false;
+        }
+        const std::vector<std::pair<const char*, std::string>> expected = {
+            {"staged_skeleton_path", "staged.mskl"},
+            {"staged_atlas_path", "staged.matl"},
+            {"staged_texture_path", "staged.png"},
+            {"staged_layers_directory", "staged_layers"},
+        };
+        const std::vector<std::filesystem::path> actual = {
+            plan.staged_skeleton_path,
+            plan.staged_atlas_path,
+            plan.staged_texture_path,
+            plan.staged_layers_directory,
+        };
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            if (actual[index].filename().generic_string() != expected[index].second) {
+                std::cerr << "Q12: " << expected[index].first << " must default to '"
+                          << expected[index].second << "'; got '"
+                          << actual[index].generic_string() << "'.\n";
+                return false;
+            }
+        }
+        if (mar189::atlas_member(plan.staged_atlas_path, "image") != "staged.png") {
+            std::cerr << "Q12: the default staged atlas must still say "
+                         "\"image\": \"staged.png\"; got '"
+                      << mar189::atlas_member(plan.staged_atlas_path, "image") << "'.\n";
+            return false;
+        }
+    }
+
+    // Q13 -- THE GATE. The staged bundle carries the target's own names, and the
+    // atlas document's own `image` member is what says so. I6 reverts the naming
+    // and this clause is the only one in the tree that reddens.
+    {
+        marrow::editor::PsdReimportPlanOptions options;
+        options.psd_path = psd;
+        options.staging_root = scratch / "q13";
+        options.staged_skeleton_filename = "player_idle.mskl";
+        options.staged_atlas_filename = "player_fixture.matl";
+        const marrow::editor::PsdReimportPlan plan =
+            marrow::editor::plan_psd_reimport(project, options);
+        if (!plan) {
+            std::cerr << "Q13: a plan under target names must succeed; got "
+                      << plan.error->format() << '\n';
+            return false;
+        }
+        const std::vector<std::pair<const char*, std::string>> expected = {
+            {"staged_skeleton_path", "player_idle.mskl"},
+            {"staged_atlas_path", "player_fixture.matl"},
+            {"staged_texture_path", "player_fixture.png"},
+        };
+        const std::vector<std::filesystem::path> actual = {
+            plan.staged_skeleton_path,
+            plan.staged_atlas_path,
+            plan.staged_texture_path,
+        };
+        const std::string root = options.staging_root.lexically_normal().generic_string();
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            if (actual[index].filename().generic_string() != expected[index].second) {
+                std::cerr << "Q13: " << expected[index].first << " must be named '"
+                          << expected[index].second << "'; got '"
+                          << actual[index].generic_string() << "'.\n";
+                return false;
+            }
+            if (actual[index].lexically_normal().generic_string().rfind(root, 0) != 0U) {
+                std::cerr << "Q13: " << expected[index].first
+                          << " escaped the staging root (root " << root << ", got "
+                          << actual[index].generic_string() << ").\n";
+                return false;
+            }
+            if (!std::filesystem::exists(actual[index])) {
+                std::cerr << "Q13: " << expected[index].first << " ('"
+                          << actual[index].generic_string() << "') was not written.\n";
+                return false;
+            }
+        }
+        const std::string image = mar189::atlas_member(plan.staged_atlas_path, "image");
+        if (image != "player_fixture.png") {
+            std::cerr << "Q13: staged atlas references image '" << image
+                      << "'; expected 'player_fixture.png'. A byte copy of this file "
+                         "onto a project atlas would name a PNG that is not beside it.\n";
+            return false;
+        }
+        const std::string name = mar189::atlas_member(plan.staged_atlas_path, "name");
+        if (name != "player_fixture") {
+            std::cerr << "Q13: staged atlas is named '" << name
+                      << "'; expected 'player_fixture'.\n";
+            return false;
+        }
+    }
+
+    // Q14 -- a name that is not a bare file name is refused, by message.
+    {
+        const std::vector<std::pair<std::string, std::string>> rejected = {
+            {"../escape.matl", "staged atlas file name must be a bare file name (../escape.matl)"},
+            {"nested/atlas.matl", "staged atlas file name must be a bare file name (nested/atlas.matl)"},
+            {"", "staged atlas file name must not be empty"},
+        };
+        for (std::size_t index = 0; index < rejected.size(); ++index) {
+            marrow::editor::PsdReimportPlanOptions options;
+            options.psd_path = psd;
+            options.staging_root = scratch / ("q14_" + std::to_string(index));
+            options.staged_atlas_filename = rejected[index].first;
+            const marrow::editor::PsdReimportPlan plan =
+                marrow::editor::plan_psd_reimport(project, options);
+            if (plan) {
+                std::cerr << "Q14: atlas file name '" << rejected[index].first
+                          << "' must be refused; the plan succeeded.\n";
+                return false;
+            }
+            if (plan.error->message != rejected[index].second) {
+                std::cerr << "Q14: atlas file name '" << rejected[index].first
+                          << "' must be refused with '" << rejected[index].second
+                          << "'; got '" << plan.error->message << "'.\n";
+                return false;
+            }
+        }
+        marrow::editor::PsdReimportPlanOptions skeleton_options;
+        skeleton_options.psd_path = psd;
+        skeleton_options.staging_root = scratch / "q14_skeleton";
+        skeleton_options.staged_skeleton_filename = "nested/skeleton.mskl";
+        const marrow::editor::PsdReimportPlan skeleton_plan =
+            marrow::editor::plan_psd_reimport(project, skeleton_options);
+        const std::string expected_message =
+            "staged skeleton file name must be a bare file name (nested/skeleton.mskl)";
+        if (skeleton_plan || skeleton_plan.error->message != expected_message) {
+            std::cerr << "Q14: a nested skeleton file name must be refused with '"
+                      << expected_message << "'; got '"
+                      << (skeleton_plan ? std::string("<no error>")
+                                        : skeleton_plan.error->message)
+                      << "'.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-189 Q12-Q14: staged bundles default to MAR-188's names, stage "
+                 "under a caller-supplied target name with the atlas document's own "
+                 "\"image\" and \"name\" members following the stem, report the "
+                 "packer-derived texture path, and refuse any name that is not a bare "
+                 "file name.\n";
+    return true;
+}
+
+namespace mar189 {
+
+// ---------------------------------------------------------------------------
+// A11 -- the repository-safety gate.
+//
+// This story's subject is the atomic replacement of asset bundles, and
+// `agent_path_allowed` whitelists the PROJECT directory. The agent smoke runs
+// with `WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}` against
+// `assets/fixtures/player_idle.marrow`, whose `.mskl`, `.matl` and `.png` are
+// TRACKED files. A committing case pointed at that session overwrites the user's
+// repository, and the blast radius is not a red test.
+//
+// So this aborts. Not a warning, not a `return false`.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Locates the repository root by walking up for the tracked fixture.
+ *
+ * NOT by a compiled-in path, and not by `.git` either: an isolated verification
+ * tree extracted with `git archive` has no `.git`, and a gate that silently
+ * cannot find its root is a gate that passes on the input it exists to catch.
+ * The anchor is a tracked file whose presence defines the hazard.
+ */
+std::filesystem::path repository_root() {
+    std::error_code error;
+    std::filesystem::path directory = std::filesystem::current_path(error);
+    if (error) {
+        return {};
+    }
+    for (;;) {
+        if (std::filesystem::exists(directory / "assets" / "fixtures" / "player_idle.marrow",
+                                    error)) {
+            return directory;
+        }
+        const std::filesystem::path parent = directory.parent_path();
+        if (parent.empty() || parent == directory) {
+            break;
+        }
+        directory = parent;
+    }
+    // No fixture above the working directory. The working directory itself is
+    // still a real place that must not be written into.
+    return std::filesystem::current_path(error);
+}
+
+bool path_within(const std::filesystem::path& candidate, const std::filesystem::path& root) {
+    if (root.empty()) {
+        return false;
+    }
+    auto root_part = root.begin();
+    auto candidate_part = candidate.begin();
+    for (; root_part != root.end(); ++root_part, ++candidate_part) {
+        if (candidate_part == candidate.end() || *root_part != *candidate_part) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Empty when @p target may be written; otherwise the reason it may not.
+ *
+ * Clause ORDER is load-bearing and was wrong in the plan. With the temp-directory
+ * clause first, every repository path trips it before the repository clause is
+ * reached, so the repository clause is dead code and its message -- the one that
+ * names the repository root -- is unreachable. Checked repository-first, both
+ * clauses are live and both are demonstrated by the self-test below.
+ *
+ * The allowed set is TMPDIR plus `/tmp` and `/private/tmp`. `temp_directory_path()`
+ * on macOS is `$TMPDIR` (`/var/folders/...`), which `agent_path_allowed`
+ * (`agent_dispatch.cpp:626-629`) does NOT whitelist, while `/tmp` -- which it does
+ * -- is not `temp_directory_path()`. A gate written against either one alone is
+ * disjoint from the other and no case can satisfy both.
+ */
+std::string disposable_target_refusal(const std::filesystem::path& target) {
+    std::error_code error;
+    const std::filesystem::path resolved = std::filesystem::weakly_canonical(target, error);
+    const std::filesystem::path candidate = error ? target.lexically_normal() : resolved;
+
+    // Both repository clauses run BEFORE the disposable-root clause, and the
+    // NARROWER of the two runs first. Ordered the other way round each is dead
+    // code that the self-test cannot reach: the temp clause swallows every
+    // repository path, and the repository clause then swallows every fixture path,
+    // so the message naming the artefacts about to be destroyed is unreachable.
+    const std::filesystem::path repository =
+        std::filesystem::weakly_canonical(repository_root(), error);
+    if (!repository.empty() &&
+        path_within(candidate, repository / "assets" / "fixtures")) {
+        return "'" + candidate.generic_string() +
+            "' is inside the tracked fixture directory '" +
+            (repository / "assets" / "fixtures").generic_string() + "'.";
+    }
+    if (!repository.empty() && path_within(candidate, repository)) {
+        return "'" + candidate.generic_string() + "' is inside the repository root '" +
+            repository.generic_string() +
+            "'. Inside the repository is inside the repository, build directory or not.";
+    }
+
+    // Clause 1.
+    std::vector<std::filesystem::path> allowed;
+    const std::filesystem::path temporary =
+        std::filesystem::weakly_canonical(std::filesystem::temp_directory_path(error), error);
+    if (!temporary.empty()) {
+        allowed.push_back(temporary);
+    }
+    for (const char* literal : {"/tmp", "/private/tmp"}) {
+        const std::filesystem::path root =
+            std::filesystem::weakly_canonical(std::filesystem::path(literal), error);
+        if (!root.empty()) {
+            allowed.push_back(root);
+        }
+    }
+    for (const std::filesystem::path& root : allowed) {
+        if (path_within(candidate, root)) {
+            return {};
+        }
+    }
+    std::string roots;
+    for (const std::filesystem::path& root : allowed) {
+        roots += (roots.empty() ? "" : ", ") + root.generic_string();
+    }
+    return "'" + candidate.generic_string() +
+        "' is not under any disposable root (" + roots + ").";
+}
+
+/// @brief Aborts the process rather than let a case write outside a disposable root.
+void require_disposable_target(const std::filesystem::path& target, const char* case_name) {
+    const std::string refusal = disposable_target_refusal(target);
+    if (refusal.empty()) {
+        return;
+    }
+    std::cerr << "FATAL " << case_name << ": refusing to write outside a disposable "
+              << "directory. " << refusal << '\n';
+    std::abort();
+}
+
+/**
+ * @brief Proves the predicate refuses the inputs it exists to refuse.
+ *
+ * Runs BEFORE any committing case. A predicate that accepts row (b) is worse than
+ * no predicate: it is a gate that passes on the exact input it exists to catch.
+ * The abort wrapper itself is one unbranched call to this predicate, so what is
+ * demonstrated here is the whole of the decision.
+ */
+bool run_disposable_target_self_test() {
+    const std::filesystem::path repository = repository_root();
+    if (repository.empty()) {
+        std::cerr << "A11: the repository root could not be located.\n";
+        return false;
+    }
+    struct Row {
+        const char* label;
+        std::filesystem::path target;
+        bool accepted;
+        const char* must_contain;
+    };
+    const std::vector<Row> rows = {
+        {"a", std::filesystem::temp_directory_path() / "mar189" / "player_idle.mskl", true, ""},
+        {"b", repository / "assets" / "fixtures" / "player_idle.mskl", false,
+         "is inside the tracked fixture directory"},
+        {"c", repository / "build" / "x.mskl", false, "is inside the repository root"},
+    };
+    for (const Row& row : rows) {
+        const std::string refusal = disposable_target_refusal(row.target);
+        if (row.accepted) {
+            if (!refusal.empty()) {
+                std::cerr << "A11(" << row.label << "): '" << row.target.generic_string()
+                          << "' must be accepted; refused with: " << refusal << '\n';
+                return false;
+            }
+            require_disposable_target(row.target, "A11(a)");
+            continue;
+        }
+        if (refusal.empty()) {
+            std::cerr << "A11(" << row.label << "): '" << row.target.generic_string()
+                      << "' MUST be refused. A gate that passes on the input it exists "
+                         "to catch is worse than no gate.\n";
+            return false;
+        }
+        if (refusal.find(row.must_contain) == std::string::npos) {
+            std::cerr << "A11(" << row.label << "): the refusal must contain '"
+                      << row.must_contain << "'; got: " << refusal << '\n';
+            return false;
+        }
+    }
+    std::cout << "MAR-189 A11: the disposable-target predicate accepts a temp path, "
+                 "refuses the tracked fixture bundle by name and refuses a path under "
+                 "the repository's own build directory.\n";
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// The byte map (design 6.2).
+// ---------------------------------------------------------------------------
+
+using ByteMap = std::map<std::string, std::string>;
+
+void collect_bytes(const std::filesystem::path& root, ByteMap* map) {
+    std::error_code error;
+    if (!std::filesystem::exists(root, error)) {
+        return;
+    }
+    for (std::filesystem::recursive_directory_iterator iterator(root, error), end;
+         iterator != end;
+         iterator.increment(error)) {
+        if (error) {
+            return;
+        }
+        std::error_code entry_error;
+        if (!iterator->is_regular_file(entry_error)) {
+            continue;
+        }
+        map->emplace(
+            iterator->path().lexically_normal().generic_string(), mar188::read_all(iterator->path()));
+    }
+}
+
+/**
+ * @brief Every byte of the project directory and the layer directory, keyed by path.
+ *
+ * A RECURSIVE LISTING, deliberately not an enumerated five-item set. An enumerated
+ * set cannot see a file the commit newly created beside the ones it knew about --
+ * an orphaned texture under a name nobody predicted, a surviving `.bak`, a
+ * `*.tmp.*` left by an interrupted atomic write. "Paths only in after" catches all
+ * three for free, and only because nothing here decides in advance what to look at.
+ *
+ * Whole contents rather than a hash: the bundle is ~20KB, and holding the bytes is
+ * what lets a failure name the first differing offset instead of only saying
+ * "different".
+ */
+ByteMap bundle_bytes(const marrow::editor::ProjectData& project) {
+    ByteMap map;
+    collect_bytes(project.source_path.parent_path(), &map);
+    if (project.editor_metadata.import_sources.has_value() &&
+        project.editor_metadata.import_sources->psd.has_value()) {
+        collect_bytes(
+            project.resolve_path(project.editor_metadata.import_sources->psd->layers_directory),
+            &map);
+    }
+    return map;
+}
+
+bool expect_bundle_equal(const ByteMap& before, const ByteMap& after, std::string_view label) {
+    bool ok = true;
+    for (const auto& entry : before) {
+        const auto found = after.find(entry.first);
+        if (found == after.end()) {
+            std::cerr << label << ": only in before: " << entry.first << '\n';
+            ok = false;
+            continue;
+        }
+        if (found->second == entry.second) {
+            continue;
+        }
+        ok = false;
+        const std::size_t shared = std::min(entry.second.size(), found->second.size());
+        std::size_t offset = 0;
+        while (offset < shared && entry.second[offset] == found->second[offset]) {
+            ++offset;
+        }
+        std::cerr << label << ": " << entry.first << " differs at offset " << offset;
+        if (offset < shared) {
+            std::cerr << ": expected 0x" << std::hex << std::setw(2) << std::setfill('0')
+                      << static_cast<int>(static_cast<unsigned char>(entry.second[offset]))
+                      << ", got 0x" << std::setw(2)
+                      << static_cast<int>(static_cast<unsigned char>(found->second[offset]))
+                      << std::dec << std::setfill(' ');
+        } else {
+            std::cerr << ": lengths " << entry.second.size() << " and " << found->second.size();
+        }
+        std::cerr << '\n';
+    }
+    for (const auto& entry : after) {
+        if (before.find(entry.first) == before.end()) {
+            std::cerr << label << ": only in after: " << entry.first << " ("
+                      << entry.second.size() << " bytes)\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// The failpoint seams, RAII-scoped.
+// ---------------------------------------------------------------------------
+
+struct ScopedCommitFailpoint {
+    explicit ScopedCommitFailpoint(marrow::editor::detail::CommitFailpoint callback) {
+        marrow::editor::detail::set_psd_commit_failpoint_for_testing(std::move(callback));
+    }
+    ~ScopedCommitFailpoint() {
+        marrow::editor::detail::set_psd_commit_failpoint_for_testing({});
+    }
+    ScopedCommitFailpoint(const ScopedCommitFailpoint&) = delete;
+    ScopedCommitFailpoint& operator=(const ScopedCommitFailpoint&) = delete;
+};
+
+struct ScopedRollbackFailpoint {
+    explicit ScopedRollbackFailpoint(marrow::editor::detail::CommitRollbackFailpoint callback) {
+        marrow::editor::detail::set_psd_commit_rollback_failpoint_for_testing(std::move(callback));
+    }
+    ~ScopedRollbackFailpoint() {
+        marrow::editor::detail::set_psd_commit_rollback_failpoint_for_testing({});
+    }
+    ScopedRollbackFailpoint(const ScopedRollbackFailpoint&) = delete;
+    ScopedRollbackFailpoint& operator=(const ScopedRollbackFailpoint&) = delete;
+};
+
+/// @brief Fails after exactly one named step and lets every other step through.
+marrow::editor::detail::CommitFailpoint fail_after(marrow::editor::PsdCommitStep step) {
+    return [step](marrow::editor::PsdCommitStep reached) -> std::string {
+        if (reached != step) {
+            return {};
+        }
+        return std::string("after ") + marrow::editor::psd_commit_step_name(step);
+    };
+}
+
+// ---------------------------------------------------------------------------
+// A disposable project bundle, built by a real import.
+// ---------------------------------------------------------------------------
+
+struct Scenario {
+    std::filesystem::path directory;
+    std::filesystem::path project_path;
+    std::filesystem::path candidate_psd;
+    std::filesystem::path staging_root;
+    marrow::editor::EditorSession session;
+    marrow::editor::PsdReimportPlan plan;
+};
+
+constexpr const char* kBundleStem = "bundle";
+
+bool open_scenario(
+    const std::filesystem::path& scratch,
+    const std::string& name,
+    const std::vector<mar188::SynthLayer>& initial,
+    const std::vector<mar188::SynthLayer>& candidate,
+    Scenario* out,
+    const std::function<void(marrow::editor::ProjectData*)>& customize = {}) {
+    out->directory = scratch / name;
+    out->staging_root = scratch / (name + "_staging");
+    require_disposable_target(out->directory, name.c_str());
+    require_disposable_target(out->staging_root, name.c_str());
+
+    std::error_code error;
+    std::filesystem::remove_all(out->directory, error);
+    std::filesystem::remove_all(out->staging_root, error);
+    error.clear();
+    std::filesystem::create_directories(out->directory, error);
+    std::filesystem::create_directories(scratch / "psd", error);
+    if (error) {
+        std::cerr << name << ": scratch directories could not be created: " << error.message()
+                  << '\n';
+        return false;
+    }
+
+    // Both PSDs live OUTSIDE the project directory so the byte map is the bundle
+    // and nothing else.
+    const std::filesystem::path initial_psd = scratch / "psd" / (name + "_initial.psd");
+    out->candidate_psd = scratch / "psd" / (name + "_candidate.psd");
+    if (!mar188::write_synthetic_psd(initial_psd, 64, 64, initial) ||
+        !mar188::write_synthetic_psd(out->candidate_psd, 64, 64, candidate)) {
+        std::cerr << name << ": the synthetic PSDs could not be written.\n";
+        return false;
+    }
+
+    marrow::editor::PsdImportOptions import_options;
+    import_options.psd_path = initial_psd;
+    import_options.skeleton_output_path =
+        out->directory / (std::string(kBundleStem) + ".mskl");
+    import_options.atlas_output_path = out->directory / (std::string(kBundleStem) + ".matl");
+    import_options.extracted_layers_directory =
+        out->directory / (std::string(kBundleStem) + "_layers");
+    import_options.atlas_name = kBundleStem;
+    const marrow::editor::PsdImportResult imported =
+        marrow::editor::import_psd_to_runtime_bundle(import_options);
+    if (!imported) {
+        std::cerr << name << ": the initial import failed: " << imported.error->format() << '\n';
+        return false;
+    }
+
+    out->project_path = out->directory / (std::string(kBundleStem) + ".marrow");
+    marrow::editor::MinimalProjectOptions project_options;
+    project_options.project_path = out->project_path;
+    project_options.skeleton_path = import_options.skeleton_output_path;
+    project_options.atlas_paths = {import_options.atlas_output_path};
+    project_options.name = name;
+    project_options.preview_skins = {};
+    marrow::editor::ProjectData project =
+        marrow::editor::create_minimal_project(project_options);
+    marrow::editor::ProjectImportSources sources;
+    sources.psd =
+        marrow::editor::make_psd_provenance(imported, out->project_path, initial_psd);
+    project.editor_metadata.import_sources = std::move(sources);
+    if (customize) {
+        customize(&project);
+    }
+    const marrow::editor::ProjectSaveResult saved =
+        marrow::editor::save_project(project, out->project_path);
+    if (!saved) {
+        std::cerr << name << ": the project could not be saved: " << saved.error->format()
+                  << '\n';
+        return false;
+    }
+    return true;
+}
+
+bool plan_scenario(Scenario* out, const char* label) {
+    const marrow::editor::ProjectLoadResult loaded = out->session.open(out->project_path);
+    if (!loaded) {
+        std::cerr << label << ": the project did not open: " << loaded.error->format() << '\n';
+        return false;
+    }
+    marrow::editor::PsdReimportPlanOptions plan_options;
+    plan_options.psd_path = out->candidate_psd;
+    plan_options.staging_root = out->staging_root;
+    // The TARGET's own names. This is what makes placement a byte copy whose
+    // result still resolves.
+    plan_options.staged_skeleton_filename = std::string(kBundleStem) + ".mskl";
+    plan_options.staged_atlas_filename = std::string(kBundleStem) + ".matl";
+    out->plan = marrow::editor::plan_psd_reimport(*out->session.project(), plan_options);
+    if (!out->plan) {
+        std::cerr << label << ": the reimport plan failed: " << out->plan.error->format() << '\n';
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::string> step_names(const std::vector<marrow::editor::PsdCommitStep>& steps) {
+    std::vector<std::string> names;
+    names.reserve(steps.size());
+    for (const marrow::editor::PsdCommitStep step : steps) {
+        names.emplace_back(marrow::editor::psd_commit_step_name(step));
+    }
+    return names;
+}
+
+bool expect_steps(
+    const std::vector<std::string>& actual,
+    const std::vector<std::string>& expected,
+    std::string_view label) {
+    if (actual == expected) {
+        return true;
+    }
+    std::cerr << label << ": step ledger mismatch.\n  expected:";
+    for (const std::string& name : expected) {
+        std::cerr << ' ' << name;
+    }
+    std::cerr << "\n  actual  :";
+    for (const std::string& name : actual) {
+        std::cerr << ' ' << name;
+    }
+    std::cerr << '\n';
+    for (const std::string& name : expected) {
+        if (std::find(actual.begin(), actual.end(), name) == actual.end()) {
+            std::cerr << "  missing: " << name << '\n';
+        }
+    }
+    for (const std::string& name : actual) {
+        if (std::find(expected.begin(), expected.end(), name) == expected.end()) {
+            std::cerr << "  unexpected: " << name << '\n';
+        }
+    }
+    return false;
+}
+
+/// @brief Every `*.marrow-journal*` and `*.tmp.*` anywhere in the bundle's directories.
+std::vector<std::string> journal_residue_scan(const marrow::editor::ProjectData& project) {
+    std::vector<std::string> found;
+    ByteMap map;
+    collect_bytes(project.source_path.parent_path(), &map);
+    if (project.editor_metadata.import_sources.has_value() &&
+        project.editor_metadata.import_sources->psd.has_value()) {
+        collect_bytes(
+            project.resolve_path(project.editor_metadata.import_sources->psd->layers_directory),
+            &map);
+    }
+    for (const auto& entry : map) {
+        const std::string name = std::filesystem::path(entry.first).filename().string();
+        if (name.find(".marrow-journal") != std::string::npos ||
+            name.find(".tmp.") != std::string::npos) {
+            found.push_back(entry.first);
+        }
+    }
+    return found;
+}
+
+std::string atlas_image_of(const std::filesystem::path& atlas_path) {
+    return atlas_member(atlas_path, "image");
+}
+
+}  // namespace mar189
+
+/**
+ * @brief R0-R8 -- the commit, its rollback, and the bytes both leave behind.
+ *
+ * Run in this order; every attribution in the inversion register is by RUN order.
+ * A11's self-test runs first and aborts the process rather than let any case here
+ * write into the repository.
+ */
+bool validate_mar189_reimport_commit(const std::filesystem::path& scratch) {
+    using marrow::editor::PsdCommitStep;
+    using mar189::ByteMap;
+    using mar189::Scenario;
+
+    if (!mar189::run_disposable_target_self_test()) {
+        return false;
+    }
+
+    std::error_code directory_error;
+    mar189::require_disposable_target(scratch, "R-suite");
+    std::filesystem::remove_all(scratch, directory_error);
+    directory_error.clear();
+    std::filesystem::create_directories(scratch, directory_error);
+    if (directory_error) {
+        std::cerr << "R-suite: scratch could not be created: " << directory_error.message()
+                  << '\n';
+        return false;
+    }
+
+    const std::vector<mar188::SynthLayer> initial_tree = mar188::fixture_tree();
+    // The candidate keeps the grouped layers and drops `shadow`, so a reimport is
+    // an Updated pair plus one Missing -- which is what exercises `preserve`.
+    const std::vector<mar188::SynthLayer> candidate_tree = {
+        {{"torso"}, "arm_l", 4, 20, 12, 8, 41U, 51U, 61U},
+        {{"torso"}, "body", 16, 12, 20, 24, 71U, 81U, 91U},
+    };
+
+    const std::vector<std::string> all_step_names = mar189::step_names(
+        std::vector<PsdCommitStep>(
+            marrow::editor::kAllCommitSteps.begin(), marrow::editor::kAllCommitSteps.end()));
+
+    // ---- R0 -- the step ledger is the enum, in order -------------------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r0", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R0")) {
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (!result) {
+            std::cerr << "R0: a clean commit must succeed; got '" << result.error << "'.\n";
+            return false;
+        }
+        if (!mar189::expect_steps(
+                mar189::step_names(result.steps_executed), all_step_names, "R0")) {
+            return false;
+        }
+        if (!result.error.empty() || result.rolled_back || !result.journal_residue.empty() ||
+            !result.steps_rolled_back.empty()) {
+            std::cerr << "R0: a clean commit must report no error, no rollback and no "
+                         "residue; error='"
+                      << result.error << "' rolled_back=" << result.rolled_back
+                      << " residue=" << result.journal_residue.size()
+                      << " rolled_back_steps=" << result.steps_rolled_back.size() << '\n';
+            return false;
+        }
+    }
+
+    // ---- R1 -- success replaces the bundle ----------------------------------
+    ByteMap committed_bytes;
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r1", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R1")) {
+            return false;
+        }
+        const std::uint64_t revision_before = scenario.session.runtime_revision();
+        const std::filesystem::path target_skeleton =
+            scenario.session.project()->resolved_skeleton_path();
+        const std::filesystem::path target_atlas =
+            scenario.session.project()->resolved_atlas_paths().front();
+        const std::filesystem::path target_texture =
+            target_atlas.parent_path() / mar189::atlas_image_of(target_atlas);
+        const std::filesystem::path target_layers = scenario.session.project()->resolve_path(
+            scenario.session.project()->editor_metadata.import_sources->psd->layers_directory);
+        const std::string staged_skeleton = mar188::read_all(scenario.plan.staged_skeleton_path);
+        const std::string staged_atlas = mar188::read_all(scenario.plan.staged_atlas_path);
+        const std::string staged_texture = mar188::read_all(scenario.plan.staged_texture_path);
+        const std::vector<std::string> staged_layers =
+            mar188::directory_listing(scenario.plan.staged_layers_directory);
+
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (!result) {
+            std::cerr << "R1: the commit must succeed; got '" << result.error << "'.\n";
+            return false;
+        }
+        const std::vector<std::pair<const char*, std::pair<std::filesystem::path, std::string>>>
+            placed = {
+                {"skeleton", {target_skeleton, staged_skeleton}},
+                {"atlas", {target_atlas, staged_atlas}},
+                {"texture", {target_texture, staged_texture}},
+            };
+        for (const auto& entry : placed) {
+            const std::string actual = mar188::read_all(entry.second.first);
+            if (actual != entry.second.second) {
+                std::cerr << "R1: the committed " << entry.first << " ('"
+                          << entry.second.first.generic_string()
+                          << "') must equal the staged bytes; sizes " << actual.size()
+                          << " and " << entry.second.second.size() << ".\n";
+                return false;
+            }
+        }
+        std::vector<std::string> committed_layers = mar188::directory_listing(target_layers);
+        std::vector<std::string> expected_layers;
+        for (const std::string& row : staged_layers) {
+            const std::size_t split = row.rfind(" (");
+            expected_layers.push_back(
+                std::filesystem::path(row.substr(0, split)).filename().generic_string() +
+                row.substr(split));
+        }
+        std::vector<std::string> actual_layers;
+        for (const std::string& row : committed_layers) {
+            const std::size_t split = row.rfind(" (");
+            actual_layers.push_back(
+                std::filesystem::path(row.substr(0, split)).filename().generic_string() +
+                row.substr(split));
+        }
+        std::sort(expected_layers.begin(), expected_layers.end());
+        std::sort(actual_layers.begin(), actual_layers.end());
+        if (actual_layers != expected_layers) {
+            std::cerr << "R1: the committed layer directory must equal the staged one.\n";
+            for (const std::string& row : expected_layers) {
+                if (std::find(actual_layers.begin(), actual_layers.end(), row) ==
+                    actual_layers.end()) {
+                    std::cerr << "  missing: " << row << '\n';
+                }
+            }
+            for (const std::string& row : actual_layers) {
+                if (std::find(expected_layers.begin(), expected_layers.end(), row) ==
+                    expected_layers.end()) {
+                    std::cerr << "  unexpected: " << row << '\n';
+                }
+            }
+            return false;
+        }
+        const marrow::editor::ProjectLoadResult reloaded =
+            marrow::editor::load_project(scenario.project_path);
+        if (!reloaded) {
+            std::cerr << "R1: the committed project must load; got "
+                      << reloaded.error->format() << '\n';
+            return false;
+        }
+        const marrow::runtime::json::LoadResult reloaded_document =
+            marrow::runtime::load_skeleton_document(reloaded.project->resolved_skeleton_path());
+        if (!reloaded_document) {
+            std::cerr << "R1: the committed skeleton must load; got "
+                      << reloaded_document.error->format() << '\n';
+            return false;
+        }
+        const marrow::editor::ProjectRuntimeResult rebuilt =
+            marrow::editor::build_project_runtime(*reloaded.project, *reloaded_document.document);
+        if (!rebuilt) {
+            std::cerr << "R1: the committed bundle must build a runtime; got "
+                      << rebuilt.error->message << '\n';
+            return false;
+        }
+        const marrow::runtime::AtlasDataResult atlas =
+            marrow::runtime::AtlasLoader::load(target_atlas);
+        if (!atlas) {
+            std::cerr << "R1: the committed atlas must load; got " << atlas.error->format()
+                      << '\n';
+            return false;
+        }
+        // A successful commit ADOPTS, and adoption bumps the revision. Asserting it
+        // unmoved here would be a gate that fails on correct code.
+        if (scenario.session.runtime_revision() == revision_before) {
+            std::cerr << "R1: a successful commit must move runtime_revision(); it stayed at "
+                      << revision_before << ".\n";
+            return false;
+        }
+        committed_bytes = mar189::bundle_bytes(*scenario.session.project());
+    }
+
+    // ---- R1b -- the committed atlas still names the texture beside it -------
+    //
+    // The invariant is a comparison against state captured BEFORE the commit. Every
+    // clause phrased against the committed bundle alone is self-satisfying: "that
+    // file exists beside the atlas" is satisfied because `PlaceTexture` created it,
+    // and "the target png's file name" is circular because the staging rule is what
+    // defines the target png.
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r1b", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R1b")) {
+            return false;
+        }
+        const std::filesystem::path target_atlas =
+            scenario.session.project()->resolved_atlas_paths().front();
+        const std::string image_before = mar189::atlas_image_of(target_atlas);
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (!result) {
+            std::cerr << "R1b: the commit must succeed; got '" << result.error << "'.\n";
+            return false;
+        }
+        const std::string image_after = mar189::atlas_image_of(target_atlas);
+        if (image_after != image_before) {
+            std::cerr << "R1b: the committed atlas references image '" << image_after
+                      << "'; the pre-commit atlas referenced '" << image_before
+                      << "'. A byte-perfect copy of a document whose bytes encode a "
+                         "path is byte-perfect and broken.\n";
+            return false;
+        }
+        // The path SET outside the layer directory must be unchanged. This is what
+        // sees an orphan: a texture placed under a name the atlas no longer uses
+        // appears here, and the one it stopped using vanishes here, while every
+        // byte clause in R1 passes. The layer directory is excluded because its
+        // membership legitimately changes -- a dropped layer's PNG is meant to go.
+        const ByteMap after = mar189::bundle_bytes(*scenario.session.project());
+        const std::string layers_prefix =
+            scenario.session.project()
+                ->resolve_path(scenario.session.project()
+                                   ->editor_metadata.import_sources->psd->layers_directory)
+                .lexically_normal()
+                .generic_string();
+        const auto outside_layers = [&layers_prefix](const std::string& path) {
+            return path.rfind(layers_prefix, 0) != 0U;
+        };
+        std::vector<std::string> only_before;
+        std::vector<std::string> only_after;
+        for (const auto& entry : before) {
+            if (outside_layers(entry.first) && after.find(entry.first) == after.end()) {
+                only_before.push_back(entry.first);
+            }
+        }
+        for (const auto& entry : after) {
+            if (outside_layers(entry.first) && before.find(entry.first) == before.end()) {
+                only_after.push_back(entry.first);
+            }
+        }
+        if (!only_before.empty() || !only_after.empty()) {
+            std::cerr << "R1b: a commit must replace the bundle's files, never add or "
+                         "orphan one.\n";
+            for (const std::string& row : only_before) {
+                std::cerr << "  vanished: " << row << '\n';
+            }
+            for (const std::string& row : only_after) {
+                std::cerr << "  appeared: " << row << '\n';
+            }
+            return false;
+        }
+        const std::string texture_bytes =
+            mar188::read_all(target_atlas.parent_path() / image_after);
+        if (texture_bytes.empty() ||
+            texture_bytes != mar188::read_all(scenario.plan.staged_texture_path)) {
+            std::cerr << "R1b: the file the committed atlas names ('" << image_after
+                      << "') must hold the staged texture's bytes; it holds "
+                      << texture_bytes.size() << ".\n";
+            return false;
+        }
+    }
+
+    // ---- R1c -- a bundle staged under the wrong name is REFUSED -------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r1c", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        const marrow::editor::ProjectLoadResult loaded =
+            scenario.session.open(scenario.project_path);
+        if (!loaded) {
+            std::cerr << "R1c: the project did not open: " << loaded.error->format() << '\n';
+            return false;
+        }
+        marrow::editor::PsdReimportPlanOptions plan_options;
+        plan_options.psd_path = scenario.candidate_psd;
+        plan_options.staging_root = scenario.staging_root;
+        // MAR-188's defaults, which is exactly what reverting the naming rule
+        // produces.
+        const marrow::editor::PsdReimportPlan plan =
+            marrow::editor::plan_psd_reimport(*scenario.session.project(), plan_options);
+        if (!plan) {
+            std::cerr << "R1c: the default-named plan must succeed; got "
+                      << plan.error->format() << '\n';
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, plan, options);
+        const std::string expected =
+            "ValidateRequest: the staged atlas references image 'staged.png' but the "
+            "project atlas 'bundle.matl' references 'bundle.png'; committing it would "
+            "name a texture that is not beside it";
+        if (result || result.error != expected) {
+            std::cerr << "R1c: a staged bundle naming a different texture must be refused "
+                         "with '"
+                      << expected << "'; got ok=" << result.ok << " error='" << result.error
+                      << "'.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "R1c")) {
+            return false;
+        }
+    }
+
+    // ---- R2(a) -- a parse failure never reaches the committer. WITNESS. ----
+    //
+    // Green before MAR-189 existed: this is MAR-188's planner behaviour, and no
+    // MAR-189 inversion reddens it. Kept because "a corrupt candidate changes
+    // nothing" is a real claim, and labelled rather than counted as coverage.
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r2a", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        const marrow::editor::ProjectLoadResult loaded =
+            scenario.session.open(scenario.project_path);
+        if (!loaded) {
+            std::cerr << "R2(a): the project did not open: " << loaded.error->format() << '\n';
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        const std::uint64_t revision_before = scenario.session.runtime_revision();
+        const std::filesystem::path corrupt = scratch / "psd" / "r2a_corrupt.psd";
+        if (!write_text_file(corrupt, "8BPSnot-a-psd")) {
+            std::cerr << "R2(a): the corrupt candidate could not be written.\n";
+            return false;
+        }
+        marrow::editor::PsdReimportPlanOptions plan_options;
+        plan_options.psd_path = corrupt;
+        plan_options.staging_root = scratch / "r2a_staging";
+        plan_options.staged_skeleton_filename = std::string(mar189::kBundleStem) + ".mskl";
+        plan_options.staged_atlas_filename = std::string(mar189::kBundleStem) + ".matl";
+        const marrow::editor::PsdReimportPlan plan =
+            marrow::editor::plan_psd_reimport(*scenario.session.project(), plan_options);
+        if (plan) {
+            std::cerr << "R2(a): a corrupt PSD must not produce a plan.\n";
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, plan, options);
+        if (result || result.error.rfind("ValidateRequest: the plan carries an error", 0) != 0) {
+            std::cerr << "R2(a): committing an errored plan must be refused at "
+                         "ValidateRequest; got ok="
+                      << result.ok << " error='" << result.error << "'.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "R2(a)")) {
+            return false;
+        }
+        if (scenario.session.runtime_revision() != revision_before) {
+            std::cerr << "R2(a): runtime_revision() must be unmoved.\n";
+            return false;
+        }
+    }
+
+    // ---- R2(b) -- the overlay refuses the staged bundle, before any target moves
+    {
+        Scenario scenario;
+        // A candidate with NO groups produces only the `root` bone, so `torso`
+        // -- which the initial import's group produced -- stops existing.
+        const std::vector<mar188::SynthLayer> ungrouped = {
+            {{}, "shadow", 18, 40, 14, 8, 10U, 20U, 30U},
+            {{}, "arm_l", 4, 20, 12, 8, 40U, 50U, 60U},
+        };
+        if (!mar189::open_scenario(
+                scratch, "r2b", initial_tree, ungrouped, &scenario,
+                [](marrow::editor::ProjectData* project) {
+                    // `torso` is a bone the initial PSD's group produces and the
+                    // candidate does not. The staged bundle replaces bones
+                    // WHOLESALE (`psd_import.cpp` rebuilds `bones` and `slots`),
+                    // so this constraint stops resolving.
+                    marrow::editor::IkConstraintEdit edit;
+                    edit.name = "overlay_probe";
+                    edit.bone_names = {"torso"};
+                    edit.target_bone_name = "root";
+                    project->ik_constraint_edits.push_back(std::move(edit));
+                }) ||
+            !mar189::plan_scenario(&scenario, "R2(b)")) {
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        const std::uint64_t revision_before = scenario.session.runtime_revision();
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (result) {
+            std::cerr << "R2(b): a staged bundle that drops a bone the project's overlay "
+                         "names must be refused before any target changes; the commit "
+                         "reported success.\n";
+            return false;
+        }
+        if (result.error.rfind("ValidateStagedBundle:", 0) != 0) {
+            std::cerr << "R2(b): the refusal must name ValidateStagedBundle; got '"
+                      << result.error << "'.\n";
+            return false;
+        }
+        if (!result.failed_step.has_value() ||
+            *result.failed_step != PsdCommitStep::ValidateStagedBundle) {
+            std::cerr << "R2(b): failed_step must be ValidateStagedBundle.\n";
+            return false;
+        }
+        // The failing step is NOT in the ledger: `advance` runs only after a step's
+        // body succeeds. This is the clause that sees an append moved before the body.
+        if (std::find(
+                result.steps_executed.begin(),
+                result.steps_executed.end(),
+                PsdCommitStep::ValidateStagedBundle) != result.steps_executed.end()) {
+            std::cerr << "R2(b): ValidateStagedBundle must not appear in steps_executed "
+                         "when it failed.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "R2(b)")) {
+            return false;
+        }
+        if (scenario.session.runtime_revision() != revision_before) {
+            std::cerr << "R2(b): runtime_revision() must be unmoved.\n";
+            return false;
+        }
+        std::cout << "R2(b): refused with -- " << result.error << '\n';
+    }
+
+    std::cout << "MAR-189 R0-R2: a clean commit walks the whole step enum in order and "
+                 "replaces skeleton, atlas, texture and layers with the staged bytes; the "
+                 "committed atlas still names the texture the PRE-COMMIT atlas named and "
+                 "the bundle gains and loses no file; a bundle staged under a different "
+                 "texture name is refused by message; and a corrupt candidate and an "
+                 "overlay-incompatible candidate each leave every byte untouched.\n";
+    return true;
+}
+
+namespace mar189 {
+
+/** @brief Slot names of a skeleton document, in document order. */
+std::vector<std::string> slot_names(const marrow::runtime::json::Document& document) {
+    std::vector<std::string> names;
+    const marrow::runtime::json::Value* slots =
+        marrow::runtime::json::find_member(document.root, "slots");
+    if (slots == nullptr || !slots->is_array()) {
+        return names;
+    }
+    for (const marrow::runtime::json::Value& slot : slots->as_array()) {
+        const marrow::runtime::json::Value* name =
+            marrow::runtime::json::find_member(slot, "name");
+        names.push_back(name != nullptr && name->is_string() ? name->as_string() : "<unnamed>");
+    }
+    return names;
+}
+
+/** @brief The session's active runtime source, as text, for an unchanged-ness clause. */
+std::string active_skeleton_source(const marrow::editor::EditorSession& session) {
+    const marrow::runtime::json::Document* document = session.base_skeleton_document();
+    if (document == nullptr) {
+        return "<none>";
+    }
+    return marrow::runtime::json::serialize_pretty(document->root);
+}
+
+/** @brief The stored provenance as an ordered full-tuple row list. */
+std::vector<std::string> provenance_rows(const marrow::editor::ProjectData& project) {
+    std::vector<std::string> rows;
+    if (!project.editor_metadata.import_sources.has_value() ||
+        !project.editor_metadata.import_sources->psd.has_value()) {
+        return rows;
+    }
+    const marrow::editor::PsdImportProvenance& psd =
+        *project.editor_metadata.import_sources->psd;
+    rows.push_back("source=" + psd.source_path.generic_string());
+    rows.push_back("layers=" + psd.layers_directory.generic_string());
+    for (const marrow::editor::PsdLayerProvenance& layer : psd.layers) {
+        std::string identity;
+        for (const std::string& segment : layer.group_path) {
+            identity += segment + "|";
+        }
+        identity += layer.layer_name;
+        rows.push_back(
+            identity + " slot=" + layer.slot_name + " attachment=" + layer.attachment_name +
+            " bone=" + layer.bone_name + " image=" + layer.image_file);
+    }
+    return rows;
+}
+
+bool expect_rows_equal(
+    const std::vector<std::string>& actual,
+    const std::vector<std::string>& expected,
+    std::string_view label) {
+    if (actual == expected) {
+        return true;
+    }
+    std::cerr << label << ": row list mismatch.\n";
+    for (std::size_t index = 0; index < std::max(actual.size(), expected.size()); ++index) {
+        const std::string left = index < expected.size() ? expected[index] : "<none>";
+        const std::string right = index < actual.size() ? actual[index] : "<none>";
+        if (left != right) {
+            std::cerr << "  index " << index << ": expected '" << left << "', got '" << right
+                      << "'\n";
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Every overlay vector this story must not disturb, one line per element.
+ *
+ * Built and compared IN MEMORY. A `.marrow` round trip normalises object order
+ * (`Value::Object` is a `std::map`) and is not bit-exact for a 17-significant-digit
+ * double, so a case that compares through a file is asserting on a different value
+ * than it wrote.
+ */
+std::vector<std::string> overlay_report(const marrow::editor::ProjectData& project) {
+    std::vector<std::string> rows;
+    rows.push_back("notes=" + project.editor_metadata.notes);
+    rows.push_back("name=" + project.editor_metadata.name);
+    rows.push_back("active_animation=" + project.editor_metadata.active_animation);
+    for (const marrow::editor::IkConstraintEdit& edit : project.ik_constraint_edits) {
+        std::string row = "ik " + edit.name + " target=" + edit.target_bone_name + " mix=" +
+            std::to_string(edit.mix) + " bones=";
+        for (const std::string& bone : edit.bone_names) {
+            row += bone + ",";
+        }
+        rows.push_back(row);
+    }
+    for (const marrow::editor::TransformTimelineEdit& edit : project.transform_timeline_edits) {
+        std::string row = "transform " + edit.animation_name + "/" + edit.bone_name +
+            " channel=" + std::to_string(static_cast<int>(edit.channel)) + " keys=";
+        for (const marrow::editor::TransformKeyframeEdit& key : edit.keyframes) {
+            row += std::to_string(key.time) + ":" + std::to_string(key.angle) + ":" +
+                std::to_string(key.x) + ":" + std::to_string(key.y) + ",";
+        }
+        rows.push_back(row);
+    }
+    for (const marrow::editor::MeshWeightAttachmentEdit& edit :
+         project.mesh_weight_attachment_edits) {
+        rows.push_back(
+            "weights " + edit.skin_name + "/" + edit.slot_name + "/" + edit.attachment_name);
+    }
+    return rows;
+}
+
+/** @brief Everything a rolled-back commit must leave exactly as it found. */
+struct PreCommitWitness {
+    ByteMap bytes;
+    std::uint64_t revision{0};
+    std::string active_source;
+    std::vector<std::string> provenance;
+};
+
+PreCommitWitness capture(const marrow::editor::EditorSession& session) {
+    PreCommitWitness witness;
+    witness.bytes = bundle_bytes(*session.project());
+    witness.revision = session.runtime_revision();
+    witness.active_source = active_skeleton_source(session);
+    witness.provenance = provenance_rows(*session.project());
+    return witness;
+}
+
+}  // namespace mar189
+
+/**
+ * @brief R3-R8 -- the sweep, provenance, preservation, rollback and refusals.
+ *
+ * Runs after R0-R2 and shares their attribution order.
+ */
+bool validate_mar189_commit_rollback(const std::filesystem::path& scratch) {
+    using marrow::editor::PsdCommitStep;
+    using mar189::ByteMap;
+    using mar189::Scenario;
+
+    const std::vector<mar188::SynthLayer> initial_tree = mar188::fixture_tree();
+    const std::vector<mar188::SynthLayer> candidate_tree = {
+        {{"torso"}, "arm_l", 4, 20, 12, 8, 41U, 51U, 61U},
+        {{"torso"}, "body", 16, 12, 20, 24, 71U, 81U, 91U},
+    };
+
+    // ---- R3 -- the failpoint sweep, one iteration per kAllCommitSteps entry --
+    //
+    // A table, not a uniform `!ok`. Fourteen arms expect a rollback and the
+    // fifteenth expects a completed commit; a uniform assumption passes fourteen
+    // and is wrong about the last one in the direction that destroys a finished
+    // reimport.
+    {
+        struct StepExpectation {
+            PsdCommitStep step;
+            enum Outcome { RollsBack, SucceedsWithError } outcome;
+            /// @brief Adoption legitimately bumps the revision, and so does the
+            /// re-adopt a rollback performs. Only the arms before adoption can
+            /// assert it unmoved; the arms after it assert the stronger clause --
+            /// that the ACTIVE SKELETON SOURCE is byte-identical.
+            bool revision_unmoved;
+        };
+        const std::vector<StepExpectation> expectations = {
+            {PsdCommitStep::ValidateRequest, StepExpectation::RollsBack, true},
+            {PsdCommitStep::PruneUnpreserved, StepExpectation::RollsBack, true},
+            {PsdCommitStep::ValidateStagedBundle, StepExpectation::RollsBack, true},
+            {PsdCommitStep::OpenJournal, StepExpectation::RollsBack, true},
+            {PsdCommitStep::BackupLayers, StepExpectation::RollsBack, true},
+            {PsdCommitStep::BackupTexture, StepExpectation::RollsBack, true},
+            {PsdCommitStep::BackupAtlas, StepExpectation::RollsBack, true},
+            {PsdCommitStep::BackupSkeleton, StepExpectation::RollsBack, true},
+            {PsdCommitStep::PlaceLayers, StepExpectation::RollsBack, true},
+            {PsdCommitStep::PlaceTexture, StepExpectation::RollsBack, true},
+            {PsdCommitStep::PlaceAtlas, StepExpectation::RollsBack, true},
+            {PsdCommitStep::PlaceSkeleton, StepExpectation::RollsBack, true},
+            {PsdCommitStep::AdoptRuntimeSources, StepExpectation::RollsBack, false},
+            {PsdCommitStep::UpdateProvenance, StepExpectation::RollsBack, false},
+            {PsdCommitStep::CleanJournal, StepExpectation::SucceedsWithError, false},
+        };
+        // A step that exists but has no row is a step the sweep does not cover, and
+        // AC3 says "every". The table is checked against the enum by identity, not
+        // by size: a size check passes on a table with the right count and the wrong
+        // members.
+        {
+            std::vector<std::string> table;
+            for (const StepExpectation& row : expectations) {
+                table.emplace_back(marrow::editor::psd_commit_step_name(row.step));
+            }
+            std::vector<std::string> all;
+            for (const PsdCommitStep step : marrow::editor::kAllCommitSteps) {
+                all.emplace_back(marrow::editor::psd_commit_step_name(step));
+            }
+            if (!mar189::expect_steps(table, all, "R3(table)")) {
+                return false;
+            }
+        }
+
+        for (const StepExpectation& row : expectations) {
+            const std::string name = marrow::editor::psd_commit_step_name(row.step);
+            const std::string label = "R3/" + name;
+            Scenario scenario;
+            if (!mar189::open_scenario(
+                    scratch, "r3_" + name, initial_tree, candidate_tree, &scenario) ||
+                !mar189::plan_scenario(&scenario, label.c_str())) {
+                return false;
+            }
+            const mar189::PreCommitWitness before = mar189::capture(scenario.session);
+            const std::string staged_skeleton =
+                mar188::read_all(scenario.plan.staged_skeleton_path);
+
+            marrow::editor::PsdReimportCommitOptions options;
+            options.project_path = scenario.project_path;
+            marrow::editor::PsdReimportCommitResult result;
+            {
+                const mar189::ScopedCommitFailpoint installed(mar189::fail_after(row.step));
+                result = marrow::editor::commit_psd_reimport(
+                    scenario.session, scenario.plan, options);
+            }
+
+            if (result.error.find(name) == std::string::npos) {
+                std::cerr << label << ": the error must name the injected step; got '"
+                          << result.error << "'.\n";
+                return false;
+            }
+            const std::vector<std::string> residue =
+                mar189::journal_residue_scan(*scenario.session.project());
+            if (!residue.empty()) {
+                std::cerr << label << ": journal residue left in the bundle:\n";
+                for (const std::string& path : residue) {
+                    std::cerr << "  " << path << '\n';
+                }
+                return false;
+            }
+
+            if (row.outcome == StepExpectation::SucceedsWithError) {
+                if (!result.ok) {
+                    std::cerr << label
+                              << ": a failure after the last step must still report "
+                                 "success; the commit reported ok=0 ('"
+                              << result.error << "').\n";
+                    return false;
+                }
+                if (result.rolled_back) {
+                    std::cerr << label
+                              << ": a failure after CleanJournal must not roll a "
+                                 "completed reimport back.\n";
+                    return false;
+                }
+                const std::string committed = mar188::read_all(
+                    scenario.session.project()->resolved_skeleton_path());
+                if (committed != staged_skeleton) {
+                    std::cerr << label
+                              << ": the committed skeleton must hold the staged bytes; "
+                                 "sizes "
+                              << committed.size() << " and " << staged_skeleton.size()
+                              << ".\n";
+                    return false;
+                }
+                continue;
+            }
+
+            if (result.ok) {
+                std::cerr << label << ": an injected failure must not report success.\n";
+                return false;
+            }
+            if (!result.rolled_back || !result.rollback_error.empty()) {
+                std::cerr << label << ": the commit must roll back cleanly; rolled_back="
+                          << result.rolled_back << " rollback_error='"
+                          << result.rollback_error << "'.\n";
+                return false;
+            }
+            if (!mar189::expect_bundle_equal(
+                    before.bytes, mar189::bundle_bytes(*scenario.session.project()), label)) {
+                return false;
+            }
+            if (mar189::active_skeleton_source(scenario.session) != before.active_source) {
+                std::cerr << label
+                          << ": the session's active skeleton source must be unchanged.\n";
+                return false;
+            }
+            if (!mar189::expect_rows_equal(
+                    mar189::provenance_rows(*scenario.session.project()),
+                    before.provenance,
+                    label + "(provenance)")) {
+                return false;
+            }
+            if (row.revision_unmoved &&
+                scenario.session.runtime_revision() != before.revision) {
+                std::cerr << label << ": runtime_revision() must be unmoved; it went from "
+                          << before.revision << " to " << scenario.session.runtime_revision()
+                          << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // ---- R3b -- CleanJournal reports residue rather than failing --------------
+    //
+    // The sweep cannot produce residue: injecting AFTER `CleanJournal` runs it
+    // first, and it succeeds. This makes the removals themselves fail.
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r3b", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R3b")) {
+            return false;
+        }
+        const std::filesystem::path directory = scenario.directory;
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        marrow::editor::PsdReimportCommitResult result;
+        {
+            // Not a failure injection: the callback returns empty and only makes the
+            // project directory unwritable, which is the last thing that happens
+            // before `CleanJournal` tries to remove four backups and a manifest.
+            const mar189::ScopedCommitFailpoint installed(
+                [&directory](PsdCommitStep reached) -> std::string {
+                    if (reached == PsdCommitStep::UpdateProvenance) {
+                        std::error_code chmod_error;
+                        std::filesystem::permissions(
+                            directory,
+                            std::filesystem::perms::owner_read |
+                                std::filesystem::perms::owner_exec,
+                            std::filesystem::perm_options::replace,
+                            chmod_error);
+                    }
+                    return {};
+                });
+            result = marrow::editor::commit_psd_reimport(
+                scenario.session, scenario.plan, options);
+        }
+        std::error_code restore_error;
+        std::filesystem::permissions(
+            directory,
+            std::filesystem::perms::owner_all,
+            std::filesystem::perm_options::replace,
+            restore_error);
+        if (!result) {
+            std::cerr << "R3b: an unremovable backup must not fail the commit; got '"
+                      << result.error << "'.\n";
+            return false;
+        }
+        if (result.rolled_back) {
+            std::cerr << "R3b: an unremovable backup must not roll a completed reimport "
+                         "back.\n";
+            return false;
+        }
+        if (result.journal_residue.empty()) {
+            std::cerr << "R3b: the residue list must name every backup CleanJournal could "
+                         "not remove; it is empty.\n";
+            return false;
+        }
+        for (const std::filesystem::path& residue : result.journal_residue) {
+            if (!std::filesystem::exists(residue)) {
+                std::cerr << "R3b: reported residue '" << residue.generic_string()
+                          << "' does not exist.\n";
+                return false;
+            }
+        }
+    }
+
+    // ---- R4 -- overlays survive, provenance is rewritten ---------------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(
+                scratch, "r4", initial_tree, candidate_tree, &scenario,
+                [](marrow::editor::ProjectData* project) {
+                    marrow::editor::IkConstraintEdit ik;
+                    ik.name = "overlay_ik";
+                    ik.bone_names = {"torso"};
+                    ik.target_bone_name = "root";
+                    ik.mix = 0.5;
+                    project->ik_constraint_edits.push_back(std::move(ik));
+                    marrow::editor::TransformTimelineEdit transform;
+                    transform.animation_name = "idle";
+                    transform.bone_name = "torso";
+                    transform.channel = marrow::editor::TransformTimelineChannel::Rotate;
+                    marrow::editor::TransformKeyframeEdit key;
+                    key.time = 0.25;
+                    key.angle = 12.0;
+                    transform.keyframes.push_back(key);
+                    project->transform_timeline_edits.push_back(std::move(transform));
+                    project->editor_metadata.notes = "overlay probe";
+                }) ||
+            !mar189::plan_scenario(&scenario, "R4")) {
+            return false;
+        }
+        const std::vector<std::string> overlays_before = mar189::overlay_report(
+            *scenario.session.project());
+        std::vector<std::string> expected_provenance;
+        expected_provenance.push_back(
+            "source=" +
+            marrow::editor::project_relative_path(
+                scenario.project_path, scenario.candidate_psd)
+                .generic_string());
+        expected_provenance.push_back(
+            "layers=" +
+            scenario.session.project()
+                ->editor_metadata.import_sources->psd->layers_directory.generic_string());
+        for (const marrow::editor::PsdPlannedLayer& layer : scenario.plan.layers) {
+            std::string identity;
+            for (const std::string& segment : layer.group_path) {
+                identity += segment + "|";
+            }
+            identity += layer.layer_name;
+            if (layer.change == marrow::editor::PsdLayerChangeKind::Missing) {
+                expected_provenance.push_back(
+                    identity + " slot=" + layer.current_slot_name + " attachment=" +
+                    layer.current_attachment_name + " bone=" + layer.current_bone_name +
+                    " image=" + layer.current_image_file);
+                continue;
+            }
+            expected_provenance.push_back(
+                identity + " slot=" + layer.proposed_slot_name + " attachment=" +
+                layer.proposed_attachment_name + " bone=" + layer.proposed_bone_name +
+                " image=" + layer.proposed_image_file);
+        }
+
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        const marrow::editor::PsdReimportCommitResult result =
+            marrow::editor::commit_psd_reimport(scenario.session, scenario.plan, options);
+        if (!result) {
+            std::cerr << "R4: the commit must succeed; got '" << result.error << "'.\n";
+            return false;
+        }
+        // In memory, never through a save round trip: `Value::Object` is a
+        // `std::map` and normalises order, and a 17-digit double does not survive.
+        if (!mar189::expect_rows_equal(
+                mar189::overlay_report(*scenario.session.project()),
+                overlays_before,
+                "R4(overlays)")) {
+            return false;
+        }
+        if (!mar189::expect_rows_equal(
+                mar189::provenance_rows(*scenario.session.project()),
+                expected_provenance,
+                "R4(provenance)")) {
+            return false;
+        }
+        // The layer directory lives inside the project folder, so the house rule
+        // stores it relative. The candidate PSD deliberately does not, and
+        // `project_relative_path` keeps such a reference ABSOLUTE rather than
+        // emitting `../` -- so "project-relative" is the RULE having been applied,
+        // which the row list above asserts, and not a blanket "no absolute paths".
+        const marrow::editor::PsdImportProvenance& stored =
+            *scenario.session.project()->editor_metadata.import_sources->psd;
+        if (stored.layers_directory != std::filesystem::path("bundle_layers")) {
+            std::cerr << "R4: the layers directory must be stored project-relative; got '"
+                      << stored.layers_directory.generic_string() << "'.\n";
+            return false;
+        }
+        if (stored.source_path !=
+            marrow::editor::project_relative_path(
+                scenario.project_path, scenario.candidate_psd)) {
+            std::cerr << "R4: the source path must go through project_relative_path; got '"
+                      << stored.source_path.generic_string() << "'.\n";
+            return false;
+        }
+    }
+
+    // ---- R5 -- preservation and deletion -------------------------------------
+    {
+        // Arm 1 -- `preserve == true` keeps the identity's provenance row.
+        Scenario preserved;
+        if (!mar189::open_scenario(
+                scratch, "r5_keep", initial_tree, candidate_tree, &preserved) ||
+            !mar189::plan_scenario(&preserved, "R5(keep)")) {
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = preserved.project_path;
+        const marrow::editor::PsdReimportCommitResult kept =
+            marrow::editor::commit_psd_reimport(preserved.session, preserved.plan, options);
+        if (!kept) {
+            std::cerr << "R5(keep): the commit must succeed; got '" << kept.error << "'.\n";
+            return false;
+        }
+        const std::vector<std::string> kept_rows =
+            mar189::provenance_rows(*preserved.session.project());
+        if (std::none_of(kept_rows.begin(), kept_rows.end(), [](const std::string& row) {
+                return row.rfind("shadow ", 0) == 0;
+            })) {
+            std::cerr << "R5(keep): a Missing layer with preserve=true must keep its "
+                         "provenance row; the committed rows are:\n";
+            for (const std::string& row : kept_rows) {
+                std::cerr << "  " << row << '\n';
+            }
+            return false;
+        }
+
+        // Arm 2 -- `preserve == false` drops exactly that row and prunes exactly
+        // that slot. The staged skeleton is patched to CARRY the slot first,
+        // because this importer replaces `slots` wholesale and a dropped layer's
+        // slot is already gone -- so without the patch the pruning code is never
+        // reached and the case would be green with the prune deleted.
+        Scenario dropped;
+        if (!mar189::open_scenario(
+                scratch, "r5_drop", initial_tree, candidate_tree, &dropped) ||
+            !mar189::plan_scenario(&dropped, "R5(drop)")) {
+            return false;
+        }
+        std::string missing_identity;
+        for (marrow::editor::PsdPlannedLayer& layer : dropped.plan.layers) {
+            if (layer.change == marrow::editor::PsdLayerChangeKind::Missing) {
+                layer.preserve = false;
+                missing_identity = layer.identity;
+            }
+        }
+        if (missing_identity.empty()) {
+            std::cerr << "R5(drop): the plan must carry a Missing layer.\n";
+            return false;
+        }
+        {
+            marrow::runtime::json::LoadResult staged =
+                marrow::runtime::json::load_document(dropped.plan.staged_skeleton_path);
+            if (!staged) {
+                std::cerr << "R5(drop): the staged skeleton did not parse.\n";
+                return false;
+            }
+            marrow::runtime::json::Value* slots =
+                marrow::runtime::json::find_member(staged.document->root, "slots");
+            if (slots == nullptr || !slots->is_array()) {
+                std::cerr << "R5(drop): the staged skeleton has no slots array.\n";
+                return false;
+            }
+            // A VALID slot: `attachment` is required, and a planted slot without
+            // it makes the un-pruned document fail validation instead -- which
+            // reddens this case for the wrong reason and never reaches the slot
+            // list that is actually under test. The attachment names a region the
+            // candidate atlas really has.
+            marrow::runtime::json::Value::Object slot;
+            slot.emplace("name", make_string_value("shadow"));
+            slot.emplace("bone", make_string_value("root"));
+            slot.emplace("attachment", make_string_value("body"));
+            slots->as_array().push_back(make_object_value(std::move(slot)));
+            if (!write_text_file(
+                    dropped.plan.staged_skeleton_path,
+                    marrow::runtime::json::serialize_pretty(staged.document->root))) {
+                std::cerr << "R5(drop): the patched staged skeleton could not be written.\n";
+                return false;
+            }
+        }
+        marrow::editor::PsdReimportCommitOptions drop_options;
+        drop_options.project_path = dropped.project_path;
+        const marrow::editor::PsdReimportCommitResult drop_result =
+            marrow::editor::commit_psd_reimport(dropped.session, dropped.plan, drop_options);
+        if (!drop_result) {
+            std::cerr << "R5(drop): the commit must succeed; got '" << drop_result.error
+                      << "'.\n";
+            return false;
+        }
+        const marrow::runtime::json::LoadResult committed = marrow::runtime::json::load_document(
+            dropped.session.project()->resolved_skeleton_path());
+        if (!committed) {
+            std::cerr << "R5(drop): the committed skeleton did not parse.\n";
+            return false;
+        }
+        const std::vector<std::string> committed_slots =
+            mar189::slot_names(*committed.document);
+        if (std::find(committed_slots.begin(), committed_slots.end(), "shadow") !=
+            committed_slots.end()) {
+            std::cerr << "R5(drop): slot 'shadow' must be removed by a preserve=false "
+                         "Missing layer; the committed slots are:";
+            for (const std::string& slot : committed_slots) {
+                std::cerr << ' ' << slot;
+            }
+            std::cerr << '\n';
+            return false;
+        }
+        const std::vector<std::string> drop_rows =
+            mar189::provenance_rows(*dropped.session.project());
+        if (std::any_of(drop_rows.begin(), drop_rows.end(), [](const std::string& row) {
+                return row.rfind("shadow ", 0) == 0;
+            })) {
+            std::cerr << "R5(drop): the deleted identity's provenance row must be gone.\n";
+            return false;
+        }
+        std::vector<std::string> kept_without_shadow;
+        for (const std::string& row : kept_rows) {
+            if (row.rfind("shadow ", 0) != 0) {
+                kept_without_shadow.push_back(row);
+            }
+        }
+        std::vector<std::string> drop_without_paths(drop_rows.begin() + 2, drop_rows.end());
+        std::vector<std::string> kept_without_paths(
+            kept_without_shadow.begin() + 2, kept_without_shadow.end());
+        if (!mar189::expect_rows_equal(
+                drop_without_paths, kept_without_paths, "R5(drop, other rows)")) {
+            return false;
+        }
+    }
+
+    // ---- R6 -- rollback after a SUCCESSFUL adoption ---------------------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r6", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R6")) {
+            return false;
+        }
+        const mar189::PreCommitWitness before = mar189::capture(scenario.session);
+        const std::vector<std::string> slots_before =
+            mar189::slot_names(*scenario.session.base_skeleton_document());
+        if (std::find(slots_before.begin(), slots_before.end(), "shadow") ==
+            slots_before.end()) {
+            std::cerr << "R6: the ORIGINAL skeleton must carry the slot this case looks "
+                         "for; it does not.\n";
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        marrow::editor::PsdReimportCommitResult result;
+        {
+            const mar189::ScopedCommitFailpoint installed(
+                mar189::fail_after(PsdCommitStep::UpdateProvenance));
+            result = marrow::editor::commit_psd_reimport(
+                scenario.session, scenario.plan, options);
+        }
+        if (result || !result.rolled_back || !result.rollback_error.empty()) {
+            std::cerr << "R6: a failure after adoption must roll back cleanly; ok="
+                      << result.ok << " rolled_back=" << result.rolled_back
+                      << " rollback_error='" << result.rollback_error << "'.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before.bytes, mar189::bundle_bytes(*scenario.session.project()), "R6")) {
+            return false;
+        }
+        const std::vector<std::string> slots_after =
+            mar189::slot_names(*scenario.session.base_skeleton_document());
+        if (slots_after != slots_before) {
+            std::cerr << "R6: the session must expose the ORIGINAL skeleton's slots after "
+                         "the rollback.\n";
+            return false;
+        }
+        if (std::find(slots_after.begin(), slots_after.end(), "shadow") == slots_after.end()) {
+            std::cerr << "R6: 'shadow' exists only in the original skeleton and must be "
+                         "back in the session's runtime source.\n";
+            return false;
+        }
+        // The rollback ledger is what says WHICH undo steps ran. The byte map says
+        // something is wrong; only this says where.
+        if (result.steps_rolled_back.empty()) {
+            std::cerr << "R6: the rollback ledger must record the steps it undid.\n";
+            return false;
+        }
+    }
+
+    // ---- R7 -- the journal exists in flight, and is gone after ----------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r7", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R7")) {
+            return false;
+        }
+        const mar189::PreCommitWitness before = mar189::capture(scenario.session);
+        std::vector<std::string> in_flight;
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+        marrow::editor::PsdReimportCommitResult result;
+        {
+            const std::filesystem::path directory = scenario.directory;
+            const mar189::ScopedCommitFailpoint installed(
+                [&in_flight, &directory](PsdCommitStep reached) -> std::string {
+                    if (reached != PsdCommitStep::BackupSkeleton) {
+                        return {};
+                    }
+                    // The seam can OBSERVE as well as inject, and this is the only
+                    // mechanism in the design that can see the journal at all: after
+                    // the commit, either outcome has removed it.
+                    std::error_code error;
+                    for (std::filesystem::recursive_directory_iterator
+                             iterator(directory, error),
+                         end;
+                         iterator != end;
+                         iterator.increment(error)) {
+                        if (error) {
+                            break;
+                        }
+                        in_flight.push_back(iterator->path().filename().string());
+                    }
+                    return "observed";
+                });
+            result = marrow::editor::commit_psd_reimport(
+                scenario.session, scenario.plan, options);
+        }
+        std::vector<std::string> manifests;
+        std::vector<std::string> backups;
+        for (const std::string& name : in_flight) {
+            if (name.rfind(".marrow-psd-journal-", 0) == 0) {
+                manifests.push_back(name);
+            } else if (name.size() > 4 && name.rfind(".bak") == name.size() - 4) {
+                backups.push_back(name);
+            }
+        }
+        if (manifests.size() != 1U) {
+            std::cerr << "R7: exactly one journal manifest must exist while the commit is "
+                         "in flight; saw "
+                      << manifests.size() << ".\n";
+            return false;
+        }
+        // FOUR, not three. The design predicted three on the reading that the
+        // injection interrupts `BackupSkeleton`; the seam fires AFTER a step's body
+        // succeeds -- which is the whole of what AC3 asks for -- so the skeleton's
+        // own backup already exists when the callback runs. Measured, and the
+        // prediction corrected rather than the assertion weakened.
+        if (backups.size() != 4U) {
+            std::cerr << "R7: four backups must exist after BackupSkeleton; saw "
+                      << backups.size() << ":";
+            for (const std::string& name : backups) {
+                std::cerr << ' ' << name;
+            }
+            std::cerr << '\n';
+            return false;
+        }
+        if (result || !result.rolled_back) {
+            std::cerr << "R7: the injected failure must roll back.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before.bytes, mar189::bundle_bytes(*scenario.session.project()), "R7")) {
+            return false;
+        }
+        const std::vector<std::string> residue =
+            mar189::journal_residue_scan(*scenario.session.project());
+        if (!residue.empty()) {
+            std::cerr << "R7: the journal must be gone after the rollback; found:\n";
+            for (const std::string& path : residue) {
+                std::cerr << "  " << path << '\n';
+            }
+            return false;
+        }
+    }
+
+    // ---- R8 -- refusals without side effects ---------------------------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "r8", initial_tree, candidate_tree, &scenario) ||
+            !mar189::plan_scenario(&scenario, "R8")) {
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        marrow::editor::PsdReimportCommitOptions options;
+        options.project_path = scenario.project_path;
+
+        struct Refusal {
+            const char* label;
+            marrow::editor::PsdReimportPlan plan;
+            std::string expected;
+        };
+        marrow::editor::PsdReimportPlan errored = scenario.plan;
+        errored.error = marrow::editor::PsdReimportPlanError{
+            scenario.candidate_psd, "synthetic planning failure"};
+        marrow::editor::PsdReimportPlan no_skeleton = scenario.plan;
+        no_skeleton.staged_skeleton_path.clear();
+        marrow::editor::PsdReimportPlan gone = scenario.plan;
+        gone.staged_skeleton_path = scenario.staging_root / "removed.mskl";
+
+        const std::vector<Refusal> refusals = {
+            {"errored plan", errored,
+             "ValidateRequest: the plan carries an error (synthetic planning failure)"},
+            {"empty staged skeleton", no_skeleton,
+             "ValidateRequest: the plan's staged_skeleton_path is empty"},
+            {"missing staged skeleton", gone,
+             "ValidateRequest: the plan's staged_skeleton_path ('" +
+                 (scenario.staging_root / "removed.mskl").generic_string() +
+                 "') no longer exists"},
+        };
+        for (const Refusal& refusal : refusals) {
+            const marrow::editor::PsdReimportCommitResult result =
+                marrow::editor::commit_psd_reimport(scenario.session, refusal.plan, options);
+            if (result || result.error != refusal.expected) {
+                std::cerr << "R8(" << refusal.label << "): expected '" << refusal.expected
+                          << "'; got ok=" << result.ok << " error='" << result.error << "'.\n";
+                return false;
+            }
+            if (!result.steps_executed.empty()) {
+                std::cerr << "R8(" << refusal.label
+                          << "): a refusal at ValidateRequest must execute no step.\n";
+                return false;
+            }
+            if (!mar189::expect_bundle_equal(
+                    before, mar189::bundle_bytes(*scenario.session.project()),
+                    std::string("R8(") + refusal.label + ")")) {
+                return false;
+            }
+        }
+
+        marrow::editor::EditorSession empty_session;
+        const marrow::editor::PsdReimportCommitResult no_project =
+            marrow::editor::commit_psd_reimport(empty_session, scenario.plan, options);
+        if (no_project ||
+            no_project.error != "ValidateRequest: no editor project is open") {
+            std::cerr << "R8(no project): expected 'ValidateRequest: no editor project is "
+                         "open'; got ok="
+                      << no_project.ok << " error='" << no_project.error << "'.\n";
+            return false;
+        }
+
+        // The state of the ONLY project fixture in this tree, and inside AC6's
+        // "missing inputs": a project that never came from a PSD has no layer
+        // directory to replace and no stored identity to preserve against.
+        Scenario bare;
+        if (!mar189::open_scenario(scratch, "r8_bare", initial_tree, candidate_tree, &bare)) {
+            return false;
+        }
+        {
+            const marrow::editor::ProjectLoadResult loaded =
+                marrow::editor::load_project(bare.project_path);
+            if (!loaded) {
+                std::cerr << "R8(no provenance): the project did not load.\n";
+                return false;
+            }
+            marrow::editor::ProjectData stripped = *loaded.project;
+            stripped.editor_metadata.import_sources.reset();
+            if (!marrow::editor::save_project(stripped, bare.project_path)) {
+                std::cerr << "R8(no provenance): the stripped project could not be saved.\n";
+                return false;
+            }
+        }
+        if (!bare.session.open(bare.project_path)) {
+            std::cerr << "R8(no provenance): the stripped project did not open.\n";
+            return false;
+        }
+        marrow::editor::PsdReimportCommitOptions bare_options;
+        bare_options.project_path = bare.project_path;
+        const marrow::editor::PsdReimportCommitResult bare_result =
+            marrow::editor::commit_psd_reimport(bare.session, scenario.plan, bare_options);
+        const std::string expected_bare =
+            "ValidateRequest: the project carries no PSD provenance, so there is no layer "
+            "directory to replace and no stored identity to preserve against";
+        if (bare_result || bare_result.error != expected_bare) {
+            std::cerr << "R8(no provenance): expected '" << expected_bare << "'; got ok="
+                      << bare_result.ok << " error='" << bare_result.error << "'.\n";
+            return false;
+        }
+    }
+
+    std::cout << "MAR-189 R3-R8: an injected failure after each of the fifteen steps rolls "
+                 "the bundle back byte-for-byte and leaves the session's runtime source and "
+                 "provenance untouched, except after CleanJournal where the completed "
+                 "reimport stands; an unremovable backup is reported as residue rather than "
+                 "rolled back; overlays survive a commit element-wise in memory while "
+                 "provenance is rewritten in the plan's order with project-relative paths; "
+                 "preserve=false drops exactly one identity and one slot; a rollback after a "
+                 "successful adoption restores the original skeleton to the session; the "
+                 "journal exists in flight and is gone after; and five refusals each name "
+                 "their cause and touch nothing.\n";
+    return true;
+}
+
+namespace mar189 {
+
+/** @brief Dispatches one JSON command against a session, UI-free. */
+marrow::editor::AgentDispatchResult dispatch(
+    marrow::editor::EditorSession& session,
+    marrow::editor::AgentControlState& control,
+    const std::string& command) {
+    const marrow::runtime::json::LoadResult parsed =
+        marrow::runtime::json::parse_document(command);
+    if (!parsed) {
+        marrow::editor::AgentDispatchResult failed;
+        failed.message = "the command did not parse: " + parsed.error->message;
+        return failed;
+    }
+    marrow::editor::AgentCommandContext context{session, control};
+    marrow::editor::AgentCommandDispatcher dispatcher;
+    return dispatcher.dispatch(context, parsed.document->root);
+}
+
+const marrow::runtime::json::Value* member(
+    const marrow::runtime::json::Value& object,
+    std::string_view name) {
+    return object.is_object() ? marrow::runtime::json::find_member(object, name) : nullptr;
+}
+
+}  // namespace mar189
+
+/**
+ * @brief A1-A6 -- the agent operation and its approval, on disposable bundles.
+ *
+ * These drive `AgentCommandDispatcher` and `apply_agent_review` DIRECTLY rather
+ * than through the C ABI, because `MarrowProject` is opaque outside `marrow_c.cpp`
+ * and approval needs the session and the review queue. `agent_dispatch_smoke`
+ * keeps the ABI-level dry-run and review invocations and owns A7.
+ */
+bool validate_mar189_agent_operation(const std::filesystem::path& scratch) {
+    using mar189::ByteMap;
+    using mar189::Scenario;
+
+    const std::vector<mar188::SynthLayer> initial_tree = mar188::fixture_tree();
+    const std::vector<mar188::SynthLayer> candidate_tree = {
+        {{"torso"}, "arm_l", 4, 20, 12, 8, 41U, 51U, 61U},
+        {{"torso"}, "body", 16, 12, 20, 24, 71U, 81U, 91U},
+    };
+
+    // ---- A1 -- a dry run returns a plan and writes nothing -------------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "a1", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        if (!scenario.session.open(scenario.project_path)) {
+            std::cerr << "A1: the project did not open.\n";
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        marrow::editor::AgentControlState control;
+        const std::filesystem::path staging = scratch / "a1_staging";
+        const marrow::editor::AgentDispatchResult result = mar189::dispatch(
+            scenario.session,
+            control,
+            "{\"op\":\"import.psd_layers\",\"args\":{\"input\":\"" +
+                scenario.candidate_psd.generic_string() + "\",\"staging_root\":\"" +
+                staging.generic_string() + "\",\"dry_run\":true}}");
+        if (!result.ok) {
+            std::cerr << "A1: the dry run must succeed; got '" << result.message << "'.\n";
+            return false;
+        }
+        const marrow::runtime::json::Value* plan =
+            mar189::member(result.scene_delta, "plan");
+        if (plan == nullptr) {
+            std::cerr << "A1: the dry run must return a 'plan' object.\n";
+            return false;
+        }
+        const marrow::runtime::json::Value* layers = mar189::member(*plan, "layers");
+        if (layers == nullptr || !layers->is_array() || layers->as_array().empty()) {
+            std::cerr << "A1: the plan must carry layer rows.\n";
+            return false;
+        }
+        for (const char* count : {"added", "updated", "missing"}) {
+            const marrow::runtime::json::Value* value = mar189::member(*plan, count);
+            if (value == nullptr || !value->is_number()) {
+                std::cerr << "A1: the plan must carry the '" << count << "' count.\n";
+                return false;
+            }
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "A1")) {
+            return false;
+        }
+        // The staging root is removed in both directions -- a dry run leaves
+        // nothing behind, and a queued review does not own a filesystem lifetime
+        // across an unbounded human wait.
+        std::error_code error;
+        if (std::filesystem::exists(staging, error)) {
+            for (std::filesystem::directory_iterator iterator(staging, error), end;
+                 iterator != end;
+                 iterator.increment(error)) {
+                std::cerr << "A1: the dry run left '"
+                          << iterator->path().generic_string() << "' behind.\n";
+                return false;
+            }
+        }
+    }
+
+    // ---- A2 -- an output naming a non-project path is refused ---------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "a2", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        if (!scenario.session.open(scenario.project_path)) {
+            std::cerr << "A2: the project did not open.\n";
+            return false;
+        }
+        marrow::editor::AgentControlState control;
+        const marrow::editor::AgentDispatchResult result = mar189::dispatch(
+            scenario.session,
+            control,
+            "{\"op\":\"import.psd_layers\",\"args\":{\"input\":\"" +
+                scenario.candidate_psd.generic_string() +
+                "\",\"output\":\"/tmp/mar189_not_the_project.mskl\",\"dry_run\":true}}");
+        if (result.ok || result.error_code != "not_project_bundle") {
+            std::cerr << "A2: an output outside the project bundle must be refused with "
+                         "not_project_bundle; got ok="
+                      << result.ok << " code='" << result.error_code << "' message='"
+                      << result.message << "'.\n";
+            return false;
+        }
+        if (result.message.find("replaces the project's own bundle") == std::string::npos) {
+            std::cerr << "A2: the refusal must say why; got '" << result.message << "'.\n";
+            return false;
+        }
+    }
+
+    // ---- A3 -- a staging root outside the whitelist is refused ---------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "a3", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        if (!scenario.session.open(scenario.project_path)) {
+            std::cerr << "A3: the project did not open.\n";
+            return false;
+        }
+        marrow::editor::AgentControlState control;
+        // `agent_path_allowed` whitelists the project directory, the export
+        // directory, `/tmp` and `/private/tmp`. A user's home is none of them.
+        const marrow::editor::AgentDispatchResult result = mar189::dispatch(
+            scenario.session,
+            control,
+            "{\"op\":\"import.psd_layers\",\"args\":{\"input\":\"" +
+                scenario.candidate_psd.generic_string() +
+                "\",\"staging_root\":\"/usr/local/mar189_forbidden\",\"dry_run\":true}}");
+        if (result.ok || result.error_code != "forbidden_path" ||
+            result.message != "Staging root is outside the agent whitelist.") {
+            std::cerr << "A3: expected forbidden_path for a staging_root outside the "
+                         "whitelist; got ok="
+                      << result.ok << " code='" << result.error_code << "' message='"
+                      << result.message << "'.\n";
+            return false;
+        }
+    }
+
+    // ---- A4/A5 -- a review is queued with a digest, and approval commits -----
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "a4", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        if (!scenario.session.open(scenario.project_path)) {
+            std::cerr << "A4: the project did not open.\n";
+            return false;
+        }
+        const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+        marrow::editor::AgentControlState control;
+        const std::string command =
+            "{\"op\":\"import.psd_layers\",\"args\":{\"input\":\"" +
+            scenario.candidate_psd.generic_string() + "\",\"staging_root\":\"" +
+            (scratch / "a4_staging").generic_string() + "\",\"dry_run\":false}}";
+        const marrow::editor::AgentDispatchResult queued =
+            mar189::dispatch(scenario.session, control, command);
+        if (!queued.ok || !queued.requires_review) {
+            std::cerr << "A4: a non-dry run must queue a review; got ok=" << queued.ok
+                      << " message='" << queued.message << "'.\n";
+            return false;
+        }
+        if (control.review_queue.size() != 1U) {
+            std::cerr << "A4: exactly one review must be queued; got "
+                      << control.review_queue.size() << ".\n";
+            return false;
+        }
+        const marrow::editor::AgentReviewRequest& request = control.review_queue.front();
+        if (request.kind != marrow::editor::AgentReviewKind::ImportOrPack ||
+            request.plan_digest.empty() || request.input_path.empty()) {
+            std::cerr << "A4: the queued request must carry the input path and a "
+                         "non-empty plan digest; digest='"
+                      << request.plan_digest << "' input='"
+                      << request.input_path.generic_string() << "'.\n";
+            return false;
+        }
+        if (!request.allowed) {
+            std::cerr << "A4: the project's own bundle must pass the whitelist; the "
+                         "request was rejected with '"
+                      << request.message << "'.\n";
+            return false;
+        }
+        if (!mar189::expect_bundle_equal(
+                before, mar189::bundle_bytes(*scenario.session.project()), "A4")) {
+            return false;
+        }
+
+        // A5 -- approval commits.
+        const std::uint64_t review_id = request.id;
+        const marrow::editor::AgentDispatchResult applied = marrow::editor::apply_agent_review(
+            scenario.session, control, review_id);
+        if (!applied.ok) {
+            std::cerr << "A5: approving an allowed request must commit; got '"
+                      << applied.message << "' (" << applied.error_code << ").\n";
+            return false;
+        }
+        if (!control.review_queue.empty()) {
+            std::cerr << "A5: the request must be gone from the queue after a commit.\n";
+            return false;
+        }
+        const std::vector<std::string> provenance =
+            mar189::provenance_rows(*scenario.session.project());
+        if (provenance.empty() ||
+            provenance.front() !=
+                "source=" +
+                    marrow::editor::project_relative_path(
+                        scenario.project_path, scenario.candidate_psd)
+                        .generic_string()) {
+            std::cerr << "A5: the committed provenance must name the approved PSD; got '"
+                      << (provenance.empty() ? std::string("<none>") : provenance.front())
+                      << "'.\n";
+            return false;
+        }
+        const std::string committed = mar188::read_all(
+            scenario.session.project()->resolved_skeleton_path());
+        const std::string original = before.at(
+            scenario.session.project()
+                ->resolved_skeleton_path()
+                .lexically_normal()
+                .generic_string());
+        if (committed == original) {
+            std::cerr << "A5: the skeleton must have been replaced.\n";
+            return false;
+        }
+    }
+
+    // ---- A6 -- approval boundaries ------------------------------------------
+    {
+        Scenario scenario;
+        if (!mar189::open_scenario(scratch, "a6", initial_tree, candidate_tree, &scenario)) {
+            return false;
+        }
+        if (!scenario.session.open(scenario.project_path)) {
+            std::cerr << "A6: the project did not open.\n";
+            return false;
+        }
+        marrow::editor::AgentControlState control;
+
+        // (i) an unknown id.
+        const marrow::editor::AgentDispatchResult unknown =
+            marrow::editor::apply_agent_review(scenario.session, control, 4242U);
+        if (unknown.ok || unknown.error_code != "unknown_review") {
+            std::cerr << "A6(unknown): expected unknown_review; got ok=" << unknown.ok
+                      << " code='" << unknown.error_code << "'.\n";
+            return false;
+        }
+
+        // (ii) a request the whitelist rejected. `allowed` is the verdict recorded
+        // at enqueue time, so the check cannot be satisfied by re-deriving it.
+        {
+            marrow::editor::AgentReviewRequest rejected;
+            rejected.id = 7U;
+            rejected.kind = marrow::editor::AgentReviewKind::ImportOrPack;
+            rejected.op = "import.psd_layers";
+            rejected.input_path = scenario.candidate_psd;
+            rejected.plan_digest = "whatever";
+            rejected.allowed = false;
+            control.review_queue.push_back(rejected);
+            const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+            const marrow::editor::AgentDispatchResult refused =
+                marrow::editor::apply_agent_review(scenario.session, control, 7U);
+            if (refused.ok || refused.error_code != "forbidden_path") {
+                std::cerr << "A6(rejected): approving a whitelist-rejected request must "
+                             "refuse; got ok="
+                          << refused.ok << " code='" << refused.error_code << "'.\n";
+                return false;
+            }
+            if (!mar189::expect_bundle_equal(
+                    before, mar189::bundle_bytes(*scenario.session.project()),
+                    "A6(rejected)")) {
+                return false;
+            }
+            control.review_queue.clear();
+        }
+
+        // (iii) a PSD mutated between review and approval.
+        {
+            const std::string command =
+                "{\"op\":\"import.psd_layers\",\"args\":{\"input\":\"" +
+                scenario.candidate_psd.generic_string() + "\",\"staging_root\":\"" +
+                (scratch / "a6_staging").generic_string() + "\",\"dry_run\":false}}";
+            const marrow::editor::AgentDispatchResult queued =
+                mar189::dispatch(scenario.session, control, command);
+            if (!queued.ok || control.review_queue.size() != 1U) {
+                std::cerr << "A6(changed): the review did not queue.\n";
+                return false;
+            }
+            const std::uint64_t review_id = control.review_queue.front().id;
+            // A layer added and a layer renamed: the ordered row list changes and
+            // the digest with it. A count would not move.
+            const std::vector<mar188::SynthLayer> mutated = {
+                {{"torso"}, "arm_r", 4, 20, 12, 8, 41U, 51U, 61U},
+                {{"torso"}, "body", 16, 12, 20, 24, 71U, 81U, 91U},
+                {{}, "halo", 2, 2, 6, 6, 9U, 9U, 9U},
+            };
+            if (!mar188::write_synthetic_psd(scenario.candidate_psd, 64, 64, mutated)) {
+                std::cerr << "A6(changed): the mutated PSD could not be written.\n";
+                return false;
+            }
+            const ByteMap before = mar189::bundle_bytes(*scenario.session.project());
+            const marrow::editor::AgentDispatchResult refused =
+                marrow::editor::apply_agent_review(scenario.session, control, review_id);
+            if (refused.ok || refused.error_code != "psd_changed_since_review") {
+                std::cerr << "A6(changed): a PSD changed since review must be refused with "
+                             "psd_changed_since_review; got ok="
+                          << refused.ok << " code='" << refused.error_code << "' message='"
+                          << refused.message << "'.\n";
+                return false;
+            }
+            if (!mar189::expect_bundle_equal(
+                    before, mar189::bundle_bytes(*scenario.session.project()),
+                    "A6(changed)")) {
+                return false;
+            }
+            if (control.review_queue.size() != 1U) {
+                std::cerr << "A6(changed): a refused approval must leave the request "
+                             "queued; the queue holds "
+                          << control.review_queue.size() << ".\n";
+                return false;
+            }
+        }
+    }
+
+    std::cout << "MAR-189 A1-A6: a dry run returns the ordered plan with its three counts "
+                 "and leaves both the bundle and the staging root empty; an output outside "
+                 "the project bundle and a staging root outside the whitelist are each "
+                 "refused by code and message; a non-dry run queues one review carrying the "
+                 "input path and a plan digest; approving it commits and empties the queue; "
+                 "and an unknown id, a whitelist-rejected request and a PSD changed since "
+                 "review are each refused without touching a byte.\n";
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1622,6 +3982,26 @@ int main(int argc, char** argv) {
     }
     if (!validate_mar188_reimport_planning(
             std::filesystem::temp_directory_path() / "mar188_plan")) {
+        return 1;
+    }
+    if (!validate_mar189_staged_naming(
+            std::filesystem::temp_directory_path() / "mar189_naming")) {
+        return 1;
+    }
+    if (!validate_mar189_reimport_commit(
+            std::filesystem::temp_directory_path() / "mar189_commit")) {
+        return 1;
+    }
+    if (!validate_mar189_commit_rollback(
+            std::filesystem::temp_directory_path() / "mar189_commit")) {
+        return 1;
+    }
+    // Under `/tmp`, deliberately, and NOT `temp_directory_path()`. On macOS the
+    // latter is `$TMPDIR` (`/var/folders/...`), which `agent_path_allowed`
+    // (`agent_dispatch.cpp:626-629`) does not whitelist -- so an A-case sited there
+    // is refused as a forbidden input path before it can test anything. The two
+    // sets are disjoint, and the safety gate accepts both.
+    if (!validate_mar189_agent_operation("/tmp/mar189_agent")) {
         return 1;
     }
 

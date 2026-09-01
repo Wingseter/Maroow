@@ -12,6 +12,7 @@
 #include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/psd_reimport_plan.hpp"
 #include "marrow/editor/session.hpp"
 
 namespace marrow::editor::agent_detail {
@@ -187,7 +188,21 @@ AgentDispatchResult enqueue_review(
     std::filesystem::path target_path,
     bool binary_output,
     std::vector<std::filesystem::path> target_paths = {},
-    std::string args_summary = {});
+    std::string args_summary = {},
+    std::filesystem::path input_path = {},
+    std::string plan_digest = {});
+
+/// @brief MAR-189. Plans a reimport of the session's own bundle into @p staging_root.
+/// @return Empty on success; otherwise the reason planning was refused.
+std::string plan_project_reimport(
+    EditorSession& session,
+    const std::filesystem::path& psd_path,
+    const std::filesystem::path& staging_root,
+    PsdReimportPlan* plan_out);
+/// @brief MAR-189. The ordered `(identity, change)` row list a reviewer saw.
+std::string psd_plan_digest(const PsdReimportPlan& plan);
+/// @brief MAR-189. The plan as a JSON payload for `scene_delta`.
+json::Value psd_plan_value(const PsdReimportPlan& plan, const std::string& digest);
 
 json::Value operation_specs_value();
 json::Value slots_value(const marrow::runtime::SkeletonData& skeleton);
