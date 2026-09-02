@@ -145,6 +145,10 @@ int run_headless_smoke(const Options& options) {
         ImGui::DestroyContext();
         return 1;
     }
+    if (!validate_mar190_psd_reimport_shell_smoke()) {
+        ImGui::DestroyContext();
+        return 1;
+    }
 
     const bool passed =
         validate_shell_foundation_smoke(shell_state, options) &&

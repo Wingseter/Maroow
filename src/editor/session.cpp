@@ -1149,6 +1149,8 @@ struct EditorSession::Impl {
     PreviewController preview;
     std::vector<HistoryEntry> undo_entries;
     std::vector<HistoryEntry> redo_entries;
+    /// @brief A redo stack set aside across a speculative edit. One slot.
+    std::vector<HistoryEntry> stashed_redo;
     std::optional<ActiveTransaction> active_transaction;
     std::uint64_t next_transaction_id{1U};
     std::string saved_serialized_project;
@@ -2542,6 +2544,36 @@ SessionResult EditorSession::undo() {
     return result;
 }
 
+SessionResult EditorSession::revert_last_edit() {
+    // `undo()` without the redo push. Same guards, deliberately: a revert during
+    // an active transaction is as wrong as an undo during one, and
+    // `clear_history()` carries the identical guard.
+    if (impl_->active_transaction.has_value()) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::TransactionAlreadyActive,
+                "Cannot revert an edit while an edit transaction is active.")};
+    }
+    if (impl_->undo_entries.empty()) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::HistoryEmpty,
+                "There is no editor action to revert.")};
+    }
+    Impl::HistoryEntry entry = impl_->undo_entries.back();
+    const SessionResult result = impl_->apply_history(entry, true);
+    if (!result) {
+        return result;
+    }
+    impl_->undo_entries.pop_back();
+    // The entry is DROPPED here rather than pushed onto `redo_entries`. That one
+    // absent line is the whole difference from `undo()`, and it is what keeps a
+    // failed rollback from arming a Redo that would replay it.
+    return result;
+}
+
 SessionResult EditorSession::redo() {
     if (impl_->active_transaction.has_value()) {
         return SessionResult{
@@ -2581,6 +2613,26 @@ std::string_view EditorSession::redo_label() const noexcept {
         ? std::string_view{}
         : std::string_view(impl_->redo_entries.back().descriptor.label);
 }
+void EditorSession::stash_redo_stack() noexcept {
+    if (impl_->active_transaction.has_value()) {
+        return;
+    }
+    impl_->stashed_redo = std::move(impl_->redo_entries);
+    impl_->redo_entries.clear();
+}
+
+void EditorSession::restore_stashed_redo() noexcept {
+    if (impl_->active_transaction.has_value()) {
+        return;
+    }
+    impl_->redo_entries = std::move(impl_->stashed_redo);
+    impl_->stashed_redo.clear();
+}
+
+void EditorSession::drop_redo_stash() noexcept {
+    impl_->stashed_redo.clear();
+}
+
 void EditorSession::clear_history() noexcept {
     if (impl_->active_transaction.has_value()) {
         return;

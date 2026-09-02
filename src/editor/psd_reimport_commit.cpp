@@ -844,6 +844,11 @@ bool CommitRun::update_provenance() {
     descriptor.kind = EditKind::EditProperty;
     descriptor.label = "Update PSD import provenance";
     descriptor.impacts = EditImpact::Project;
+    // The user's redo stack, set aside. Committing this edit clears it, and if
+    // the commit later fails the rollback must give it back -- a failed reimport
+    // that silently destroys a redo branch the user built beforehand is AC3's
+    // "history unchanged" broken just as surely as an armed Redo is.
+    session_.stash_redo_stack();
     EditorSession::EditTransaction transaction = session_.begin_edit(descriptor);
     if (!transaction) {
         fail(PsdCommitStep::UpdateProvenance, transaction.error()->format());
@@ -916,9 +921,29 @@ void CommitRun::rollback() {
     // files coming back does not take it out again -- the provenance would name
     // the candidate PSD while the bundle on disk is the original one.
     if (options_.update_provenance && executed(PsdCommitStep::UpdateProvenance)) {
-        const SessionResult undone = session_.undo();
+        // `revert_last_edit()`, NOT `undo()`. A rollback's meaning is "this never
+        // happened"; `undo()`'s is "the user stepped back one", and it therefore
+        // pushes the entry onto the redo stack. Using it here left a failed
+        // reimport with Redo armed, so pressing it re-applied the provenance
+        // update while the files were rolled back -- provenance naming the
+        // candidate PSD over the original bundle. MAR-190's V8 measured it on
+        // this arm; AC3 says a commit failure leaves HISTORY unchanged.
+        //
+        // `clear_history()` would also have removed the entry, and would have
+        // destroyed the user's whole redo stack with it -- fixing this by
+        // breaking the guarantee one story out.
+        // RESTORE FIRST, then revert. The order is not cosmetic: `restore_stashed_redo`
+        // ASSIGNS `redo_entries`, so doing it second would overwrite whatever the
+        // revert left behind -- and that masks the difference between a correct
+        // `revert_last_edit()` and a redoable `undo()` entirely. Measured: with the
+        // restore last, an inversion swapping in `undo()` did not bite, because both
+        // spellings produced the same final stack. Restoring first makes each
+        // primitive carry its own weight -- an `undo()` here now pushes its entry ON
+        // TOP of the user's restored branch, which V8 sees.
+        session_.restore_stashed_redo();
+        const SessionResult undone = session_.revert_last_edit();
         if (!undone && result_.rollback_error.empty()) {
-            result_.rollback_error = "the provenance edit could not be undone (" +
+            result_.rollback_error = "the provenance edit could not be reverted (" +
                 undone.error->format() + "); reload the project";
         }
         if (!rollback_advance(PsdCommitStep::UpdateProvenance)) {
@@ -1016,6 +1041,10 @@ PsdReimportCommitResult CommitRun::run() {
     // distinguishes it -- which is why the sweep is a table of per-step
     // expectations and not a uniform `!ok`.
     (void)advance(PsdCommitStep::CleanJournal);
+    // The reimport stands, so the redo branch it displaced is genuinely gone --
+    // a committed edit invalidates it, exactly as any other edit would. Dropping
+    // the stash here keeps a later rollback from restoring a stale one.
+    session_.drop_redo_stash();
     result_.ok = true;
     return std::move(result_);
 }

@@ -17,6 +17,7 @@
 #include "timeline_controller.hpp"
 #include "shell_asset_watch.hpp"
 #include "shell_file_paths.hpp"
+#include "shell_psd_reimport.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_theme.hpp"
@@ -982,6 +983,45 @@ void draw_project_window(ShellState* state) {
     ImGui::SameLine();
     ImGui::Checkbox("Export .mbin", &state->export_binary_output);
 
+    // MAR-190. Shown only when the project remembers a PSD import: with no
+    // provenance there is nothing to diff a candidate against, and every layer
+    // would plan as `Added`. P1 witnesses that a provenance-free project draws
+    // no button at all.
+    if (state->session.has_project() &&
+        state->session.project()->editor_metadata.import_sources.has_value() &&
+        state->session.project()->editor_metadata.import_sources->psd.has_value()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Reimport PSD...##psd_reimport_open")) {
+            const marrow::editor::ProjectData& project = *state->session.project();
+            const marrow::editor::PsdImportProvenance& stored =
+                *project.editor_metadata.import_sources->psd;
+            marrow::editor::PsdReimportPlanOptions options;
+            options.psd_path = project.resolve_path(stored.source_path);
+            // Per-process, at the point the directory is named. A `static`
+            // counter is unique within one process only, so two editors under a
+            // shared root both pick `plan-1` and the second is refused for a
+            // reason its user cannot act on.
+            options.staging_root = psd_reimport_staging_root();
+            // The TARGET's own names, so the staged atlas's `image` member still
+            // names the texture beside it after a byte copy. Left at the
+            // planner's defaults the commit is refused at `ValidateRequest`.
+            options.staged_skeleton_filename =
+                project.resolved_skeleton_path().filename().generic_string();
+            options.staged_atlas_filename =
+                project.resolved_atlas_paths().empty()
+                ? std::string()
+                : project.resolved_atlas_paths().front().filename().generic_string();
+            marrow::editor::PsdReimportPlan plan =
+                marrow::editor::plan_psd_reimport(project, options);
+            if (!plan) {
+                state->status_message = plan.error->format();
+            } else {
+                begin_psd_reimport_review(
+                    state, plan, options.staging_root, options.psd_path);
+            }
+        }
+    }
+
     // Project identity card (surface-card tonal lift, no border).
     {
         namespace t = marrow::editor::shell::theme;
@@ -1082,6 +1122,17 @@ void draw_project_window(ShellState* state) {
     }
 
     ImGui::End();
+
+    // THE call site -- the only one in the tree outside the module that defines
+    // it. Drawn from inside `draw_project_window`, which BOTH frame bodies
+    // already call unconditionally, so no frame-body edit is needed and there is
+    // no duplicated list for a gate to keep in sync. `CheckFrameBodies.cmake`
+    // cannot see this function at all (its regex matches only `draw_*_window`),
+    // so Task 9's single-call-site grep is the structural guard instead.
+    //
+    // AFTER `ImGui::End()`, deliberately: a modal is a top-level window, and
+    // opening one while the Project window is still current would nest it.
+    draw_psd_reimport_modal(state);
 }
 
 void draw_runtime_window(const ShellState& state) {

@@ -188,6 +188,31 @@
   changed since review are each refused without touching a byte (A1-A6):
   `./build/marrow_psd_import_smoke` -- now also `ctest --test-dir build -R marrow.psd_import_smoke`,
   which it was not before this story
+- MAR-190's PSD reimport review UI, model and shell. The model layer, UI-free: the
+  three review sections partition the plan and preserve its ascending identity
+  order, confirmation is refused for a plan carrying a planner error and for one
+  with nothing to do, the derived commit plan forgets EXACTLY the ticked
+  identities and defaults to none without mutating the review, a PSD that changed
+  under an open review or became unreadable is refused as Stale or PlanFailed, a
+  confirmed reimport commits the full step ledger and keeps exactly the provenance
+  rows that were not forgotten while every other authored field stays
+  byte-identical, an injected failure after each of the FIFTEEN commit steps is
+  reported as CommitFailed naming that step with the ledger ENDING there (except
+  after `CleanJournal`, where the completed reimport stands), and a redo stack the
+  user already had survives a failed reimport intact and still applies
+  (V1-V9, D1-D2):
+  `./build/marrow_psd_import_smoke assets/fixtures/psd_import_sample.psd assets/fixtures/psd_import_sample_reimport.psd`
+  -- and the shell, on a fixture built by the REAL importer entirely under the temp
+  directory: cancelling a review, closing its modal, a provenance edit that
+  outdates it, a vanished PSD and an injected commit failure each leave the
+  project, its runtime sources, its bytes, its history and the SELECTION unchanged
+  with the staging tree removed (N1-N5); every tracked fixture is byte-identical
+  after the run, asserted to EXIST before it is hashed (W1); and a real mouse opens
+  the modal from the Project window, finds a row in each section, reaches the
+  Forget checkbox inside the modal's reserved control column, ticks it, and
+  confirms -- with Escape measured UNABLE to close the modal, which is the property
+  the `p_open` design rests on (F1-F2):
+  `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -806,6 +831,44 @@ after being written. A mutation whose effect cannot be observed is not a weak
 inversion; it is not an inversion at all, and recording "I7 did not bite" without
 that reasoning would have told the next reader nothing.
 
+### MASKING: a later step overwrites what the mutation changed, so the inversion reports "did not bite"
+
+A sixth degenerate shape, and it is none of the five already catalogued -- not
+*fails on correct code*, not *passes on unchanged code*, not a *provable no-op*,
+not *self-satisfying*, not a *misplaced invariant*.
+
+**The mutation IS applied and DOES change behaviour.** A later step then
+overwrites the state it affected, so both variants produce identical observable
+results. The inversion reports *"DID NOT BITE"*, which reads as **this clause is
+redundant** when the truth is **this clause is unobservable from here**. Those two
+readings lead to opposite actions: the first says delete the clause, the second
+says fix the code around it.
+
+**A provable no-op differs and the distinction is worth holding.** In a no-op the
+mutation cannot change anything -- two names for one object, nothing cross-reads.
+Under masking the mutation genuinely does something and something else undoes it.
+The no-op is a defect in the *inversion*; masking is a defect in the *code's
+ordering*, and it is the code that has to move.
+
+**Measured in MAR-190.** A rollback called `revert_last_edit()` (drop the entry)
+and then `restore_stashed_redo()` (put the user's branch back). An inversion
+swapping in `undo()` -- which PUSHES a redo entry -- did not bite: `restore_stashed_redo`
+**assigns** `redo_entries`, so it overwrote whatever the revert had left, and both
+spellings produced the same final stack. Reordering to restore FIRST made each
+primitive carry its own weight, and the same inversion then reddened the case by
+name (redo `1 -> 2`).
+
+**The diagnosis is the part that is not obvious: two CORRECT components in the
+wrong order made each other unobservable.** Neither function was wrong. A reviewer
+hunting the bug would have read both, found nothing, and concluded the inversion
+was weak. Only the sequence was at fault.
+
+- **Suspect masking whenever an inversion aimed at a real behavioural difference
+  reports "did not bite".** Before deleting the clause, ask what runs *after* the
+  mutated line and whether it assigns -- rather than merges into -- the same state.
+- **Comment the ordering at the site.** An order that looks arbitrary and is not is
+  exactly what the next refactorer tidies away, and the tidy-up is silent.
+
 ### A suite that shares a fixed scratch path is green only while nobody else runs it
 
 Found by review during MAR-189, and the way it was found is the point:
@@ -1072,11 +1135,28 @@ committed to that file in between. Nothing in the edit was wrong. The base it wa
 applied to was.
 
 **The detector is free, and it is the reason this was caught at all.** *On an
-append-only edit, a non-zero deletion count in `git diff --numstat` is always a
-bug.* No judgement, no cost, works every time. Run it after **every** edit to a
-file another story is touching, and re-read the file immediately before each
-edit rather than relying on a read from earlier in the task. Better still, on a
-contended file, make the edit through a tool that reads from disk at write time.
+append-only edit, a non-zero deletion count in `git diff --numstat` is a SIGNAL
+TO INVESTIGATE -- never a verdict.* No judgement, no cost, works every time. Run
+it after **every** edit to a file another story is touching, and re-read the file
+immediately before each edit rather than relying on a read from earlier in the
+task. Better still, on a contended file, make the edit through a tool that reads
+from disk at write time.
+
+**"Always a bug" is how this entry was first written, and that phrasing is itself
+a hazard.** The same number means two opposite things: *I clobbered someone*, and
+*someone else is mid-refactor in a file I share*. Only the first wants a repair.
+The story that found this hazard then met a **19-deletion** diff against HEAD an
+hour later; its post-incident reflex said *I did it again*, and reconstructing
+"HEAD + my hunks" would have **destroyed a live refactor** another agent was in
+the middle of. The detector fired correctly and the verdict would have been wrong.
+
+**A free detector with a confident verdict attached becomes a reflex, and a reflex
+fires on the false positives too.** So the disambiguator is part of the rule, not
+an optional follow-up: **read the deleted lines and establish whether they are
+yours** before repairing anything. Deletions that are your own text, or that
+replace a construct you can see the other story rewriting, are theirs to keep --
+`git log -1 --format=%s` and a glance at the surrounding hunk answer it in
+seconds.
 
 **A red run is evidence only once the TREE is known to be what you think it is** --
 not merely once the build is sound. This is the sharpening the incident forced.
@@ -1406,6 +1486,150 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-190 Add the PSD Reimport Review UI Validation Results
+
+Measured at `435250e`. Baselines re-derived at Task 0 and again before the commit.
+
+### The finding that changed the product, not just the tests
+
+**AC2's word "preserved" does not mean what the design assumed, and the UI would
+have said so.** `preserve` is read in exactly two places. `prune_unpreserved`
+(`psd_reimport_commit.cpp`) erases a `Missing` layer's slot from the staged
+skeleton -- but against ANY plan the real importer produces it never fires, because
+`build_skeleton_document` assigns `(*root)["slots"]` wholesale from the newly
+parsed PSD and erases `skins` (`psd_import.cpp:1040-1041`), so the slot is already
+gone. The sole observable is `provenance_from_plan`, which keeps or drops the
+layer's row in `$.editor.import_sources.psd`.
+
+So a `Missing` layer's slot and attachment are removed by the reimport **in either
+direction**. The checkbox governs only whether the project keeps REMEMBERING the
+mapping -- and, downstream, whether a layer that returns arrives as `Updated` or as
+a brand-new `Added` (`psd_reimport_plan.cpp:242-247,288-293`).
+
+Three consequences, all shipped:
+
+- The checkbox reads **`Forget`**, never `Delete`. On a modal whose every other row
+  names slots and attachments, `Delete` reads as *"delete the slot"*, and a user
+  leaving it unticked would form a false belief about their art.
+- The `Missing` section carries a body line stating **both** halves: the slot goes
+  either way, and forgetting means a returning layer arrives as a new layer.
+- **D1/D2 assert the provenance row list, not the committed skeleton's slots.** The
+  design's original clauses (*"both Missing layers' slots are present after the
+  commit"*) **fail on correct code** -- the first degenerate shape, inside AC2's own
+  row. **V5 now asserts the committed slot set is IDENTICAL whether a layer was
+  forgotten or preserved**, so the finding is a standing gate rather than a claim.
+
+### AC3 was failing, and fixing it needed two defects separated
+
+V8 measured MAR-190's own AC3 -- *"...commit failure leave the project, runtime
+source, files, selection, and **history** unchanged"* -- failing. The shell cases
+already demanded `redo_count()` unchanged for Cancel and modal close, so the
+commit-failure arm was held to a weaker bar for no principled reason. The first
+version of V8 asserted `redo == before + 1`, which **encoded the defect as a
+requirement**.
+
+| Symptom | Verdict |
+|---|---|
+| `redo_count()` gains an entry after a rolled-back `UpdateProvenance` | **Defect.** The rollback called `session_.undo()`, whose contract is to make the entry redoable. Redo then re-applied the provenance edit over rolled-back files |
+| The user's PRE-EXISTING redo stack is emptied | **A second, different defect.** `push_history` clears redo on every commit (`session.cpp:1393`) -- right for a real edit, wrong for a speculative one that is rolled back |
+| `project_revision()` advances across the revert | **INTENDED.** `apply_history` bumps it whenever the project changed (`session.cpp:1672`), in either direction. It is a change detector, not a state identifier. Recorded as intended, not excused -- *an excused clause and an intended behaviour read identically in a test and mean opposite things* |
+
+**Fixing either defect alone leaves AC3 or AC5 broken.** The fix adds
+`EditorSession::revert_last_edit()` (revert without recording a redo entry, keeping
+`undo()`'s two guards) and a matched `stash_redo_stack()` /
+`restore_stashed_redo()` / `drop_redo_stash()` trio. **`clear_history()` was not
+used**: it wipes both stacks, which fixes AC3 by breaking AC5's *"preserving
+existing unsaved overlays and undo/redo history."*
+
+### Inversions -- actual outcomes, not predictions
+
+| # | Mutation | Outcome |
+|---|---|---|
+| I1 | `Missing` indices appended to `updated` | **BIT** -- V1, ordered section rows |
+| I2 | sections bucketed in REVERSE order | **BIT** -- V1, *"first order difference at index 0"*. The register's original I2 (drop the identity sort) was a **provable no-op**: `plan.layers` is ordered by a `std::set`, so there is no sort to drop |
+| I3a | `build_psd_commit_plan` derives through a `const_cast` | **BIT (after relocation)** -- D2. It did NOT bite in D1, whose forget set is empty, so the clause could not fail there |
+| I4 | AC2's default inverted | **BIT** -- D1, ordered `(identity, preserve)` list |
+| I5 | digest returns a constant | **BIT** -- V3 |
+| I6 | restage root never removed | **BIT** -- V3, by absolute path |
+| I7 | Cancel leaves the review engaged | **BIT** -- N1 |
+| I8 | `BeginPopupModal` given `nullptr` | **BIT** -- N2 |
+| I10 | `clear_history()` on the success path | **BIT** -- D1c |
+| I11 | row `Selectable` loses its explicit width | **BIT** -- F2, as *"never hovered"*: a control pushed past the window edge is CLIPPED, so the sweep never sees it rather than finding it misplaced |
+| I15 | rollback returns to `session_.undo()` | **BIT (after reordering)** -- V9, redo `1 -> 2` |
+| I16 | displaced redo branch never restored | **BIT** -- V9, redo `1 -> 0`. This is the faithful test of the AC3/AC5 trade |
+| ~~I14~~ | chosen identity absent from the re-plan | **SUBSUMED by I5, not run.** The digest IS the ordered identity list, so step 2 returns `Stale` before step 3's lookup can run. Step 3's arm is unreachable defensive code |
+| ~~I17~~ | `clear_history()` in place of the revert | **MIS-AIMED, retired.** It bit, but MAR-189's **R3** caught the un-reverted provenance first, so this story's clause was never exercised |
+| ~~I9~~ | neuter `adopt_runtime_sources` | **NOT THIS STORY'S.** It targets code inside `commit_psd_reimport`; recorded as belonging to MAR-189's register rather than reported as "did not bite" |
+
+**I15 did not bite on its first run, and the diagnosis is the durable part.** The
+rollback restored the stash AFTER reverting, and `restore_stashed_redo` *assigns*
+`redo_entries` -- so it overwrote whatever the revert left, and `undo()` and
+`revert_last_edit()` produced identical stacks. **Two correct components in the
+wrong order made each other unobservable.** The general form is recorded above as
+**masking**, a sixth degenerate gate shape.
+
+### Gates, and the two that were wrong when written
+
+Every "expect zero" gate was run against a **planted hit** and returned to green
+after a restore verified by absolute-path `cmp`: S1 `1 -> 2`, S2 `1 -> 2`,
+S3 `0 -> 1`, S4 `0 -> 1`, S5 `0/0 -> 1/1`, S6's `.find(` pattern shown to match.
+
+- **S1 was restated twice, both times by RUNNING it.** *"Exactly 3 lines"* broke
+  once N2 legitimately called the function to drive the `p_open` route. Worse, the
+  count-only form **did not catch I12 at all**: moving the call into
+  `render_shell_frame` leaves the count at 1, because `shell_main.cpp` is also
+  under `src/editor/`. **A gate that counts call sites cannot see a call site
+  MOVE.** S1 now asserts the count AND that the line is in
+  `shell_project_panels.cpp`.
+- **T1 was comparing build progress.** A whole-output diff against the baseline
+  differs only in `[100%]` prefixes, which a standalone target invocation omits.
+  T1 compares the `MAR-187 frame-body check` STATUS line, and the narrowed
+  comparison was itself proven capable of failing against a planted change.
+
+The frame-body gate remains a **non-effect** check for this story and is labelled
+one: its regex `draw_[a-z_]+windows?\(` cannot match `draw_psd_reimport_modal`, in
+either direction.
+
+### What a real mouse proved that nothing else could
+
+**F2 found an ImGui abort no UI-free case in this story could reach**: the Confirm
+branch returned early from inside `BeginDisabled(...)`, skipping `EndDisabled()`
+and aborting with *"In window 'Reimport PSD##psd_reimport': Missing
+EndDisabled()"*. Every N-case calls the seams directly and never enters that scope.
+
+Also measured there: **the window a sweep starts from needs settle frames too**,
+not just the modal -- the Project window's rect one frame after submission is a
+**32x37 stub at (60,60)-(92,97)**, and the CONTROL sweep is what caught it, because
+a widget that shipped years ago failing to hover is unambiguous where a missing
+button is not. And **Escape is measured unable to close the modal**, which is the
+property AC3's "modal close" path rests on.
+
+### Not independently covered
+
+- **P1**, the compatibility witness: a provenance-free project draws no
+  `Reimport PSD...` button. Green on the pristine tree and labelled a WITNESS; no
+  story-owned inversion turns it red, and the negative direction -- *the button is
+  correctly hidden* -- has no gate.
+- **The staleness digest covers identity and classification only.** It is MAR-189's
+  two-field `identity=change;` list, not the ten-field tuple this story's design
+  specified. A provenance edit that renames a stored `slot_name` leaves the modal
+  showing `current_slot: X` while the commit uses `current_slot: Y`, with no
+  staleness reported. **Inherited deliberately**: a stricter MAR-190-local digest
+  would make the same edit stale on the editor path and not on the agent path, and
+  an inconsistent staleness contract between two entry points is worse than one
+  recorded gap. Raised as a follow-up for the digest's owner.
+- **A pixel-only PSD edit is not stale.** Same layers, same classification, same
+  digest; the reimport proceeds and the new pixels ship.
+- **The scrolling path is never exercised by a mouse.** F1/F2 use a plan that fits.
+- **Photoshop's real layer-record order is unverifiable here.** No
+  Photoshop-authored PSD exists in this repository. If the real order is the
+  inverse, a group-bearing real-world PSD produces a planning error, and what the
+  user sees is this story's planning-failure path (N4) reporting the parser's own
+  message. Contained by AC3, not removed.
+- **Slot names remain unstable across imports** (`psd_import.cpp:814-826` dedups
+  from a document-global census), surfaced as `proposed_slot_name` differing from
+  `current_slot_name` on an `Updated` row. Displayed without editorial.
 
 ## MAR-189 Commit PSD Reimports Atomically Validation Results
 

@@ -28,6 +28,7 @@
 #include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/editor/problems_model.hpp"
+#include "marrow/editor/psd_reimport_review.hpp"
 #include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "session_shell_binding.hpp"
@@ -504,6 +505,30 @@ struct ViewportTransformGesture {
  * re-collected and re-sorted whenever either revision moves, so an index would
  * silently point at a different problem after an unrelated edit.
  */
+/**
+ * @brief MAR-190. One open PSD reimport review, or none.
+ *
+ * `open` is what `BeginPopupModal` is given as its `bool*`. It is NOT redundant
+ * with `review`: Escape cannot close an ImGui modal (`imgui.cpp:14873` reaches
+ * the popup-closing arm only for a NON-modal popup), so the title-bar close
+ * control that a `bool*` produces is the ONLY route out of the modal that is not
+ * its own Cancel button -- and AC3 lists "modal close" as a path distinct from
+ * "cancel". Without the `bool*` that criterion is not failed, it is
+ * unimplementable, and nothing would say so.
+ */
+struct PsdReimportPanelState {
+    /// Engaged while a review is open. Disengaged by Cancel and by modal close.
+    std::optional<marrow::editor::PsdReimportReview> review;
+    /// The modal's `p_open`. Cleared by the title-bar close control.
+    bool open{false};
+    /// Where the reviewed plan staged, so it can be removed when the review ends.
+    std::filesystem::path staging_root;
+    /// Absolute path of the PSD under review; what AC1 displays.
+    std::filesystem::path source_path;
+    /// Set from `PsdReviewOutcome` when a review ends. Empty until then.
+    std::string last_outcome;
+};
+
 struct ProblemsPanelState {
     std::optional<marrow::editor::DiagnosticReport> report;
     marrow::editor::ProblemsView view;
@@ -923,6 +948,7 @@ struct ShellState {
     /// carry was wrong and a reader should not take it at face value.
     bool should_exit{false};
     ProblemsPanelState problems;
+    PsdReimportPanelState psd_reimport;
     std::string status_message;
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
@@ -1023,6 +1049,12 @@ constexpr char kLipSyncWindowTitle[] = "Lip Sync";
 // MAR-187. Docked as a TAB beside the Timeline, so it renders no rows until it
 // is focused -- which is why F1 focuses it on its opening frames.
 constexpr char kProblemsWindowTitle[] = "Problems";
+
+// MAR-190. A popup's ImGui window name is the FULL string passed to
+// `BeginPopupModal`, `##` suffix included, and the frame case finds it by that
+// exact string. A MODAL, not a window: it matches no `draw_[a-z_]+windows?\(`
+// and so is invisible to `CheckFrameBodies.cmake` in both directions.
+constexpr char kPsdReimportModal[] = "Reimport PSD##psd_reimport";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr float kPi = 3.14159265358979323846f;

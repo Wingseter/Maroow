@@ -25,6 +25,7 @@
 #include "marrow/editor/agent_dispatch.hpp"
 #include "marrow/editor/psd_reimport_commit.hpp"
 #include "marrow/editor/psd_reimport_plan.hpp"
+#include "marrow/editor/psd_reimport_review.hpp"
 #include "marrow/editor/psd_import.hpp"
 #include "marrow/editor/session.hpp"
 #include "marrow/runtime/atlas.hpp"
@@ -4778,7 +4779,1281 @@ bool validate_mar189_agent_operation(const std::filesystem::path& scratch) {
 
 // ===================== MAR-190 -- the reimport review model =====================
 
+namespace mar190 {
 
+/**
+ * @brief The stored side of MAR-190's fixture: five layers, three groups deep.
+ *
+ * Deliberately larger than `mar188::fixture_tree()`, which has three layers and
+ * therefore cannot produce 3 `Updated` and 2 `Missing` at once. V1 needs the
+ * three sections to INTERLEAVE in identity order, so that a grouping bug that
+ * preserves membership but loses order is visible.
+ */
+std::vector<mar188::SynthLayer> base_tree() {
+    return {
+        {{"fx"}, "halo", 2, 2, 6, 6, 1U, 2U, 3U},
+        {{}, "shadow", 18, 40, 14, 8, 10U, 20U, 30U},
+        {{"torso"}, "arm_l", 4, 20, 12, 8, 40U, 50U, 60U},
+        {{"torso"}, "arm_r", 30, 20, 12, 8, 41U, 51U, 61U},
+        {{"torso"}, "body", 16, 12, 20, 24, 70U, 80U, 90U},
+    };
+}
+
+/**
+ * @brief The candidate: keeps three, drops two, adds two.
+ *
+ * Against `base_tree()` this yields the union below, in the plan's own ascending
+ * identity order, with every section interleaved:
+ *
+ *   0 `fx|glow`      Added      4 `torso|arm_r`  Missing
+ *   1 `fx|halo`      Updated    5 `torso|body`   Updated
+ *   2 `shadow`       Updated    6 `torso|hand_r` Added
+ *   3 `torso|arm_l`  Missing
+ */
+std::vector<mar188::SynthLayer> candidate_tree() {
+    return {
+        {{"fx"}, "glow", 8, 2, 6, 6, 4U, 5U, 6U},
+        {{"fx"}, "halo", 2, 2, 6, 6, 1U, 2U, 3U},
+        {{}, "shadow", 18, 40, 14, 8, 10U, 20U, 30U},
+        {{"torso"}, "body", 16, 12, 20, 24, 70U, 80U, 90U},
+        {{"torso"}, "hand_r", 30, 30, 6, 6, 11U, 12U, 13U},
+    };
+}
+
+/**
+ * @brief AC3's WHOLE invariant, in one helper, called by every no-op case.
+ *
+ * Five distinct paths reach "nothing changed" -- cancel, modal close, stale,
+ * planning failure and commit failure. Five partial assertions would let each
+ * path prove a different subset and none prove the invariant, so every caller
+ * runs every clause. Deliberately NOT asserted: `status_message`. A failed
+ * reimport should say so, and AC3 does not list it; its absence here is a
+ * decision rather than an oversight.
+ */
+struct NoOpWitness {
+    std::string serialized;
+    std::uint64_t project_revision{0};
+    std::uint64_t runtime_revision{0};
+    std::uint64_t preview_revision{0};
+    std::size_t undo_count{0};
+    std::size_t redo_count{0};
+    mar189::ByteMap bundle;
+    std::filesystem::path skeleton_path;
+    std::vector<std::filesystem::path> atlas_paths;
+};
+
+NoOpWitness capture_no_op(const marrow::editor::EditorSession& session) {
+    NoOpWitness witness;
+    const marrow::editor::ProjectData& project = *session.project();
+    // In memory, never round-tripped through a file: `serialize_project` is not
+    // bit-exact for doubles needing 17 significant digits, so a file round trip
+    // would drift under the comparison.
+    witness.serialized = marrow::editor::serialize_project(project);
+    witness.project_revision = session.project_revision();
+    witness.runtime_revision = session.runtime_revision();
+    witness.preview_revision = session.preview_revision();
+    witness.undo_count = session.undo_count();
+    witness.redo_count = session.redo_count();
+    witness.bundle = mar189::bundle_bytes(project);
+    witness.skeleton_path = project.resolved_skeleton_path();
+    witness.atlas_paths = project.resolved_atlas_paths();
+    return witness;
+}
+
+/**
+ * @brief One `"<identity> -> slot,attachment,bone,image"` row per stored layer.
+ *
+ * The FULL tuple, in the stored order. AC2's observable is this list and nothing
+ * else: `preserve` decides whether a `Missing` layer keeps its row here, and a
+ * row's presence is the only thing the choice changes. It does NOT keep the
+ * layer's slot in the committed skeleton -- the importer replaces `slots`
+ * wholesale -- so no case may assert that.
+ */
+std::vector<std::string> provenance_rows(const marrow::editor::ProjectData& project) {
+    std::vector<std::string> rows;
+    if (!project.editor_metadata.import_sources.has_value() ||
+        !project.editor_metadata.import_sources->psd.has_value()) {
+        return rows;
+    }
+    for (const marrow::editor::PsdLayerProvenance& layer :
+         project.editor_metadata.import_sources->psd->layers) {
+        std::string identity;
+        for (const std::string& segment : layer.group_path) {
+            identity += segment;
+            identity += '|';
+        }
+        identity += layer.layer_name;
+        rows.push_back(
+            identity + " -> " + layer.slot_name + "," + layer.attachment_name + "," +
+            layer.bone_name + "," + layer.image_file);
+    }
+    return rows;
+}
+
+/** @brief Slot names the committed skeleton document defines, sorted. */
+std::vector<std::string> committed_slot_names(const std::filesystem::path& skeleton_path) {
+    std::vector<std::string> names;
+    const marrow::runtime::json::LoadResult loaded =
+        marrow::runtime::json::load_document(skeleton_path);
+    if (!loaded) {
+        return names;
+    }
+    const marrow::runtime::json::Value* slots =
+        marrow::runtime::json::find_member(loaded.document->root, "slots");
+    if (slots == nullptr || !slots->is_array()) {
+        return names;
+    }
+    for (const marrow::runtime::json::Value& slot : slots->as_array()) {
+        const marrow::runtime::json::Value* name =
+            marrow::runtime::json::find_member(slot, "name");
+        if (name != nullptr && name->is_string()) {
+            names.push_back(name->as_string());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+/**
+ * @brief Runs every clause of AC3's invariant.
+ *
+ * @param provenance_reverted Set ONLY for the arm that reverts a completed
+ *        `UpdateProvenance`, where the authored revision advances by design (see
+ *        below). It does NOT relax any history-stack clause.
+ * @param revisions_may_move Set ONLY for a failure injected after
+ *        `AdoptRuntimeSources`. Adoption bumps the runtime and preview revisions
+ *        legitimately, and the rollback's re-adopt bumps them again, so a
+ *        revisions-unmoved clause on those arms fails on CORRECT code. Every
+ *        other clause -- serialization, both history depths, the whole byte map,
+ *        and the runtime source PATHS -- still runs, so the arm is not weakened
+ *        anywhere it can be strong. MAR-189's R3 records the same asymmetry.
+ */
+bool expect_reimport_no_op(
+    const marrow::editor::EditorSession& session,
+    const NoOpWitness& before,
+    std::string_view label,
+    bool revisions_may_move = false,
+    bool provenance_reverted = false) {
+    const marrow::editor::ProjectData& project = *session.project();
+    bool ok = true;
+
+    // (a) The authored project, by full byte identity. A dirty flag, a revision
+    //     number or "it still loads" are all compatible with an authored edit.
+    const std::string after = marrow::editor::serialize_project(project);
+    if (after != before.serialized) {
+        std::size_t offset = 0;
+        const std::size_t shared = std::min(after.size(), before.serialized.size());
+        while (offset < shared && after[offset] == before.serialized[offset]) {
+            ++offset;
+        }
+        std::cerr << label << ": the project's serialization changed at offset " << offset
+                  << " (before " << before.serialized.size() << " bytes, after "
+                  << after.size() << ").\n";
+        ok = false;
+    }
+
+    // (b) Revisions. (a) cannot see a runtime swap rolled back into identical
+    //     FILES that nonetheless left the session rebuilt.
+    // The AUTHORED revision must never move on a no-op path, adoption or not: a
+    // rolled-back commit that left an authored edit behind is exactly what this
+    // catches, and adoption does not touch it.
+    // INTENDED, not excused, and the distinction matters because the two read
+    // identically here. `apply_history` bumps `project_revision` whenever the
+    // project changed (`session.cpp:1672`), in EITHER direction -- so a revert
+    // advances it exactly as the edit did. The counter counts CHANGES and is a
+    // change detector, not a state identifier; a monotonic counter is what makes
+    // it usable as one. AC3's "history unchanged" is about the undo/redo stacks,
+    // which the clause below asserts in full.
+    if (!provenance_reverted && session.project_revision() != before.project_revision) {
+        std::cerr << label << ": the authored project revision moved ("
+                  << before.project_revision << " -> " << session.project_revision()
+                  << ").\n";
+        ok = false;
+    }
+    if (!revisions_may_move &&
+        (session.runtime_revision() != before.runtime_revision ||
+         session.preview_revision() != before.preview_revision)) {
+        std::cerr << label << ": a runtime revision moved (runtime "
+                  << before.runtime_revision << "->" << session.runtime_revision()
+                  << ", preview " << before.preview_revision << "->"
+                  << session.preview_revision() << ").\n";
+        ok = false;
+    }
+
+    // (c) BOTH depths. A failed path that opened and rolled back a transaction
+    //     can leave undo right and redo wrong.
+    // BOTH depths, on EVERY arm including the one that reverts a completed
+    // `UpdateProvenance`. This clause used to expect `redo + 1` there, which
+    // encoded a defect rather than a requirement: the rollback called
+    // `session.undo()`, whose contract is to make the entry REDOABLE, so a failed
+    // reimport left Redo armed to re-apply the provenance edit over rolled-back
+    // files. AC3 says a commit failure leaves history unchanged, so that was
+    // MAR-190's own criterion failing. `commit_psd_reimport` now calls
+    // `revert_last_edit()` and the expectation is simply "unchanged".
+    if (session.undo_count() != before.undo_count ||
+        session.redo_count() != before.redo_count) {
+        std::cerr << label << ": history depth moved (undo " << before.undo_count << "->"
+                  << session.undo_count() << ", redo " << before.redo_count << "->"
+                  << session.redo_count() << ").\n";
+        ok = false;
+    }
+
+    // (d) Every byte of the bundle and the layer directory, both directions.
+    //     `rolled_back == true` is compatible with every byte being wrong.
+    const mar189::ByteMap after_bundle = mar189::bundle_bytes(project);
+    if (!mar189::expect_bundle_equal(before.bundle, after_bundle, label)) {
+        ok = false;
+    }
+    for (const auto& entry : after_bundle) {
+        if (before.bundle.find(entry.first) == before.bundle.end()) {
+            std::cerr << label << ": only in after: " << entry.first << '\n';
+            ok = false;
+        }
+    }
+
+    // (e) The runtime SOURCE is a path, not only bytes. AC3 names it.
+    if (project.resolved_skeleton_path() != before.skeleton_path) {
+        std::cerr << label << ": the active skeleton path changed ("
+                  << before.skeleton_path.generic_string() << " -> "
+                  << project.resolved_skeleton_path().generic_string() << ").\n";
+        ok = false;
+    }
+    if (project.resolved_atlas_paths() != before.atlas_paths) {
+        std::cerr << label << ": the resolved atlas path list changed.\n";
+        ok = false;
+    }
+    return ok;
+}
+
+/** @brief One `"<identity> -> <kind>"` row per index, in the section's own order. */
+std::vector<std::string> section_rows(
+    const marrow::editor::PsdReimportPlan& plan,
+    const std::vector<std::size_t>& indices) {
+    std::vector<std::string> rows;
+    rows.reserve(indices.size());
+    for (const std::size_t index : indices) {
+        if (index >= plan.layers.size()) {
+            rows.push_back("<out of range: " + std::to_string(index) + ">");
+            continue;
+        }
+        rows.push_back(plan.layers[index].identity);
+    }
+    return rows;
+}
+
+/**
+ * @brief Asserts the three sections partition `plan.layers` exactly.
+ *
+ * Union equals every index and the three are pairwise disjoint. A count clause
+ * cannot see I1 (a `Missing` index appended to `updated`), because every count
+ * still sums to `layers.size()`.
+ */
+bool expect_partition(
+    std::string_view label,
+    const marrow::editor::PsdReviewSections& sections,
+    std::size_t layer_count) {
+    std::vector<std::size_t> seen;
+    for (const std::vector<std::size_t>* list :
+         {&sections.added, &sections.updated, &sections.missing}) {
+        seen.insert(seen.end(), list->begin(), list->end());
+    }
+    std::sort(seen.begin(), seen.end());
+    const auto duplicate = std::adjacent_find(seen.begin(), seen.end());
+    if (duplicate != seen.end()) {
+        std::cerr << label << ": the three sections do not partition plan.layers -- index "
+                  << *duplicate << " appears in more than one section.\n";
+        return false;
+    }
+    std::vector<std::size_t> expected(layer_count);
+    for (std::size_t index = 0; index < layer_count; ++index) {
+        expected[index] = index;
+    }
+    if (seen != expected) {
+        std::cerr << label << ": the three sections do not cover plan.layers exactly (union "
+                     "has "
+                  << seen.size() << " indices, expected " << layer_count << ").\n";
+        for (const std::size_t index : expected) {
+            if (std::find(seen.begin(), seen.end(), index) == seen.end()) {
+                std::cerr << "  uncovered index: " << index << '\n';
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace mar190
+
+/**
+ * @brief MAR-190 V1-V2. The review model's grouping and its confirmation gate.
+ *
+ * Runs after every MAR-188 and MAR-189 case, so a synthesiser regression is
+ * still attributed to Q0 and a commit regression to MAR-189's own cases rather
+ * than to this story.
+ */
+bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
+    std::error_code directory_error;
+    std::filesystem::remove_all(scratch, directory_error);
+    std::filesystem::create_directories(scratch, directory_error);
+
+    const std::filesystem::path project_directory = scratch / "project";
+    std::filesystem::create_directories(project_directory, directory_error);
+    const std::filesystem::path project_path = project_directory / "review.marrow";
+
+    // The stored side, built by the REAL importer over a synthesised PSD, so the
+    // provenance is shaped exactly as an import would have written it.
+    const std::filesystem::path base_psd = scratch / "base.psd";
+    if (!mar188::write_synthetic_psd(base_psd, 64, 64, mar190::base_tree())) {
+        std::cerr << "MAR-190 V1: the synthesiser could not write the base PSD.\n";
+        return false;
+    }
+    marrow::editor::PsdImportResult base_import;
+    if (!mar188::import_synthetic(base_psd, scratch / "base_out", "base", &base_import)) {
+        std::cerr << "MAR-190 V1: the base PSD did not import.\n";
+        return false;
+    }
+    const marrow::editor::ProjectData project = mar188::project_with_provenance(
+        project_path,
+        marrow::editor::make_psd_provenance(base_import, project_path, base_psd));
+
+    std::size_t staging_index = 0;
+    const auto plan_for = [&](const std::vector<mar188::SynthLayer>& layers,
+                              const std::string& name,
+                              marrow::editor::PsdReimportPlan* plan_out) {
+        const std::filesystem::path psd = scratch / (name + ".psd");
+        if (!mar188::write_synthetic_psd(psd, 64, 64, layers)) {
+            std::cerr << "MAR-190 " << name << ": the synthesiser could not write it.\n";
+            return false;
+        }
+        marrow::editor::PsdReimportPlanOptions options;
+        options.psd_path = psd;
+        options.staging_root = scratch / ("staging_" + std::to_string(staging_index++));
+        *plan_out = marrow::editor::plan_psd_reimport(project, options);
+        return true;
+    };
+
+    marrow::editor::PsdReimportPlan plan;
+    if (!plan_for(mar190::candidate_tree(), "V1", &plan)) {
+        return false;
+    }
+    if (!plan) {
+        std::cerr << "MAR-190 V1: planning failed: " << plan.error->format() << '\n';
+        return false;
+    }
+
+    // ---- V1 -- grouping is the model's, not the view's. --------------------
+    {
+        // The whole plan first, so a fixture drift is reported as a fixture
+        // problem rather than as a grouping problem.
+        const std::vector<std::string> expected_plan = {
+            "fx|glow -> Added",     "fx|halo -> Updated",  "shadow -> Updated",
+            "torso|arm_l -> Missing", "torso|arm_r -> Missing", "torso|body -> Updated",
+            "torso|hand_r -> Added",
+        };
+        if (!mar188::expect_rows("MAR-190 V1 (the fixture's own plan)",
+                                 mar188::plan_rows(plan), expected_plan)) {
+            return false;
+        }
+
+        const marrow::editor::PsdReviewSections sections =
+            marrow::editor::group_psd_review(plan);
+
+        // Element-wise ORDERED comparison, per section. Set membership passes
+        // under a reversed iteration; only this clause sees it.
+        if (!mar188::expect_rows("MAR-190 V1 section 'added' (ordered)",
+                                 mar190::section_rows(plan, sections.added),
+                                 {"fx|glow", "torso|hand_r"})) {
+            return false;
+        }
+        if (!mar188::expect_rows("MAR-190 V1 section 'updated' (ordered)",
+                                 mar190::section_rows(plan, sections.updated),
+                                 {"fx|halo", "shadow", "torso|body"})) {
+            return false;
+        }
+        if (!mar188::expect_rows("MAR-190 V1 section 'missing' (ordered)",
+                                 mar190::section_rows(plan, sections.missing),
+                                 {"torso|arm_l", "torso|arm_r"})) {
+            return false;
+        }
+
+        // The partition. I1 appends a `Missing` index to `updated`; every count
+        // still sums, and only this clause fails.
+        if (!mar190::expect_partition("MAR-190 V1", sections, plan.layers.size())) {
+            return false;
+        }
+
+        // Each section's indices ascend. Redundant beside the ordered rows above
+        // and labelled so: it names the invariant the header promises.
+        for (const auto& entry : {std::make_pair("added", &sections.added),
+                                  std::make_pair("updated", &sections.updated),
+                                  std::make_pair("missing", &sections.missing)}) {
+            if (!std::is_sorted(entry.second->begin(), entry.second->end())) {
+                std::cerr << "MAR-190 V1: section '" << entry.first
+                          << "' indices are not ascending.\n";
+                return false;
+            }
+        }
+    }
+
+    // ---- V2 -- confirmation gating. ----------------------------------------
+    {
+        marrow::editor::PsdReimportReview confirmable;
+        confirmable.plan = plan;
+        if (!marrow::editor::psd_review_can_confirm(confirmable)) {
+            std::cerr << "MAR-190 V2: confirmation is disabled on a clean plan carrying "
+                      << plan.layers.size() << " layers.\n";
+            return false;
+        }
+
+        // A plan carrying the planner's OWN error, produced by truncating a real
+        // PSD rather than by hand-setting the field -- so the error text is the
+        // parser's and V2 asserts a message it did not author.
+        const std::filesystem::path broken_psd = scratch / "V2_broken.psd";
+        {
+            std::ofstream stream(broken_psd, std::ios::binary | std::ios::trunc);
+            stream << "8BPS";
+        }
+        marrow::editor::PsdReimportPlanOptions broken_options;
+        broken_options.psd_path = broken_psd;
+        broken_options.staging_root = scratch / "staging_broken";
+        marrow::editor::PsdReimportReview failed;
+        failed.plan = marrow::editor::plan_psd_reimport(project, broken_options);
+        if (failed.plan) {
+            std::cerr << "MAR-190 V2: a four-byte PSD planned successfully.\n";
+            return false;
+        }
+        if (marrow::editor::psd_review_can_confirm(failed)) {
+            std::cerr << "MAR-190 V2: confirmation is enabled on a plan carrying error '"
+                      << failed.plan.error->message << "'.\n";
+            return false;
+        }
+
+        // The empty plan: nothing to do in any of the three categories.
+        marrow::editor::PsdReimportReview empty;
+        if (marrow::editor::psd_review_can_confirm(empty)) {
+            std::cerr << "MAR-190 V2: confirmation is enabled on a plan with no layers in "
+                         "any section.\n";
+            return false;
+        }
+    }
+
+    // ---- D1 -- AC2's DEFAULT: nothing is forgotten unless it is ticked. -----
+    //
+    // The full `(identity, preserve)` list, ordered, never a count of `false`s.
+    // A count reads "seven layers, zero forgotten" as consistent whether the
+    // zero is the right zero or an accident, and I4 (seeding the forget set from
+    // the `Missing` section) produces a plan whose count clause still sums.
+    std::vector<std::string> d1_preserve_rows;
+    {
+        marrow::editor::PsdReimportReview review;
+        review.plan = plan;
+
+        if (!mar188::expect_rows("MAR-190 D1 (the forget set, whole)",
+                                 marrow::editor::chosen_psd_deletions(review), {})) {
+            return false;
+        }
+
+        const marrow::editor::PsdReimportPlan derived =
+            marrow::editor::build_psd_commit_plan(review);
+        for (const marrow::editor::PsdPlannedLayer& layer : derived.layers) {
+            d1_preserve_rows.push_back(
+                layer.identity + " preserve=" + (layer.preserve ? "true" : "false"));
+        }
+        const std::vector<std::string> expected = {
+            "fx|glow preserve=true",       "fx|halo preserve=true",
+            "shadow preserve=true",        "torso|arm_l preserve=true",
+            "torso|arm_r preserve=true",   "torso|body preserve=true",
+            "torso|hand_r preserve=true",
+        };
+        if (!mar188::expect_rows("MAR-190 D1 (derived preserve list, ordered)",
+                                 d1_preserve_rows, expected)) {
+            return false;
+        }
+
+        // The by-value property is asserted in D2, NOT here. With an empty
+        // forget set this derivation sets nothing to `false`, so a clause here
+        // saying "the review was not mutated" cannot fail whatever the
+        // implementation does -- a gate that passes on unchanged code. Measured:
+        // an inversion deriving through a `const_cast` on `review.plan` left
+        // this case green.
+    }
+
+    // ---- D2 -- AC2's OPT-IN: exactly the ticked identity, and nothing else. --
+    {
+        marrow::editor::PsdReimportReview review;
+        review.plan = plan;
+        marrow::editor::set_psd_review_deletion(&review, "torso|arm_l", true);
+
+        if (!mar188::expect_rows("MAR-190 D2 (the forget set, whole)",
+                                 marrow::editor::chosen_psd_deletions(review),
+                                 {"torso|arm_l"})) {
+            return false;
+        }
+
+        const marrow::editor::PsdReimportPlan derived =
+            marrow::editor::build_psd_commit_plan(review);
+        std::vector<std::string> rows;
+        for (const marrow::editor::PsdPlannedLayer& layer : derived.layers) {
+            rows.push_back(
+                layer.identity + " preserve=" + (layer.preserve ? "true" : "false"));
+        }
+        const std::vector<std::string> expected = {
+            "fx|glow preserve=true",       "fx|halo preserve=true",
+            "shadow preserve=true",        "torso|arm_l preserve=false",
+            "torso|arm_r preserve=true",   "torso|body preserve=true",
+            "torso|hand_r preserve=true",
+        };
+        if (!mar188::expect_rows("MAR-190 D2 (derived preserve list, ordered)", rows,
+                                 expected)) {
+            return false;
+        }
+
+        // The list differs from D1's in EXACTLY one position. Asserted as a
+        // positional diff rather than as "one false appears": the latter passes
+        // if the wrong layer is the one forgotten.
+        std::vector<std::size_t> differing;
+        for (std::size_t index = 0; index < rows.size() && index < d1_preserve_rows.size();
+             ++index) {
+            if (rows[index] != d1_preserve_rows[index]) {
+                differing.push_back(index);
+            }
+        }
+        if (differing.size() != 1U || rows[differing.front()] != "torso|arm_l preserve=false") {
+            std::cerr << "MAR-190 D2: the derived plan must differ from D1's in exactly one "
+                         "position, at 'torso|arm_l'; it differs in "
+                      << differing.size() << " position(s):";
+            for (const std::size_t index : differing) {
+                std::cerr << " [" << index << "] " << d1_preserve_rows[index] << " -> "
+                          << rows[index];
+            }
+            std::cerr << ".\n";
+            return false;
+        }
+
+        // By VALUE, asserted where it can actually fail. D2's forget set is
+        // non-empty, so an in-place derivation writes `preserve=false` into the
+        // REVIEW's plan and this clause sees it. That is what keeps I3 (Task 5)
+        // a real inversion instead of two names for one object.
+        for (const marrow::editor::PsdPlannedLayer& layer : review.plan.layers) {
+            if (!layer.preserve) {
+                std::cerr << "MAR-190 D2: deriving the commit plan mutated the REVIEW's "
+                             "own plan; layer '"
+                          << layer.identity
+                          << "' now has preserve=false. The derivation must return a copy.\n";
+                return false;
+            }
+        }
+
+        // Unticking restores the default exactly -- the set is the whole state,
+        // so there is nowhere for a stale `false` to survive.
+        marrow::editor::set_psd_review_deletion(&review, "torso|arm_l", false);
+        if (!mar188::expect_rows("MAR-190 D2 (unticked, the forget set, whole)",
+                                 marrow::editor::chosen_psd_deletions(review), {})) {
+            return false;
+        }
+    }
+
+    // ---- V3 -- STALE, PSD side. The PSD changed while the modal was open. ---
+    {
+        mar189::Scenario scenario;
+        if (!mar189::open_scenario(scratch, "v3", mar190::base_tree(),
+                                   mar190::candidate_tree(), &scenario) ||
+            !mar189::plan_scenario(&scenario, "MAR-190 V3")) {
+            return false;
+        }
+
+        marrow::editor::PsdReimportReview review;
+        review.plan = scenario.plan;
+        review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
+        review.staging_root = scenario.staging_root;
+        review.source_path = scenario.candidate_psd;
+
+        // The PSD gains a layer AFTER the review was taken. The reviewed plan is
+        // now a description of a file that no longer exists in that form.
+        std::vector<mar188::SynthLayer> changed = mar190::candidate_tree();
+        changed.push_back({{"fx"}, "spark", 20, 2, 5, 5, 7U, 8U, 9U});
+        if (!mar188::write_synthetic_psd(scenario.candidate_psd, 64, 64, changed)) {
+            std::cerr << "MAR-190 V3: the synthesiser could not rewrite the candidate.\n";
+            return false;
+        }
+
+        // The baseline is captured AFTER every deliberate setup step, so the
+        // case cannot fail on its own fixture.
+        const mar190::NoOpWitness before = mar190::capture_no_op(scenario.session);
+
+        marrow::editor::PsdReimportReviewOptions apply_options;
+        apply_options.project_path = scenario.project_path;
+        apply_options.restage_root = scratch / "v3_restage";
+        const marrow::editor::PsdReviewApplyResult applied =
+            marrow::editor::apply_psd_reimport_review(scenario.session, review, apply_options);
+
+        if (applied.outcome != marrow::editor::PsdReviewOutcome::Stale) {
+            std::cerr << "MAR-190 V3: expected outcome Stale, got "
+                      << marrow::editor::psd_review_outcome_text(applied.outcome)
+                      << " (error '" << applied.error << "').\n";
+            return false;
+        }
+        // The MESSAGE, not `!result`. An unrelated refusal would satisfy a bare
+        // negative check while proving nothing about staleness.
+        if (applied.error.find("no longer matches") == std::string::npos) {
+            std::cerr << "MAR-190 V3: the error must say the reviewed plan no longer "
+                         "matches; got '"
+                      << applied.error << "'.\n";
+            return false;
+        }
+        if (applied.commit.has_value()) {
+            std::cerr << "MAR-190 V3: a commit was attempted on a stale review.\n";
+            return false;
+        }
+        if (!mar190::expect_reimport_no_op(scenario.session, before, "MAR-190 V3")) {
+            return false;
+        }
+        // Step 5 on a failure path. Staging is not a target, so NO byte-map
+        // clause anywhere can see a leaked restage tree -- this is its only
+        // detector, which is what makes it non-decorative.
+        if (std::filesystem::exists(apply_options.restage_root)) {
+            std::cerr << "MAR-190 V3: the restage root "
+                      << std::filesystem::absolute(apply_options.restage_root).generic_string()
+                      << " still exists after a stale review.\n";
+            return false;
+        }
+    }
+
+    // ---- V4 -- PLANNING FAILURE. The PSD became unreadable. -----------------
+    {
+        mar189::Scenario scenario;
+        if (!mar189::open_scenario(scratch, "v4", mar190::base_tree(),
+                                   mar190::candidate_tree(), &scenario) ||
+            !mar189::plan_scenario(&scenario, "MAR-190 V4")) {
+            return false;
+        }
+
+        marrow::editor::PsdReimportReview review;
+        review.plan = scenario.plan;
+        review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
+        review.staging_root = scenario.staging_root;
+        review.source_path = scenario.candidate_psd;
+
+        {
+            std::ofstream truncated(
+                scenario.candidate_psd, std::ios::binary | std::ios::trunc);
+            truncated << "8BPS";
+        }
+
+        const mar190::NoOpWitness before = mar190::capture_no_op(scenario.session);
+
+        marrow::editor::PsdReimportReviewOptions apply_options;
+        apply_options.project_path = scenario.project_path;
+        apply_options.restage_root = scratch / "v4_restage";
+        const marrow::editor::PsdReviewApplyResult applied =
+            marrow::editor::apply_psd_reimport_review(scenario.session, review, apply_options);
+
+        if (applied.outcome != marrow::editor::PsdReviewOutcome::PlanFailed) {
+            std::cerr << "MAR-190 V4: expected outcome PlanFailed, got "
+                      << marrow::editor::psd_review_outcome_text(applied.outcome)
+                      << " (error '" << applied.error << "').\n";
+            return false;
+        }
+        // The PLANNER's own rejection text, which this story does not author.
+        if (applied.error.find("PSD") == std::string::npos) {
+            std::cerr << "MAR-190 V4: the error must carry the planner's own rejection; "
+                         "got '"
+                      << applied.error << "'.\n";
+            return false;
+        }
+        if (applied.commit.has_value()) {
+            std::cerr << "MAR-190 V4: a commit was attempted after planning failed.\n";
+            return false;
+        }
+        if (!mar190::expect_reimport_no_op(scenario.session, before, "MAR-190 V4")) {
+            return false;
+        }
+        if (std::filesystem::exists(apply_options.restage_root)) {
+            std::cerr << "MAR-190 V4: the restage root "
+                      << std::filesystem::absolute(apply_options.restage_root).generic_string()
+                      << " still exists after a planning failure.\n";
+            return false;
+        }
+    }
+
+    // ---- D1/D2 commit halves, V5, V7 -- one successful commit each. ---------
+    //
+    // AC2's observable is the stored provenance row list, NOT the committed
+    // skeleton's slots. A `Missing` layer's slot is removed by the reimport in
+    // EITHER direction, because `build_skeleton_document` assigns `slots`
+    // wholesale from the newly parsed PSD and erases `skins`
+    // (`psd_import.cpp:1040-1041`); MAR-189's `prune_unpreserved` says so in its
+    // own comment. `preserve` governs whether the project keeps REMEMBERING the
+    // layer. Asserting a preserved slot survives would fail on correct code.
+    const auto commit_case = [&](const char* label,
+                                 const std::vector<std::string>& forget,
+                                 const std::vector<std::string>& expected_provenance,
+                                 std::vector<std::string>* slots_out) {
+        mar189::Scenario scenario;
+        if (!mar189::open_scenario(scratch, label, mar190::base_tree(),
+                                   mar190::candidate_tree(), &scenario) ||
+            !mar189::plan_scenario(&scenario, label)) {
+            return false;
+        }
+        marrow::editor::PsdReimportReview review;
+        review.plan = scenario.plan;
+        review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
+        review.staging_root = scenario.staging_root;
+        review.source_path = scenario.candidate_psd;
+        for (const std::string& identity : forget) {
+            marrow::editor::set_psd_review_deletion(&review, identity, true);
+        }
+
+        const std::size_t undo_before = scenario.session.undo_count();
+        marrow::editor::PsdReimportReviewOptions apply_options;
+        apply_options.project_path = scenario.project_path;
+        apply_options.restage_root = scratch / (std::string(label) + "_restage");
+        const marrow::editor::PsdReviewApplyResult applied =
+            marrow::editor::apply_psd_reimport_review(scenario.session, review, apply_options);
+
+        if (applied.outcome != marrow::editor::PsdReviewOutcome::Committed) {
+            std::cerr << label << ": expected Committed, got "
+                      << marrow::editor::psd_review_outcome_text(applied.outcome)
+                      << " (error '" << applied.error << "').\n";
+            return false;
+        }
+        if (!applied.error.empty()) {
+            std::cerr << label << ": a committed reimport must carry no error; got '"
+                      << applied.error << "'.\n";
+            return false;
+        }
+        if (!applied.commit.has_value() || !applied.commit->ok) {
+            std::cerr << label << ": the commit ledger is missing or not ok.\n";
+            return false;
+        }
+        // The ledger ENDS where the enum ends. A containment check passes on a
+        // commit that carried on past the step it reported.
+        if (!mar189::expect_steps(
+                mar189::step_names(applied.commit->steps_executed),
+                mar189::step_names(std::vector<marrow::editor::PsdCommitStep>(
+                    marrow::editor::kAllCommitSteps.begin(),
+                    marrow::editor::kAllCommitSteps.end())),
+                label)) {
+            return false;
+        }
+        if (applied.commit->rolled_back || !applied.commit->steps_rolled_back.empty()) {
+            std::cerr << label << ": a successful commit rolled something back.\n";
+            return false;
+        }
+        // AC2, the whole list, ordered.
+        if (!mar188::expect_rows(
+                std::string(label) + " (stored provenance, whole ordered list)",
+                mar190::provenance_rows(*scenario.session.project()),
+                expected_provenance)) {
+            return false;
+        }
+        // V7 -- provenance is refreshed, TYPED. `image_file` is a bare name for
+        // every entry (a stored path could only restate `layers_directory` and
+        // would then have two spellings to keep in agreement), and both stored
+        // paths are project-RELATIVE so the bundle survives being moved.
+        {
+            const marrow::editor::PsdImportProvenance& stored =
+                *scenario.session.project()->editor_metadata.import_sources->psd;
+            for (const marrow::editor::PsdLayerProvenance& layer : stored.layers) {
+                if (layer.image_file != std::filesystem::path(layer.image_file)
+                                            .filename()
+                                            .generic_string() ||
+                    layer.image_file.find('/') != std::string::npos) {
+                    std::cerr << label << ": provenance image_file '" << layer.image_file
+                              << "' is not a bare file name.\n";
+                    return false;
+                }
+            }
+            // `layers_directory` lives inside the bundle and is always relative,
+            // which is what lets the bundle be moved.
+            if (stored.layers_directory.is_absolute()) {
+                std::cerr << label << ": layers_directory must be project-relative; got '"
+                          << stored.layers_directory.generic_string() << "'.\n";
+                return false;
+            }
+            // `source_path` is NOT asserted relative. `provenance_from_plan`
+            // relativizes against the project file, and this fixture's PSD sits
+            // outside the project directory, where no relative form exists that is
+            // not a `..` chain -- so an is_relative() clause here would fail on
+            // correct code, which it did when first written. The property that
+            // actually matters is that the stored path still FINDS the PSD.
+            const std::filesystem::path resolved =
+                scenario.session.project()->resolve_path(stored.source_path);
+            std::error_code same_error;
+            if (!std::filesystem::equivalent(resolved, scenario.candidate_psd, same_error)) {
+                std::cerr << label << ": stored source_path '"
+                          << stored.source_path.generic_string() << "' resolves to '"
+                          << resolved.generic_string() << "', not to the reimported PSD '"
+                          << scenario.candidate_psd.generic_string() << "'.\n";
+                return false;
+            }
+        }
+
+        // AC5's history half: exactly one new entry, and redo cleared.
+        if (scenario.session.undo_count() != undo_before + 1U) {
+            std::cerr << label << ": undo_count() is " << scenario.session.undo_count()
+                      << ", expected " << (undo_before + 1U)
+                      << " (the provenance update is one entry).\n";
+            return false;
+        }
+        if (scenario.session.redo_count() != 0U) {
+            std::cerr << label << ": redo_count() is " << scenario.session.redo_count()
+                      << ", expected 0.\n";
+            return false;
+        }
+        if (std::filesystem::exists(apply_options.restage_root)) {
+            std::cerr << label << ": the restage root "
+                      << std::filesystem::absolute(apply_options.restage_root).generic_string()
+                      << " still exists after a successful commit.\n";
+            return false;
+        }
+        if (slots_out != nullptr) {
+            *slots_out = mar190::committed_slot_names(
+                scenario.session.project()->resolved_skeleton_path());
+        }
+        return true;
+    };
+
+    // The bone is the enclosing GROUP name (`root` for an ungrouped layer), not the
+    // layer's -- MAR-188's importer creates one bone per folder. Measured, not
+    // assumed; these tuples are the importer's output and this story does not
+    // define them. What this story DOES define, and what these cases discriminate
+    // on, is which rows survive the commit.
+    // D1's commit half: nothing ticked, so BOTH `Missing` layers keep their rows,
+    // each carrying its CURRENT (pre-reimport) mapping.
+    std::vector<std::string> d1_slots;
+    {
+        const std::vector<std::string> expected = {
+            "fx|glow -> glow,glow,fx,glow.png",
+            "fx|halo -> halo,halo,fx,halo.png",
+            "shadow -> shadow,shadow,root,shadow.png",
+            "torso|arm_l -> arm_l,arm_l,torso,arm_l.png",
+            "torso|arm_r -> arm_r,arm_r,torso,arm_r.png",
+            "torso|body -> body,body,torso,body.png",
+            "torso|hand_r -> hand_r,hand_r,torso,hand_r.png",
+        };
+        if (!commit_case("MAR-190 D1c", {}, expected, &d1_slots)) {
+            return false;
+        }
+    }
+
+    // D2's commit half + V5: exactly the ticked identity loses its row, and the
+    // other `Missing` layer keeps its own. The set difference from D1c is ONE row.
+    std::vector<std::string> d2_slots;
+    {
+        const std::vector<std::string> expected = {
+            "fx|glow -> glow,glow,fx,glow.png",
+            "fx|halo -> halo,halo,fx,halo.png",
+            "shadow -> shadow,shadow,root,shadow.png",
+            "torso|arm_r -> arm_r,arm_r,torso,arm_r.png",
+            "torso|body -> body,body,torso,body.png",
+            "torso|hand_r -> hand_r,hand_r,torso,hand_r.png",
+        };
+        if (!commit_case("MAR-190 D2c/V5", {"torso|arm_l"}, expected, &d2_slots)) {
+            return false;
+        }
+        if (d1_slots.size() != d2_slots.size() || d1_slots != d2_slots) {
+            std::cerr << "MAR-190 V5: the committed SLOT set must be identical whether a "
+                         "missing layer was forgotten or preserved -- the reimport removes "
+                         "it either way. D1c had " << d1_slots.size() << " slots, D2c/V5 had "
+                      << d2_slots.size() << ".\n";
+            return false;
+        }
+        // And the slots are the CANDIDATE's, with neither `Missing` layer present
+        // in either run. This is the clause that would have been written the
+        // wrong way round.
+        const std::vector<std::string> expected_slots = {
+            "body", "glow", "halo", "hand_r", "shadow",
+        };
+        if (!mar188::expect_rows("MAR-190 V5 (committed slot names, sorted)", d2_slots,
+                                 expected_slots)) {
+            return false;
+        }
+    }
+
+    // ---- V9 -- a PRE-EXISTING redo stack survives a failed reimport. --------
+    //
+    // This is the case that proves AC3 was not fixed by breaking AC5. The
+    // rollback has to drop the entry IT pushed and nothing else; the obvious
+    // remedy -- `clear_history()` -- also removes every redo entry the user had
+    // before they ever opened the reimport, which is AC5's "preserving existing
+    // unsaved overlays and undo/redo history" broken in the course of repairing
+    // AC3. Without this case both implementations pass V8 identically.
+    {
+        using marrow::editor::PsdCommitStep;
+        mar189::Scenario scenario;
+        if (!mar189::open_scenario(scratch, "v9", mar190::base_tree(),
+                                   mar190::candidate_tree(), &scenario) ||
+            !mar189::plan_scenario(&scenario, "MAR-190 V9")) {
+            return false;
+        }
+
+        // Give the user a real redo stack: make an edit, then undo it. This is a
+        // NORMAL user undo, so the entry is legitimately redoable and must stay so.
+        {
+            // An RAII transaction: it commits when the scope closes.
+            auto seed = scenario.session.begin_edit(
+                {marrow::editor::EditKind::EditProperty,
+                 "mar190 user edit",
+                 {},
+                 false,
+                 marrow::editor::EditImpact::Project});
+            if (!seed) {
+                std::cerr << "MAR-190 V9: could not begin the seed edit.\n";
+                return false;
+            }
+            marrow::editor::IkConstraintEdit edit;
+            edit.name = "mar190_user_edit";
+            edit.bone_names = {"torso"};
+            edit.target_bone_name = "root";
+            seed.project()->ik_constraint_edits.push_back(std::move(edit));
+            // EXPLICIT commit. The destructor CANCELS an uncommitted transaction,
+            // so relying on scope exit produced no history entry at all and this
+            // case silently had nothing to protect.
+            const marrow::editor::SessionResult sealed = seed.commit();
+            if (!sealed) {
+                std::cerr << "MAR-190 V9: could not commit the seed edit: "
+                          << sealed.error->format() << '\n';
+                return false;
+            }
+        }
+        if (scenario.session.undo_count() == 0U) {
+            std::cerr << "MAR-190 V9: the seed edit produced no undo entry.\n";
+            return false;
+        }
+        {
+            const marrow::editor::SessionResult undone = scenario.session.undo();
+            if (!undone) {
+                std::cerr << "MAR-190 V9: could not undo the seed edit: "
+                          << undone.error->format() << '\n';
+                return false;
+            }
+        }
+        if (scenario.session.redo_count() != 1U) {
+            std::cerr << "MAR-190 V9: the fixture needs a redo stack of exactly 1; got "
+                      << scenario.session.redo_count()
+                      << ". Without one this case cannot fail.\n";
+            return false;
+        }
+        const std::string redo_label_before(scenario.session.redo_label());
+
+        marrow::editor::PsdReimportReview review;
+        review.plan = scenario.plan;
+        review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
+        review.staging_root = scenario.staging_root;
+        review.source_path = scenario.candidate_psd;
+
+        const mar190::NoOpWitness before = mar190::capture_no_op(scenario.session);
+
+        marrow::editor::PsdReimportReviewOptions apply_options;
+        apply_options.project_path = scenario.project_path;
+        apply_options.restage_root = scratch / "v9_restage";
+
+        // Fail AFTER `UpdateProvenance`, the one arm whose rollback touches history.
+        marrow::editor::detail::set_psd_commit_failpoint_for_testing(
+            mar189::fail_after(PsdCommitStep::UpdateProvenance));
+        const marrow::editor::PsdReviewApplyResult applied =
+            marrow::editor::apply_psd_reimport_review(scenario.session, review, apply_options);
+        marrow::editor::detail::set_psd_commit_failpoint_for_testing({});
+
+        if (applied.outcome != marrow::editor::PsdReviewOutcome::CommitFailed) {
+            std::cerr << "MAR-190 V9: expected CommitFailed, got "
+                      << marrow::editor::psd_review_outcome_text(applied.outcome) << ".\n";
+            return false;
+        }
+        // The user's OWN redo entry is still there, by depth AND by label -- a
+        // depth of 1 would also pass if the rollback had swapped its own entry in.
+        if (scenario.session.redo_count() != 1U) {
+            std::cerr << "MAR-190 V9: the user's redo stack was " << 1U << " before the "
+                         "failed reimport and is "
+                      << scenario.session.redo_count()
+                      << " after. A rollback must discard only the entry it pushed.\n";
+            return false;
+        }
+        if (std::string(scenario.session.redo_label()) != redo_label_before) {
+            std::cerr << "MAR-190 V9: the top of the redo stack is now '"
+                      << scenario.session.redo_label() << "', was '" << redo_label_before
+                      << "' -- the rollback replaced the user's entry with its own.\n";
+            return false;
+        }
+        // And redoing it still works, which a depth check alone cannot show.
+        const marrow::editor::SessionResult redone = scenario.session.redo();
+        if (!redone) {
+            std::cerr << "MAR-190 V9: the user's redo entry survived in the count but "
+                         "could not be applied: "
+                      << redone.error->format() << '\n';
+            return false;
+        }
+        (void)before;
+    }
+
+    // ---- V6 -- AC5's overlay preservation, by FULL IDENTITY. ----------------
+    //
+    // Not spot checks. Serialize before, commit, then overwrite the AFTER
+    // project's `import_sources` with the BEFORE value and re-serialize: the two
+    // strings must be byte-equal. Exactly one field is excused, by name, and
+    // everything else in `ProjectData` is asserted -- a dropped animation edit,
+    // curve, constraint, inherit or editor overlay fails it without anyone having
+    // to have thought of that field.
+    //
+    // Both strings are produced IN MEMORY from live `ProjectData`. `AGENTS.md`:
+    // `serialize_project` is not bit-exact for doubles needing 17 significant
+    // digits, so a file round trip would drift under the comparison.
+    {
+        mar189::Scenario scenario;
+        if (!mar189::open_scenario(
+                scratch, "v6", mar190::base_tree(), mar190::candidate_tree(), &scenario,
+                [](marrow::editor::ProjectData* project) {
+                    // `torso` and `root` are bones BOTH trees produce, so this
+                    // constraint still resolves against the staged bundle. R2(b)
+                    // measured that one naming a dropped bone is refused outright,
+                    // which would test the refusal rather than the preservation.
+                    marrow::editor::IkConstraintEdit edit;
+                    edit.name = "mar190_overlay";
+                    edit.bone_names = {"torso"};
+                    edit.target_bone_name = "root";
+                    project->ik_constraint_edits.push_back(std::move(edit));
+                }) ||
+            !mar189::plan_scenario(&scenario, "MAR-190 V6")) {
+            return false;
+        }
+
+        marrow::editor::PsdReimportReview review;
+        review.plan = scenario.plan;
+        review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
+        review.staging_root = scenario.staging_root;
+        review.source_path = scenario.candidate_psd;
+
+        const marrow::editor::ProjectData before_project = *scenario.session.project();
+        const std::string before_text = marrow::editor::serialize_project(before_project);
+        const std::size_t undo_before = scenario.session.undo_count();
+
+        marrow::editor::PsdReimportReviewOptions apply_options;
+        apply_options.project_path = scenario.project_path;
+        apply_options.restage_root = scratch / "v6_restage";
+        const marrow::editor::PsdReviewApplyResult applied =
+            marrow::editor::apply_psd_reimport_review(scenario.session, review, apply_options);
+        if (applied.outcome != marrow::editor::PsdReviewOutcome::Committed) {
+            std::cerr << "MAR-190 V6: expected Committed, got "
+                      << marrow::editor::psd_review_outcome_text(applied.outcome)
+                      << " (error '" << applied.error << "').\n";
+            return false;
+        }
+
+        // The one excused field, named. Everything else must be byte-identical.
+        marrow::editor::ProjectData rebased = *scenario.session.project();
+        rebased.editor_metadata.import_sources = before_project.editor_metadata.import_sources;
+        const std::string rebased_text = marrow::editor::serialize_project(rebased);
+        if (rebased_text != before_text) {
+            std::size_t offset = 0;
+            const std::size_t shared = std::min(rebased_text.size(), before_text.size());
+            while (offset < shared && rebased_text[offset] == before_text[offset]) {
+                ++offset;
+            }
+            std::cerr << "MAR-190 V6: the commit changed something other than "
+                         "import_sources; the projects first differ at offset "
+                      << offset << " (before " << before_text.size() << " bytes, after "
+                      << rebased_text.size() << ").\n";
+            return false;
+        }
+        // The overlay is still there BY NAME as well. The clause above would catch
+        // its loss, but this says which thing was lost when it fails.
+        if (scenario.session.project()->ik_constraint_edits.size() !=
+                before_project.ik_constraint_edits.size() ||
+            scenario.session.project()->ik_constraint_edits.empty() ||
+            scenario.session.project()->ik_constraint_edits.front().name !=
+                "mar190_overlay") {
+            std::cerr << "MAR-190 V6: the seeded IK constraint overlay did not survive.\n";
+            return false;
+        }
+        if (scenario.session.undo_count() != undo_before + 1U ||
+            scenario.session.redo_count() != 0U) {
+            std::cerr << "MAR-190 V6: undo_count() is " << scenario.session.undo_count()
+                      << " (expected " << (undo_before + 1U) << ") and redo_count() is "
+                      << scenario.session.redo_count() << " (expected 0).\n";
+            return false;
+        }
+    }
+
+    // ---- V8 -- commit failure, one arm per step the seam can reach. ---------
+    //
+    // Scope: this asserts how the REVIEW LAYER maps a commit failure, not how the
+    // commit behaves -- MAR-189's R3 owns the commit body and sweeps it far more
+    // thoroughly than a second copy here would. What is MAR-190's to prove is
+    // that every failure becomes `CommitFailed` carrying the step's own message,
+    // that the ledger ENDS where the failure was injected, and that AC3's whole
+    // invariant holds on every one of them.
+    {
+        using marrow::editor::PsdCommitStep;
+        struct Arm {
+            PsdCommitStep step;
+            bool rolls_back;  ///< False only for the arm that leaves a COMPLETED reimport.
+        };
+        // `CleanJournal` is the fifteenth arm and the asymmetric one: the reimport
+        // is committed and only the journal cleanup failed. Rolling that back
+        // would destroy a finished reimport, so `commit_psd_reimport` reports
+        // `ok` WITH an error and the review layer must report Committed. A uniform
+        // `!ok` sweep is wrong here in the destructive direction.
+        const std::vector<Arm> arms = {
+            {PsdCommitStep::ValidateRequest, true},
+            {PsdCommitStep::PruneUnpreserved, true},
+            {PsdCommitStep::ValidateStagedBundle, true},
+            {PsdCommitStep::OpenJournal, true},
+            {PsdCommitStep::BackupLayers, true},
+            {PsdCommitStep::BackupTexture, true},
+            {PsdCommitStep::BackupAtlas, true},
+            {PsdCommitStep::BackupSkeleton, true},
+            {PsdCommitStep::PlaceLayers, true},
+            {PsdCommitStep::PlaceTexture, true},
+            {PsdCommitStep::PlaceAtlas, true},
+            {PsdCommitStep::PlaceSkeleton, true},
+            {PsdCommitStep::AdoptRuntimeSources, true},
+            {PsdCommitStep::UpdateProvenance, true},
+            {PsdCommitStep::CleanJournal, false},
+        };
+        // The table is checked against the ENUM by identity, never by size: a size
+        // check passes on a table with the right count and the wrong members, and
+        // AC6 says every step.
+        {
+            std::vector<std::string> table;
+            for (const Arm& arm : arms) {
+                table.emplace_back(marrow::editor::psd_commit_step_name(arm.step));
+            }
+            std::vector<std::string> all;
+            for (const PsdCommitStep step : marrow::editor::kAllCommitSteps) {
+                all.emplace_back(marrow::editor::psd_commit_step_name(step));
+            }
+            if (!mar189::expect_steps(table, all, "MAR-190 V8 (table covers the enum)")) {
+                return false;
+            }
+        }
+
+        bool adoption_seen = false;
+        for (const Arm& arm : arms) {
+            const std::string step_name = marrow::editor::psd_commit_step_name(arm.step);
+            const std::string label = "MAR-190 V8[" + step_name + "]";
+
+            mar189::Scenario scenario;
+            if (!mar189::open_scenario(scratch, "v8_" + step_name, mar190::base_tree(),
+                                       mar190::candidate_tree(), &scenario) ||
+                !mar189::plan_scenario(&scenario, label.c_str())) {
+                return false;
+            }
+            marrow::editor::PsdReimportReview review;
+            review.plan = scenario.plan;
+            review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
+            review.staging_root = scenario.staging_root;
+            review.source_path = scenario.candidate_psd;
+
+            const mar190::NoOpWitness before = mar190::capture_no_op(scenario.session);
+
+            marrow::editor::PsdReimportReviewOptions apply_options;
+            apply_options.project_path = scenario.project_path;
+            apply_options.restage_root = scratch / ("v8_" + step_name + "_restage");
+
+            marrow::editor::detail::set_psd_commit_failpoint_for_testing(
+                mar189::fail_after(arm.step));
+            const marrow::editor::PsdReviewApplyResult applied =
+                marrow::editor::apply_psd_reimport_review(
+                    scenario.session, review, apply_options);
+            marrow::editor::detail::set_psd_commit_failpoint_for_testing({});
+
+            if (!applied.commit.has_value()) {
+                std::cerr << label << ": no commit ledger was returned.\n";
+                return false;
+            }
+            // The ledger ENDS at the injected step. The failpoint fires AFTER the
+            // step's body succeeds, so that step is recorded and must be the LAST
+            // one. A containment check passes on a commit that carried on past the
+            // step it reported failing at.
+            if (applied.commit->steps_executed.empty() ||
+                applied.commit->steps_executed.back() != arm.step) {
+                std::cerr << label << ": the step ledger must END at " << step_name
+                          << "; it ends at "
+                          << (applied.commit->steps_executed.empty()
+                                  ? "<empty>"
+                                  : marrow::editor::psd_commit_step_name(
+                                        applied.commit->steps_executed.back()))
+                          << ".\n";
+                return false;
+            }
+
+            if (!arm.rolls_back) {
+                // The completed-reimport arm. The review layer must NOT report a
+                // failure and must NOT be a no-op: the reimport happened.
+                if (applied.outcome != marrow::editor::PsdReviewOutcome::Committed) {
+                    std::cerr << label
+                              << ": a failure after the reimport completed must still be "
+                                 "Committed; got "
+                              << marrow::editor::psd_review_outcome_text(applied.outcome)
+                              << ".\n";
+                    return false;
+                }
+                if (applied.commit->rolled_back) {
+                    std::cerr << label
+                              << ": a completed reimport was ROLLED BACK, which destroys "
+                                 "it.\n";
+                    return false;
+                }
+                continue;
+            }
+
+            if (applied.outcome != marrow::editor::PsdReviewOutcome::CommitFailed) {
+                std::cerr << label << ": expected CommitFailed, got "
+                          << marrow::editor::psd_review_outcome_text(applied.outcome)
+                          << " (error '" << applied.error << "').\n";
+                return false;
+            }
+            // The MESSAGE names the step. `!ok` alone passes under an unrelated
+            // failure and would prove nothing about which arm was exercised.
+            if (applied.error.find(step_name) == std::string::npos) {
+                std::cerr << label << ": the error must name " << step_name << "; got '"
+                          << applied.error << "'.\n";
+                return false;
+            }
+            if (!applied.commit->rolled_back) {
+                std::cerr << label << ": the commit did not report a rollback.\n";
+                return false;
+            }
+            // The failpoint fires AFTER the step's body, so adoption has already
+            // run on ITS OWN arm -- the allowance must include that arm, not just
+            // the ones after it. Measured: `runtime 1->3, preview 1->3` on the
+            // AdoptRuntimeSources arm, which is the rollback's re-adopt on top of
+            // the adoption itself.
+            const bool revisions_may_move =
+                adoption_seen || arm.step == PsdCommitStep::AdoptRuntimeSources;
+            const bool provenance_reverted = arm.step == PsdCommitStep::UpdateProvenance;
+            if (!mar190::expect_reimport_no_op(scenario.session, before, label,
+                                               revisions_may_move, provenance_reverted)) {
+                return false;
+            }
+            if (std::filesystem::exists(apply_options.restage_root)) {
+                std::cerr << label << ": the restage root still exists.\n";
+                return false;
+            }
+            if (arm.step == PsdCommitStep::AdoptRuntimeSources) {
+                adoption_seen = true;
+            }
+        }
+    }
+
+    std::cout << "MAR-190 V1-V2, D1-D2: the three review sections partition the plan and "
+                 "preserve its ascending identity order; confirmation is refused for a plan "
+                 "carrying a planner error and for a plan with nothing to do; and the "
+                 "derived commit plan forgets exactly the ticked identities, defaulting to "
+                 "none, without mutating the review; and a PSD that changed under an "
+                 "open review, or became unreadable, is refused as Stale and PlanFailed "
+                 "with the project, its runtime sources, its bytes and its history "
+                 "unchanged and the restage root removed; a confirmed reimport commits the "
+                 "full step ledger, keeps exactly the provenance rows that were not "
+                 "forgotten, leaves every other authored field byte-identical, and adds "
+                 "exactly one undo entry; and an injected failure after each of the "
+                 "fifteen commit steps is reported as CommitFailed naming that step with "
+                 "the ledger ending there, except after CleanJournal where the completed "
+                 "reimport stands; and a redo stack the user already had survives a "
+                 "failed reimport intact and still applies.\n";
+    return true;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -4856,6 +6131,16 @@ int main(int argc, char** argv) {
     // (`agent_dispatch.cpp:626-629`) does not whitelist -- so an A-case sited there
     // is refused as a forbidden input path before it can test anything. The two
     // sets are disjoint, and the safety gate accepts both.
+    {
+        // MAR-190. Owned like every other root here: removed on success, KEPT on
+        // failure, because the bundle a failing case built is the thing someone
+        // will want to look at.
+        ScratchRoot root(scratch_root("mar190_review"));
+        if (!validate_mar190_reimport_review(root.path())) {
+            root.keep();
+            return 1;
+        }
+    }
     {
         ScratchRoot root(agent_scratch_root());
         if (!validate_mar189_agent_operation(root.path())) {

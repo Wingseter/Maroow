@@ -348,6 +348,54 @@ public:
     std::size_t redo_count() const noexcept;
     std::string_view undo_label() const noexcept;
     std::string_view redo_label() const noexcept;
+    /**
+     * @brief Reverts the most recent edit WITHOUT making it redoable.
+     *
+     * `undo()` is the user's action and is redoable by definition: it pops the
+     * entry, applies it, and pushes it onto the redo stack. That is right for a
+     * person stepping back and wrong for an internal rollback, whose meaning is
+     * *"this never happened"* rather than *"the user stepped back one"*. A
+     * rollback that calls `undo()` leaves the reverted transaction sitting on the
+     * redo stack, so the next Redo re-applies half of an operation that failed --
+     * measured in MAR-190, where a commit failure after `UpdateProvenance` left
+     * the files rolled back and the provenance edit armed for replay.
+     *
+     * Discards ONLY the entry it reverts. The user's existing redo stack is left
+     * exactly as it was: `clear_history()` is the wrong tool here because it
+     * destroys both stacks, which would trade one history defect for a worse one.
+     *
+     * `project_revision()` still advances, deliberately -- it counts CHANGES to
+     * the project in either direction and is a change detector, not a state
+     * identifier, so it is monotonic by design.
+     *
+     * @return Failure when a transaction is active or there is nothing to revert.
+     */
+    SessionResult revert_last_edit();
+
+    /**
+     * @brief Sets the redo stack aside so a SPECULATIVE edit can give it back.
+     *
+     * Committing any edit clears the redo stack -- correct and universal, because
+     * a new edit invalidates the branch the user could have redone into. But an
+     * edit that is about to be rolled back is not a new branch: if it fails, the
+     * user must be left exactly where they were, and `revert_last_edit()` alone
+     * cannot restore what `commit` already discarded.
+     *
+     * So the pair is: stash before the speculative edit, `restore_stashed_redo()`
+     * if it is rolled back, `drop_redo_stash()` if it stands. Without the stash a
+     * failed reimport silently destroyed a redo stack the user built before they
+     * ever opened it -- MAR-190's V9 measures exactly that.
+     *
+     * One slot, and the session is single-writer, so these do not nest. A second
+     * stash before a restore overwrites the first; both are no-ops during an
+     * active transaction, matching `clear_history()`.
+     */
+    void stash_redo_stack() noexcept;
+    /** @brief Puts a stashed redo stack back, replacing the current one. */
+    void restore_stashed_redo() noexcept;
+    /** @brief Discards a stashed redo stack; the speculative edit stands. */
+    void drop_redo_stash() noexcept;
+
     void clear_history() noexcept;
 
     bool dirty() const noexcept;

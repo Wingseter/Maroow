@@ -507,6 +507,7 @@ add_library(marrow_editor STATIC
     src/editor/project.cpp
     src/editor/psd_reimport_plan.cpp
     src/editor/psd_reimport_commit.cpp
+    src/editor/psd_reimport_review.cpp
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
     src/editor/mesh_weight_model.cpp
@@ -903,12 +904,14 @@ add_executable(marrow_editor_shell
     src/editor/viewport_ffd_controller.cpp
     src/editor/shell_viewport_ui.cpp
     src/editor/shell_problems.cpp
+    src/editor/shell_psd_reimport.cpp
     src/editor/shell_project_panels.cpp
     src/editor/shell_parameters.cpp
     src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
     src/editor/shell_smoke.cpp
     src/editor/shell_smoke_project.cpp
+    src/editor/shell_smoke_psd.cpp
     src/editor/shell_smoke_viewport.cpp
     src/editor/shell_smoke_ffd.cpp
     src/editor/shell_smoke_graph.cpp
