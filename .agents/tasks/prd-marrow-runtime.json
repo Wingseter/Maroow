@@ -3840,7 +3840,8 @@
       "dependsOn": [
         "MAR-189"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-09-02"
     },
     {
       "id": "MAR-191",
