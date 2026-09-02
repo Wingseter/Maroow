@@ -2297,7 +2297,17 @@ Nine, all measured rather than reasoned:
 7. **Three `done` stories carried no `completedAt`**: MAR-188, MAR-157, and this
    story's own row. Found by sweeping the whole file rather than the story range;
    a range-scoped check had reported one. MAR-157's date was corroborated twice
-   before writing it. The file-wide invariant now holds: **188 done, 0 undated**.
+   before writing it.
+
+   **The invariant did not hold continuously, and saying otherwise would be the
+   understated-currency error this story documents.** Measured across commits:
+   `2f050ba` and `cde3bb6` both carry `MAR-157` and `MAR-188` as `done` with **no
+   `completedAt`** — the repair existed only in an uncommitted worktree, so HEAD was
+   broken for that window. It holds from **`af9d403`**, this story's commit, which is
+   what repaired it: **189 done, 0 undated**. *An invariant is a property of a
+   commit, not of the tree you happen to be sitting in*, and a worktree measurement
+   reported as a repository fact is the same shape as a passing gate that was never
+   shown able to fail.
 8. **The gate reddened on its own documentation.** Writing the historical-sentence
    entry — which necessarily *quotes* a stale claim — made X2 fail. A gate over
    prose **claims** must not read quoted **examples**; it now skips blockquotes and
