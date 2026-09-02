@@ -1399,4 +1399,19 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;shell;smoke;noninteractive"
     )
+
+    # MAR-191. Documented registry totals must agree with the registry itself.
+    # The oracle is COMPUTED from `src/editor/agent_dispatch.cpp`; the gate carries
+    # no copy of the number, so it cannot go stale the way the claims it checks did.
+    # Registered here rather than left as a prose command line, because a gate
+    # nobody invokes rots until someone deletes it as dead code.
+    add_test(
+        NAME marrow.registry_claims
+        COMMAND python3 ${PROJECT_SOURCE_DIR}/tools/docs/check_registry_claims.py
+                ${PROJECT_SOURCE_DIR}
+    )
+    set_tests_properties(marrow.registry_claims PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "docs;noninteractive"
+    )
 endif()

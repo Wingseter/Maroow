@@ -551,12 +551,18 @@ void push_layer_record(
  * importer's `active_groups` stack accepts and the order both checked-in fixtures
  * use. Whether a Photoshop-authored file is ordered the same way is NOT settled
  * here and cannot be -- there is no Photoshop-authored PSD in this repository.
+ *
+ * `inverse_group_order` emits the mirror image -- the `lsct` 3 divider where the
+ * folder record goes and the `lsct` 1 folder record where the divider goes -- so
+ * MAR-191's O1 can measure what the IMPORTER does with the other order. It still
+ * says nothing about what Photoshop emits.
  */
 bool write_synthetic_psd(
     const std::filesystem::path& path,
     int canvas_width,
     int canvas_height,
-    const std::vector<SynthLayer>& layers) {
+    const std::vector<SynthLayer>& layers,
+    bool inverse_group_order = false) {
     std::vector<std::uint8_t> records;
     std::vector<std::uint8_t> pixels;
     std::uint16_t record_count = 0U;
@@ -574,12 +580,22 @@ bool write_synthetic_psd(
             ++common;
         }
         while (open_groups.size() > common) {
-            emit_marker("</Layer group>", 3U);
+            // MAR-191 O1: in the inverse form the CLOSE position carries the
+            // `lsct` 1 folder record, so the accepted pairing is reversed.
+            if (inverse_group_order) {
+                emit_marker(open_groups.back(), 1U);
+            } else {
+                emit_marker("</Layer group>", 3U);
+            }
             open_groups.pop_back();
         }
         while (open_groups.size() < layer.group_path.size()) {
             const std::string& group_name = layer.group_path[open_groups.size()];
-            emit_marker(group_name, 1U);
+            if (inverse_group_order) {
+                emit_marker("</Layer group>", 3U);
+            } else {
+                emit_marker(group_name, 1U);
+            }
             open_groups.push_back(group_name);
         }
 
@@ -601,7 +617,11 @@ bool write_synthetic_psd(
         }
     }
     while (!open_groups.empty()) {
-        emit_marker("</Layer group>", 3U);
+        if (inverse_group_order) {
+            emit_marker(open_groups.back(), 1U);
+        } else {
+            emit_marker("</Layer group>", 3U);
+        }
         open_groups.pop_back();
     }
 
@@ -6056,6 +6076,109 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
 }
 } // namespace
 
+/**
+ * @brief O1 -- what the IMPORTER does with the inverse group-record order.
+ *
+ * MAR-188 recorded that Photoshop's real layer-record order is unverifiable in
+ * this repository, and MAR-189 and MAR-190 carried the row forward unchanged.
+ * That half stays open and stays class G: no Photoshop-authored PSD exists here
+ * and none can be produced. **This case measures the other half**, which is
+ * measurable and was never measured: given a group written in the inverse order,
+ * what does `import_psd_to_runtime_bundle` do?
+ *
+ * The answer is a refusal, and O1 pins its exact text. `psd_import.cpp:732-737`
+ * returns it when a `GroupEnd` record arrives with `active_groups` empty.
+ *
+ * **This says nothing about what Photoshop emits.** It says what the importer
+ * would do if Photoshop emitted the other order, which is the part a reader of
+ * the limitation row actually needs.
+ *
+ * The control arm is load-bearing: without it, a synthesiser that emitted
+ * nothing parseable would satisfy the refusal clause for entirely the wrong
+ * reason, and O1 would be a gate that passes on a broken generator.
+ */
+bool validate_mar191_group_order(const std::filesystem::path& scratch) {
+    std::error_code directory_error;
+    std::filesystem::remove_all(scratch, directory_error);
+    std::filesystem::create_directories(scratch, directory_error);
+
+    // -- Control arm: the SAME layers in the accepted order still import. ------
+    const std::filesystem::path accepted_psd = scratch / "accepted.psd";
+    if (!mar188::write_synthetic_psd(accepted_psd, 64, 64, mar188::fixture_tree())) {
+        std::cerr << "O1 (control): the synthesiser could not write "
+                  << accepted_psd.generic_string() << ".\n";
+        return false;
+    }
+    marrow::editor::PsdImportResult accepted;
+    if (!mar188::import_synthetic(accepted_psd, scratch / "accepted_out", "O1 (control)",
+                                  &accepted)) {
+        return false;
+    }
+    const std::vector<std::string> accepted_report = mar188::layer_report(accepted);
+    if (accepted_report.size() != 3U) {
+        std::cerr << "O1 (control): expected three layers from fixture_tree(), got "
+                  << accepted_report.size()
+                  << ". The generator is broken, so O1's refusal would prove nothing.\n";
+        return false;
+    }
+    // The group must actually have survived, or "inverting the group order" is
+    // inverting nothing.
+    std::size_t grouped = 0;
+    for (const marrow::editor::PsdImportedLayer& layer : accepted.layers) {
+        if (!layer.group_path.empty()) {
+            ++grouped;
+        }
+    }
+    if (grouped != 2U) {
+        std::cerr << "O1 (control): expected two grouped layers under 'torso', got "
+                  << grouped << ".\n";
+        return false;
+    }
+
+    // -- O1: the inverse order is refused, by exact message. ------------------
+    const std::filesystem::path inverse_psd = scratch / "inverse.psd";
+    if (!mar188::write_synthetic_psd(inverse_psd, 64, 64, mar188::fixture_tree(), true)) {
+        std::cerr << "O1: the synthesiser could not write "
+                  << inverse_psd.generic_string() << ".\n";
+        return false;
+    }
+
+    marrow::editor::PsdImportOptions options;
+    options.psd_path = inverse_psd;
+    options.skeleton_output_path = scratch / "inverse_out" / "out.mskl";
+    options.atlas_output_path = scratch / "inverse_out" / "out.matl";
+    options.extracted_layers_directory = scratch / "inverse_out" / "out_layers";
+    options.atlas_name = "out";
+    const marrow::editor::PsdImportResult inverted =
+        marrow::editor::import_psd_to_runtime_bundle(options);
+
+    if (inverted) {
+        std::cerr << "O1: the inverse group order was ACCEPTED. The importer's "
+                     "record-order contract changed; the limitation row and this "
+                     "case both need re-deriving.\n";
+        return false;
+    }
+    // The exact text, not a substring of a paraphrase: a message clause that
+    // matched loosely would keep passing after the parser started refusing for a
+    // different reason.
+    const std::string expected = "PSD folder end marker appeared without an open folder.";
+    if (inverted.error->message != expected) {
+        std::cerr << "O1: refused, but not for the reason claimed.\n"
+                  << "  expected: " << expected << '\n'
+                  << "  actual:   " << inverted.error->message << '\n';
+        return false;
+    }
+
+    std::cout << "MAR-191 O1: the importer REFUSES a group written in the inverse "
+                 "record order (`lsct` 3 divider first, then the children, then the "
+                 "`lsct` 1 folder record) with \""
+              << expected
+              << "\", while the same three layers in the accepted order import with "
+                 "two of them grouped under 'torso'. This measures the IMPORTER; what "
+                 "Photoshop actually emits is still unverifiable here and stays open.\n";
+    return true;
+}
+
 int main(int argc, char** argv) {
     Options options;
     if (argc == 3) {
@@ -6098,6 +6221,16 @@ int main(int argc, char** argv) {
     {
         ScratchRoot root(scratch_root("mar188_q0"));
         if (!validate_mar188_q0(options.initial_psd, root.path())) {
+            root.keep();
+            return 1;
+        }
+    }
+    {
+        // MAR-191 O1 runs directly after Q0, for the same reason Q0 runs first:
+        // it leans entirely on the synthesiser, so it is only meaningful once the
+        // synthesiser has been shown to reproduce the checked-in fixture.
+        ScratchRoot root(scratch_root("mar191_group_order"));
+        if (!validate_mar191_group_order(root.path())) {
             root.keep();
             return 1;
         }

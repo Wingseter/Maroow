@@ -17,7 +17,7 @@ The refactor was completed by HEAD commit `4c93ca15fc0cd0481bf8868577da96b270c04
 - Preview/playback, asset watching, timeline, constraints, selection, inspector, weight-paint, viewport UI, project/runtime panels, and agent panels have feature-owned source/header pairs.
 - `marrow_editor` contains UI-free project/session/agent authoring code and links only `marrow_runtime` and Zlib; icon/UI/OpenGL code is compiled only into `marrow_editor_shell`.
 - The C API and socket dispatcher use `EditorSession` plus `AgentControlState`, and C ABI version 1 is unchanged.
-- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the registry to 56, MAR-169's `timeline.set_interpolation` raised it to 57, MAR-171's `timeline.set_curve_mode` raised it to 58, MAR-172's `timeline.set_loop_sync` raised it to 59, MAR-173's `timeline.scale_key_times` raised it to 60, MAR-175's `mesh.rebind_weights` raised it to 61, MAR-176's `mesh.generate_weights` raised it to 62, and MAR-178's `constraint.rename`/`constraint.delete` raise the **current** registry to the exact 64-operation total recorded below.
+- CTest discovered seven source-root compatibility tests at this historical P0 checkpoint. The refactor baseline characterized 44 operations; editing P0 added animation CRUD and atomic timeline retime, so the P0-era agent smoke exercised all 49 operations registered at that time. Later parameter/duration milestones raised the registry to 56, MAR-169's `timeline.set_interpolation` raised it to 57, MAR-171's `timeline.set_curve_mode` raised it to 58, MAR-172's `timeline.set_loop_sync` raised it to 59, MAR-173's `timeline.scale_key_times` raised it to 60, MAR-175's `mesh.rebind_weights` raised it to 61, MAR-176's `mesh.generate_weights` raised it to 62, MAR-178's `constraint.rename`/`constraint.delete` raised it to 64, and MAR-185's `set_inherit_keyframe`/`remove_inherit_keyframe` raise the **current** registry to the exact 66-operation total.
 
 ## Target ownership
 
@@ -330,7 +330,7 @@ passed this completion gate on both hosts:
 
 Task #28, MAR-163, and MAR-164 remain complete at that checkpoint. MAR-165,
 MAR-166, and MAR-167 were completed separately on 2026-08-20 and MAR-168,
-MAR-169, MAR-170, and MAR-171 on 2026-08-30; MAR-172 is the next product milestone.
+MAR-169, MAR-170, and MAR-171 on 2026-08-30; MAR-172 through MAR-191 completed in order, closing Editing P1.
 Windows 11 high-DPI manual UI, physical Ink, and fixed legacy/Sokol A/B remain
 deferred MAR-192 through MAR-210 qualification evidence and received no
 Task #28 or platform-qualification credit. Those stories remain `open`, and

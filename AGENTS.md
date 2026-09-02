@@ -3,7 +3,7 @@
 ## Project State
 
 - The architecture source of truth is `docs/root1/discription.md`; active dependency-ordered milestones are tracked in `.agents/tasks/prd-marrow-runtime.json`.
-- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-174, and the behavior-preserving Task #28 refactor checkpoint are complete. MAR-175 is the next product milestone and depends on MAR-174. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
+- MAR-121 is a completed tracking tombstone whose runtime foundation is integrated into MAR-122. MAR-122 through MAR-128, MAR-154 through MAR-191, and the behavior-preserving Task #28 refactor checkpoint are complete. Editing P1 closes at MAR-191; no product milestone follows it in this chain. MAR-192 through MAR-210 remain an open, parallel deferred qualification backlog and do not block product work.
 - Work is organized as small functional milestone checkpoints with focused validation.
 - `.agents/ralph/`, `.ralph/`, and `docs/root1/ralph-loop.md` are preserved historical artifacts and are not current execution authority.
 
@@ -213,6 +213,36 @@
   confirms -- with Escape measured UNABLE to close the modal, which is the property
   the `p_open` design rests on (F1-F2):
   `./build/marrow_editor_shell --project assets/fixtures/player_idle.marrow --auto-close 5`
+- MAR-191's severity-assignment register, the evidence MAR-186 raised, MAR-187
+  re-recorded, and both deferred to MAR-191 by name: `check_invariants` recomputes
+  its error/warning tallies from the same `issue.severity` values it compares
+  against, so a MISASSIGNMENT moves both sides together and no counting case can
+  see it. The population is CLOSED rather than sampled -- `make_issue` has exactly
+  seven call sites and `diagnostics.cpp:75` is the only severity write in
+  `src/editor/`, so the seven literals at `:203, :456, :504, :544, :596, :629,
+  :764` are every severity assignment there is. Each was flipped to its opposite,
+  rebuilt with objects deleted, run, and restored under a byte `cmp` naming two
+  absolute paths; all seven redden -- at MAR-186 `G1`, `G9(e)`, `G8`, `G7`,
+  `G9(a)`, `G10 (pure)` and `G10 (dirty session)` respectively -- each on a
+  severity or a count clause and none on a message clause. `PreviewStaleSkin`
+  (`:629`) is the one worth reading twice: it has NO per-issue severity detector
+  and reddens only through G10's aggregate, which the fixture makes asymmetric on
+  purpose -- covered, but one fixture edit away from ceasing to be. The register
+  measures the FIRST detector by run order and cannot enumerate over-determination,
+  because the smoke aborts at its first failure:
+  `./build/marrow_project_smoke assets/fixtures/player_idle.marrow`
+- MAR-191's **O1**, the importer's group-record ORDER: a synthesised document whose
+  group is written in the inverse order (`lsct` 3 divider first, then the children,
+  then the `lsct` 1 folder record) is REFUSED by exact message, while the same three
+  layers in the accepted order still import with two grouped under `torso`. The
+  refusal is over-determined -- a second guard catches it when the first is disabled
+  -- so the clause pins the exact text rather than any-error:
+  `./build/marrow_psd_import_smoke assets/fixtures/psd_import_sample.psd assets/fixtures/psd_import_sample_reimport.psd`
+- Documented registry totals agree with the registry itself -- present-tense
+  claims in `AGENTS.md` and the three `docs/root1` documents are compared against
+  a count **computed from** `src/editor/agent_dispatch.cpp`, never a literal, and
+  the historical `64` residue is pinned by count in all eight document/literal
+  pairs including the zeros: `python3 tools/docs/check_registry_claims.py .`
 - Focused CTest guardrail discovery: `ctest --test-dir build -N`
 - Focused CTest guardrail: `ctest --test-dir build --output-on-failure`
 - Runtime-labeled CTest guardrail: `ctest --test-dir build --output-on-failure -L runtime`
@@ -1494,6 +1524,409 @@ is the refusal a commit issues when the two names disagree. `AGENTS.md`'s
 existing rule that *a case green before the implementation exists is a witness*
 is the same argument applied to a test; this is it applied to an invariant.
 
+## Methodology hazards worth recording -- the comparison itself can lie
+
+*Promoted to a top-level section by MAR-191. These are present-tense
+methodology rules, and they had been living inside `## MAR-183 …
+Validation Results`, whose content is a historical measurement of one
+story. Every durable entry added here since was therefore an edit to a
+story section, which the chain's own rule forbids. MAR-183's own content
+is untouched; only this misfiled subsection moved.*
+
+**This section generalises past MAR-183.** Sixteen stories in this chain have
+scrutinised the *code under test* while treating the **comparison mechanics** as
+trustworthy. An inversion result is not a claim about code; it is a claim about a
+**comparison** -- "this case, built from this source, produced this message." Any
+link in that chain can break without the code being wrong, and when one does the
+result is a confident, false, and completely plausible-looking claim. Three
+distinct instances were found here, two of them near-misses caught only by luck.
+**H4 was added later**, by the review pass that read this section. It is H3's
+sibling, not a restatement of it. **H3 is historical**: a recovery or rewrite
+silently thinned a case that *was* once falsifiable, so its remedy is to re-run
+every inversion after any recovery. **H4 is authorial**: the assertion was
+**never** falsifiable and no recovery was involved, so its remedy is to trace
+which writes actually survive to the assertion point. Both rest on the same
+principle -- a passing case is no evidence that it detects anything.
+
+**H1 -- a `cp` restore that does not rebuild.** Restoring an inverted source file
+with `cp` can leave the restored file and its stale object sharing the **same
+second** in their mtimes, in which case `make` does **not** rebuild and the next
+run silently exercises the *inverted* binary. This bit once:
+`marrow_preference_tests` reported two failures against a pristine source tree,
+and C23 assertion 3 failed for the same reason. Every "the inversion bit" claim
+across this whole chain rests on the restore actually rebuilding.
+**MAR-184 found that `touch` is not sufficient, and that the failure is not
+one-directional.** `touch` sets the source's mtime to *now*, and the object
+written by the immediately preceding build is also from *now*; at one-second
+granularity the object is not older than the source, so an automated loop that
+restores, `touch`es, rebuilds, then mutates, `touch`es and rebuilds skips builds
+anyway. Nine of sixteen inversions read as "did not bite" from this alone.
+
+**Both directions are reachable, and the difference matters.** If the *mutation*
+build is skipped, the stale object is the pristine one and the run is a false
+**pass** -- a missed inversion. But if the *restore* build is skipped, the stale
+object is the **mutated** one, and the next inversion in a **different**
+translation unit compiles and links cleanly against it; its failure is then
+attributed to the wrong mutation. That is a false **positive**, from a single
+skipped build. MAR-184's mutations spanned four translation units, so this was
+reachable rather than hypothetical. Do **not** reason that a stale binary can
+only cost you a missed inversion -- under that belief, skipping the deletion when
+you are in a hurry looks free, and it is not.
+
+*Rule: do not rely on mtime. **Delete the object file before every verification
+build** (`rm -f build/CMakeFiles/<target>.dir/<path>.o`), which removes the
+comparison from the question entirely; `touch` is sufficient for a single
+interactive restore and is **not** sufficient in an automated loop. Run final
+verification against a from-scratch `rm -rf build`. What makes an inversion table
+trustworthy is not any asymmetry argument but **H2** -- comparing each message
+with `cmp` against an independently recorded first-run text. See the MAR-184
+section for the nine-false-negative worked example.*
+
+**H2 -- a hand-sliced reference line.** Comparing a measured message against a
+recorded one with `sed -n '3p'` pulled the **wrong line** out of the reference
+file and printed `DIFFERS` for a message that was in fact byte-identical. Caught
+only because the diff output was visibly nonsense; had the off-by-one landed on a
+*similar* line it would have passed unnoticed in either direction.
+*Rule: compare with `cmp`/`diff` against a whole recorded string. Never
+hand-slice line numbers out of a reference file, and never eyeball a
+byte-identity claim.*
+
+**H3 -- a recovered case can be thinner than the one the inversion was run
+against.** After test code was lost and rebuilt, the recovered cases **passed**
+-- but passing is not evidence, because *a thinned case passes too.* The property
+destroyed by the loss was **falsifiability**, and falsifiability is invisible to a
+passing run. Confirming C20/C24/C25 green after recovery proved nothing about
+whether they still detect anything.
+*Rule: after any recovery, restoration or rewrite of test code, **re-demonstrate
+falsifiability** -- re-run the inversions against the recovered tree. Do not
+substitute a green run for it.*
+
+**H4 -- an assertion can be VACUOUS at the point it runs.** C25 assertion 4 read
+three pieces of state after clicking a disabled entry (`dirty_intent`,
+`pending_file_application`, `project_path`) and **none of them could have been
+set on that click**, on a clean session, no matter what the menu did: the arm is
+created and consumed inside the same `render_frame`, and the failed open returns
+before it assigns the path. The case passed, the inversion table listed it, and
+the property it named -- AC4's "visible but *disabled*" half -- had **no failing
+detector anywhere**. Its author reasoned about what *should* be observable
+instead of tracing what actually survives the frame.
+*Rule: an assertion earns its place by FAILING under the mutation it names. Run
+that mutation. Reading state that a passing run leaves at its default is not
+evidence -- trace which writes survive to the assertion point, and assert on
+those. The reusable shape to watch for, which H3 has nothing to say about: state
+ARMED and CONSUMED inside a single `render_frame`, leaving every later reader at
+a default it would have held anyway.*
+
+**What was actually done here.** Every inversion restore in this story is followed
+by `touch`. The final verification ran against a from-scratch rebuild. Two
+inversion results (I7b, I6b) were re-run after H1 was found, and the three
+headline inversions (I1, I2a, I2b) were re-verified against the clean build with
+identical messages. After H3, **every** inversion originally run against the three
+rebuilt cases (C20, C24, C25) was re-run against the committed tree: I6 -> C20;
+I9, I10, I3 and the live-vector variant -> C25; the failed-save, fresh-preferences
+and transaction variants -> C24. Five reproduced byte-identically (verified with
+`cmp`, per H2), one reproduced its first detector with the second stated as
+unchanged-by-inference only, and the live-vector variant **again did not
+reproduce** -- reported as a second non-reproduction rather than converted into a
+convenient bite. C21/C22/C23 were never exposed to H3: they were restored from a
+byte-exact file copy rather than rewritten.
+
+### A historical sentence carries its own anchor, and correcting it is a falsification
+
+**A present-tense claim may be corrected; a historical measurement must not.**
+The criterion for "historical" is wider than a date. A sentence is anchored, and
+must be left alone, when it is bound by **a heading, a date, or a narrated
+event** — and the third is the one that gets missed, because it looks
+present-tense.
+
+Two measured instances, in two different documents:
+
+- `docs/root1/discription.md:59-60` open *"MAR-182는 2026-08-30에 … 완료했다"* and
+  then state *"64-operation Agent/MCP surface는 모두 그대로다"*. The **date**
+  anchors them. The registry is 66 today; overwriting the 64 would make the
+  sentence claim MAR-182 shipped against a 66-operation surface, which is false.
+- `AGENTS.md:500` — *"250 objects and 22/22"* — sits inside a **durable** entry,
+  narrating MAR-186's review incident. `ctest` is **23** today. The **narrated
+  event** anchors it; the number is correct for the moment it describes.
+
+MAR-191 met the same shape a third time and nearly got it wrong from its own
+plan. Its Task 5 table ordered three `64` sites overwritten to `66`, and all
+three were consequences attributed to MAR-177, MAR-178 and MAR-179:
+
+> MAR-178이 … 올렸다. 그래서 registry는 이제 정확히 64 ops다.
+
+**MAR-185** raised the registry to 66. Overwriting would have traded a true stale
+sentence for a false current one.
+
+**The repair for an anchored sentence is to extend the narration, not to edit the
+numeral**: put the historical clause in the past tense and append what happened
+next. Every attribution stays true and the endpoint becomes current. Where even
+that is too invasive, append a parenthetical and leave the original untouched.
+
+**The corollary for gates.** A gate that asserts a stale string has *disappeared*
+encodes the assumption that every instance was correctable, and that assumption
+is false wherever a historical instance exists. MAR-191's X2 pre-registered
+*"all six patterns return zero"* and **could not reach it** without either
+falsifying history or rewording prose purely to defeat a string search — the
+second being the self-satisfying shape, where the gate is satisfied by editing
+the thing it searches rather than by fixing anything. It was recorded as
+**falsified**, and replaced by a **derived** check
+(`tools/docs/check_registry_claims.py`): present-tense totals must equal a count
+**computed from `src/editor/agent_dispatch.cpp`**, never a literal, while
+historical totals are pinned by anchor and count. Its proof is the inversion that
+adds a 67th operation to the registry and reddens the gate **with no document
+touched** — which a hardcoded `66` could never do.
+
+**That gate reddened on this very entry**, because the paragraph above quotes the
+stale sentence it is about. A gate over prose *claims* must not read quoted
+*examples*, so it now skips fenced code and blockquotes — and the quotation above
+is a blockquote for that reason. The cost was measured rather than assumed: a
+genuine stale claim written inside a blockquote is now **invisible** to it. That
+is the right trade for a repository whose methodology section exists to quote
+stale claims, and it is recorded here so the next person knows the blind spot is
+deliberate.
+
+### A pattern-based filter over another agent's live code is worth exactly as much as the check you run after it
+
+MAR-189's implementer used a pattern-based cutter to reconstruct hunks around a
+collaborator's code. It failed **three times in one story**: a `\n}\n` matched
+early inside a neighbouring function body; a `namespace` block boundary shifted;
+and the block's shape changed because MAR-190 adopted the `ScratchRoot` guard.
+**Every one was caught by the check that ran after it — none by the script's own
+success report.**
+
+The aggravating condition is worth stating plainly: the third failure was
+triggered by a **legitimate** change in the other agent's code. The cutter breaks
+when your collaborator does something correct, which is why *"it worked last
+time"* carries no information on a contended file. Re-read the file immediately
+before each edit rather than relying on a read from earlier in the task, and
+prefer an edit that matches an exact string and **refuses** when the match count
+is not what you expect. MAR-191 anchored every documentation edit that way; the
+guard earned its place immediately, refusing a basis-list edit whose anchor
+turned out to wrap between `MAR-167` and `Synchronized`.
+
+### `grep -c` counts lines, not occurrences — and a count without its scope is not a measurement
+
+`grep -c` reports **matching lines**. A second occurrence on an already-matching
+line is invisible. Measured instance: `64 ops` in
+`docs/root1/editing-gap-analysis.md` was **2 lines but 3 occurrences**, so a gate
+phrased over `grep -c` would have reported success while an occurrence survived.
+Use `grep -o … | wc -l` wherever the expectation is a number.
+
+**A zero is exempt** — no matching line means no occurrence — so this only
+threatens **non-zero** expectations. MAR-191 swept the repo's existing gates and
+found **none affected**: the `[ OK ]` census measures 437 lines and 437
+occurrences; the registry census `^    {"` is line-anchored and immune by
+construction; and the remaining stated expectations are zeros. The hazard is
+real, the repo is clean today, and both halves of that sentence needed measuring.
+
+**State the scope beside every count.** The same pattern `64 ops` measures **3
+occurrences** across the four documents MAR-191 targeted and **13** across the
+whole repository. Neither number is wrong; a number reported without its scope
+is, and two people comparing scopeless counts will conclude one of them is
+mistaken.
+
+## Editing P1 Limitation Inventory
+
+**What this is, and why it exists.** Editing P1 (MAR-154–191) recorded its
+limitations story by story, in nine `### Not independently covered` sections and
+in prose scattered across `## Repo facts that outlive their story`, MAR-180's
+fsync paragraphs, MAR-181's `### Two gaps recorded rather than half-closed`, and
+MAR-190's design. `shell_main.cpp`'s frame body had to be written **seven times**
+and `commit_path_choice` **five** before anyone could see they were one entry
+each. This table is the maintainable copy.
+
+**The rule that keeps it maintainable.** The `## MAR-NNN` sections stay
+**untouched** — a story section is the record of what that story saw, and it is a
+historical measurement. When a later story closes an entry it edits **this row**,
+adding "closed by MAR-NNN", and adds nothing to and removes nothing from any
+story section. Reference a row by its `L#` rather than restating it.
+
+**How it was derived, and how to falsify it.** From **84 bullets across 9
+sections** measured at `435250e` **before this table existed**, plus the
+non-section sources named above. Re-running that census today reports **96 across
+11**: MAR-190 landed at `947191b` with six of its own, and MAR-191's validation
+section adds six more. That is the census moving, not the derivation being wrong;
+the basis is anchored to the SHA above. **Do not re-derive the row count by subtracting collapses
+from 84**: bullets 27, 41, 57 and 66 are *compound* "carried forward" entries
+naming five or six limitations each, so the bullet count and the row count are
+not related by arithmetic. Count rows directly.
+
+| Class | Meaning | Who can close it |
+|---|---|---|
+| **A** | Coverage gap — a surface exists and no test reaches it | A story with a test budget |
+| **B** | Evidence gap — covered in form; no mutation proves the cover bites | An inversion; cheap |
+| **C** | Unreachable — written, correct by inspection, no input reaches it | Nobody — record, do not "fix" |
+| **D** | Compiler blindness — a list or chain the compiler cannot police | A consumer-side test, or `-Werror=switch` |
+| **E** | Known product defect — wrong or surprising behaviour, unfixed | A product story |
+| **F** | Permanently open — quantified over a set the program cannot enumerate | A decision nobody has taken |
+| **G** | Human/hardware required — Photoshop, an interactive host, a GPU, a second volume | Not an agent |
+| **I** | Deliberate decision — intended behaviour, recorded so it is not re-litigated | Nobody, unless the decision changes |
+
+**Class I is a MAR-191 split, and it is the most useful thing in this table.**
+The eight classes this story inherited put "a PSD reimport erases every skin"
+and "`--auto-close` bypasses the prompt by design" in the same bucket. Fourteen
+rows below are a recorded decision rather than a defect. A reader scanning for
+work to do should read **E**, not **E ∪ I**.
+
+### A — coverage gap
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-A1 | `shell_main.cpp`'s **interactive** frame body is reachable from no test; C11 pins only the smoke's copy, so deleting the interactive `apply_pending_file_action` call is invisible | 181, 182, 183, 184, 185, 186, 187 |
+| L-A2 | `commit_path_choice` (`shell_file_paths.cpp`, one call site inside the chooser modal) has zero end-to-end coverage — no smoke in `src/editor/` clicks `"Choose"` | 181, 183, 184, 185, 186, 187 |
+| L-A3 | MAR-189's `Approve` button is not proven to call `apply_agent_review`; `CheckFrameBodies.cmake` lists `draw_agent_window` as app-only | 189 |
+| L-A4 | MAR-189's rollback seam cannot fail the **session call** inside a rollback step | 189 |
+| L-A5 | `make_psd_provenance` has no production caller outside `psd_import_smoke.cpp`. (`plan_psd_reimport` gained one at `agent_handlers_management.cpp:99`; that half is **closed by MAR-189**) | 188 |
+| L-A6 | MAR-188's `preserve` is exposed and nothing consumes it | 188 |
+| L-A7 | MAR-187's F1 proves the severity filter and one Fix button on screen; the group headers, the row Selectables' text and the counts line are covered UI-free only | 187 |
+| L-A8 | MAR-185's **scale** materialize arm (`agent_handlers_editing.cpp:2064`) has no case; the byte-identical retime arm at `:997` does | 185 |
+| L-A9 | MCP coverage for MAR-185's two tools is count-only — `test_client.py` asserts set equality and nothing about either schema or `required` set | 185 |
+| L-A10 | Only the `Mode` combo is proved on screen; the lane's diamonds, the toolbar buttons and the dopesheet row are covered UI-free only | 185 |
+| L-A11 | `merge_inherit_timeline`'s `replace_existing_times = false` arm has no product caller | 184, 185 |
+| L-A12 | No pixel is asserted for the Inherit dopesheet row; `build_tracks` producing it is not the dopesheet drawing it | 184 |
+| L-A13 | MAR-182's `absorb_close_request` / `cancel_close_request()` call site lives in the real main loop and is covered only by a manual check | 182 |
+| L-A14 | MAR-189's A5/A6 do not go through the C ABI — `MarrowProject` is opaque outside `marrow_c.cpp` | 189 |
+| L-A15 | MAR-190's scrolling path is never exercised by a mouse — F1/F2 use a plan that fits the modal | 190 |
+
+### B — evidence gap
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-B1 | MAR-186's seven severity **assignments** had no inversion; `check_invariants` recomputes its tallies from the same `issue.severity` it compares against, so a misassignment moves both sides together. **Closed by MAR-191** (V1–V7, `diagnostics.cpp:203, 456, 504, 544, 596, 629, 764`) | 186, 187, closed by 191 |
+| L-B2 | `PreviewStaleSkin` (`diagnostics.cpp:629`) has **no per-issue severity detector**; it reddens only through G10's aggregate counts, which the fixture makes asymmetric on purpose. Covered, but one fixture edit from ceasing to be, and nothing would announce that | 191 (measured) |
+| L-B3 | MAR-186's V2/V5 failure messages state the expectation and never print the actual severity (`expected a … Warning …; got code '…' fix '…'`), so a reader must re-run to learn what the harness already knew. G7's message does print it | 191 (measured) |
+| L-B4 | The severity register measures the **first** detector by run order and cannot enumerate over-determination, because `marrow_project_smoke` aborts at its first failure | 191 (measured) |
+| L-B5 | MAR-186's G4/G5 are witnesses with no story-owned inversion, and G0's byte-identity half is a non-effect assertion | 186 |
+| L-B6 | MAR-186's AC5 selection half is proved structurally (the collector takes no `SelectionSet`), not by assertion | 186 |
+| L-B7 | MAR-187's V0 zero-mutation half is structural, not measured | 187 |
+| L-B8 | Which of the eight erase arms a wrong-**record** mutation is caught in is a per-arm claim; the first X1 covered three arms while the prose implied all eight | 187 |
+| L-B9 | Fourteen `TimelineKeyKind` switch arms are deliberately uninverted — eleven fall through to the correct answer, three are unreachable | 185 |
+| L-B10 | `export.preview` carries no inherit data; A6's assertion is a non-effect witness with no story-owned inversion | 185 |
+| L-B11 | MAR-185's A4 "the key still exists" half is not falsifiable, and its error code is over-determined by a pre-existing registry-metadata guard | 185 |
+| L-B12 | Inherit undo/redo has no failing detector MAR-185 owns | 185 |
+| L-B13 | MAR-184's P4 and the equivalence half of P12 have no story-owned inversion | 184, 185 |
+| L-B14 | MAR-184's P10a/P10b have no clean inversion — dropping the bone check fails P10b with the same message by a different route | 184 |
+| L-B15 | `marrow_inspect --compare` is a regression witness only for MAR-184: it runs over `player_idle`, which carries no inherit data | 184 |
+| L-B16 | MAR-181's load-bearing C11 assertion is `pending_file_application.has_value()`; the `project_path.filename()` check beside it is near-tautological | 181 |
+| L-B17 | MAR-189's R1b `image` clause is a witness for a structural reason — its remaining degree of freedom is supplied by the test | 189 |
+| L-B18 | MAR-190's P1 is a compatibility **witness**: a provenance-free project draws no `Reimport PSD...` button, green on the pristine tree, and **the negative direction — that the button is correctly hidden — has no gate** | 190 |
+
+### C — unreachable
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-C1 | MAR-187's `nothing changed → cancel()` branch — the freshness preflight guarantees a live issue always has something to repair | 187 |
+| L-C2 | `describe_missing_target`'s `PreviewStaleAnimation`, `PreviewStaleSkin` and `ProjectUnsavedChanges` arms — they carry no selection, so the guard above the switch returns first | 187 |
+| L-C3 | `reset_preview_reference`'s five non-preview arms — MAR-186 attaches that fix id to exactly two codes | 187 |
+| L-C4 | `collect_session_diagnostics`' `nullopt` branch is unreachable through the agent (`agent_dispatch.cpp:542` rejects first); its `base_skeleton_document() == nullptr` sub-condition is not separately reachable at all | 186 |
+| L-C5 | No save-time validation of `image_file`: every write path constructs it from `filename()` and structurally cannot produce a separator | 188 |
+| L-C6 | `sort_retimed_timelines`' seventh call is provably a no-op — a retime applies one shared clamped delta, which preserves index order | 185 |
+| L-C7 | `set_animation_duration`'s seventh fold is correct by inspection and unreachable by test (four production call sites, not two) | 185 |
+| L-C8 | AC1's "finite" half is only partially reachable from a file — JSON has no NaN literal and the tokenizer refuses an out-of-range exponent, so from a `.marrow` the rule bites only on a finite magnitude over float32 max | 184 |
+| L-C9 | `EXDEV` is **structurally** unreachable on the placement path, not merely unobserved: `write_file_atomically` places its temporary in the destination's own directory (`atomic_file_write.cpp:61-78`) | 189 |
+| L-C10 | `DiagnosticPanel::Hierarchy` and `::Inspector` do not exist; three panels serve four of AC2's five destinations, and no MAR-186 code is a hierarchy-scoped problem | 187 |
+
+### D — compiler blindness
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-D1 | Populating `OverlayRecordKey` is not compiler-checked, and the `static_assert` beside `collect_orphan_animation_overlays`' seven family calls is a **tautology** — `kSweptOverlayFamilyCount` is initialised from the same literal it is compared against | 186, 187 |
+| L-D2 | `-Wswitch` warns but does not stop the build, GCC needs `-Wall` for the same diagnostic, and the build still has no `-Wall`/`-Wextra` | 185, 186 |
+| L-D3 | `ProblemsSeverityFilter::` and `DiagnosticPanel::` appear outside their switch files as member defaults and test expectations | 187 |
+| L-D4 | MAR-189's staged-atlas naming rule has **two** implementations kept in sync by hand — `plan_scenario` re-derives it instead of calling `plan_project_reimport`. The cost is locality, not coverage: MAR-189's case A5 guards it in both directions, but a break surfaces in an agent-approval case rather than beside the rule | 189 |
+| L-D5 | The two hand-maintained frame bodies are policed only by `cmake/CheckFrameBodies.cmake`, whose regex `draw_[a-z_]+windows?\(` **does not match modals** | 182, 187, 191 |
+
+### E — known product defect
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-E1 | **A PSD reimport erases every skin.** `psd_import.cpp:1041` is `root->erase("skins")`, with `bones` and `slots` replaced wholesale above it. MAR-189 refuses to build on it rather than papering over it; the importer is unfixed | 188, 189 |
+| L-E2 | Slot names are unstable across imports — adding a layer can rename an untouched slot, because the dedup uses a document-global census (`psd_import.cpp:814-826`), surfaced as `proposed_slot_name` differing from `current_slot_name` on an `Updated` row | 188, 189, 190 |
+| L-E3 | `normalize_mesh_weights` **creates** its target instead of validating it, and `AttachmentSelection` and `MeshWeightTarget` are transposed | 187 |
+| L-E4 | `serialize_project` is not bit-exact for doubles needing 17 significant digits | 186 |
+| L-E5 | The runtime accepts a negative first inherit key time, and a `.mskl` may carry inert `curve` data on an inherit key. Only the project layer refuses either | 184, 186, 187 |
+| L-E6 | The empty-edit hazard is fixed only for the inherit family; siblings still emit `"attachment": []` and produce an unloadable `.mskl` | 184, 186, 187 |
+| L-E7 | An inherit lane can be pruned out of existence and cannot be re-created from the dopesheet, because a row exists only for a materialized timeline | 185 |
+| L-E8 | An agent-driven `animation.rename` leaves the GUI clipboard stale; `sync_shell_from_editor_session_if_revised` cannot tell a rename from a selection change | 185 |
+| L-E9 | macOS case duplicates of a **missing** file remain two recent-project entries — `weakly_canonical` converges only for files that exist | 183, 186, 187 |
+| L-E10 | A settings write failure is reported once and then forgotten; the in-memory list keeps the change, so the session behaves as if it persisted and the next launch disagrees | 183 |
+| L-E11 | Up to `kRecentProjectLimit` `stat` calls per frame while the submenu is open, and a `stat` on a dead network mount can block one | 183 |
+| L-E12 | **The largest orphan class is unreachable.** An overlay naming a missing bone or slot makes the project **unopenable**, and it is reported by nobody — the user sees only the runtime's load error | 186 |
+| L-E13 | The New form keeps the stale-`opened` hole the chooser lost; it self-heals on the next `begin_file_action(New)` and nothing in the machine reads it | 182 |
+| L-E14 | New writes `active_animation: "idle"` for a rig that may have no `idle` clip | 181 |
+| L-E15 | MAR-187's Fix button was **off-window** until F1 found it — a default `Selectable` spans the content region, so the `SameLine()` button landed past the right edge, unreachable by mouse. Fixed; recorded because every UI-free case passed the whole time | 187 |
+| L-E16 | **A pixel-only PSD edit is not stale.** Same layers, same classification, same digest; the reimport proceeds and the new pixels ship | 190 |
+
+### F — permanently open
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-F1 | MAR-180's "rebases every relative path" quantifies over a set the program cannot enumerate: `preserved_root` is by definition what the code does not understand. **It must not be written up as "six families, done"** | 180, 190 |
+| L-F2 | Nothing is persisted — a diagnostic is recomputed on demand, and a project opened, inspected and closed leaves no trace of what was found | 186 |
+| L-F3 | No `fsync`. A crash between the temporary and the rename leaves one orphan `*.tmp.*`, beside the project and beside `editor-settings.json` alike | 180, 183, 190 |
+
+### G — human or hardware required
+
+| L# | Limitation | Recorded by |
+|---|---|---|
+| L-G1 | **Photoshop's real layer-record order is unverifiable here and requires Photoshop.** MAR-191's **O1** measured the half that *is* measurable — the importer **refuses** the inverse record order by exact message, over-determined by a second guard — which settles what would happen, not what Photoshop emits. The row stays open and stays class **G**. If the real order is the inverse, a group-bearing real PSD produces a planning error and the user sees MAR-190's planning-failure path (N4) reporting the parser's own message — contained, not removed. The parser requires each group's `lsct` 1/2 header before its children and the `lsct` 3 divider after; both fixtures and the synthesiser are authored that way. This is a **G**, not a macOS limitation — no future agent story can close it | 188, 190 |
+| L-G2 | The MCP client half (`tools/mcp/test_client.py`) is hand-run and not in CTest; it needs a live editor with the agent socket listening | 185, 189, 191 |
+| L-G3 | This host cannot create a Metal device for the headless renderer, so `marrow_renderer_sample` is exercised with `--skip-render` and no frame is rendered | 191 |
+| L-G4 | A real cross-device rename needs a second volume; this machine has one | 180, 189 |
+| L-G5 | The interactive frame body and the window host need a real display session; `run_headless_smoke` returns before a window host is created | 182 |
+
+### I — deliberate decision, recorded so it is not re-litigated
+
+| L# | Decision | Recorded by |
+|---|---|---|
+| L-I1 | `weights.uncanonicalizable` has no repair. Normalization is precisely what cannot fix it, which is why its `safe_fix_id` is deliberately absent | 186 |
+| L-I2 | The orphan-weight-target supersession hides real weight problems on an orphaned edit until the orphan is fixed — the weights are dead data the runtime never sees | 186 |
+| L-I3 | Fixing an orphan overlay can **create** a stale-preview issue, and both polarities are asserted | 186 |
+| L-I4 | An oversized on-disk recent list stays oversized until the next real mutation, because **loading never writes** — cleaning at load would let one unmounted volume delete a user's bookmarks permanently | 183 |
+| L-I5 | A native close during a live authoring gesture re-raises the prompt; `absorb_close_request` is deliberately not gated on `authoring_gesture_active` | 183 |
+| L-I6 | `AwaitingSave` ignores a close request rather than queueing it — a save in flight must land | 182 |
+| L-I7 | A New project created over an existing file, then saved, is recorded in Recents: the arm keys on the create, not on the file's prior absence | 183 |
+| L-I8 | A persisted "last used directory" for the chooser is deliberately deferred — a different preference with a different lifetime and failure mode | 183 |
+| L-I9 | `--auto-close` bypasses the dirty prompt by design; smokes end on frame count, and any other choice hangs CI | 182 |
+| L-I10 | The clipboard cascade fixes all seven families at once, and the copied fragment's own `animation_name` is deliberately **not** rewritten | 185 |
+| L-I11 | The review queue is deliberately **not** a diagnostic issue — making it one would move `warning_count` whenever an agent queues a save | 186 |
+| L-I12 | MAR-189's AC5 approval clause is read as editor-only; MCP gets no approve tool, following `agent.resume`'s "only the editor can restore access". A stricter reading needs a 67th operation | 189 |
+| L-I13 | MAR-189's skins refusal is **unconditional** for a project carrying hand-authored skins on layers the PSD still produces — narrow sense: no remedy exists; wide sense: validation refuses. Both were measured and both are true; they are different senses of "blocked" | 189 |
+| L-I14 | MAR-190's staleness digest covers identity and classification only — it is **MAR-189's two-field `identity=change;` list**, not the ten-field tuple MAR-190's design specified, so a provenance edit renaming a stored `slot_name` leaves the modal showing `current_slot: X` while the commit uses `current_slot: Y`. **Inherited deliberately**: a stricter MAR-190-local digest would make the same edit stale on the editor path and not on the agent path, and an inconsistent contract between two entry points is worse than one recorded gap. Raised as a follow-up for the digest's owner | 190 |
+
+### The count, and where it disagrees with its own prediction
+
+**86 rows in 8 classes** — A 15, B 18, C 10, D 5, E 16, F 3, G 5, I 14 —
+against a pre-registered **73 in 8 classes** (A 12, B 11, C 9, D 4, E 22, F 3,
+G 5, H 7). The prediction was made against **74 bullets in 8 sections**; the
+sweep ran against **84 in 9**, because MAR-189 landed in between. Reported as a
+disagreement rather than reconciled, per the plan.
+
+Where the two differ, and why:
+
+- **E 22 → E 15 + I 13.** The single largest difference is the class split, not
+  a change in what was found. E ∪ I is 28 against a predicted 22; six of those
+  are rows the prediction did not enumerate rather than rows invented here.
+- **B 11 → 17.** Four rows are new **measurements** MAR-191 made rather than
+  inherited: B2, B3 and B4 come out of the severity register, and B1 moves to
+  closed. An inventory that only copies forward cannot grow this way.
+- **H 7 → 0, and the class is gone.** MAR-189 shipped, then MAR-190 shipped at
+  `947191b`, so nothing is prospective any more. Its rows were re-derived against
+  the delivered code, as this section instructed, and redistributed: the scrolling
+  gap to **A**, P1's ungated negative direction to **B**, the pixel-only staleness
+  hole to **E**, and the deliberately-inherited digest scope to **I**. **One row was
+  dropped rather than moved** — "a failed rollback is reachable" was read from
+  MAR-190's design, and the delivered story measured it and withdrew the disclaimer,
+  so it is not a limitation. A prospective row that survives delivery unexamined is
+  exactly the unmeasured claim this class was flagged to prevent.
+- **C 9 → 10, F 3 → 3, G 5 → 5.** Essentially confirmed.
+
+**The prediction was not falsified so much as superseded by a story landing**,
+and the evidence for that reading is that the per-story bullet counts matched it
+exactly — 6/12/14/16/9/10/5/2 for MAR-188 down to MAR-181 — with MAR-189's ten
+as the entire difference.
+
 ## MAR-192–210 Platform Program Local Implementation Checkpoint
 
 Validated locally on 2026-08-09 without closing any platform story. The source
@@ -1527,6 +1960,313 @@ required by MAR-210.
   and both AppKit/process Regular activation policies verified.
 - Current qualification authority and explicit NOT RUN rows:
   `docs/root1/platform-validation.md`.
+
+## MAR-191 Validate and Document Editing P1 Validation Results
+
+MAR-191 closes Editing P1. Its job is different from the twenty-three stories
+before it: it **verifies and documents what they built**, adds one measurement of
+its own, and repairs exactly one debt that was assigned to it by name. It changes
+**no compiled code** — every file it touches is documentation, a tracking JSON, or
+a standalone checker script that `CMakeLists.txt` does not reference.
+
+### What was measured before anything was written
+
+Fifteen gates, in a `git archive` extraction of the parent SHA rather than the
+live worktree, because two other stories were writing into it. Five were
+blocking; **three fired**.
+
+| Gate | Expected | Measured | |
+|---|---|---|---|
+| G1 | parent + both trailers | present, contiguous | pass |
+| G2 | `ctest -N` 22 | **23** | drift — MAR-189 registered `marrow.psd_import_smoke` |
+| G3 | `-L runtime` 4, `-L editor` 12 | **4 / 13** | differs — see below |
+| G4 | `grep -c add_test` 25, 3 guarded | **26**, 3 guarded → 26 − 3 = 23 | pass |
+| G5 | 0 warnings | build exit 0, **0 warnings, 0 errors** | pass |
+| G6 | `[ OK ]` 437 | **437**, re-measured not carried | pass |
+| G7 | registry 66 | **66** | pass |
+| G8 | 11 guards, array bound, 2 py asserts | **11** = 7 graph / 2 constraints / 2 timeline; `agent_dispatch_smoke.cpp:42`; `test_client.py:53,55` | pass |
+| **G9** | 7 severity sites | **exact**, and proven complete | pass |
+| **G10** | MAR-189 absent | **PRESENT** | **fired — inverted** |
+| **G11** | MAR-190 absent | absent, but the gate is **defective** | **fired** |
+| **G12** | 74 bullets / 8 sections | **84 / 9** | **fired — material** |
+| **G13** | six stale strings each > 0 | 2/1/1/1/1/1 | pass |
+| G14 | MCP venv present, gitignored | present via `tools/mcp/.gitignore:1`, absent from the archive | pass |
+| G15 | worktree dirty | dirty **and moving**; `AGENTS.md` was staged by another agent mid-measurement | pass |
+
+**G3 is a correction worth carrying.** The two labels **overlap** —
+`marrow.parameter_project_smoke` carries both — so `4 + 13` **double-counts** and
+the union is **16 of 23**, with **7 tests carrying neither**. The labels are an
+overlapping subset check, never a sum and never a partition.
+
+**G11 was a defective gate, and it was in this story's own plan.** Its pattern
+`draw_psd_reimport_modal` matches nothing in the parent tree **and nothing in the
+live worktree either**, where MAR-190's files exist — so its zero carried no
+information. MAR-190's surface is a model layer (`apply_psd_reimport_review`,
+`group_psd_review`, `psd_review_can_confirm`, `build_psd_commit_plan`) with no
+`draw_` function at all. *A zero is evidence only once the pattern is known to
+match something*, and the rule existed before the plan that broke it.
+
+**G12 was not falsified so much as superseded.** The per-story counts matched the
+prediction **exactly** — 6/12/14/16/9/10/5/2 for MAR-188 down to MAR-181 — with
+MAR-189's ten as the entire difference.
+
+### Result, by acceptance criterion
+
+**Four of six are witnesses, and that is a property of the story, not a
+shortfall.** MAR-191 changes no compiled code, so no suite can fail *because of*
+it; a run that passes regardless of what this story did is a witness by
+definition. Saying so is the point of the label.
+
+| AC | Verdict | Kind | Evidence |
+|---|---|---|---|
+| AC1 | met | **witness** | The P1 surfaces are covered by MAR-154–189's own cases, re-run green here. PSD reimport is covered at the **plan and commit** layers (MAR-188/189); the **review UI** layer is MAR-190's and is not in this tree |
+| AC2 | met | **gate** | Zero-line diff over `src/runtime/`, `include/marrow/runtime/`, `include/marrow/marrow.h`, and over `project.cpp`'s schema-shaped edits; `format-spec.md` untouched. Each proven capable of matching (below) |
+| AC3 | met | **witness** | Registry **66**, MCP **66**, eleven `!= 66U` guards, two `== 66` Python asserts — all pre-existing and re-measured, none authored here |
+| AC4 | met | **witness** | MAR-189's rollback failpoint sweep, re-run green. MAR-191 authored none of it |
+| AC5 | met | **gate** | The documentation edits below, gated by `tools/docs/check_registry_claims.py` with **five** proven failure modes |
+| AC6 | met | **witness** | Run **twice**. **8a** on the tree this commit produces, before MAR-190 existed; **8b** at `cde3bb6`, with all of Editing P1 present, which is the one that counts — *a final validation of Editing P1 that omits the last story of Editing P1 is not a P1 sign-off*. Both below |
+
+### The full run (8a), and exactly which tree it ran in
+
+Run in a fresh extraction of the parent SHA **with this story's hunks applied and
+MAR-190's excluded** — verified: their `AGENTS.md` entry absent, their
+`psd_reimport_review.cpp` absent, `psd_import_smoke.cpp` byte-identical to HEAD.
+The live worktree was **not** used for this half, because it carries MAR-190's
+uncommitted work across eight files and building it would measure a tree
+belonging to no commit.
+
+| Command | Result |
+|---|---|
+| `cmake --build build` | exit 0, **0 warnings, 0 errors** |
+| `marrow_verify_third_party` | hashes verified |
+| `marrow_constraint_warning_check` | built |
+| `marrow_frame_body_check` | both frame bodies draw the same ten windows |
+| `ctest` | **100% passed, 0 failed out of 23** |
+| `ctest -L runtime` | **4/4** |
+| `ctest -L editor` | **13/13** |
+| `marrow_project_smoke` | exit 0 |
+| `… --export-runtime/--export-binary` | exit 0 |
+| `marrow_inspect --compare` | `matches` |
+| `marrow_agent_dispatch_smoke` | exit 0, **437** `[ OK ]` |
+| `marrow_psd_import_smoke` | exit 0 |
+| `marrow_renderer_sample --skip-render` | exit 0 — **`--skip-render` is what AC6 names; this host cannot create a Metal device, so no frame was rendered** |
+| `marrow_editor_shell --auto-close 2` | exit 0, `MARROW_CONFIG_HOME` set; `$HOME/Library/Application Support/Marrow` absent **before and after** |
+| `check_registry_claims.py` | X2 PASSED |
+| `git diff --check` | clean |
+
+### The sign-off run (8b), at `cde3bb6`, with all of Editing P1 present
+
+Re-run once MAR-190 landed, because a P1 sign-off that omits P1's last story is
+not a sign-off. Same tree plus MAR-191's own hunks.
+
+| Command | Result |
+|---|---|
+| `cmake --build build` | exit 0, **0 warnings** |
+| `marrow_verify_third_party` / `marrow_constraint_warning_check` / `marrow_frame_body_check` | all built; both frame bodies draw the same windows |
+| `ctest` | **100% passed, 0 failed out of 24** |
+| `ctest -L runtime` / `-L editor` / `-L docs` | **4** / **13** / **1** |
+| `marrow_project_smoke`, `+ exports`, `marrow_inspect --compare` | exit 0; `matches` |
+| `marrow_agent_dispatch_smoke` | exit 0, **437** `[ OK ]`, registry **66** |
+| `marrow_psd_import_smoke` | exit 0 — **now including O1** |
+| `marrow_renderer_sample --skip-render` | exit 0, no frame rendered on this host |
+| `marrow_editor_shell --auto-close 2` | exit 0; `$HOME/Library/Application Support/Marrow` absent before and after |
+| `marrow.registry_claims` alone | **Passed**; and `***Failed` on a planted claim, so the CTest entry is a gate rather than a green light |
+| `git diff --check` | clean |
+
+The MCP half ran in the **live** worktree, because the venv is gitignored and
+exists only there; `tools/mcp/` is untouched by both stories in flight, verified
+by `git status` and by a diff against the parent SHA. `py_compile` over
+`server.py`, `test_client.py`, `tools/editing.py`, `tools/inspection.py` — exit 0.
+**The MCP client run itself is manual and is reported as manual**, the same
+standard MAR-180 and MAR-185 met.
+
+### Inversions run
+
+**V1–V7 — the severity register, complete over its class.** MAR-186 raised this
+gap, MAR-187 re-recorded it, and both deferred it **to MAR-191 by name**:
+`check_invariants` recomputes its error/warning tallies from the same
+`issue.severity` values it compares against, so a **misassignment** moves both
+sides together and no counting case can see it.
+
+The population is **closed, not sampled**: `make_issue` has exactly seven call
+sites, and `diagnostics.cpp:75` is the only severity write in `src/editor/`. The
+struct default at `diagnostics.hpp:211` is always overwritten on that path; other
+`DiagnosticIssue` constructions exist only in test code.
+
+Each literal was flipped to its opposite, rebuilt with objects deleted, run, and
+restored under a `cmp` naming two absolute paths.
+
+| # | Site | Code | First reddening case | Clause |
+|---|---|---|---|---|
+| V1 | `:203` | `OverlayOrphanAnimation` | MAR-186 **G1** | severity |
+| V2 | `:456` | `OverlayOrphanWeightTarget` | MAR-186 **G9(e)** | severity |
+| V3 | `:504` | `WeightsUncanonicalizable` | MAR-186 **G8** | severity |
+| V4 | `:544` | `WeightsNonCanonical` | MAR-186 **G7** | severity |
+| V5 | `:596` | `PreviewStaleAnimation` | MAR-186 **G9(a)** | severity |
+| V6 | `:629` | `PreviewStaleSkin` | MAR-186 **G10 (pure)** | **count** |
+| V7 | `:764` | `ProjectUnsavedChanges` | MAR-186 **G10 (dirty session)** | count |
+
+The seven texts, verbatim:
+
+- **V1** — `issue 'overlay.orphan_animation|deform|ghost|body|body_mesh' is a warning, expected an Error -- the phantom animation is written into every .mskl and .mbin export, which is shipped corruption.`
+- **V2** — `expected an overlay.orphan_weight_target Warning carrying 'remove_orphan_overlay'; got code 'overlay.orphan_weight_target' fix 'remove_orphan_overlay'.`
+- **V3** — `weights.uncanonicalizable is a 'warning', expected an Error -- a vertex whose whole influence list is below kMeshWeightEpsilon has no meaningful binding.`
+- **V4** — `expected a weights.non_canonical Warning carrying 'normalize_weights', got code 'weights.non_canonical' severity 'error' fix 'normalize_weights'.`
+- **V5** — `expected a Warning carrying 'reset_preview_reference' on panel 'project' naming animation 'ghost'; got fix 'reset_preview_reference' panel 'project' animation 'ghost'.`
+- **V6** — `error_count 2, warning_count 1 -- expected error_count 1, warning_count 2. The fixture is asymmetric on purpose: a one-of-each fixture cannot see the two accumulators swapped.`
+- **V7** — `reported error_count 2 warning_count 2, expected 1 and 3 -- the two project warnings plus the unsaved-changes warning. Counting severities BEFORE appending project.unsaved_changes leaves warning_count one short on every dirty project.`
+
+Every clause is a **severity or count** clause; **no message clause reddened**, so
+no mutation was over-broad and all seven are credited.
+
+**V6 is the result worth reading twice, and it is not a clean win.**
+`PreviewStaleSkin` bit, so the predicted "no detector" outcome did not occur and
+no assertion needed inventing. But it reddened through G10's **aggregate**, not
+through a per-issue check — the other five name the offending issue and V6
+reports two integers being swapped. Its own failure text says why: *"a one-of-each
+fixture cannot see the two accumulators swapped."* The assignment is covered, but
+by a fixture asymmetry that one edit could remove, and nothing would announce
+that. Recorded as **L-B2**, not as a gap closed at the V1–V5 standard.
+
+**A limitation of the register that could not be removed.** It measures the
+**first** detector by run order and **cannot observe over-determination**, because
+`marrow_project_smoke` aborts at its first failure. Measured, not assumed: all
+seven logs are exactly 99 lines against the baseline's 119, lines 1–98 are
+byte-identical across all seven, and the baseline's 20 MAR-187/188 lines are
+absent from every mutated run. So **"one case per site" must not be read as "one
+detector per site"** — different claims, and only the first is in evidence. A
+continue-on-failure mode would make the second measurable and is another story's
+change.
+
+**I-X2 — five proven failure modes.** X2's original form (*"all six patterns
+return zero"*) is recorded as **falsified**; see the document errors below. Its
+replacement derives the oracle from the product.
+
+| Mode | Mutation | Result |
+|---|---|---|
+| a | one present-tense `66` → `64` | exit 1, `claims 64, registry has 66` |
+| b | a pinned historical count drifts | exit 1, `'64 ops' x1 (pinned 2)` |
+| c | **a 67th operation added to the registry** | exit 1, `oracle: 67` — **no document touched** |
+| d | a bare claim with no present-tense marker, in an unpinned document | exit 1 **after** zero-pinning; **exit 0 before** |
+| e | the same shape via `64-operation` in `AGENTS.md` | exit 1 |
+
+**Mode (c) is what makes it a derived check** rather than a hardcoded one: the
+gate reddens because the *product* moved, which a literal `66` could never do.
+Mode (d) was a hole found by review after the gate was first written and closed by
+pinning **all eight** document/literal pairs **including the zeros** — a zero pin
+converts *"this literal happens to be absent"* into *"this literal is asserted
+absent."*
+
+**O1 and I-O1 — run after MAR-190 landed and released the file.** Task 2 was held
+for most of the story because `src/samples/psd_import_smoke.cpp` was under
+continuous edit; it was taken up once MAR-190 committed.
+
+`write_synthetic_psd` gained an `inverse_group_order` mode that emits the mirror
+image — the `lsct` 3 divider where the folder record goes and the `lsct` 1 folder
+record where the divider goes. **O1** asserts that
+`import_psd_to_runtime_bundle` refuses that document with **exactly**
+`"PSD folder end marker appeared without an open folder."`, and its **control
+arm** asserts the same three layers in the accepted order still import with two of
+them grouped under `torso` — without which a synthesiser that emitted nothing
+parseable would satisfy the refusal clause for entirely the wrong reason.
+
+**I-O1** makes the pop on an empty `active_groups` a no-op (`psd_import.cpp:732-737`)
+and O1 reddens:
+
+> `O1: refused, but not for the reason claimed.`
+> `  expected: PSD folder end marker appeared without an open folder.`
+> `  actual:   PSD folder markers were unbalanced.`
+
+**The refusal turns out to be over-determined**, and that is the result worth
+keeping: a *second*, later guard catches the inverse order when the first is
+disabled. O1's **exact-message** clause is what discriminates between them — a
+substring or an any-error clause would have passed under the mutation and been
+recorded as "no bite". Q0, which runs before O1, stayed green under the mutation.
+
+**What this does and does not settle.** It measures the **importer**, which was
+the measurable half. It says nothing about what Photoshop emits; **L-G1** stays
+open and stays class **G**, because no Photoshop-authored PSD exists here and none
+can be produced.
+
+### Document errors found
+
+Nine, all measured rather than reasoned:
+
+1. **This story's plan ordered three historical sentences overwritten.** Its Task 5
+   table listed `editing-gap-analysis.md:95`, `:455` and `refector.md:20` as
+   present-tense `64` claims. All three are **narrated consequences** of MAR-177,
+   MAR-178 and MAR-179 — and **MAR-185** raised the registry to 66. Overwriting
+   would have traded a true stale sentence for a false current one. Repaired by
+   extending the narration; the general rule is now a durable entry.
+2. **X2's pre-registered form was unreachable.** *"All six patterns return zero"*
+   could not be achieved without either falsifying history or rewording prose
+   purely to defeat a string search — the **self-satisfying** shape, where a gate
+   is satisfied by editing the thing it searches. Recorded as falsified and
+   replaced by the derived check, rather than quietly re-specified.
+3. **`grep -c` counts lines, not occurrences.** `64 ops` in
+   `editing-gap-analysis.md` is **2 lines but 3 occurrences**. A sweep of the
+   repository's other gates found **none** affected — the `[ OK ]` census is 437
+   both ways, the registry census is `^`-anchored, and every other stated
+   expectation is a zero, which is exempt because no matching line means no
+   occurrence.
+4. **`### Methodology hazards worth recording` was misfiled** inside
+   `## MAR-183 … Validation Results`. Its entries are present-tense rules; that
+   section's content is one story's historical measurement, so every durable entry
+   added there was an edit to a story section. **Promoted to top level** by this
+   story, with MAR-183's remaining content proven byte-identical to
+   before-minus-block (295 → 195 lines, matching the 100 moved).
+5. **The plan directed MAR-190 to be marked complete.** It has not shipped. Left
+   unmarked; the plan assumed a landing order that did not happen.
+6. **Six story-table rows were shipped but unmarked** — MAR-184 through MAR-189 —
+   found by measuring against which stories actually have validation sections
+   rather than by trusting the plan's list of three.
+7. **Three `done` stories carried no `completedAt`**: MAR-188, MAR-157, and this
+   story's own row. Found by sweeping the whole file rather than the story range;
+   a range-scoped check had reported one. MAR-157's date was corroborated twice
+   before writing it. The file-wide invariant now holds: **188 done, 0 undated**.
+8. **The gate reddened on its own documentation.** Writing the historical-sentence
+   entry — which necessarily *quotes* a stale claim — made X2 fail. A gate over
+   prose **claims** must not read quoted **examples**; it now skips blockquotes and
+   fenced code. It was **re-proved after being modified**, on the principle that a
+   modified gate is no longer a proven gate, and the **cost was measured**: a
+   genuine stale claim inside a blockquote is now invisible to clause (1). That
+   blind spot is recorded as deliberate so it is not "fixed" back.
+9. **`-L editor` was reported to this story as 12 with six unlabelled.** Measured:
+   **13**, seven unlabelled, and the labels overlap.
+
+### Not independently covered
+
+**This is the last such section the chain writes.** Everything Editing P1 knows
+about its own limitations is now in `## Editing P1 Limitation Inventory` —
+**86 rows in 8 classes**, derived from 84 bullets across 9 sections plus the
+non-section sources. Read that, not this. What follows is only what MAR-191
+itself leaves open:
+
+- **O1 was never run.** The importer's group-order behaviour is unmeasured because
+  `psd_import_smoke.cpp` was locked by MAR-190 for the duration. **L-G1** stays
+  open, and the half of it that *is* measurable stays unmeasured.
+- **AC6's 8b run measures a tree that is not this commit.** It ran at `cde3bb6`
+  with every Editing P1 story present but without MAR-191's own hunks, which are
+  documentation, one test case and one CTest registration. The build and suite
+  results therefore describe the code this story validates, not the diff it adds.
+- **Four of six acceptance criteria are witnesses**, because this story changes no
+  compiled code. No suite here can fail because of MAR-191, and a passing run is
+  therefore weak evidence about MAR-191 specifically — it is strong evidence about
+  the twenty-three stories it verifies.
+- **The inventory's own class boundaries are a judgement.** The **E/I** split —
+  product defect versus deliberate decision — moved fourteen rows out of the
+  "things to fix" bucket. A re-derivation that moves some back is a better answer,
+  not a worse one; what must not change is that the count's role is to be
+  falsifiable.
+- **The severity register cannot see over-determination**, as measured above, and
+  `PreviewStaleSkin`'s coverage rests on a fixture asymmetry (**L-B2**).
+- **`ctest -N` moves 23 → 24, and the delta is this story.** `marrow.registry_claims`
+  is registered (label `docs`). MAR-190's Task 10 gate compares `ctest -N` against
+  its own Task 0 baseline of 23 and says *any other value is a regression to
+  investigate, never a number to adjust* — correctly written, but **not scoped to
+  authorship**, so it cannot tell "MAR-190 added a test" from "someone else did".
+  Registration was deliberately held until MAR-190 committed for exactly that
+  reason. MAR-190's five *recorded* 23s are historical and stay 23.
 
 ## MAR-190 Add the PSD Reimport Review UI Validation Results
 
@@ -4162,106 +4902,6 @@ fifth, 182 six).
 | D4 | Plan §1.5 | Predicts inversion **I7a** ("`resize` before `insert`") fails with *"`front()` is `p11`, not `p12`"* | The predicted symptom does not follow from the mutation. Truncate-before-insert leaves the newest entry at the head and the **size** wrong: the actual failure is `"twelve promotions must leave exactly kRecentProjectLimit entries, got 11"` |
 | D5 | The plan's task list | Design §7.2 and §5 both require **C20**, but **no task in the plan implements it**. Tasks 1-6 cover the P-case, C21, C22, C23, C24 and C25 only | C20 was written and added to the rail. It is falsifiable: under I6 it fails with `"a relative path must be stored ABSOLUTE …"` |
 | D6 | Design §6 / plan §3.5, §4.4, §6.2 | Attribute **I8** to C24 assertion 1 and **I11** to C23 assertions 1 and 8 | Both bite, but each has earlier detectors among **shipped** guards -- I8 in MAR-181 C4 then C5, I11 in two MAR-170 guards then MAR-183's own C21 phase 6. The named assertions are real and correct; they are simply not the first to fire. Recorded rather than "fixed", because over-determination here is a strength |
-
-### Methodology hazards worth recording -- the comparison itself can lie
-
-**This section generalises past MAR-183.** Sixteen stories in this chain have
-scrutinised the *code under test* while treating the **comparison mechanics** as
-trustworthy. An inversion result is not a claim about code; it is a claim about a
-**comparison** -- "this case, built from this source, produced this message." Any
-link in that chain can break without the code being wrong, and when one does the
-result is a confident, false, and completely plausible-looking claim. Three
-distinct instances were found here, two of them near-misses caught only by luck.
-**H4 was added later**, by the review pass that read this section. It is H3's
-sibling, not a restatement of it. **H3 is historical**: a recovery or rewrite
-silently thinned a case that *was* once falsifiable, so its remedy is to re-run
-every inversion after any recovery. **H4 is authorial**: the assertion was
-**never** falsifiable and no recovery was involved, so its remedy is to trace
-which writes actually survive to the assertion point. Both rest on the same
-principle -- a passing case is no evidence that it detects anything.
-
-**H1 -- a `cp` restore that does not rebuild.** Restoring an inverted source file
-with `cp` can leave the restored file and its stale object sharing the **same
-second** in their mtimes, in which case `make` does **not** rebuild and the next
-run silently exercises the *inverted* binary. This bit once:
-`marrow_preference_tests` reported two failures against a pristine source tree,
-and C23 assertion 3 failed for the same reason. Every "the inversion bit" claim
-across this whole chain rests on the restore actually rebuilding.
-**MAR-184 found that `touch` is not sufficient, and that the failure is not
-one-directional.** `touch` sets the source's mtime to *now*, and the object
-written by the immediately preceding build is also from *now*; at one-second
-granularity the object is not older than the source, so an automated loop that
-restores, `touch`es, rebuilds, then mutates, `touch`es and rebuilds skips builds
-anyway. Nine of sixteen inversions read as "did not bite" from this alone.
-
-**Both directions are reachable, and the difference matters.** If the *mutation*
-build is skipped, the stale object is the pristine one and the run is a false
-**pass** -- a missed inversion. But if the *restore* build is skipped, the stale
-object is the **mutated** one, and the next inversion in a **different**
-translation unit compiles and links cleanly against it; its failure is then
-attributed to the wrong mutation. That is a false **positive**, from a single
-skipped build. MAR-184's mutations spanned four translation units, so this was
-reachable rather than hypothetical. Do **not** reason that a stale binary can
-only cost you a missed inversion -- under that belief, skipping the deletion when
-you are in a hurry looks free, and it is not.
-
-*Rule: do not rely on mtime. **Delete the object file before every verification
-build** (`rm -f build/CMakeFiles/<target>.dir/<path>.o`), which removes the
-comparison from the question entirely; `touch` is sufficient for a single
-interactive restore and is **not** sufficient in an automated loop. Run final
-verification against a from-scratch `rm -rf build`. What makes an inversion table
-trustworthy is not any asymmetry argument but **H2** -- comparing each message
-with `cmp` against an independently recorded first-run text. See the MAR-184
-section for the nine-false-negative worked example.*
-
-**H2 -- a hand-sliced reference line.** Comparing a measured message against a
-recorded one with `sed -n '3p'` pulled the **wrong line** out of the reference
-file and printed `DIFFERS` for a message that was in fact byte-identical. Caught
-only because the diff output was visibly nonsense; had the off-by-one landed on a
-*similar* line it would have passed unnoticed in either direction.
-*Rule: compare with `cmp`/`diff` against a whole recorded string. Never
-hand-slice line numbers out of a reference file, and never eyeball a
-byte-identity claim.*
-
-**H3 -- a recovered case can be thinner than the one the inversion was run
-against.** After test code was lost and rebuilt, the recovered cases **passed**
--- but passing is not evidence, because *a thinned case passes too.* The property
-destroyed by the loss was **falsifiability**, and falsifiability is invisible to a
-passing run. Confirming C20/C24/C25 green after recovery proved nothing about
-whether they still detect anything.
-*Rule: after any recovery, restoration or rewrite of test code, **re-demonstrate
-falsifiability** -- re-run the inversions against the recovered tree. Do not
-substitute a green run for it.*
-
-**H4 -- an assertion can be VACUOUS at the point it runs.** C25 assertion 4 read
-three pieces of state after clicking a disabled entry (`dirty_intent`,
-`pending_file_application`, `project_path`) and **none of them could have been
-set on that click**, on a clean session, no matter what the menu did: the arm is
-created and consumed inside the same `render_frame`, and the failed open returns
-before it assigns the path. The case passed, the inversion table listed it, and
-the property it named -- AC4's "visible but *disabled*" half -- had **no failing
-detector anywhere**. Its author reasoned about what *should* be observable
-instead of tracing what actually survives the frame.
-*Rule: an assertion earns its place by FAILING under the mutation it names. Run
-that mutation. Reading state that a passing run leaves at its default is not
-evidence -- trace which writes survive to the assertion point, and assert on
-those. The reusable shape to watch for, which H3 has nothing to say about: state
-ARMED and CONSUMED inside a single `render_frame`, leaving every later reader at
-a default it would have held anyway.*
-
-**What was actually done here.** Every inversion restore in this story is followed
-by `touch`. The final verification ran against a from-scratch rebuild. Two
-inversion results (I7b, I6b) were re-run after H1 was found, and the three
-headline inversions (I1, I2a, I2b) were re-verified against the clean build with
-identical messages. After H3, **every** inversion originally run against the three
-rebuilt cases (C20, C24, C25) was re-run against the committed tree: I6 -> C20;
-I9, I10, I3 and the live-vector variant -> C25; the failed-save, fresh-preferences
-and transaction variants -> C24. Five reproduced byte-identically (verified with
-`cmp`, per H2), one reproduced its first detector with the second stated as
-unchanged-by-inference only, and the live-vector variant **again did not
-reproduce** -- reported as a second non-reproduction rather than converted into a
-convenient bite. C21/C22/C23 were never exposed to H3: they were restored from a
-byte-exact file copy rather than rewritten.
 
 ### Not independently covered
 

@@ -2867,7 +2867,8 @@
       "dependsOn": [
         "MAR-156"
       ],
-      "status": "done"
+      "status": "done",
+      "completedAt": "2026-07-18"
     },
     {
       "id": "MAR-158",
@@ -3805,7 +3806,8 @@
       "dependsOn": [
         "MAR-187"
       ],
-      "status": "done"
+      "status": "done",
+      "completedAt": "2026-09-01"
     },
     {
       "id": "MAR-189",
@@ -3858,7 +3860,8 @@
       "dependsOn": [
         "MAR-190"
       ],
-      "status": "open"
+      "status": "done",
+      "completedAt": "2026-09-02"
     }
   ]
 }
