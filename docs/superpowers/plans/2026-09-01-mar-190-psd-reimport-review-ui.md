@@ -474,7 +474,7 @@ Recorded as they were measured, per design §5.2 rule 5.
 |---|---|---|---|---|
 | **i3a** | `psd_reimport_review.cpp` | `build_psd_commit_plan` derives through `const_cast<PsdReimportPlan&>(review.plan)` instead of copying -- the by-value property removed | **D2**: `"MAR-190 D2: deriving the commit plan mutated the REVIEW's own plan; layer 'torso\|arm_l' now has preserve=false. The derivation must return a copy."` | Every ordered `preserve`-list clause passes: the derived plan is *correct*, and only the review's own copy is collateral. D1 cannot see it (empty forget set, nothing set to `false` -- F-b). This row exists because it is what keeps **I3** a real inversion in Task 5 rather than two names for one object, and it is the direct evidence for design §2.3's by-value requirement |
 
-### B.2 AC3's history clause -- the defect, the fix, and its three inversions
+### B.1 AC3's history clause -- the defect, the fix, and its three inversions
 
 **V8 measured MAR-190's own AC3 failing.** AC3 names five conditions in one breath
 and "commit failure" is one of them: *"...leave the project, runtime source,
@@ -519,7 +519,7 @@ redo stack (edit, then undo), fails a reimport at `UpdateProvenance`, and assert
 the primed entry survives **by depth, by label, and by still replaying** -- a
 depth check alone passes if the rollback swapped its own entry in.
 
-### B.1 Deliberately uninverted, by name
+### B.2 Deliberately uninverted, by name
 
 - **The four provenance `ImGui::Text` calls.** MAR-188's P-cases already cover the
   fields' typed round trip; inverting the formatter proves nothing an acceptance
@@ -536,7 +536,7 @@ depth check alone passes if the rollback swapped its own entry in.
   through I9; the remaining five clauses are each the named detector of at least
   one row above, so no clause is unattributed.
 
-### B.2 The three degenerate shapes, per-case
+### B.3 The three degenerate shapes, per-case
 
 | Shape | Instance found while planning | Resolution |
 |---|---|---|

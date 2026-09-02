@@ -831,6 +831,47 @@ after being written. A mutation whose effect cannot be observed is not a weak
 inversion; it is not an inversion at all, and recording "I7 did not bite" without
 that reasoning would have told the next reader nothing.
 
+### An AGGREGATE is blind to any mutation that PERMUTES its inputs rather than changing them
+
+Three instances in this chain, each found the same way -- by running the gate
+against the mutation it was written for, not by reading it.
+
+| Aggregate | Invariant under | Instance |
+|---|---|---|
+| a **count** | a **move** | **MAR-190's S1.** It counted call sites of `draw_psd_reimport_modal(` under `src/editor/`. Its own inversion **I12** *moves* the call from `draw_project_window` into `render_shell_frame` -- both under `src/editor/` -- so the count stayed at exactly **1** and the gate reported green on the single mutation it existed to detect |
+| a **sum** | a **swap** | **MAR-186's G10 / MAR-191's V6.** Its failure text says it outright: *"a one-of-each fixture cannot see the two accumulators swapped."* It bites only because the fixture was deliberately made asymmetric |
+| a **set** | **reordering and duplication** | **MAR-187's frame-body gate.** `CheckFrameBodies.cmake` compares the two bodies with a set difference (`_missing_from_smoke` / `_missing_from_app`), so it cannot see a window drawn twice or the draw order changing. **Recorded as an observation, not a defect**: for *"do both lists mention the same windows"* a set may be exactly the right comparison, and whether multiplicity or order matter there is a real question rather than an assumed bug |
+
+**The remedy is the same in all three: assert the STRUCTURE, not the aggregate.**
+S1 gained the file the surviving line must be in; G10 needed an asymmetric fixture;
+the frame-body gate would need multiplicity or order if either turned out to
+matter.
+
+*Rule: before trusting a gate that reduces its input to a number or a set, ask
+what rearrangement of the input leaves that reduction unchanged -- and check
+whether the mutation you are guarding against is exactly such a rearrangement.*
+**A gate is a hypothesis until it has been run against the mutation it names.**
+S1 needed restating twice, and both times running it rather than reading it is
+what exposed the gap.
+
+### A case that observes its own INPUT instead of the system's OUTPUT
+
+Not the vacuous shape and not the self-satisfying one: the case does real work,
+asserts a real value, and compares it against something **it computed itself** --
+never reading the state the system actually built. A green result then means only
+that the case agrees with itself.
+
+**Measured in MAR-190.** The frame case F1 grouped `fixture.plan` -- the plan the
+CASE had prepared -- while the production button path builds its own plan from the
+project. `fixture.plan` was default-constructed, so F1 reported **0 Updated / 0
+Missing while the modal on screen was drawing rows**. Nothing was broken; the case
+was looking at the wrong object. The fix is to read
+`state.psd_reimport.review->plan`, the plan the modal is actually showing.
+
+*Rule: read the state the SYSTEM built, never the state you handed it.* This is the
+failure a frame case is most likely to have while looking entirely correct, because
+every line of it is doing something real.
+
 ### MASKING: a later step overwrites what the mutation changed, so the inversion reports "did not bite"
 
 A sixth degenerate shape, and it is none of the five already catalogued -- not
