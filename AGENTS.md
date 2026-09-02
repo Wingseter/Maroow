@@ -1331,6 +1331,80 @@ and every regenerated file from that one value. In a worktree with other agents 
 it, "HEAD" is not a constant, and two reads of it minutes apart are two different
 trees.*
 
+### `git apply --cached` is necessary and NOT sufficient: `git commit --only` re-stages from the worktree
+
+**The sharpest form first: the index check passed, and only the COMMIT check caught
+it.** A verified index is not a verified commit.
+
+This chain has had this incident **four times** and every previous post-mortem
+concluded *"stage hunks, not files"* and stopped. That advice is right and it is
+insufficient, and the gap between it and the damage is this entry.
+
+**The mechanism.** MAR-190 hunk-staged a shared `AGENTS.md`: constructed
+HEAD-plus-its-own-blocks, applied it with `git apply --cached`, verified the index
+held **zero** of the other story's markers, and ran a **planted-marker control**
+proving that verification could see one. All correct. It then committed with
+`git commit --only -- <paths>`.
+
+**`--only` commits the named paths from the WORKING TREE, not the index.** It
+silently re-staged the shared file and swept in ~800 lines of another story's
+uncommitted work, including a Project State sentence that was not yet true. The
+commit was 5893 insertions / 108 deletions where the staged content was 224.
+
+**The full trap list, because `--only` is not the only spelling:**
+
+- `git commit --only -- <paths>`
+- `git commit -i` / `--include`
+- `git commit <path>` (the bare pathspec form)
+
+All three re-stage from the worktree and discard `git apply --cached`.
+
+- **After hunk-staging a shared file, commit from the INDEX**: bare `git commit`,
+  or `git commit --amend` with **no pathspec**.
+- **Verify the COMMIT, not the index.** `git show HEAD:<path> | grep -c <the other
+  story's marker>` -- and run that check against a planted marker first, so a zero
+  is known to be capable of being non-zero.
+
+**The repair, which must not re-enter the trap.** Fix it by writing the intended
+content to a blob and moving only that index entry, then amending from the index:
+
+```
+blob=$(git hash-object -w <constructed-file>)
+git update-index --cacheinfo "100644,$blob,<path>"
+git commit --amend --no-edit          # no pathspec: uses the index
+```
+
+Re-staging the file to fix a bad stage is how the second occurrence happens.
+
+*Rule, and it generalises past git: **verify the artefact, not the intermediate.**
+Every step upstream of the artefact can be correct and verified, and the artefact
+still wrong, if the last step reads from somewhere else.*
+
+**The same substitution recurred within the hour, from the agent that had just
+learned it -- which is why this entry states the general form and not only the git
+mechanics.** Committing a one-row PRD status flip, MAR-190 re-parsed the file and
+reported the project's invariant held: *"zero `done` rows without a
+`completedAt`."* It measured the **worktree**. Against **HEAD -- the artefact it
+had just produced -- there were two**, `MAR-157` and `MAR-188`, whose date fixes
+were sitting uncommitted in a parallel story's working copy. The commit itself was
+correct and staging only its own hunk was right; the *claim about it* was measured
+against the wrong tree.
+
+**A stated invariant that does not hold is worse than no claim, because someone
+will trust it.** When you assert a property of a commit, read it out of the commit:
+`git show <sha>:<path>`, never the file on disk. **Index, worktree, staged patch,
+build directory -- all intermediates, all the same sentence.** Naming only one of
+them is how the rule gets learned and then missed.
+
+**Why the two instances were caught by different means, which is the part that
+does not reduce to trying harder.** The first was caught by a control the author
+had built; the second was caught by a REVIEWER. **A control only catches the error
+you anticipated well enough to build a control for** -- so the residual after every
+control you can think of is not shrinkable by diligence. It shrinks only when
+someone with different assumptions looks. That is the argument for review as a
+mechanism rather than a courtesy, and it is why two people found things in each
+other's work here that neither found alone.
+
 ### A passing result is evidence only once you have seen the failing form fail
 
 This chain has written this rule three times in three vocabularies without
