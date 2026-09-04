@@ -281,9 +281,6 @@ private:
     bool update_mixing_from(
         const std::shared_ptr<TrackEntry>& entry,
         double delta);
-    void advance_entry(
-        const std::shared_ptr<TrackEntry>& entry,
-        double delta);
     void dispatch_complete_callbacks(
         const std::shared_ptr<TrackEntry>& entry,
         double previous_time,
@@ -312,7 +309,6 @@ private:
     double apply_mixing_from(
         const std::shared_ptr<TrackEntry>& entry,
         Skeleton& skeleton) const;
-    void prune_mixing_from(const std::shared_ptr<TrackEntry>& entry);
     void start_next_entry(std::size_t track_index);
     void dispose_queued_entries(const std::shared_ptr<TrackEntry>& entry);
     void dispose_entry_only(

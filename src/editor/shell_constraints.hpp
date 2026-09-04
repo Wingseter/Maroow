@@ -7,24 +7,12 @@
 #include <string_view>
 #include <vector>
 
+#include "constraint_lookup.hpp"
 #include "marrow/editor/selection.hpp"
 
 namespace marrow::editor::shell {
 
 struct ShellState;
-
-template <typename ConstraintType>
-const ConstraintType* find_named_constraint(
-    const std::vector<ConstraintType>& constraints,
-    std::string_view name) {
-    const auto iterator = std::find_if(
-        constraints.begin(),
-        constraints.end(),
-        [&](const ConstraintType& constraint) {
-            return constraint.name == name;
-        });
-    return iterator == constraints.end() ? nullptr : &(*iterator);
-}
 
 const char* constraint_kind_label(ConstraintKind kind);
 void select_constraint(

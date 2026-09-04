@@ -2076,6 +2076,24 @@ bool render_headless_smoke_frames(
                       << " history entries, expected exactly one.\n";
             return false;
         }
+        // A safe fix commits through a session transaction, and a Runtime-impact
+        // commit replaces the PreviewController -- destroying the Skeleton and
+        // AnimationState the shell's raw aliases point at. Asserted on POINTER
+        // IDENTITY, not by dereferencing: reading through a dangling pointer is UB
+        // that usually happens to pass. The click above is real, so this fails if
+        // the Fix handler stops calling `sync_shell_from_editor_session`.
+        if (shell_state.preview_skeleton !=
+                marrow::editor::EditorSessionShellBinding::preview_skeleton(
+                    shell_state.session) ||
+            shell_state.animation_state !=
+                marrow::editor::EditorSessionShellBinding::preview_animation_state(
+                    shell_state.session)) {
+            std::cerr << "MAR-187 F1: after clicking Fix the shell's preview aliases "
+                         "still point at the pre-commit PreviewController, which the "
+                         "commit destroyed. The handler must call "
+                         "sync_shell_from_editor_session() before returning.\n";
+            return false;
+        }
         refresh_problems_if_revised(&shell_state);
         if (!shell_state.problems.report.has_value()) {
             std::cerr << "MAR-187 F1: no report after the fix.\n";

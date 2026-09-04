@@ -183,12 +183,26 @@ void draw_problems_window(ShellState* state) {
                 ImGui::SameLine();
                 const std::string fix_label = "Fix##fix_" + issue.identity;
                 if (ImGui::SmallButton(fix_label.c_str())) {
-                    // The button calls `apply_safe_fix` and nothing else. This is
-                    // the ONE call site in the tree.
+                    // The button calls `apply_safe_fix` and then resyncs, and
+                    // nothing else. This is the ONE call site in the tree.
                     const SafeFixResult applied = apply_safe_fix(state->session, issue);
                     state->status_message = applied.ok
                         ? ("Fixed: " + applied.applied_identity)
                         : applied.error;
+                    // `apply_safe_fix` commits through a session transaction whose
+                    // descriptor carries Runtime impact, and that commit replaces the
+                    // PreviewController wholesale (session.cpp:1527) -- destroying the
+                    // Skeleton and AnimationState that `preview_skeleton` and
+                    // `animation_state` alias. Unconditional, because the FAILURE arm
+                    // can replace it too and `applied.ok` cannot tell you which
+                    // happened: `restore_active_transaction` binds a FRESH controller
+                    // when the transaction had applied a live refresh
+                    // (session.cpp:1284-1299) and only restores the existing one in
+                    // place otherwise (session.cpp:1301). The next frame's
+                    // `sync_shell_from_editor_session_if_revised` is too late: the
+                    // windows drawn after this one in the SAME frame body would read
+                    // the freed aliases first.
+                    sync_shell_from_editor_session(state);
                 }
             }
         }

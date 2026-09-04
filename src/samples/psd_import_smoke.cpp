@@ -5385,7 +5385,6 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
         marrow::editor::PsdReimportReview review;
         review.plan = scenario.plan;
         review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
-        review.staging_root = scenario.staging_root;
         review.source_path = scenario.candidate_psd;
 
         // The PSD gains a layer AFTER the review was taken. The reviewed plan is
@@ -5451,7 +5450,6 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
         marrow::editor::PsdReimportReview review;
         review.plan = scenario.plan;
         review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
-        review.staging_root = scenario.staging_root;
         review.source_path = scenario.candidate_psd;
 
         {
@@ -5518,7 +5516,6 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
         marrow::editor::PsdReimportReview review;
         review.plan = scenario.plan;
         review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
-        review.staging_root = scenario.staging_root;
         review.source_path = scenario.candidate_psd;
         for (const std::string& identity : forget) {
             marrow::editor::set_psd_review_deletion(&review, identity, true);
@@ -5760,7 +5757,6 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
         marrow::editor::PsdReimportReview review;
         review.plan = scenario.plan;
         review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
-        review.staging_root = scenario.staging_root;
         review.source_path = scenario.candidate_psd;
 
         const mar190::NoOpWitness before = mar190::capture_no_op(scenario.session);
@@ -5841,7 +5837,6 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
         marrow::editor::PsdReimportReview review;
         review.plan = scenario.plan;
         review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
-        review.staging_root = scenario.staging_root;
         review.source_path = scenario.candidate_psd;
 
         const marrow::editor::ProjectData before_project = *scenario.session.project();
@@ -5962,7 +5957,6 @@ bool validate_mar190_reimport_review(const std::filesystem::path& scratch) {
             marrow::editor::PsdReimportReview review;
             review.plan = scenario.plan;
             review.plan_digest = marrow::editor::psd_review_plan_digest(scenario.plan);
-            review.staging_root = scenario.staging_root;
             review.source_path = scenario.candidate_psd;
 
             const mar190::NoOpWitness before = mar190::capture_no_op(scenario.session);

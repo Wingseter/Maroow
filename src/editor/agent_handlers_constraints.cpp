@@ -1,5 +1,5 @@
 #include "agent_dispatch_internal.hpp"
-#include "shell_constraints.hpp"
+#include "constraint_lookup.hpp"
 
 #include "marrow/editor/constraint_catalog.hpp"
 
@@ -215,7 +215,7 @@ struct PathConstraintTraits {
     static const RuntimeConstraint* find_runtime(
         const marrow::runtime::SkeletonData& skeleton,
         std::string_view name) {
-        return shell::find_named_constraint(skeleton.path_constraints(), name);
+        return find_named_constraint(skeleton.path_constraints(), name);
     }
     static Edit materialize(
         const marrow::runtime::SkeletonData& skeleton,
@@ -357,7 +357,7 @@ struct TransformConstraintTraits {
     static const RuntimeConstraint* find_runtime(
         const marrow::runtime::SkeletonData& skeleton,
         std::string_view name) {
-        return shell::find_named_constraint(skeleton.transform_constraints(), name);
+        return find_named_constraint(skeleton.transform_constraints(), name);
     }
     static Edit materialize(
         const marrow::runtime::SkeletonData& skeleton,
@@ -490,7 +490,7 @@ struct PhysicsConstraintTraits {
     static const RuntimeConstraint* find_runtime(
         const marrow::runtime::SkeletonData& skeleton,
         std::string_view name) {
-        return shell::find_named_constraint(skeleton.physics_constraints(), name);
+        return find_named_constraint(skeleton.physics_constraints(), name);
     }
     static Edit materialize(
         const marrow::runtime::SkeletonData& skeleton,
@@ -719,7 +719,7 @@ AgentDispatchResult handle_constraint_operation(
             merged = *project_edit;
         } else if (
             const marrow::runtime::IkConstraintData* runtime_constraint =
-                shell::find_named_constraint(skeleton.ik_constraints(), *name)) {
+                find_named_constraint(skeleton.ik_constraints(), *name)) {
             merged.name = std::string(*name);
             merged.bone_names =
                 names_from_indices(skeleton.bones(), runtime_constraint->bone_indices);

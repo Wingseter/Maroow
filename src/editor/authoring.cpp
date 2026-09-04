@@ -3658,13 +3658,6 @@ std::string_view timeline_lane_kind_token(TimelineLaneKind kind) {
     return "transform";
 }
 
-std::optional<TimelineLaneKind> timeline_lane_kind_from_token(std::string_view token) {
-    if (token == "transform") return TimelineLaneKind::Transform;
-    if (token == "slot_color") return TimelineLaneKind::SlotColor;
-    if (token == "deform") return TimelineLaneKind::Deform;
-    return std::nullopt;
-}
-
 namespace {
 
 /**

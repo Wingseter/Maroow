@@ -907,7 +907,6 @@ struct ShellState {
     bool export_binary_output{false};
     bool project_dirty{false};
     bool default_dock_layout_initialized{false};
-    std::string saved_project_snapshot;
     // MAR-181: the live path-chooser request, the New form, and the deferred
     // New/Open application. These are ShellState fields rather than file-statics
     // like the two catalog popups because ImGui::OpenPopup inside BeginMenu

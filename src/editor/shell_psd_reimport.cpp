@@ -106,7 +106,6 @@ void begin_psd_reimport_review(
     PsdReimportReview review;
     review.plan = plan;
     review.plan_digest = psd_review_plan_digest(plan);
-    review.staging_root = staging;
     review.source_path = source;
     state->psd_reimport.review = std::move(review);
     state->psd_reimport.staging_root = staging;
@@ -209,6 +208,17 @@ void draw_psd_reimport_modal(ShellState* state) {
             ImGui::EndDisabled();
             ImGui::EndPopup();
             close_psd_reimport_review(state, applied.outcome);
+            // A committed reimport reaches `EditorSession::adopt_runtime_sources`,
+            // which replaces the PreviewController and destroys the Skeleton and
+            // AnimationState that `preview_skeleton` and `animation_state` alias.
+            // This modal is drawn from `draw_project_window`, the FIRST window in
+            // both frame bodies, so timeline, hierarchy, viewport and inspector all
+            // still dereference those aliases later in THIS frame -- and
+            // `load_result` is a reference into the session, so without this the
+            // viewport pairs the NEW atlas against the freed skeleton. Ordering
+            // against `close_psd_reimport_review` is free: the two touch disjoint
+            // fields.
+            sync_shell_from_editor_session(state);
             return;
         }
         ImGui::EndDisabled();

@@ -495,9 +495,8 @@ bool timeline_key_is_managed_loop_boundary(
     const runtime::SkeletonData& effective_skeleton,
     const TimelineKeySelector& selector);
 
-/** @brief The `.marrow` token for one lane kind, and its inverse. */
+/** @brief The `.marrow` token for one lane kind. */
 std::string_view timeline_lane_kind_token(TimelineLaneKind kind);
-std::optional<TimelineLaneKind> timeline_lane_kind_from_token(std::string_view token);
 
 /** @brief Which edge of the selection's time range stays fixed while scaling. */
 enum class TimelineScalePivot : std::uint8_t {

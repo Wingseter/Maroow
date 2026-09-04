@@ -1042,24 +1042,6 @@ bool AnimationState::update_mixing_from(
     return false;
 }
 
-void AnimationState::advance_entry(
-    const std::shared_ptr<TrackEntry>& entry,
-    double delta) {
-    if (entry == nullptr) {
-        return;
-    }
-
-    const double previous_time = entry->track_time;
-    entry->last_track_time_ = previous_time;
-    entry->track_time += delta;
-    if (entry->mixing_from != nullptr || entry->is_empty) {
-        entry->mix_time += delta;
-    }
-
-    dispatch_event_callbacks(entry, previous_time, entry->track_time);
-    dispatch_complete_callbacks(entry, previous_time, entry->track_time);
-}
-
 void AnimationState::dispose_queued_entries(const std::shared_ptr<TrackEntry>& entry) {
     if (entry == nullptr) {
         return;
@@ -1108,9 +1090,6 @@ void AnimationState::dispose_active_entry(
         dispatch(AnimationStateEventType::End, entry);
     }
     dispatch(AnimationStateEventType::Dispose, entry);
-}
-
-void AnimationState::prune_mixing_from(const std::shared_ptr<TrackEntry>&) {
 }
 
 void AnimationState::start_next_entry(std::size_t track_index) {

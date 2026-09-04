@@ -571,14 +571,11 @@ void adopt_session_project_into_shell(
     state->pending_edit_action.reset();
     
     state->project_dirty = !project_is_clean;
-    state->saved_project_snapshot.clear();
     state->error_message.clear();
 
     state->viewport = state->load_result.project->editor_metadata.viewport;
     state->timeline_editor.frames_per_second =
         state->load_result.project->editor_metadata.timeline.frames_per_second;
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
     state->preview_skeleton =
         marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
     state->animation_state =
@@ -678,8 +675,6 @@ bool save_project_file(ShellState* state, bool update_status_message) {
         return false;
     }
 
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
     state->project_dirty = state->session.dirty();
     state->error_message.clear();
     // MAR-183: ONLY the FIRST successful save of a New session records. An

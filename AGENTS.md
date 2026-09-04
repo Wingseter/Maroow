@@ -1598,6 +1598,132 @@ is the refusal a commit issues when the two names disagree. `AGENTS.md`'s
 existing rule that *a case green before the implementation exists is a witness*
 is the same argument applied to a test; this is it applied to an invariant.
 
+### A shell mutation that skips the mirror resync is a use-after-free, and no existing gate could see it
+
+`ShellState::preview_skeleton` and `ShellState::animation_state`
+(`shell_state.hpp:882-883`) are **raw pointers into the session's
+`PreviewController`**, which owns both objects as `unique_ptr`
+(`session.cpp:217-270`, handed out by `session_shell_binding.hpp:24-31`). Every
+path that replaces that controller therefore invalidates them, and
+`shell_state.hpp:1105-1106` says so: *"Every path that replaces that runtime must
+call it."* About **79** non-smoke shell sites honour it. **Two did not**, both
+added by recent milestones:
+
+- `shell_problems.cpp` — MAR-187's Fix button. `apply_safe_fix` opens a
+  transaction carrying Runtime impact (`safe_fix.cpp:292-297`); the commit does
+  `preview = std::move(next_preview)` at `session.cpp:1527`.
+- `shell_psd_reimport.cpp` — MAR-190's Confirm button. `apply_psd_reimport_review`
+  -> `commit_psd_reimport` -> `CommitRun::adopt_runtime_sources`
+  (`psd_reimport_commit.cpp:831`) -> `session.cpp:2005`.
+
+**The PSD one is the sharp case, and the reason is frame ORDER.** The modal is
+drawn from `draw_project_window`, the **first** window in both frame bodies
+(`shell_main.cpp:584`, via `shell_project_panels.cpp:1135`). Timeline, hierarchy,
+viewport and inspector all still dereference the aliases later in the SAME frame
+— `shell_viewport.cpp` alone at 24 sites. Recovery via
+`sync_shell_from_editor_session_if_revised` (`shell_main.cpp:538`) does not arrive
+until the **next** frame. Worse, `ShellState::load_result` is a **reference** into
+the session (`shell_state.hpp:864`), so it stays fresh while the aliases do not:
+`shell_viewport_ui.cpp:1221-1223` pairs `*state->preview_skeleton` with
+`*state->load_result.atlas_data.front()` in one expression — a **freed skeleton
+against a live atlas**, not merely a stale pair.
+
+**The resync must be UNCONDITIONAL, and `ok` is the wrong gate.** The failure arm
+replaces the controller too: `restore_active_transaction` binds a **fresh**
+`PreviewController` when the transaction had applied a live refresh
+(`session.cpp:1284-1299`) and only restores the existing one in place otherwise
+(`session.cpp:1301`). Nothing in the result tells the caller which happened.
+
+**Why every gate was blind.** `CheckFrameBodies.cmake` compares the two frame
+bodies for the same `draw_*_window` calls — it cannot see inside a handler. The
+existing MAR-187 F1 and MAR-190 F1/F2 cases **already clicked both buttons with a
+real mouse** and stayed green, because their frame bodies draw only the one window
+under test and neither asserted anything about the aliases afterwards. *A case that
+performs the triggering gesture is not coverage of the gesture's consequences.*
+
+**The assertion that does work** compares POINTER IDENTITY against the binding's
+accessor after the click, rather than dereferencing — reading through a dangling
+pointer is UB that usually happens to pass, which is how this shipped:
+
+```
+state.preview_skeleton == EditorSessionShellBinding::preview_skeleton(state.session)
+```
+
+**And it is vacuous unless the alias is non-null first.** MAR-190's block opens
+the session with `state.session.open(...)` directly, bypassing the shell's
+`open_project`, so `adopt_session_project_into_shell` — the only path that
+assigns the aliases — never runs and both stay `nullptr`. The assertion then
+compares `nullptr` against a pointer: it still reddens for a MISSING sync, but it
+cannot see a STALE one, and its own failure message is a lie. The block now calls
+`sync_shell_from_editor_session` during setup, exactly as MAR-187 F1 already did
+at `shell_smoke_frames.cpp:1967`. Measured both ways: with the alias null the
+probe read `alias_before=0`; with the setup sync it reads two genuinely different
+non-null pointers across the commit.
+
+**Known remaining gap, deliberately not closed here.** `shell_asset_watch.cpp` is
+the *other* `adopt_runtime_sources` caller and it does four things the Confirm path
+still does not: it resets `viewport_ffd_selection`, `viewport_ffd_box_selection`
+and `viewport_box_selection` (`:177-179`, under the comment *"A source adoption
+can reorder or move bones"*) and calls `reconcile_selection_to_runtime` and
+`reconcile_hierarchy_anchor_to_runtime` (`:180-185`).
+`sync_shell_from_editor_session` performs none of them. That is **index staleness,
+a different defect class from the use-after-free** — wrong data rather than freed
+memory — and it is unfixed.
+
+### Four dead symbols were removed; MAR-175's design doc still says one is "retained"
+
+Removed after proving zero references across `src/`, `include/`, `tools/`,
+`cmake/` and `CMakeLists.txt`: `agent_dispatch.cpp`'s
+`draw_order_edit_from_runtime` (**born dead** at its introducing commit
+`480136f` — it never had a caller) and `ensure_mesh_weight_edit`;
+`AnimationState::advance_entry` and `AnimationState::prune_mixing_from`;
+`Skeleton::apply_display_state`; `editor::timeline_lane_kind_from_token`. Also
+`ShellState::saved_project_snapshot` (3 writes, **0 reads**, and its removal drops
+a redundant whole-project `serialize_project()` per save that
+`session.cpp:2069` had already performed) and `PsdReimportReview::staging_root`
+(7 writes, 0 reads).
+
+**Two of these are traps for a future agent.**
+
+1. `docs/superpowers/specs/2026-08-30-mar-175-unified-manual-weight-authoring-design.md:568-570`
+   says `ensure_mesh_weight_edit` *"is retained and re-pointed at the shared
+   converter."* The re-point happened; the retention became an orphan at the same
+   commit (`d3a9e75`). **The spec is a dated record and was left as written** —
+   do not restore the function to satisfy it.
+2. `AnimationState::advance_entry` was not merely unused, it had **drifted**: its
+   `mix_time` gate (`entry->mixing_from != nullptr || entry->is_empty`) is close
+   to the logical inverse of the live main-loop gate (`current->is_empty &&
+   current->mixing_from == nullptr`, `animation_state.cpp:1163-1170`). Three
+   different `mix_time` rules lived in that file, one of which never ran. *A
+   future mixing fix could have landed in the copy that never executes.*
+
+Deleting private non-virtual members is layout-safe here and was checked, not
+assumed: neither `AnimationState` nor `Skeleton` contains a single `virtual`, so
+neither has a vtable; there is no `static_assert(sizeof(...))` or `offsetof` on
+either type; and `.mbin`/`.mskl` serialize `SkeletonData`, never the runtime
+`Skeleton` or `AnimationState`.
+
+### The library's one shell include is gone, and the boundary is now grep-checkable
+
+`agent_handlers_constraints.cpp:2` was the **only** `#include "shell_*"` among the
+26 translation units of `marrow_editor`, taken for a single vector-scanning
+template. `find_named_constraint` now lives in `src/editor/constraint_lookup.hpp`
+under `marrow::editor`. No shell call site changed: all of them sit in
+`marrow::editor::shell` and were already unqualified, so enclosing-namespace
+lookup finds it. It is deliberately **not** in the public
+`include/marrow/editor/constraint_catalog.hpp` — a generic helper used by nothing
+outside `src/editor` does not belong on the authoring surface. The boundary is now
+one command:
+
+```
+for f in $(awk '/add_library\(marrow_editor /,/^\)/' CMakeLists.txt | grep -o 'src/editor/[a-z_]*\.cpp'); do grep -Hn '#include "shell_' $f; done   -> no output
+```
+
+Note `constraint_kind_label` stays in the shell and the agent path keeps using
+`constraint_family_key` instead: those are **different functions** ("IK"/"Path"
+vs the frozen wire spelling "ik"/"path"), not a duplicate pair, and the comment at
+`agent_handlers_constraints.cpp:981-983` remains correct.
+
 ## Methodology hazards worth recording -- the comparison itself can lie
 
 *Promoted to a top-level section by MAR-191. These are present-tense

@@ -704,6 +704,15 @@ bool validate_mar190_psd_reimport_shell_smoke() {
         }
         state.session.clear_history();
         state.project_path = fixture.project_path;
+        // This block opens the session DIRECTLY rather than through the shell's
+        // `open_project`, so `adopt_session_project_into_shell` -- the only path
+        // that points `preview_skeleton`/`animation_state` at the session -- never
+        // runs, and both aliases stay null. The real shell has them populated from
+        // the moment a project is adopted and re-synced every frame
+        // (shell_main.cpp:538). Without this line F3 below compares nullptr against
+        // a pointer, which fails for the right reason by accident: it would catch a
+        // MISSING sync but not a STALE one, and its own message would be a lie.
+        sync_shell_from_editor_session(&state);
 
         ImGuiIO& io = ImGui::GetIO();
         const auto render_frame = [&]() {
@@ -937,6 +946,30 @@ bool validate_mar190_psd_reimport_shell_smoke() {
             std::cerr << "MAR-190 F2: undo_count() is " << state.session.undo_count()
                       << ", expected " << (undo_before + 1U)
                       << " -- a confirmed reimport is exactly one history entry.\n";
+            return false;
+        }
+
+        // F3. A committed reimport reaches `adopt_runtime_sources`, which replaces
+        // the PreviewController and DESTROYS the Skeleton and AnimationState the
+        // shell's raw aliases point at. This modal is drawn from
+        // `draw_project_window` -- the FIRST window in both frame bodies -- so the
+        // timeline, hierarchy, viewport and inspector all still read those aliases
+        // later in the SAME frame, and `load_result` is a reference into the
+        // session, so the viewport would pair the NEW atlas against the freed
+        // skeleton. Asserted on POINTER IDENTITY, not by dereferencing: reading
+        // through a dangling pointer is UB that usually happens to pass, which is
+        // exactly how this shipped. The case above clicks the real button, so this
+        // fails if the handler stops calling `sync_shell_from_editor_session`.
+        if (state.preview_skeleton !=
+                marrow::editor::EditorSessionShellBinding::preview_skeleton(
+                    state.session) ||
+            state.animation_state !=
+                marrow::editor::EditorSessionShellBinding::preview_animation_state(
+                    state.session)) {
+            std::cerr << "MAR-190 F3: after Confirm the shell's preview aliases still "
+                         "point at the pre-commit PreviewController, which the commit "
+                         "destroyed. The handler must call "
+                         "sync_shell_from_editor_session() before returning.\n";
             return false;
         }
     }

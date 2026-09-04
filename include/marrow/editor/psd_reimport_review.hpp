@@ -62,7 +62,6 @@ PsdReviewSections group_psd_review(const PsdReimportPlan& plan);
 struct PsdReimportReview {
     PsdReimportPlan plan;               ///< Exactly as reviewed.
     std::string plan_digest;            ///< Of `plan`, at review time.
-    std::filesystem::path staging_root; ///< What `plan` staged into.
     std::filesystem::path source_path;  ///< Absolute; what AC1 displays.
 
     /**

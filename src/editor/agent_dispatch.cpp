@@ -15,7 +15,6 @@
 #include "marrow/editor/psd_reimport_commit.hpp"
 #include "marrow/editor/session.hpp"
 #include "agent_dispatch_internal.hpp"
-#include "mesh_weight_model.hpp"
 #include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor {
@@ -896,36 +895,6 @@ json::Value constraints_value(const marrow::runtime::SkeletonData& skeleton) {
     return array_value(std::move(constraints));
 }
 
-std::optional<marrow::editor::DrawOrderTimelineEdit> draw_order_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view animation_name) {
-    const marrow::runtime::AnimationData* animation = skeleton.find_animation(animation_name);
-    if (animation == nullptr) {
-        return std::nullopt;
-    }
-
-    marrow::editor::DrawOrderTimelineEdit edit;
-    edit.animation_name = std::string(animation_name);
-    const marrow::runtime::DrawOrderTimeline* timeline = animation->find_draw_order_timeline();
-    if (timeline == nullptr) {
-        return edit;
-    }
-
-    for (const auto& keyframe : timeline->keyframes) {
-        marrow::editor::DrawOrderKeyframeEdit copied;
-        copied.time = static_cast<double>(keyframe.time);
-        copied.slot_names.reserve(keyframe.slot_indices.size());
-        for (const std::size_t slot_index : keyframe.slot_indices) {
-            if (slot_index >= skeleton.slots().size()) {
-                return std::nullopt;
-            }
-            copied.slot_names.push_back(skeleton.slots()[slot_index].name);
-        }
-        edit.keyframes.push_back(std::move(copied));
-    }
-    return edit;
-}
-
 bool parse_complete_slot_order(
     const marrow::runtime::SkeletonData& skeleton,
     const json::Value& args,
@@ -992,23 +961,6 @@ const marrow::runtime::AttachmentData* find_mesh_attachment(
         return nullptr;
     }
     return attachment;
-}
-
-marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
-    marrow::editor::ProjectData& project,
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view skin_name,
-    std::string_view slot_name,
-    std::string_view attachment_name,
-    const marrow::runtime::AttachmentData& attachment) {
-    if (auto* existing = project.find_mesh_weight_attachment_edit(
-            skin_name, slot_name, attachment_name)) {
-        return existing;
-    }
-    project.mesh_weight_attachment_edits.push_back(
-        mesh_weight_model::mesh_weight_edit_from_runtime(
-            skeleton, skin_name, slot_name, attachment_name, attachment));
-    return &project.mesh_weight_attachment_edits.back();
 }
 
 json::Value timeline_description_value(

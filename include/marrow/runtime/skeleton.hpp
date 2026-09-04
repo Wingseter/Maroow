@@ -1599,7 +1599,6 @@ private:
     void reset_physics_state();
     void reset_update_throttle_state();
     void capture_display_state(DisplayStateSnapshot* snapshot) const;
-    void apply_display_state(const DisplayStateSnapshot& snapshot);
     void apply_interpolated_display_state(double alpha);
     void rebuild_predicted_display_state(
         const AnimationState& animation_state,
