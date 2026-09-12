@@ -1363,6 +1363,20 @@ if(BUILD_TESTING)
         LABELS "editor;agent;smoke;noninteractive"
     )
 
+    # Exercise the Python side of the same agent boundary without the MCP SDK
+    # or a live editor. A missing interpreter must not silently skip this gate.
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    add_test(
+        NAME marrow.mcp_transport
+        COMMAND ${Python3_EXECUTABLE} -W error::ResourceWarning
+                ${PROJECT_SOURCE_DIR}/tools/mcp/test_transport.py -v
+    )
+    set_tests_properties(marrow.mcp_transport PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;agent;socket;unit;noninteractive"
+        TIMEOUT 30
+    )
+
     # MAR-189. Built since MAR-176 and never run by CTest, so MAR-188's whole
     # planning suite and this story's commit suite were one manual invocation away
     # from silence. The working directory is the source tree because the cases

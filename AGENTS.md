@@ -13,6 +13,8 @@
 - Keep milestones small, vertical, and independently verifiable at focused checkpoints.
 - Preserve the runtime-first plan unless the active story explicitly updates it.
 - If a build or test workflow is introduced, document the exact commands here.
+- MCP transport safety: `python3 -W error::ResourceWarning tools/mcp/test_transport.py -v` (Python 3.9+, standard library only); also registered as CTest `marrow.mcp_transport`.
+- MCP stdio integration: `tools/mcp/venv/bin/python -W error::ResourceWarning tools/mcp/test_stdio.py -v`. Transport/timeout contracts are in `tools/mcp/README.md`; Phase 1 execution evidence is in `docs/superpowers/plans/2026-09-12-mcp-transport-safety.md`.
 - The checked-in PRD already expands the renderer, runtime, and editor roadmap from `docs/root1/discription.md`. Prefer updating that PRD rather than inventing parallel plans.
 
 ### Story commit checklist
