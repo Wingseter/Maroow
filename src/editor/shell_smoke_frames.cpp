@@ -18,6 +18,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include "shell_frame.hpp"
 #include "shell_constraints.hpp"
 #include "shell_asset_watch.hpp"
 #include "shell_agent_panel.hpp"
@@ -54,31 +55,22 @@ bool render_headless_smoke_frames(
     const Options& options,
     ImGuiIO& io) {
     apply_shell_mode(&shell_state, ShellMode::Parameter);
+    // The shared frame must honor the same optional-window condition as the app.
+    shell_state.show_agent_panel = true;
+    shell_state.agent_panel_was_open = true;
     const int frame_count = options.auto_close_frames.value_or(1);
     bool validated_dock_layout = false;
     for (int frame_index = 0; frame_index < frame_count; ++frame_index) {
         io.DeltaTime = 1.0f / 60.0f;
         ImGui::NewFrame();
-        (void)poll_runtime_asset_changes(&shell_state);
-        advance_timeline_playback(&shell_state, io.DeltaTime);
-        (void)shell_state.session.advance_parameter_state(io.DeltaTime);
-        sync_shell_from_editor_session_if_revised(&shell_state);
-        handle_project_history_shortcuts(&shell_state);
+        draw_shell_frame(shell_state, io.DeltaTime);
 
-        (void)draw_menu_bar(&shell_state);
-        const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
-        const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
-        ensure_default_dock_layout(&shell_state, dockspace_id, main_viewport);
-        draw_project_window(&shell_state);
-        draw_runtime_window(shell_state);
-        draw_constraints_window(&shell_state);
-        draw_timeline_window(&shell_state);
-        draw_hierarchy_window(&shell_state);
-        draw_viewport_window(&shell_state);
-        draw_inspector_window(&shell_state);
-        draw_problems_window(&shell_state);
-        draw_parameter_windows(&shell_state);
-
+        const ImGuiWindow* agent_window = ImGui::FindWindowByName(kAgentWindowTitle);
+        if (agent_window == nullptr || !agent_window->Active) {
+            std::cerr << "Shared frame did not draw the enabled Agent panel.\n";
+            ImGui::EndFrame();
+            return false;
+        }
         if (!validated_dock_layout) {
             const ImGuiWindow* viewport_window = ImGui::FindWindowByName(kViewportWindowTitle);
             const ImGuiWindow* timeline_window = ImGui::FindWindowByName(kTimelineWindowTitle);
@@ -125,12 +117,12 @@ bool render_headless_smoke_frames(
             validated_dock_layout = true;
         }
         ImGui::Render();
-
-        // MAR-181: the twin of src/editor/shell_main.cpp's call. Without this
-        // the smoke would never run a deferred New or Open at all.
-        (void)apply_pending_file_action(&shell_state);
     }
 
+    // Restore the default panel layout for the specialized single-panel cases.
+    shell_state.show_agent_panel = false;
+    shell_state.agent_panel_was_open = false;
+    shell_state.default_dock_layout_initialized = false;
     apply_shell_mode(&shell_state, ShellMode::Animation);
     if (!set_selected_animation(&shell_state, "idle", "Graph frame smoke", false, true)) {
         std::cerr << "Actual-frame graph smoke could not select idle.\n";

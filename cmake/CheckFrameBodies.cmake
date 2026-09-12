@@ -1,137 +1,74 @@
-# Verifies that the editor shell's TWO hand-duplicated frame bodies draw the
-# same set of windows (MAR-187).
-#
-# WHY THIS EXISTS AS A SCRIPT AND NOT AS PROSE IN A PLAN
-#
-# `render_shell_frame` (src/editor/shell_main.cpp) and
-# `render_headless_smoke_frames` (src/editor/shell_smoke_frames.cpp) each carry a
-# hand-written list of `draw_*_window` calls. Nothing compiler-checks the pair.
-# A window added to only one of them is silently broken in a direction that is
-# invisible to the whole test suite:
-#
-#   * missing from the APPLICATION body  -> the window ships in no application,
-#     and every headless case still passes;
-#   * missing from the SMOKE body        -> the shared smoke frame never renders
-#     it, and any future scenario relying on it is blind.
-#
-# MAR-187 measured BOTH halves by deleting each call in turn: the shell smoke
-# stayed green each time, INCLUDING its own actual-frame case. That case draws
-# through a scenario-local lambda of its own, so it backs neither body. This
-# script is therefore the only mechanism that can catch either omission, which
-# is why it runs on every build of `marrow_editor_shell` rather than living in a
-# document as a command somebody might run.
-#
-# It deliberately checks ALL windows, not just the one MAR-187 added: the next
-# story to add a window inherits the guard without having to notice it exists.
-
+# Phase 2: both full-shell hosts delegate to the same production coordinator.
+# Keep the historical target/script name, but do NOT keep a second window list.
+# This is a narrow source-wiring guard, not a C++ semantic/order proof. Real
+# ImGui smoke cases verify behavior; mutation tests prove this guard is live.
 cmake_minimum_required(VERSION 3.16)
 
-set(_app_file "${CMAKE_CURRENT_LIST_DIR}/../src/editor/shell_main.cpp")
-set(_smoke_file "${CMAKE_CURRENT_LIST_DIR}/../src/editor/shell_smoke_frames.cpp")
-
-# Windows the application draws that the headless smoke deliberately does not.
-# `draw_agent_window` sits behind `show_agent_panel`, which the smoke never
-# enables. Add to this list only with a reason, because every entry is a window
-# the smoke can no longer see.
-set(_allowed_app_only "draw_agent_window")
-
-# Extracts the run of `draw_*_window(` calls between two anchors.
-function(_marrow_extract_draw_calls out_var file_path begin_anchor end_anchor)
+function(_marrow_read_code out_var file_path)
     if(NOT EXISTS "${file_path}")
-        message(FATAL_ERROR "MAR-187 frame-body check: ${file_path} does not exist.")
+        message(FATAL_ERROR "shared frame wiring: missing ${file_path}")
     endif()
     file(READ "${file_path}" _text)
+    # Ignore ordinary C++ comments and quoted strings, so examples cannot satisfy
+    # required calls. These source regions deliberately contain no raw strings.
+    string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" "" _text "${_text}")
+    string(REGEX REPLACE "//[^\n]*" "" _text "${_text}")
+    string(REGEX REPLACE "\"([^\"\\\\]|\\\\.)*\"" "\"\"" _text "${_text}")
+    set(${out_var} "${_text}" PARENT_SCOPE)
+endfunction()
+
+function(_marrow_host_region out_var file_path begin_anchor end_anchor)
+    _marrow_read_code(_text "${file_path}")
     string(FIND "${_text}" "${begin_anchor}" _begin)
     if(_begin EQUAL -1)
-        message(FATAL_ERROR
-            "MAR-187 frame-body check: could not find '${begin_anchor}' in "
-            "${file_path}. The anchor moved; fix this script rather than "
-            "deleting the check.")
+        message(FATAL_ERROR "shared frame wiring: missing host anchor ${begin_anchor}")
     endif()
     string(SUBSTRING "${_text}" ${_begin} -1 _tail)
     string(FIND "${_tail}" "${end_anchor}" _end)
     if(_end EQUAL -1)
-        message(FATAL_ERROR
-            "MAR-187 frame-body check: could not find '${end_anchor}' after "
-            "'${begin_anchor}' in ${file_path}. The anchor moved; fix this "
-            "script rather than deleting the check.")
+        message(FATAL_ERROR "shared frame wiring: missing host end anchor ${end_anchor}")
     endif()
     string(SUBSTRING "${_tail}" 0 ${_end} _region)
-    string(REGEX MATCHALL "draw_[a-z_]+windows?\\(" _raw "${_region}")
-    set(_names "")
-    foreach(_call IN LISTS _raw)
-        string(REPLACE "(" "" _call "${_call}")
-        list(APPEND _names "${_call}")
-    endforeach()
-    list(REMOVE_DUPLICATES _names)
-    list(SORT _names)
-    set(${out_var} "${_names}" PARENT_SCOPE)
+    set(${out_var} "${_region}" PARENT_SCOPE)
 endfunction()
 
-# The application's draw list: from the frame function to the first
-# gesture-finalisation call, which is what follows the list.
-_marrow_extract_draw_calls(_app_draws "${_app_file}"
-    "ShellFrameOutcome render_shell_frame("
-    "finalize_orphaned_inspector_transform_gesture")
+function(_marrow_check_host code host_name frame_begin)
+    string(REGEX MATCHALL "draw_shell_frame[ \t\r\n]*\\(" _calls "${code}")
+    list(LENGTH _calls _count)
+    if(NOT _count EQUAL 1)
+        message(FATAL_ERROR
+            "shared frame wiring: ${host_name} requires exactly one draw_shell_frame call; found ${_count}")
+    endif()
+    if("${code}" MATCHES "draw_(menu_bar|[a-z_]+windows?)[ \t\r\n]*\\(")
+        message(FATAL_ERROR "shared frame wiring: ${host_name} contains direct composition")
+    endif()
+    if("${code}" MATCHES "(poll_runtime_asset_changes|advance_timeline_playback|advance_parameter_state|finalize_orphaned_[a-z_]+|apply_pending_file_action)[ \t\r\n]*\\(")
+        message(FATAL_ERROR "shared frame wiring: ${host_name} duplicates coordinator state updates")
+    endif()
+    string(FIND "${code}" "${frame_begin}" _begin)
+    string(FIND "${code}" "draw_shell_frame" _draw)
+    if(_begin EQUAL -1 OR _begin GREATER _draw)
+        message(FATAL_ERROR "shared frame wiring: ${host_name} must begin ImGui before delegation")
+    endif()
+endfunction()
 
-# The smoke's SHARED draw list only. The end anchor is the dock-layout
-# validation block that immediately follows it -- this deliberately stops long
-# before the per-scenario render lambdas further down the same function, which
-# must NOT be able to satisfy this check.
-_marrow_extract_draw_calls(_smoke_draws "${_smoke_file}"
-    "bool render_headless_smoke_frames("
-    "if (!validated_dock_layout)")
+set(_editor "${CMAKE_CURRENT_LIST_DIR}/../src/editor")
+_marrow_host_region(_app "${_editor}/shell_main.cpp"
+    "ShellFrameOutcome render_shell_frame(" "sg_pass main_pass")
+# Stop BEFORE assertions and specialized single-panel scenarios: a later lambda
+# must not be able to supply a missing shared-frame call.
+_marrow_host_region(_smoke "${_editor}/shell_smoke_frames.cpp"
+    "bool render_headless_smoke_frames(" "if (!validated_dock_layout)")
+_marrow_check_host("${_app}" "application" "simgui_new_frame")
+_marrow_check_host("${_smoke}" "shared smoke" "ImGui::NewFrame")
 
-if(_app_draws STREQUAL "")
-    message(FATAL_ERROR
-        "MAR-187 frame-body check: found NO draw_*_window calls in the "
-        "application frame body. The check cannot pass vacuously.")
+_marrow_read_code(_frame "${_editor}/shell_frame.cpp")
+if(NOT _frame MATCHES "void[ \t\r\n]+draw_shell_frame[ \t\r\n]*\\(" OR
+   NOT _frame MATCHES "draw_[a-z_]+windows?[ \t\r\n]*\\(")
+    message(FATAL_ERROR "shared frame wiring: coordinator has no window composition")
 endif()
-if(_smoke_draws STREQUAL "")
-    message(FATAL_ERROR
-        "MAR-187 frame-body check: found NO draw_*_window calls in the smoke's "
-        "shared draw list. The check cannot pass vacuously.")
-endif()
-
-set(_missing_from_smoke "")
-foreach(_call IN LISTS _app_draws)
-    if(NOT _call IN_LIST _smoke_draws AND NOT _call IN_LIST _allowed_app_only)
-        list(APPEND _missing_from_smoke "${_call}")
-    endif()
-endforeach()
-
-set(_missing_from_app "")
-foreach(_call IN LISTS _smoke_draws)
-    if(NOT _call IN_LIST _app_draws)
-        list(APPEND _missing_from_app "${_call}")
-    endif()
-endforeach()
-
-if(NOT _missing_from_smoke STREQUAL "" OR NOT _missing_from_app STREQUAL "")
-    message("MAR-187 frame-body check FAILED.")
-    message("  application body (shell_main.cpp)        : ${_app_draws}")
-    message("  smoke shared list (shell_smoke_frames.cpp): ${_smoke_draws}")
-    if(NOT _missing_from_app STREQUAL "")
-        message("")
-        message("  DRAWN ONLY IN THE SMOKE, so it SHIPS IN NO APPLICATION:")
-        message("    ${_missing_from_app}")
-    endif()
-    if(NOT _missing_from_smoke STREQUAL "")
-        message("")
-        message("  DRAWN ONLY IN THE APPLICATION, so the shared smoke frame")
-        message("  never renders it and no headless scenario can see it:")
-        message("    ${_missing_from_smoke}")
-    endif()
-    message("")
-    message("  Add the call to BOTH frame bodies. If a window is deliberately")
-    message("  application-only, add it to _allowed_app_only in this script")
-    message("  WITH A REASON. Note that the shell smoke passes green with")
-    message("  either call missing -- including its actual-frame case, which")
-    message("  draws through a lambda of its own -- so this script is the only")
-    message("  thing that can tell you.")
-    message(FATAL_ERROR "MAR-187: the two frame bodies disagree.")
+if(_frame MATCHES "(ImGui::(NewFrame|EndFrame|Render)|simgui_[a-z_]+|sg_(begin_pass|end_pass|commit)|SDL_[a-zA-Z_]+|drain_commands|acquire_frame_surface|present)[ \t\r\n]*\\(")
+    message(FATAL_ERROR "shared frame wiring: coordinator owns host lifecycle work")
 endif()
 
-message(STATUS
-    "MAR-187 frame-body check: both frame bodies draw the same windows "
-    "(${_app_draws}).")
+message(STATUS "shared frame wiring: both hosts delegate once; composition belongs to the coordinator")

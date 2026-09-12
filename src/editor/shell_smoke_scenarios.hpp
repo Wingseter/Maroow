@@ -6,6 +6,8 @@
 
 namespace marrow::editor::shell {
 
+bool validate_shared_shell_frame_contract(ImGuiIO& io);
+
 bool validate_parameter_mode_shell_smoke(
     ShellState* state,
     const Options& options,

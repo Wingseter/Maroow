@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -67,6 +68,15 @@ int run_headless_smoke(const Options& options) {
     int font_width = 0;
     int font_height = 0;
     io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
+
+    // Focused coordinator contracts use this host's real ImGui setup and
+    // preference isolation, but never run in the product executable.
+    const char* frame_contract_only = std::getenv("MARROW_FRAME_CONTRACT_ONLY");
+    if (frame_contract_only != nullptr && std::string(frame_contract_only) == "1") {
+        const bool passed = validate_shared_shell_frame_contract(io);
+        ImGui::DestroyContext();
+        return passed ? 0 : 1;
+    }
 
     ShellState shell_state;
     // Inside the isolation installed above, so this reads the temporary config

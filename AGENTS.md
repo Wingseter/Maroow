@@ -15,6 +15,10 @@
 - If a build or test workflow is introduced, document the exact commands here.
 - MCP transport safety: `python3 -W error::ResourceWarning tools/mcp/test_transport.py -v` (Python 3.9+, standard library only); also registered as CTest `marrow.mcp_transport`.
 - MCP stdio integration: `tools/mcp/venv/bin/python -W error::ResourceWarning tools/mcp/test_stdio.py -v`. Transport/timeout contracts are in `tools/mcp/README.md`; Phase 1 execution evidence is in `docs/superpowers/plans/2026-09-12-mcp-transport-safety.md`.
+- Shared shell Phase 2: `cmake -S . -B build-sentinel -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, `cmake --build build-sentinel -j 6`, then `ctest --test-dir build-sentinel --output-on-failure`; focused real-ImGui coverage is CTest `marrow.shell_frame_contract`.
+- Frame wiring guard: `cmake --build build-sentinel --target marrow_frame_body_check`; mutation tests: `python3 tools/tests/test_shell_frame_boundary.py -v` (also CTest `marrow.shell_frame_boundary`). This verifies shared delegation, not two copied window lists.
+- Product-only check: `cmake -S . -B build-phase2-product -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DMARROW_ENABLE_DISPLAY_TESTS=OFF`, then `cmake --build build-phase2-product --target marrow_editor_shell -j 6`. On macOS/Linux with Makefiles/Ninja, verify artifacts using `python3 tools/tests/check_shell_build_boundary.py --build-dir build-phase2-product --testing off --nm nm`; use `--build-dir build-sentinel --testing on` for the test-enabled build.
+- Headless authoring scenarios now run in `marrow_editor_shell_smoke --project assets/fixtures/player_idle.marrow --auto-close 5` (BUILD_TESTING only). Product `marrow_editor_shell --auto-close N` uses the real display path on every platform. Phase 2 evidence and qualification limits: `docs/superpowers/plans/2026-09-12-shared-shell-frame.md`; historical frame-copy observations below describe the pre-refactor state.
 - The checked-in PRD already expands the renderer, runtime, and editor roadmap from `docs/root1/discription.md`. Prefer updating that PRD rather than inventing parallel plans.
 
 ### Story commit checklist

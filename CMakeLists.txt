@@ -884,8 +884,8 @@ add_dependencies(marrow_renderer_link_boundary_tests
     marrow_benchmark
 )
 
-add_executable(marrow_editor_shell
-    src/editor/shell_main.cpp
+add_library(marrow_editor_shell_core STATIC
+    src/editor/shell_frame.cpp
     src/editor/shell_core.cpp
     src/editor/shell_file_paths.cpp
     src/editor/shell_preferences.cpp
@@ -909,16 +909,6 @@ add_executable(marrow_editor_shell
     src/editor/shell_parameters.cpp
     src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
-    src/editor/shell_smoke.cpp
-    src/editor/shell_smoke_project.cpp
-    src/editor/shell_smoke_psd.cpp
-    src/editor/shell_smoke_viewport.cpp
-    src/editor/shell_smoke_ffd.cpp
-    src/editor/shell_smoke_graph.cpp
-    src/editor/shell_smoke_timeline.cpp
-    src/editor/shell_smoke_constraints.cpp
-    src/editor/shell_smoke_frames.cpp
-    src/editor/shell_smoke_parameters.cpp
     src/editor/shell_widgets.cpp
     src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
@@ -927,36 +917,24 @@ add_executable(marrow_editor_shell
     src/editor/sokol_graphics_device.cpp
 )
 
-# MAR-187: the two hand-duplicated frame bodies must draw the same windows.
-# POST_BUILD rather than a bare custom target, and deliberately NOT a CTest test
-# (`ctest -N` stays 22): nothing compiler-checks the pair, the shell smoke passes
-# green with EITHER call missing -- including its own actual-frame case, which
-# draws through a scenario-local lambda -- and a gate that only runs when someone
-# remembers to invoke it is how MAR-187 shipped a plain two-file `grep` that a
-# lambda satisfies. Building the shell runs it.
-add_custom_command(TARGET marrow_editor_shell POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/CheckFrameBodies.cmake
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-    COMMENT "Checking the editor shell's two frame bodies agree"
-    VERBATIM
-)
-
-# The same check on demand, for anyone who wants it without a build.
+# Preserve the historical guard name, now checking shared delegation. A build
+# dependency (not just POST_BUILD) also guards incremental/no-op host builds.
 add_custom_target(marrow_frame_body_check
     COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/CheckFrameBodies.cmake
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-    COMMENT "Checking the editor shell's two frame bodies agree"
+    COMMENT "Checking shared shell frame wiring"
     VERBATIM
 )
+add_dependencies(marrow_editor_shell_core marrow_frame_body_check)
 
-target_include_directories(marrow_editor_shell
-    PRIVATE
+target_include_directories(marrow_editor_shell_core
+    PUBLIC
         ${PROJECT_SOURCE_DIR}/external
         ${PROJECT_SOURCE_DIR}/src/renderer/generated
 )
 
-target_link_libraries(marrow_editor_shell
-    PRIVATE
+target_link_libraries(marrow_editor_shell_core
+    PUBLIC
         marrow_editor
         marrow_renderer_core
         marrow_timeline_model
@@ -966,21 +944,48 @@ target_link_libraries(marrow_editor_shell
 )
 
 if(WIN32)
-    target_link_libraries(marrow_editor_shell PRIVATE ws2_32)
+    target_link_libraries(marrow_editor_shell_core PUBLIC ws2_32)
 endif()
 
 if(APPLE)
-    target_sources(marrow_editor_shell PRIVATE
+    target_sources(marrow_editor_shell_core PRIVATE
         src/editor/macos_app_focus.mm
     )
 endif()
 
-add_custom_command(TARGET marrow_editor_shell POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_SOURCE_DIR}/assets/fonts
-        $<TARGET_FILE_DIR:marrow_editor_shell>/fonts
-    COMMENT "Copying editor fonts to build directory"
-)
+add_executable(marrow_editor_shell src/editor/shell_main.cpp)
+target_link_libraries(marrow_editor_shell PRIVATE marrow_editor_shell_core)
+set(MARROW_SHELL_HOST_TARGETS marrow_editor_shell)
+
+if(BUILD_TESTING)
+    add_executable(marrow_editor_shell_smoke
+        src/editor/shell_main.cpp
+        src/editor/shell_smoke.cpp
+        src/editor/shell_smoke_project.cpp
+        src/editor/shell_smoke_psd.cpp
+        src/editor/shell_smoke_viewport.cpp
+        src/editor/shell_smoke_ffd.cpp
+        src/editor/shell_smoke_graph.cpp
+        src/editor/shell_smoke_timeline.cpp
+        src/editor/shell_smoke_constraints.cpp
+        src/editor/shell_smoke_frames.cpp
+        src/editor/shell_smoke_frame_contract.cpp
+        src/editor/shell_smoke_parameters.cpp
+    )
+    target_compile_definitions(marrow_editor_shell_smoke PRIVATE
+        MARROW_ENABLE_HEADLESS_SMOKE=1)
+    target_link_libraries(marrow_editor_shell_smoke PRIVATE marrow_editor_shell_core)
+    list(APPEND MARROW_SHELL_HOST_TARGETS marrow_editor_shell_smoke)
+endif()
+
+foreach(_shell_host IN LISTS MARROW_SHELL_HOST_TARGETS)
+    add_custom_command(TARGET ${_shell_host} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/assets/fonts
+            $<TARGET_FILE_DIR:${_shell_host}>/fonts
+        COMMENT "Copying editor fonts to build directory"
+    )
+endforeach()
 
 file(GLOB MARROW_EDITOR_ICON_SOURCES
     "${CMAKE_CURRENT_BINARY_DIR}/icons/*.png")
@@ -1001,7 +1006,9 @@ add_custom_command(
 
 add_custom_target(marrow_editor_icons ALL
     DEPENDS ${MARROW_EDITOR_ICON_STAMP})
-add_dependencies(marrow_editor_shell marrow_editor_icons)
+foreach(_shell_host IN LISTS MARROW_SHELL_HOST_TARGETS)
+    add_dependencies(${_shell_host} marrow_editor_icons)
+endforeach()
 
 if(WIN32)
     set(MARROW_PORTABLE_ROOT
@@ -1122,9 +1129,9 @@ else()
 endif()
 
 if(APPLE)
-    target_compile_definitions(marrow_editor_shell PRIVATE SOKOL_METAL)
+    target_compile_definitions(marrow_editor_shell_core PUBLIC SOKOL_METAL)
 else()
-    target_compile_definitions(marrow_editor_shell PRIVATE SOKOL_GLCORE)
+    target_compile_definitions(marrow_editor_shell_core PUBLIC SOKOL_GLCORE)
 endif()
 
 if(BUILD_TESTING)
@@ -1319,8 +1326,21 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME marrow.shell_frame_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            MARROW_DISPLAY_SMOKE=0 MARROW_FRAME_CONTRACT_ONLY=1
+            $<TARGET_FILE:marrow_editor_shell_smoke>
+            --project assets/fixtures/player_idle.marrow --auto-close 1
+    )
+    set_tests_properties(marrow.shell_frame_contract PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;integration;noninteractive"
+        TIMEOUT 30
+    )
+
+    add_test(
         NAME marrow.parameter_editor_shell_smoke
-        COMMAND marrow_editor_shell
+        COMMAND marrow_editor_shell_smoke
             --project assets/fixtures/parameter_face_basic.marrow
             --auto-close 2
     )
@@ -1367,6 +1387,16 @@ if(BUILD_TESTING)
     # or a live editor. A missing interpreter must not silently skip this gate.
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
     add_test(
+        NAME marrow.shell_frame_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tools/tests/test_shell_frame_boundary.py -v
+    )
+    set_tests_properties(marrow.shell_frame_boundary PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;guardrail;unit;noninteractive"
+        TIMEOUT 30
+    )
+    add_test(
         NAME marrow.mcp_transport
         COMMAND ${Python3_EXECUTABLE} -W error::ResourceWarning
                 ${PROJECT_SOURCE_DIR}/tools/mcp/test_transport.py -v
@@ -1403,7 +1433,7 @@ if(BUILD_TESTING)
 
     add_test(
         NAME marrow.editor_shell_smoke
-        COMMAND marrow_editor_shell
+        COMMAND marrow_editor_shell_smoke
             --project
             assets/fixtures/player_idle.marrow
             --auto-close
