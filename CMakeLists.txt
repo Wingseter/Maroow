@@ -505,6 +505,13 @@ add_library(marrow_editor STATIC
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/project_io.cpp
+    src/editor/project_parse.cpp
+    src/editor/project_runtime.cpp
+    src/editor/project_overlay.cpp
+    src/editor/project_serialize.cpp
+    src/editor/project_validation.cpp
+    src/editor/project_json.cpp
     src/editor/psd_reimport_plan.cpp
     src/editor/psd_reimport_commit.cpp
     src/editor/psd_reimport_review.cpp
@@ -1394,6 +1401,30 @@ if(BUILD_TESTING)
     # Exercise the Python side of the same agent boundary without the MCP SDK
     # or a live editor. A missing interpreter must not silently skip this gate.
     find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+
+    add_executable(marrow_project_subsystem_tests
+        src/tests/project_subsystem_tests.cpp
+    )
+    target_include_directories(marrow_project_subsystem_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+    )
+    target_link_libraries(marrow_project_subsystem_tests PRIVATE marrow_editor)
+    add_test(NAME marrow.project_subsystem COMMAND marrow_project_subsystem_tests)
+    set_tests_properties(marrow.project_subsystem PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;project;unit;noninteractive"
+        TIMEOUT 30
+    )
+    add_test(NAME marrow.project_subsystem_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tools/tests/test_project_subsystem_boundary.py -v
+    )
+    set_tests_properties(marrow.project_subsystem_boundary PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;project;guardrail;unit;noninteractive"
+        TIMEOUT 30
+    )
+
     add_test(
         NAME marrow.shell_frame_boundary
         COMMAND ${Python3_EXECUTABLE}

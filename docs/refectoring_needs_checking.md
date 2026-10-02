@@ -35,9 +35,31 @@
 
 실행 계획·RED/GREEN 근거·정확한 검증 명령: `docs/superpowers/plans/2026-09-12-shared-shell-frame.md`. AGENTS 상단에는 현재 검증 명령과 새 실행 파일 구분만 추가했고 역사 기록은 보존했다.
 
-**아직 미착수:** Phase 3 shell lifecycle, Phase 4 project 책임 분리, AGENTS 역사 기록 분리.
+**Phase 3 — shell lifecycle: 구현 및 macOS 로컬 회귀 검증 완료.**
 
-이번 검증은 macOS 로컬 빌드/headless, 격리 TCP peer, 실제 MCP 서버 프로세스와 CTest를 대상으로 한다. 실제 C++ 에디터에 대한 Python mutation E2E, Windows/Linux 실행, display/GPU/portable qualification 완료를 의미하지 않는다. 구현 작업 당시 기존 dirty 변경을 보존했으며, 이후 사용자의 커밋 정리 요청으로 아래 두 구현 커밋을 생성했다. 푸시는 하지 않았다.
+- `ShellState`에 저장하던 `preview_skeleton` / `animation_state` raw pointer 두 개를 제거했다. const/non-const accessor가 호출 시점의 `EditorSession` 객체를 반환하므로 Open·close·runtime 재생성·undo/redo 뒤 별도 재연결이 필요 없다. 반환 포인터 자체는 여전히 borrowed view이므로 runtime 변경을 넘겨 보관하면 안 된다.
+- 기존 alias 재연결 함수는 `normalize_shell_preview_composition_to_runtime`으로 좁혔다. skin/attachment/animation 구성 정규화만 담당한다. 닫힌 세션도 revision 동기화하도록 수정해 이전 재생 상태가 셸에 남지 않게 했다.
+- `shell_gesture_lifecycle.cpp`의 단일 typed visitor에 12종 authoring owner를 등록하고 active 판정과 공통 취소가 같은 목록을 사용하게 했다. viewport 선택·hierarchy anchor·timeline focus·FFD 정점 선택·weight/coalesced snapshot의 개별 복원 정책을 유지한다.
+- 실제 결함도 수정했다. 공통 취소에서 timeline retime/scale의 원래 selected key와 active key를 복구하지 않던 경로를 기존 전용 `finish_*(commit=false)`에 연결했다. 취소 후 transaction 해제, 다음 편집 시작, history 비증가와 반복 취소도 검증했다.
+- BUILD_TESTING 전용 `marrow.shell_lifecycle`에 20개 사례를 추가했다. 수정 전 **7개 실패/13개 통과**를 확인했고 수정 후 **20/20 통과**했다. owner 등록과 FFD 정점 복원을 의도적으로 누락한 변이에서는 정확히 두 사례가 실패했으며, 원본 SHA 복구 후 전체 회귀를 다시 통과했다.
+- 최종 전체 빌드와 CTest **28/28**, Python MCP transport **20/20**, 실제 MCP stdio **1/1** 통과. `BUILD_TESTING=OFF` 제품 빌드 및 compile database/`nm -C` 경계 검사도 통과했다. core 32개·제품 host 1개·smoke 컴파일 단위 0개이며 새 lifecycle 테스트도 제품 compile database에 없다.
+- UI가 직접 편집하는 playback/composition 작업 값, legacy dirty 호환 mirror, 직접 수집하는 events 및 root-motion reset은 무리하게 제거하지 않았다. session 권위 상태와 shell transient/cache의 구분 및 보류 이유는 실행 계획의 ownership 표에 기록했다.
+
+실행 계획·RED/GREEN·변이 검증·제한: `docs/superpowers/plans/2026-09-12-shell-lifecycle-cleanup.md`.
+
+**Phase 4 — project 책임 분리: 구현 및 다계층 회귀·변이 검증 완료.**
+
+- 기존 8,745줄 규모의 `project.cpp`에서 순수 파싱, 직렬화, 검증, 오버레이 폴드, 런타임 구체화, 파일 I/O를 7개 번역 단위(`project_json`, `project_parse`, `project_validation`, `project_overlay`, `project_runtime`, `project_serialize`, `project_io`) 및 2개 내부 헤더(`project_internal.hpp`, `project_json.hpp`)로 분리했다. `project.cpp`는 1,217줄로 줄었고 공개 모델/저작 도우미 함수만 유지한다.
+- 193개 함수 중 192개 함수 본문이 바이트 단위로 보존되었다(`load_project` 배선만 전용 파싱 층 호출로 갱신). `.mskl` v1, `.mbin` v2, C ABI v1 및 기존 `.marrow` 호환성과 미식별 루트 필드 보존을 유지한다.
+- 신규 단위 테스트 `marrow_project_subsystem_tests` (7개 케이스) 및 아키텍처 경계 가드레일 `test_project_subsystem_boundary.py`를 추가했다. 순수 계층의 파일 시스템 I/O 배제, `.cpp` include 차단, UI 의존성 차단을 검증한다.
+- 4종 의도적 변이(`unknown_root_loss`, `constraint_order_reversal`, `partial_parse_commit`, `save_as_without_rebase`)를 모두 적절히 거부하고 원본 해시로 복구했다 (`docs/evidence/`).
+- 전체 빌드 및 CTest **30/30**, MCP transport **20/20**, stdio 통합 **1/1** 통과. `BUILD_TESTING=OFF` 제품 빌드 및 심벌/컴파일 경계 검사도 통과했다.
+
+실행 계획·RED/GREEN·변이 검증·증적: `docs/superpowers/plans/2026-09-12-project-subsystem-split.md`.
+
+**아직 미착수:** AGENTS 역사 기록 분리.
+
+이번 검증은 macOS 로컬 빌드/headless, 격리 TCP peer, 실제 MCP 서버 프로세스와 CTest를 대상으로 한다. 실제 C++ 에디터에 대한 Python mutation E2E, Windows/Linux 실행, display/GPU/portable qualification 완료를 의미하지 않는다. 구현 작업 당시 기존 dirty 변경을 보존했다.
 
 ### 커밋 정리 — 2026-09-12
 

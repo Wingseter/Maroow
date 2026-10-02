@@ -1,0 +1,71 @@
+{
+  "baseline_project_sha256": "4466a25c9a0def24a2ab8f47509f25272d6d232ab65afc39debcc9c28f531ff7",
+  "original_function_count": 193,
+  "unchanged_function_bodies": 192,
+  "intentional_plumbing_changes": [
+    {
+      "name": "load_project",
+      "signature": "ProjectLoadResult load_project ( const Document & document )",
+      "candidates": [
+        [
+          "8fefac455ab60355f53cdba5416e116682a0750dc6e7ed8d2bac21d51f3d13bd",
+          "project_io.cpp"
+        ]
+      ]
+    }
+  ],
+  "public_header_sha256": "8f678e92cf1cdcaffe540069772aeb18a1d93d792374de0bb5b140aa0ffa0c2c",
+  "pre_existing_cmake_changes_preserved": true,
+  "strict_syntax_checks": [
+    {
+      "file": "src/editor/project.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_io.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_json.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_overlay.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_parse.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_runtime.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_serialize.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    },
+    {
+      "file": "src/editor/project_validation.cpp",
+      "exit_code": 0,
+      "diagnostic": ""
+    }
+  ],
+  "line_counts": {
+    "project.cpp": 1217,
+    "project_io.cpp": 447,
+    "project_json.cpp": 596,
+    "project_overlay.cpp": 271,
+    "project_parse.cpp": 4214,
+    "project_runtime.cpp": 390,
+    "project_serialize.cpp": 703,
+    "project_validation.cpp": 1023
+  }
+}
