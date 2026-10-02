@@ -159,8 +159,8 @@ bool validate_shared_shell_frame_contract(ImGuiIO& io) {
             require(state.session.project() != nullptr &&
                         state.session.project()->parameter_model.has_value(),
                     "deferred Open did not replace the session before rendering");
-            require(state.preview_skeleton == state.session.preview_skeleton() &&
-                        state.animation_state == state.session.preview_animation_state(),
+            require(state.preview_skeleton() == state.session.preview_skeleton() &&
+                        state.animation_state() == state.session.preview_animation_state(),
                     "deferred Open left stale runtime aliases");
         });
 

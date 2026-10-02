@@ -270,7 +270,7 @@ std::optional<std::size_t> rotation_gizmo_bone_index(
     const ResolvedSelection resolved = resolve_shell_selection(state);
     if (state.shell_mode != ShellMode::Animation ||
         state.selected_animation_name.empty() || state.weight_paint.enabled ||
-        state.preview_skeleton == nullptr || state.load_result.skeleton_data == nullptr ||
+        state.preview_skeleton() == nullptr || state.load_result.skeleton_data == nullptr ||
         state.session.runtime_data() == nullptr ||
         state.session.runtime_data()->find_animation(state.selected_animation_name) == nullptr ||
         !resolved.active_bone_index.has_value()) {
@@ -278,11 +278,11 @@ std::optional<std::size_t> rotation_gizmo_bone_index(
     }
     const std::size_t bone_index = *resolved.active_bone_index;
     if (bone_index >= layout.bones.size() ||
-        bone_index >= state.preview_skeleton->bone_poses().size() ||
-        bone_index >= state.preview_skeleton->bone_world_transforms().size() ||
-        !state.preview_skeleton->is_bone_active(bone_index) ||
+        bone_index >= state.preview_skeleton()->bone_poses().size() ||
+        bone_index >= state.preview_skeleton()->bone_world_transforms().size() ||
+        !state.preview_skeleton()->is_bone_active(bone_index) ||
         unsupported_rotation_inherit(
-            state.preview_skeleton->bone_poses()[bone_index].inherit)) {
+            state.preview_skeleton()->bone_poses()[bone_index].inherit)) {
         return std::nullopt;
     }
     return bone_index;
@@ -292,13 +292,13 @@ const char* active_rotation_inherit_hint(const ShellState& state) {
     const ResolvedSelection resolved = resolve_shell_selection(state);
     if (state.shell_mode != ShellMode::Animation ||
         state.selected_animation_name.empty() || state.weight_paint.enabled ||
-        state.preview_skeleton == nullptr || !resolved.active_bone_index.has_value() ||
-        *resolved.active_bone_index >= state.preview_skeleton->bone_poses().size() ||
-        !state.preview_skeleton->is_bone_active(*resolved.active_bone_index)) {
+        state.preview_skeleton() == nullptr || !resolved.active_bone_index.has_value() ||
+        *resolved.active_bone_index >= state.preview_skeleton()->bone_poses().size() ||
+        !state.preview_skeleton()->is_bone_active(*resolved.active_bone_index)) {
         return nullptr;
     }
     return unsupported_rotation_inherit_hint(
-        state.preview_skeleton->bone_poses()[*resolved.active_bone_index].inherit);
+        state.preview_skeleton()->bone_poses()[*resolved.active_bone_index].inherit);
 }
 
 ImVec2 rotation_gizmo_center(
@@ -336,7 +336,7 @@ std::optional<std::size_t> scale_gizmo_bone_index(
     const ViewportLayout& layout) {
     const auto bone_index = rotation_gizmo_bone_index(state, layout);
     if (!bone_index.has_value() ||
-        !scale_basis(*state.preview_skeleton, *bone_index).has_value()) {
+        !scale_basis(*state.preview_skeleton(), *bone_index).has_value()) {
         return std::nullopt;
     }
     return bone_index;
@@ -377,7 +377,7 @@ ViewportScaleBasis visible_scale_basis(
             return scale->basis;
         }
     }
-    return *scale_basis(*state.preview_skeleton, bone_index);
+    return *scale_basis(*state.preview_skeleton(), bone_index);
 }
 
 ImVec2 scale_gizmo_center(
@@ -572,7 +572,7 @@ bool viewport_transform_context_valid(
     const ShellState& state,
     const ViewportTransformGesture& gesture) {
     if (state.shell_mode != ShellMode::Animation || state.weight_paint.enabled ||
-        state.preview_skeleton == nullptr || state.load_result.skeleton_data == nullptr ||
+        state.preview_skeleton() == nullptr || state.load_result.skeleton_data == nullptr ||
         state.session.runtime_data() == nullptr ||
         state.selected_animation_name != gesture.animation_name ||
         !std::isfinite(state.timeline_time_seconds) ||
@@ -585,9 +585,9 @@ bool viewport_transform_context_valid(
     const ResolvedSelection resolved = resolve_shell_selection(state);
     if (!resolved.active_bone_index.has_value() ||
         *resolved.active_bone_index != gesture.bone_index ||
-        gesture.bone_index >= state.preview_skeleton->bone_poses().size() ||
-        gesture.bone_index >= state.preview_skeleton->bone_world_transforms().size() ||
-        !state.preview_skeleton->is_bone_active(gesture.bone_index)) {
+        gesture.bone_index >= state.preview_skeleton()->bone_poses().size() ||
+        gesture.bone_index >= state.preview_skeleton()->bone_world_transforms().size() ||
+        !state.preview_skeleton()->is_bone_active(gesture.bone_index)) {
         return false;
     }
     const auto runtime_index =
@@ -705,18 +705,18 @@ bool begin_translate_gesture(
     const ResolvedSelection resolved = resolve_shell_selection(*state);
     if (state->shell_mode != ShellMode::Animation ||
         state->selected_animation_name.empty() ||
-        !resolved.active_bone_index.has_value() || state->preview_skeleton == nullptr ||
+        !resolved.active_bone_index.has_value() || state->preview_skeleton() == nullptr ||
         state->load_result.project == nullptr || state->session.runtime_data() == nullptr ||
         state->weight_paint.enabled || authoring_gesture_active(*state)) {
         return false;
     }
     const std::size_t bone_index = *resolved.active_bone_index;
-    if (bone_index >= state->preview_skeleton->bone_world_transforms().size() ||
+    if (bone_index >= state->preview_skeleton()->bone_world_transforms().size() ||
         bone_index >= state->load_result.skeleton_data->bones().size()) {
         return false;
     }
     const ViewportWorldPoint pointer_world = world_from_screen(layout, pointer);
-    const auto world = state->preview_skeleton->bone_world_transforms()[bone_index];
+    const auto world = state->preview_skeleton()->bone_world_transforms()[bone_index];
     if (!finite_world_point(pointer_world) || !std::isfinite(world.world_x) ||
         !std::isfinite(world.world_y) || !std::isfinite(state->timeline_time_seconds)) {
         return false;
@@ -739,7 +739,7 @@ bool update_translate_gesture(
     const ImVec2& pointer,
     ViewportSnapModifiers modifiers) {
     if (state == nullptr || !state->viewport_transform_gesture.has_value() ||
-        state->preview_skeleton == nullptr) {
+        state->preview_skeleton() == nullptr) {
         return false;
     }
     auto& gesture = *state->viewport_transform_gesture;
@@ -806,7 +806,7 @@ bool update_translate_gesture(
         return true;
     }
     const auto local = local_position_for_world_target(
-        *state->preview_skeleton, gesture.bone_index, target);
+        *state->preview_skeleton(), gesture.bone_index, target);
     if (!local.has_value()) {
         const std::string error =
             "Cannot move a bone through a singular parent transform.";
@@ -865,7 +865,7 @@ bool begin_rotate_gesture(
     if (!bone_index.has_value() || state->session.runtime_data() == nullptr) {
         return false;
     }
-    const auto basis = rotation_basis(*state->preview_skeleton, *bone_index);
+    const auto basis = rotation_basis(*state->preview_skeleton(), *bone_index);
     const ViewportWorldPoint pointer_world = world_from_screen(layout, pointer);
     const auto wrapped_angle = basis.has_value()
         ? rotation_angle(*basis, pointer_world)
@@ -1045,7 +1045,7 @@ bool begin_scale_gesture(
         return false;
     }
     const auto basis =
-        scale_basis(*state->preview_skeleton, *bone_index);
+        scale_basis(*state->preview_skeleton(), *bone_index);
     const auto start_scale =
         effective_scale_at_playhead(*state, *bone_index);
     if (!basis.has_value() || !start_scale.has_value() ||

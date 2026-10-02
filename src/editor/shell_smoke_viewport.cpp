@@ -101,8 +101,8 @@ bool validate_viewport_camera_smoke(
         return false;
     }
     if (!camera_state.viewport_camera.initialized ||
-        camera_state.preview_skeleton == nullptr ||
-        camera_state.preview_skeleton->bone_poses().empty()) {
+        camera_state.preview_skeleton() == nullptr ||
+        camera_state.preview_skeleton()->bone_poses().empty()) {
         std::cerr << "Viewport camera smoke did not initialize from the loaded preview pose.\n";
         return false;
     }
@@ -454,13 +454,13 @@ bool validate_viewport_camera_smoke(
     rotation_layout = build_viewport_layout(camera_state, canvas_origin, canvas_size);
     rotation_center = rotation_layout->bones[root_index].screen_position;
 
-    camera_state.preview_skeleton->bone_poses()[root_index].inherit =
+    camera_state.preview_skeleton()->bone_poses()[root_index].inherit =
         marrow::runtime::BoneInherit::NoScale;
     if (viewport_interaction::rotation_gizmo_visible(camera_state, *rotation_layout)) {
         std::cerr << "Viewport rotation ring remained visible for unsupported inherit.\n";
         return false;
     }
-    camera_state.preview_skeleton->bone_poses()[root_index].inherit =
+    camera_state.preview_skeleton()->bone_poses()[root_index].inherit =
         marrow::runtime::BoneInherit::Normal;
     camera_state.selection.replace(
         marrow::editor::SlotSelection{runtime_slots.front().name});
@@ -639,7 +639,7 @@ bool validate_viewport_camera_smoke(
         return marrow::editor::serialize_project(*camera_state.session.project()) ==
                 rotation_project_before &&
             camera_state.session.runtime_data() == rollback_runtime_before &&
-            camera_preview_signature(*camera_state.preview_skeleton) ==
+            camera_preview_signature(*camera_state.preview_skeleton()) ==
                 camera_preview_signature(
                     *marrow::editor::EditorSessionShellBinding::preview_skeleton(
                         camera_state.session)) &&
@@ -653,7 +653,7 @@ bool validate_viewport_camera_smoke(
             camera_state.selected_timeline_track_id == mixed_focus;
     };
     const std::string rollback_preview_before =
-        camera_preview_signature(*camera_state.preview_skeleton);
+        camera_preview_signature(*camera_state.preview_skeleton());
     if (!viewport_interaction::begin_rotate_gesture(
             &camera_state,
             *rotation_layout,
@@ -704,7 +704,7 @@ bool validate_viewport_camera_smoke(
     }
     viewport_interaction::finish_transform_gesture(&camera_state, false);
     if (!rollback_is_exact() ||
-        camera_preview_signature(*camera_state.preview_skeleton) !=
+        camera_preview_signature(*camera_state.preview_skeleton()) !=
             rollback_preview_before) {
         std::cerr << "Viewport rotation Escape rollback was not exact.\n";
         return false;
@@ -723,7 +723,7 @@ bool validate_viewport_camera_smoke(
             *rotation_layout,
             ImVec2(std::numeric_limits<float>::quiet_NaN(), rotation_center.y)) ||
         !rollback_is_exact() ||
-        camera_preview_signature(*camera_state.preview_skeleton) !=
+        camera_preview_signature(*camera_state.preview_skeleton()) !=
             rollback_preview_before) {
         std::cerr << "Viewport rotation non-finite failure rollback was not exact.\n";
         return false;
@@ -1123,7 +1123,7 @@ bool validate_viewport_camera_smoke(
     auto scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
     const auto scale_basis = viewport_interaction::scale_basis(
-        *camera_state.preview_skeleton, *spine_index);
+        *camera_state.preview_skeleton(), *spine_index);
     if (!scale_layout.has_value() || !scale_basis.has_value() ||
         !viewport_interaction::scale_gizmo_visible(
             camera_state, *scale_layout)) {
@@ -1166,7 +1166,7 @@ bool validate_viewport_camera_smoke(
     }
     camera_state.weight_paint.enabled = false;
     auto& scale_preview_pose =
-        camera_state.preview_skeleton->bone_poses()[*spine_index];
+        camera_state.preview_skeleton()->bone_poses()[*spine_index];
     const auto scale_preview_inherit = scale_preview_pose.inherit;
     scale_preview_pose.inherit = marrow::runtime::BoneInherit::NoScale;
     const char* unsupported_scale_hint =
@@ -1381,7 +1381,7 @@ bool validate_viewport_camera_smoke(
         }
     }
     const auto& live_preview_scale_pose =
-        camera_state.preview_skeleton->bone_poses()[*spine_index].local_pose;
+        camera_state.preview_skeleton()->bone_poses()[*spine_index].local_pose;
     if (live_scale == nullptr ||
         live_scale->current_absolute_scale_x != 0.0 ||
         std::abs(
@@ -1413,7 +1413,7 @@ bool validate_viewport_camera_smoke(
     scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
     const auto zero_scale_basis = viewport_interaction::scale_basis(
-        *camera_state.preview_skeleton, *spine_index);
+        *camera_state.preview_skeleton(), *spine_index);
     if (!scale_layout.has_value() ||
         !zero_scale_basis.has_value()) {
         return false;
@@ -1431,7 +1431,7 @@ bool validate_viewport_camera_smoke(
     const auto zero_scale_runtime_before =
         camera_state.session.runtime_data();
     const std::string zero_scale_preview_before =
-        camera_preview_signature(*camera_state.preview_skeleton);
+        camera_preview_signature(*camera_state.preview_skeleton());
     const bool zero_scale_dirty_before =
         camera_state.session.dirty();
     const bool zero_scale_project_dirty_before =
@@ -1447,7 +1447,7 @@ bool validate_viewport_camera_smoke(
             camera_state.session.runtime_data() ==
                 zero_scale_runtime_before &&
             camera_preview_signature(
-                *camera_state.preview_skeleton) ==
+                *camera_state.preview_skeleton()) ==
                 zero_scale_preview_before &&
             camera_state.session.dirty() ==
                 zero_scale_dirty_before &&
@@ -1505,7 +1505,7 @@ bool validate_viewport_camera_smoke(
         marrow::editor::serialize_project(
             *camera_state.session.project()) == scale_project_zero ||
         camera_preview_signature(
-            *camera_state.preview_skeleton) ==
+            *camera_state.preview_skeleton()) ==
             zero_scale_preview_before ||
         viewport_interaction::update_scale_gesture(
             &camera_state,
@@ -1551,7 +1551,7 @@ bool validate_viewport_camera_smoke(
     scale_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
     const auto uniform_zero_basis = viewport_interaction::scale_basis(
-        *camera_state.preview_skeleton, *spine_index);
+        *camera_state.preview_skeleton(), *spine_index);
     if (!scale_layout.has_value() ||
         !uniform_zero_basis.has_value()) {
         return false;
@@ -1588,7 +1588,7 @@ bool validate_viewport_camera_smoke(
               camera_state, *scale_layout)
         : nullptr;
     const auto& zero_uniform_preview =
-        camera_state.preview_skeleton->bone_poses()[*spine_index].local_pose;
+        camera_state.preview_skeleton()->bone_poses()[*spine_index].local_pose;
     if (!scale_layout.has_value() ||
         viewport_interaction::uniform_scale_handle_visible(
             camera_state, *scale_layout) ||
@@ -1625,11 +1625,11 @@ bool validate_viewport_camera_smoke(
         const auto layout = build_viewport_layout(
             camera_state, canvas_origin, canvas_size);
         if (!layout.has_value() ||
-            *bone_index >= camera_state.preview_skeleton->bone_world_transforms().size()) {
+            *bone_index >= camera_state.preview_skeleton()->bone_world_transforms().size()) {
             return false;
         }
         const auto world =
-            camera_state.preview_skeleton->bone_world_transforms()[*bone_index];
+            camera_state.preview_skeleton()->bone_world_transforms()[*bone_index];
         const ImVec2 pointer = screen_from_world(
             *layout, world.world_x, world.world_y);
         const std::string before =
@@ -1691,15 +1691,15 @@ bool validate_viewport_camera_smoke(
     if (!singular_parent.has_value()) return false;
     select_bone(&camera_state, *singular_arm, "Smoke", false);
     auto& singular_parent_pose =
-        camera_state.preview_skeleton->bone_poses()[*singular_parent].local_pose;
+        camera_state.preview_skeleton()->bone_poses()[*singular_parent].local_pose;
     singular_parent_pose.scale_x = 0.0f;
     singular_parent_pose.scale_y = 0.0f;
-    camera_state.preview_skeleton->update_world_transforms();
+    camera_state.preview_skeleton()->update_world_transforms();
     const auto singular_layout = build_viewport_layout(
         camera_state, canvas_origin, canvas_size);
     if (!singular_layout.has_value()) return false;
     const auto singular_world =
-        camera_state.preview_skeleton->bone_world_transforms()[*singular_arm];
+        camera_state.preview_skeleton()->bone_world_transforms()[*singular_arm];
     const ImVec2 singular_pointer = screen_from_world(
         *singular_layout, singular_world.world_x, singular_world.world_y);
     if (!viewport_interaction::begin_translate_gesture(
@@ -1749,9 +1749,9 @@ bool validate_viewport_camera_smoke(
     const ViewportCamera stable_camera = camera_state.viewport_camera;
     const float stable_pixels_per_unit = zoomed_layout->pixels_per_unit;
     const ImVec2 root_screen_before = zoomed_layout->bones.front().screen_position;
-    camera_state.preview_skeleton->bone_poses().front().local_pose.x += 250.0f;
-    camera_state.preview_skeleton->bone_poses().front().local_pose.y -= 125.0f;
-    camera_state.preview_skeleton->update_world_transforms();
+    camera_state.preview_skeleton()->bone_poses().front().local_pose.x += 250.0f;
+    camera_state.preview_skeleton()->bone_poses().front().local_pose.y -= 125.0f;
+    camera_state.preview_skeleton()->update_world_transforms();
     const auto moved_pose_layout = build_viewport_layout(
         camera_state,
         canvas_origin,
@@ -1792,7 +1792,7 @@ bool validate_viewport_camera_smoke(
 bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
     ShellState state;
     state.project_path = project_path;
-    if (!reload_project(&state) || state.preview_skeleton == nullptr ||
+    if (!reload_project(&state) || state.preview_skeleton() == nullptr ||
         state.session.runtime_data() == nullptr ||
         !scrub_timeline_time(&state, 0.333, "Viewport snap smoke", false)) {
         std::cerr << "Viewport snap smoke could not load its animation context.\n";
@@ -2024,14 +2024,14 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
     state.session.clear_history();
 
     const auto reflected_arm_world =
-        state.preview_skeleton->bone_world_transforms()[*arm_index];
+        state.preview_skeleton()->bone_world_transforms()[*arm_index];
     const ViewportWorldPoint staged_off_grid_world{
         std::round(static_cast<double>(reflected_arm_world.world_x) / 10.0) * 10.0 +
             3.0,
         static_cast<double>(reflected_arm_world.world_y)};
     const auto staged_off_grid_local =
         viewport_interaction::local_position_for_world_target(
-            *state.preview_skeleton, *arm_index, staged_off_grid_world);
+            *state.preview_skeleton(), *arm_index, staged_off_grid_world);
     auto off_grid_translate_transaction = state.session.begin_edit({
         marrow::editor::EditKind::AddKeyframe,
         "Stage off-grid constrained translation",
@@ -2089,7 +2089,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
         return false;
     }
     const auto arm_start =
-        state.preview_skeleton->bone_world_transforms()[*arm_index];
+        state.preview_skeleton()->bone_world_transforms()[*arm_index];
     const ImVec2 translate_start = screen_from_world(
         *layout, arm_start.world_x, arm_start.world_y);
     const std::string constrained_click_before =
@@ -2107,7 +2107,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
     }
     viewport_interaction::finish_transform_gesture(&state, true);
     const auto constrained_click_world =
-        state.preview_skeleton->bone_world_transforms()[*arm_index];
+        state.preview_skeleton()->bone_world_transforms()[*arm_index];
     if (marrow::editor::serialize_project(*state.session.project()) !=
             constrained_click_before ||
         state.session.undo_count() != constrained_click_undo_before ||
@@ -2135,7 +2135,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
         std::cerr << "Configured translate snapping did not begin.\n";
         return false;
     }
-    auto arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    auto arm_world = state.preview_skeleton()->bone_world_transforms()[*arm_index];
     if (std::abs(arm_world.world_x - snapped_translate_target.x) > 2e-3 ||
         std::abs(arm_world.world_y - snapped_translate_target.y) > 2e-3 ||
         !viewport_interaction::update_translate_gesture(
@@ -2146,7 +2146,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
         std::cerr << "World snap was not applied before reflected-parent inversion.\n";
         return false;
     }
-    arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    arm_world = state.preview_skeleton()->bone_world_transforms()[*arm_index];
     if (std::abs(arm_world.world_x - raw_translate_target.x) > 2e-3 ||
         std::abs(arm_world.world_y - raw_translate_target.y) > 2e-3) {
         std::cerr << "Live Alt did not bypass configured translation snapping.\n";
@@ -2182,7 +2182,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
         return false;
     }
     const auto temporary_start_world =
-        state.preview_skeleton->bone_world_transforms()[*arm_index];
+        state.preview_skeleton()->bone_world_transforms()[*arm_index];
     const ImVec2 temporary_start = screen_from_world(
         *layout, temporary_start_world.world_x, temporary_start_world.world_y);
     const ViewportWorldPoint temporary_raw_target{
@@ -2204,7 +2204,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
         std::cerr << "Temporary command translation snapping did not begin.\n";
         return false;
     }
-    arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    arm_world = state.preview_skeleton()->bone_world_transforms()[*arm_index];
     if (std::abs(arm_world.world_x - std::round(temporary_raw_target.x / 10.0) * 10.0) >
             2e-3 ||
         std::abs(arm_world.world_y - std::round(temporary_raw_target.y / 10.0) * 10.0) >
@@ -2214,7 +2214,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
         std::cerr << "Command modifier did not enable disabled world snapping.\n";
         return false;
     }
-    arm_world = state.preview_skeleton->bone_world_transforms()[*arm_index];
+    arm_world = state.preview_skeleton()->bone_world_transforms()[*arm_index];
     if (std::abs(arm_world.world_x - temporary_raw_target.x) > 2e-3 ||
         std::abs(arm_world.world_y - temporary_raw_target.y) > 2e-3) {
         std::cerr << "Live command release did not restore unsnapped translation.\n";
@@ -2319,7 +2319,7 @@ bool validate_viewport_snap_smoke(const std::filesystem::path& project_path) {
     select_bone(&state, *root_index, "Snap smoke", false);
     layout = build_viewport_layout(state, canvas_origin, canvas_size);
     const auto scale_basis = layout.has_value()
-        ? viewport_interaction::scale_basis(*state.preview_skeleton, *root_index)
+        ? viewport_interaction::scale_basis(*state.preview_skeleton(), *root_index)
         : std::nullopt;
     if (!layout.has_value() || !scale_basis.has_value()) {
         return false;
@@ -2412,7 +2412,7 @@ bool validate_viewport_prepared_scene_renderer_smoke(
     const std::filesystem::path& project_path) {
     ShellState state;
     state.project_path = project_path;
-    if (!reload_project(&state) || state.preview_skeleton == nullptr ||
+    if (!reload_project(&state) || state.preview_skeleton() == nullptr ||
         state.load_result.atlas_data.empty()) {
         std::cerr << "Viewport command smoke could not load the preview scene.\n";
         return false;
@@ -2426,7 +2426,7 @@ bool validate_viewport_prepared_scene_renderer_smoke(
         return false;
     }
     const auto scene_result = marrow::renderer::prepare_setup_pose_scene(
-        *state.preview_skeleton,
+        *state.preview_skeleton(),
         *state.load_result.atlas_data.front());
     if (!scene_result) {
         std::cerr << scene_result.error_message << '\n';
@@ -2454,7 +2454,7 @@ bool validate_viewport_prepared_scene_renderer_smoke(
 
 bool validate_selection_set_shell_smoke(ShellState* state) {
     if (state == nullptr || !state->load_result || state->load_result.project == nullptr ||
-        state->preview_skeleton == nullptr || state->session.runtime_data() == nullptr) {
+        state->preview_skeleton() == nullptr || state->session.runtime_data() == nullptr) {
         return false;
     }
 
@@ -2492,10 +2492,10 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
     const std::string project_before =
         marrow::editor::serialize_project(*state->load_result.project);
     const EditorHistorySnapshot shell_preview_before = capture_history_snapshot(*state);
-    const std::string runtime_preview_before = preview_signature(*state->preview_skeleton);
+    const std::string runtime_preview_before = preview_signature(*state->preview_skeleton());
     const auto* runtime_data_before = state->session.runtime_data();
-    const auto* preview_skeleton_before = state->preview_skeleton;
-    const auto* animation_state_before = state->animation_state;
+    const auto* preview_skeleton_before = state->preview_skeleton();
+    const auto* animation_state_before = state->animation_state();
     const bool session_dirty_before = state->session.dirty();
     const bool shell_dirty_before = state->project_dirty;
     const std::size_t undo_before = state->session.undo_count();
@@ -3164,7 +3164,7 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
     state->viewport.debug_overlay = {};
     state->viewport.debug_overlay.bones = false;
     const auto scene_result = marrow::renderer::prepare_setup_pose_scene(
-        *state->preview_skeleton,
+        *state->preview_skeleton(),
         *state->load_result.atlas_data.front());
     if (!scene_result) {
         std::cerr << scene_result.error_message << '\n';
@@ -3432,10 +3432,10 @@ bool validate_selection_set_shell_smoke(ShellState* state) {
 
     if (marrow::editor::serialize_project(*state->load_result.project) != project_before ||
         !history_snapshots_equal(shell_preview_before, capture_history_snapshot(*state)) ||
-        preview_signature(*state->preview_skeleton) != runtime_preview_before ||
+        preview_signature(*state->preview_skeleton()) != runtime_preview_before ||
         state->session.runtime_data() != runtime_data_before ||
-        state->preview_skeleton != preview_skeleton_before ||
-        state->animation_state != animation_state_before ||
+        state->preview_skeleton() != preview_skeleton_before ||
+        state->animation_state() != animation_state_before ||
         state->session.dirty() != session_dirty_before ||
         state->project_dirty != shell_dirty_before ||
         state->session.undo_count() != undo_before ||
@@ -3474,7 +3474,7 @@ bool validate_viewport_selection_smoke(ShellState& shell_state) {
         }
         const double arm_rotation =
             static_cast<double>(
-                shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
+                shell_state.preview_skeleton()->bone_poses()[*arm_index].local_pose.rotation);
         if (std::abs(arm_rotation - 60.0) > 1e-3) {
             std::cerr << "Timeline scrub did not update the preview arm rotation at t=0.2.\n";
             return false;

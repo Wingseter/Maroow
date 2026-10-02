@@ -1079,7 +1079,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         return false;
     }
     if (std::abs(
-            shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation - 8.0f) >
+            shell_state.preview_skeleton()->bone_poses()[*spine_index].local_pose.rotation - 8.0f) >
         1e-3f) {
         std::cerr << "Timeline track focus did not apply the project-authored spine rotation.\n";
         return false;
@@ -1094,9 +1094,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const auto body_position =
-            draw_order_position(*shell_state.preview_skeleton, *body_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *body_slot_index);
         const auto spark_fx_position =
-            draw_order_position(*shell_state.preview_skeleton, *spark_fx_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *spark_fx_slot_index);
         if (!body_position.has_value() || !spark_fx_position.has_value() ||
             *body_position != 0U || *spark_fx_position != 2U) {
             std::cerr << "Timeline draw-order focus did not apply the project-authored slot order.\n";
@@ -1152,14 +1152,14 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
 
         if (!focus_timeline_track(&shell_state, *spine_track, 0.625, "Smoke", false) ||
             std::abs(
-                shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation -
+                shell_state.preview_skeleton()->bone_poses()[*spine_index].local_pose.rotation -
                 10.5f) > 1e-3f) {
             std::cerr << "Timeline editor smoke did not apply edited linear interpolation.\n";
             return false;
         }
         if (!scrub_timeline_time(&shell_state, 0.875, "Smoke", false) ||
             std::abs(
-                shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation -
+                shell_state.preview_skeleton()->bone_poses()[*spine_index].local_pose.rotation -
                 12.0f) > 1e-3f) {
             std::cerr << "Timeline editor smoke did not apply the inserted stepped key.\n";
             return false;
@@ -1267,9 +1267,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const auto edited_body_position =
-            draw_order_position(*shell_state.preview_skeleton, *body_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *body_slot_index);
         const auto edited_spark_fx_position =
-            draw_order_position(*shell_state.preview_skeleton, *spark_fx_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *spark_fx_slot_index);
         if (!edited_body_position.has_value() || !edited_spark_fx_position.has_value() ||
             *edited_body_position != 0U || *edited_spark_fx_position != 1U) {
             std::cerr << "Timeline editor smoke did not apply the edited draw-order key.\n";
@@ -1280,9 +1280,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const auto inserted_body_position =
-            draw_order_position(*shell_state.preview_skeleton, *body_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *body_slot_index);
         const auto inserted_spark_fx_position =
-            draw_order_position(*shell_state.preview_skeleton, *spark_fx_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *spark_fx_slot_index);
         if (!inserted_body_position.has_value() || !inserted_spark_fx_position.has_value() ||
             *inserted_body_position != 1U || *inserted_spark_fx_position != 0U) {
             std::cerr << "Timeline editor smoke did not apply the inserted draw-order key.\n";
@@ -1444,7 +1444,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const std::vector<double>* fixture_offsets =
-            shell_state.preview_skeleton->current_mesh_vertex_offsets(*body_slot_index);
+            shell_state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot_index);
         if (fixture_offsets == nullptr || fixture_offsets->size() != 8U ||
             std::abs((*fixture_offsets)[2] - 12.0) > 1e-3 ||
             std::abs((*fixture_offsets)[3] + 8.0) > 1e-3 ||
@@ -1489,7 +1489,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
                 return false;
             }
             const std::vector<double>* edited_mid_offsets =
-                shell_state.preview_skeleton->current_mesh_vertex_offsets(*body_slot_index);
+                shell_state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot_index);
             if (edited_mid_offsets == nullptr || edited_mid_offsets->size() != 8U ||
                 std::abs((*edited_mid_offsets)[2] - 14.0) > 1e-3 ||
                 std::abs((*edited_mid_offsets)[3] + 10.0) > 1e-3 ||
@@ -1503,7 +1503,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
                 return false;
             }
             const std::vector<double>* inserted_offsets =
-                shell_state.preview_skeleton->current_mesh_vertex_offsets(*body_slot_index);
+                shell_state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot_index);
             if (inserted_offsets == nullptr || inserted_offsets->size() != 8U ||
                 std::abs((*inserted_offsets)[2] - 8.0) > 1e-3 ||
                 std::abs((*inserted_offsets)[3] + 6.0) > 1e-3 ||
@@ -1583,7 +1583,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* animated_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (animated_attachment == nullptr || animated_attachment->name != "warrior_body") {
             std::cerr << "Timeline scrub did not synchronize the animated body attachment.\n";
             return false;
@@ -1635,7 +1635,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* warrior_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (warrior_attachment == nullptr || warrior_attachment->name != "warrior_body" ||
             !warrior_attachment->linked_mesh.has_value()) {
             std::cerr << "Skin preview did not activate the warrior linked mesh attachment.\n";
@@ -1673,7 +1673,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* mage_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (mage_attachment == nullptr || mage_attachment->name != "mage_body" ||
             !mage_attachment->linked_mesh.has_value() ||
             mage_attachment->linked_mesh->parent_attachment != "body_mesh") {
@@ -1687,7 +1687,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* restored_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (restored_attachment == nullptr || restored_attachment->name != "warrior_body") {
             std::cerr << "Resetting the slot preview did not restore the warrior skin state.\n";
             return false;
@@ -1769,7 +1769,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return total;
         };
         const auto current_body_pose = [&]() -> std::optional<marrow::runtime::MeshAttachmentPose> {
-            return shell_state.preview_skeleton->evaluate_current_mesh_attachment(*body_slot_index);
+            return shell_state.preview_skeleton()->evaluate_current_mesh_attachment(*body_slot_index);
         };
 
         const EditorHistorySnapshot weight_paint_baseline =
@@ -2073,10 +2073,10 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         // The preview must actually be off setup pose, or the assertion proves
         // nothing.
         const auto& live_spine_transform =
-            shell_state.preview_skeleton->bone_world_transforms()[*paint_bone_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*paint_bone_index];
         const auto& setup_spine_transform = setup_transforms[*paint_bone_index];
         const auto& live_arm_transform =
-            shell_state.preview_skeleton->bone_world_transforms()[*arm_bone_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*arm_bone_index];
         const auto& setup_arm_transform = setup_transforms[*arm_bone_index];
         std::cout << "  MAR-175 setup-pose bind check: the playhead is off setup pose (arm_l "
                      "scale a=" << live_arm_transform.a << " live vs " << setup_arm_transform.a
@@ -2948,7 +2948,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     if (const auto arm_index = shell_state.load_result.skeleton_data->find_bone_index("arm_l")) {
         const double mixed_rotation =
             static_cast<double>(
-                shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
+                shell_state.preview_skeleton()->bone_poses()[*arm_index].local_pose.rotation);
         if (std::abs(mixed_rotation - 45.0) > 1e-3) {
             std::cerr << "State preview smoke did not apply the queued mix pose.\n";
             return false;
@@ -3048,9 +3048,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     }
 
     const auto& ik_tip_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*ik_tip_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*ik_tip_index];
     const auto& ik_target_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*ik_target_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*ik_target_index];
     const double setup_ik_tip_x = -40.0;
     const double setup_ik_tip_y = 140.0;
     const double setup_ik_distance = std::hypot(
@@ -3065,11 +3065,11 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     }
 
     const auto& path_a_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*path_a_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*path_a_index];
     const auto& path_b_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*path_b_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*path_b_index];
     const auto& path_c_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*path_c_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*path_c_index];
     if (!require_smoke_near(
             path_a_world.world_x,
             20.0,
@@ -3117,7 +3117,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     const double transform_y_radians =
         (expected_transform_rotation + 90.0 + expected_transform_shear_y) * kPi / 180.0;
     const auto& transform_target_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*transform_target_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*transform_target_index];
     if (!require_smoke_near(
             transform_target_world.world_x,
             expected_transform_x,
@@ -3153,7 +3153,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     }
 
     const auto& setup_ribbon_tip =
-        shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*ribbon_tip_index];
     if (!require_smoke_near(
             setup_ribbon_tip.world_x,
             230.0,
@@ -3253,11 +3253,11 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto& edited_path_a_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*path_a_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*path_a_index];
         const auto& edited_path_b_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*path_b_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*path_b_index];
         const auto& edited_path_c_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*path_c_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*path_c_index];
         if (!require_smoke_near(
                 edited_path_a_world.world_x,
                 0.0,
@@ -3293,7 +3293,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto& edited_transform_target_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*transform_target_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*transform_target_index];
         if (!require_smoke_near(
                 edited_transform_target_world.world_x,
                 200.0,
@@ -3308,13 +3308,13 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
 
-        shell_state.preview_skeleton->bone_poses()[*pivot_index].local_pose.rotation = 90.0;
-        shell_state.preview_skeleton->update_world_transforms();
+        shell_state.preview_skeleton()->bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+        shell_state.preview_skeleton()->update_world_transforms();
         const auto lagged_ribbon_tip =
-            shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
-        shell_state.preview_skeleton->update_physics(1.0 / 60.0);
+            shell_state.preview_skeleton()->bone_world_transforms()[*ribbon_tip_index];
+        shell_state.preview_skeleton()->update_physics(1.0 / 60.0);
         const auto stepped_ribbon_tip =
-            shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*ribbon_tip_index];
         const double preview_physics_motion = std::hypot(
             static_cast<double>(stepped_ribbon_tip.world_x - lagged_ribbon_tip.world_x),
             static_cast<double>(stepped_ribbon_tip.world_y - lagged_ribbon_tip.world_y));
@@ -3560,7 +3560,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
                     shell_state.load_result.skeleton_data->transform_constraints(),
                     "editor_transform_follow");
                 const auto* overridden_attachment =
-                    shell_state.preview_skeleton->current_attachment(*body_slot_index);
+                    shell_state.preview_skeleton()->current_attachment(*body_slot_index);
                 const bool warrior_enabled = std::find(
                     shell_state.preview_skin_names.begin(),
                     shell_state.preview_skin_names.end(),
@@ -3721,7 +3721,7 @@ bool validate_preview_playback_speed_shell_smoke(
         return false;
     }
     const auto spine_pose = [&]() {
-        return state.preview_skeleton->bone_poses()[*spine_index].local_pose;
+        return state.preview_skeleton()->bone_poses()[*spine_index].local_pose;
     };
     const auto poses_match = [](const marrow::runtime::BoneTransform& left,
                                 const marrow::runtime::BoneTransform& right) {

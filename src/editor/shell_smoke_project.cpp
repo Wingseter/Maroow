@@ -373,17 +373,17 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         return false;
     }
 
-    hot_reload_state.animation_state->clear_tracks();
-    hot_reload_state.animation_state->set_animation(0, "idle", true, 0.0);
-    hot_reload_state.animation_state->update(0.5);
+    hot_reload_state.animation_state()->clear_tracks();
+    hot_reload_state.animation_state()->set_animation(0, "idle", true, 0.0);
+    hot_reload_state.animation_state()->update(0.5);
     hot_reload_state.selected_animation_name = "idle";
     hot_reload_state.timeline_time_seconds = 0.5;
     if (!apply_current_animation_state_to_preview(&hot_reload_state)) {
         std::cerr << hot_reload_state.error_message << '\n';
         return false;
     }
-    hot_reload_state.animation_state->set_animation(0, "attack", false, 0.2);
-    hot_reload_state.animation_state->update(0.1);
+    hot_reload_state.animation_state()->set_animation(0, "attack", false, 0.2);
+    hot_reload_state.animation_state()->update(0.1);
     hot_reload_state.selected_animation_name = "attack";
     hot_reload_state.timeline_time_seconds = 0.1;
     hot_reload_state.timeline_playing = true;
@@ -394,7 +394,7 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     }
 
     std::shared_ptr<marrow::runtime::TrackEntry> current =
-        hot_reload_state.animation_state->get_current(0);
+        hot_reload_state.animation_state()->get_current(0);
     if (current == nullptr || current->mixing_from == nullptr ||
         current->animation_name != "attack" ||
         current->mixing_from->animation_name != "idle") {
@@ -406,7 +406,7 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
     const double pre_reload_mix_time = current->mix_time;
     const double pre_reload_rotation =
         static_cast<double>(
-            hot_reload_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
+            hot_reload_state.preview_skeleton()->bone_poses()[*arm_index].local_pose.rotation);
     if (std::abs(pre_reload_rotation - 15.0) > 1e-3) {
         std::cerr << "Hot-reload smoke expected the pre-reload mixed attack pose at 15 degrees.\n";
         return false;
@@ -492,7 +492,7 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         return false;
     }
 
-    current = hot_reload_state.animation_state->get_current(0);
+    current = hot_reload_state.animation_state()->get_current(0);
     if (current == nullptr || current->mixing_from == nullptr ||
         current->animation_name != "attack" ||
         current->mixing_from->animation_name != "idle") {
@@ -507,7 +507,7 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
 
     const double post_reload_rotation =
         static_cast<double>(
-            hot_reload_state.preview_skeleton
+            hot_reload_state.preview_skeleton()
                 ->bone_poses()[*remapped_arm_index]
                 .local_pose.rotation);
     if (std::abs(post_reload_rotation - 22.5) > 1e-3) {
@@ -515,14 +515,14 @@ bool validate_runtime_asset_hot_reload_smoke(const ShellState& source_state) {
         return false;
     }
 
-    hot_reload_state.animation_state->update(1.0 / 60.0);
+    hot_reload_state.animation_state()->update(1.0 / 60.0);
     hot_reload_state.timeline_time_seconds =
-        hot_reload_state.animation_state->get_current(0)->track_time;
+        hot_reload_state.animation_state()->get_current(0)->track_time;
     if (!apply_current_animation_state_to_preview(&hot_reload_state)) {
         std::cerr << hot_reload_state.error_message << '\n';
         return false;
     }
-    if (hot_reload_state.animation_state->get_current(0)->track_time <= pre_reload_track_time) {
+    if (hot_reload_state.animation_state()->get_current(0)->track_time <= pre_reload_track_time) {
         std::cerr << "Hot-reload smoke playback did not continue after reload.\n";
         return false;
     }
@@ -909,8 +909,8 @@ bool validate_mar180_failed_hot_reload_shell_coherence(const ShellState& source_
                      "exactly as it was.\n";
         return false;
     }
-    if (state.preview_skeleton == nullptr || state.animation_state == nullptr ||
-        state.animation_state->get_current(0) == nullptr) {
+    if (state.preview_skeleton() == nullptr || state.animation_state() == nullptr ||
+        state.animation_state()->get_current(0) == nullptr) {
         std::cerr << "MAR-180 C2: the shell's cached preview pointers must still be "
                      "USABLE after a failed hot reload. Committing the session's "
                      "runtime before the preview bind leaves them addressing freed "
@@ -1344,8 +1344,8 @@ bool validate_animation_duration_shell_smoke(
         return false;
     }
     const auto current_before_queue_rebuild =
-        state.animation_state != nullptr
-        ? state.animation_state->get_current(0U)
+        state.animation_state() != nullptr
+        ? state.animation_state()->get_current(0U)
         : nullptr;
     if (current_before_queue_rebuild == nullptr ||
         current_before_queue_rebuild->animation_name != "aim" ||
@@ -1355,8 +1355,8 @@ bool validate_animation_duration_shell_smoke(
         return false;
     }
     const auto current_after_queue_rebuild =
-        state.animation_state != nullptr
-        ? state.animation_state->get_current(0U)
+        state.animation_state() != nullptr
+        ? state.animation_state()->get_current(0U)
         : nullptr;
     if (current_after_queue_rebuild == nullptr ||
         current_after_queue_rebuild->animation_name != "attack" ||
@@ -1366,8 +1366,8 @@ bool validate_animation_duration_shell_smoke(
     }
     (void)finish_animation_duration_gesture(&state, false);
     const auto current_after_queue_cancel =
-        state.animation_state != nullptr
-        ? state.animation_state->get_current(0U)
+        state.animation_state() != nullptr
+        ? state.animation_state()->get_current(0U)
         : nullptr;
     if (!duration_is(0.8) || current_after_queue_cancel == nullptr ||
         current_after_queue_cancel->animation_name != "aim" ||
@@ -1715,8 +1715,8 @@ bool validate_mar181_failed_open_preserves_shell(const ShellState& source_state)
 
     const SessionSnapshot before = capture_session_snapshot(state);
     const std::filesystem::path path_before = state.project_path;
-    const marrow::runtime::Skeleton* preview_before = state.preview_skeleton;
-    const marrow::runtime::AnimationState* animation_before = state.animation_state;
+    const marrow::runtime::Skeleton* preview_before = state.preview_skeleton();
+    const marrow::runtime::AnimationState* animation_before = state.animation_state();
 
     PendingFileApplication pending;
     pending.action = FileAction::Open;
@@ -1744,9 +1744,9 @@ bool validate_mar181_failed_open_preserves_shell(const ShellState& source_state)
                      "snapshot bit-identical.\n";
         return false;
     }
-    if (state.preview_skeleton != preview_before ||
-        state.animation_state != animation_before ||
-        state.preview_skeleton == nullptr) {
+    if (state.preview_skeleton() != preview_before ||
+        state.animation_state() != animation_before ||
+        state.preview_skeleton() == nullptr) {
         std::cerr << "MAR-181 C7: a failed Open must leave the shell's cached preview "
                      "pointers usable and unchanged.\n";
         return false;
@@ -2163,7 +2163,7 @@ bool validate_mar181_new_project_writes_nothing(const ShellState& source_state) 
                      "project path.\n";
         return false;
     }
-    if (state.load_result.skeleton_data == nullptr || state.preview_skeleton == nullptr) {
+    if (state.load_result.skeleton_data == nullptr || state.preview_skeleton() == nullptr) {
         std::cerr << "MAR-181 C4: New must materialize a rig and bind the preview.\n";
         return false;
     }
@@ -6093,7 +6093,7 @@ bool validate_shell_foundation_smoke(
     const auto& setup_pose =
         shell_state.load_result.skeleton_data->bones()[*setup_bone_index].setup_pose;
     const auto& setup_preview =
-        shell_state.preview_skeleton->bone_poses()[*setup_bone_index].local_pose;
+        shell_state.preview_skeleton()->bone_poses()[*setup_bone_index].local_pose;
     if (std::abs(setup_pose.x - setup_preview.x) > 1e-6 ||
         std::abs(setup_pose.y - setup_preview.y) > 1e-6 ||
         std::abs(setup_pose.rotation - setup_preview.rotation) > 1e-6) {

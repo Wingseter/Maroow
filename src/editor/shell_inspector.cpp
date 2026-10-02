@@ -665,7 +665,7 @@ void draw_inspector_window(ShellState* state) {
     ImGui::Begin(kPropertiesWindowTitle);
     widgets::panel_head(state->icons, Icon::PropTranslate, "Properties");
 
-    if (!state->load_result || !state->preview_skeleton) {
+    if (!state->load_result || !state->preview_skeleton()) {
         ImGui::TextUnformatted("Load a valid project to inspect setup-pose data.");
         ImGui::End();
         return;
@@ -728,7 +728,7 @@ void draw_inspector_window(ShellState* state) {
         if (resolved.active_bone_index.has_value() &&
             *resolved.active_bone_index < skeleton.bones().size() &&
             *resolved.active_bone_index <
-                state->preview_skeleton->bone_world_transforms().size()) {
+                state->preview_skeleton()->bone_world_transforms().size()) {
             const std::size_t bone_index = *resolved.active_bone_index;
             const auto& bone = skeleton.bones()[bone_index];
             const auto& setup_pose = bone.setup_pose;
@@ -740,7 +740,7 @@ void draw_inspector_window(ShellState* state) {
             ImGui::Text("Slots: %s", join_slots_for_bone(skeleton, bone_index).c_str());
             ImGui::Text(
                 "Active in preview: %s",
-                yes_no(state->preview_skeleton->is_bone_active(bone_index)));
+                yes_no(state->preview_skeleton()->is_bone_active(bone_index)));
             ImGui::Separator();
             ImGui::TextUnformatted("Setup Pose");
             {
@@ -805,7 +805,7 @@ void draw_inspector_window(ShellState* state) {
                     ? "(auto-key at playhead)"
                     : "(read-only; switch to Animation mode to key)");
             const marrow::runtime::BoneTransform local_pose =
-                state->preview_skeleton->bone_poses()[bone_index].local_pose;
+                state->preview_skeleton()->bone_poses()[bone_index].local_pose;
             if (pose_editable) {
 
                 // Ghost input: transparent FrameBg + bottom underline that
@@ -941,7 +941,7 @@ void draw_inspector_window(ShellState* state) {
             ImGui::Separator();
             ImGui::TextUnformatted("World Pose");
             const auto& current_world_transforms =
-                state->preview_skeleton->bone_world_transforms();
+                state->preview_skeleton()->bone_world_transforms();
             const marrow::runtime::BoneWorldTransform world =
                 current_world_transforms[bone_index];
             ImGui::Text(
@@ -964,7 +964,7 @@ void draw_inspector_window(ShellState* state) {
         ImGui::BeginChild("inspector_slots", ImVec2(0.0f, 130.0f), true);
         for (std::size_t slot_index = 0; slot_index < skeleton.slots().size(); ++slot_index) {
             const auto& slot = skeleton.slots()[slot_index];
-            const auto* current_attachment = state->preview_skeleton->current_attachment(slot_index);
+            const auto* current_attachment = state->preview_skeleton()->current_attachment(slot_index);
             const bool selected = resolved.active_slot_index == slot_index;
             std::string label = slot.name + " -> " +
                 (current_attachment != nullptr ? current_attachment->name : std::string("<none>"));
@@ -978,11 +978,11 @@ void draw_inspector_window(ShellState* state) {
 
         if (resolved.active_slot_index.has_value() &&
             *resolved.active_slot_index < skeleton.slots().size() &&
-            *resolved.active_slot_index < state->preview_skeleton->slot_states().size()) {
+            *resolved.active_slot_index < state->preview_skeleton()->slot_states().size()) {
             const std::size_t slot_index = *resolved.active_slot_index;
             const auto& slot = skeleton.slots()[slot_index];
-            const auto& slot_state = state->preview_skeleton->slot_states()[slot_index];
-            const auto* current_attachment = state->preview_skeleton->current_attachment(slot_index);
+            const auto& slot_state = state->preview_skeleton()->slot_states()[slot_index];
+            const auto* current_attachment = state->preview_skeleton()->current_attachment(slot_index);
             const auto current_selection = current_attachment_selection(*state, slot_index);
             const auto skin_preview_attachment = resolve_skin_preview_attachment(
                 skeleton,
@@ -1003,11 +1003,11 @@ void draw_inspector_window(ShellState* state) {
             ImGui::Spacing();
             ImGui::Text("Selected slot: %s", slot.name.c_str());
             ImGui::Text("Bone: %s", skeleton.bones()[slot.bone_index].name.c_str());
-            if (const auto order = draw_order_position(*state->preview_skeleton, slot_index)) {
+            if (const auto order = draw_order_position(*state->preview_skeleton(), slot_index)) {
                 ImGui::Text(
                     "Draw order: %zu / %zu",
                     *order + 1U,
-                    state->preview_skeleton->draw_order().size());
+                    state->preview_skeleton()->draw_order().size());
             }
             ImGui::Text("Blend mode: %s", blend_mode_name(slot.blend_mode));
             ImGui::Text(

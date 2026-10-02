@@ -120,9 +120,9 @@ void draw_rotation_gizmo(
                   : IM_COL32(151, 166, 190, 225);
     draw_list->AddCircle(center, kRotationGizmoRadius, ring_color, 64, 2.25f);
 
-    if (*bone_index < state.preview_skeleton->bone_world_transforms().size()) {
+    if (*bone_index < state.preview_skeleton()->bone_world_transforms().size()) {
         const auto world =
-            state.preview_skeleton->bone_world_transforms()[*bone_index];
+            state.preview_skeleton()->bone_world_transforms()[*bone_index];
         double axis_x = world.a;
         double axis_y = -world.c;
         const double length = std::hypot(axis_x, axis_y);
@@ -1081,7 +1081,7 @@ void draw_viewport_window(ShellState* state) {
                                                : "Animation preview / " + state->selected_animation_name;
 
     // ── Viewport Toolbar ──
-    if (state->load_result && state->preview_skeleton) {
+    if (state->load_result && state->preview_skeleton()) {
         const ImVec2 pre_toolbar_avail = ImGui::GetContentRegionAvail();
         if (!state->viewport_transform_gesture.has_value() &&
             !state->viewport_ffd_gesture.has_value() &&
@@ -1218,10 +1218,10 @@ void draw_viewport_window(ShellState* state) {
         state->viewport_box_selection.reset();
     }
     std::optional<marrow::renderer::PreparedScene> frame_scene;
-    if (use_framebuffer && layout.has_value() && state->preview_skeleton != nullptr &&
+    if (use_framebuffer && layout.has_value() && state->preview_skeleton() != nullptr &&
         !state->load_result.atlas_data.empty()) {
         auto scene_result = marrow::renderer::prepare_setup_pose_scene(
-            *state->preview_skeleton, *state->load_result.atlas_data.front());
+            *state->preview_skeleton(), *state->load_result.atlas_data.front());
         if (scene_result) {
             frame_scene = std::move(*scene_result.scene);
         } else {

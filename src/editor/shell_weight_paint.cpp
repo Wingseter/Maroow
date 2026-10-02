@@ -228,7 +228,7 @@ WeightPaintSelectionContext resolve_weight_paint_selection_context(
 std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const ShellState& state) {
     const WeightPaintSelectionContext context =
         resolve_weight_paint_selection_context(state);
-    if (!state.load_result || !state.preview_skeleton ||
+    if (!state.load_result || !state.preview_skeleton() ||
         !context.target_slot_index.has_value()) {
         return std::nullopt;
     }
@@ -256,7 +256,7 @@ std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const Shel
             slot_index,
             context.target_attachment->attachment_name);
     } else {
-        display_attachment = state.preview_skeleton->current_attachment(slot_index);
+        display_attachment = state.preview_skeleton()->current_attachment(slot_index);
     }
     if (display_attachment == nullptr || display_attachment->mesh_geometry == nullptr) {
         return std::nullopt;
@@ -303,12 +303,12 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     const ShellState& state,
     const ViewportLayout& layout) {
     const std::optional<MeshWeightPaintTarget> target = current_mesh_weight_paint_target(state);
-    if (!target.has_value() || !state.preview_skeleton) {
+    if (!target.has_value() || !state.preview_skeleton()) {
         return std::nullopt;
     }
 
     const std::optional<marrow::runtime::MeshAttachmentPose> pose =
-        state.preview_skeleton->evaluate_current_mesh_attachment(target->slot_index);
+        state.preview_skeleton()->evaluate_current_mesh_attachment(target->slot_index);
     if (!pose.has_value() ||
         target->display_attachment == nullptr ||
         target->display_attachment->mesh_geometry == nullptr) {
@@ -325,7 +325,7 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     overlay.triangles = geometry.triangles;
     overlay.neighbors = build_mesh_vertex_neighbors(geometry.triangles, pose->vertices.size());
     const std::vector<double>* vertex_offsets =
-        state.preview_skeleton->current_mesh_vertex_offsets(target->slot_index);
+        state.preview_skeleton()->current_mesh_vertex_offsets(target->slot_index);
     if (vertex_offsets != nullptr) {
         overlay.vertex_offsets = *vertex_offsets;
     } else {
@@ -368,7 +368,7 @@ bool apply_weight_to_vertex_impl(
         vertex_index >= overlay.vertices.size() ||
         *context.influence_bone_index >= state.load_result.skeleton_data->bones().size() ||
         *context.influence_bone_index >=
-            state.preview_skeleton->bone_world_transforms().size()) {
+            state.preview_skeleton()->bone_world_transforms().size()) {
         return false;
     }
 

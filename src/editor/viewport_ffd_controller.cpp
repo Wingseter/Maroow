@@ -141,7 +141,7 @@ std::optional<ResolvedFfdTarget> resolve_target(const ShellState& state) {
     const auto* runtime_data = state.session.runtime_data();
     if (state.shell_mode != ShellMode::Animation || state.weight_paint.enabled ||
         state.selected_animation_name.empty() || !std::isfinite(state.timeline_time_seconds) ||
-        state.preview_skeleton == nullptr || runtime_data == nullptr ||
+        state.preview_skeleton() == nullptr || runtime_data == nullptr ||
         runtime_data->find_animation(state.selected_animation_name) == nullptr) {
         return std::nullopt;
     }
@@ -153,7 +153,7 @@ std::optional<ResolvedFfdTarget> resolve_target(const ShellState& state) {
     }
     const PreviewAttachmentSelection& selected = *resolved.active_attachment;
     if (selected.slot_index >= runtime_data->slots().size() ||
-        selected.slot_index >= state.preview_skeleton->slot_states().size()) {
+        selected.slot_index >= state.preview_skeleton()->slot_states().size()) {
         return std::nullopt;
     }
 
@@ -162,7 +162,7 @@ std::optional<ResolvedFfdTarget> resolve_target(const ShellState& state) {
         selected.slot_index,
         selected.attachment_name);
     const auto* current_attachment =
-        state.preview_skeleton->current_attachment(selected.slot_index);
+        state.preview_skeleton()->current_attachment(selected.slot_index);
     if (display_attachment == nullptr || current_attachment != display_attachment ||
         display_attachment->mesh_geometry == nullptr ||
         (display_attachment->kind != marrow::runtime::AttachmentKind::Mesh &&
@@ -186,7 +186,7 @@ std::optional<ResolvedFfdTarget> resolve_target(const ShellState& state) {
         return std::nullopt;
     }
 
-    const auto pose = state.preview_skeleton->evaluate_current_mesh_attachment(
+    const auto pose = state.preview_skeleton()->evaluate_current_mesh_attachment(
         selected.slot_index);
     const std::size_t component_count =
         display_attachment->mesh_geometry->vertices.size();
@@ -223,12 +223,12 @@ std::optional<kernel::Matrix2> inverse_for_vertex(
     if (target.display_attachment == nullptr ||
         target.display_attachment->mesh_geometry == nullptr ||
         vertex_index >= target.display_attachment->mesh_geometry->weights.size() ||
-        state.preview_skeleton == nullptr) {
+        state.preview_skeleton() == nullptr) {
         return std::nullopt;
     }
     const auto& influences =
         target.display_attachment->mesh_geometry->weights[vertex_index].influences;
-    const auto world = state.preview_skeleton->bone_world_transforms();
+    const auto world = state.preview_skeleton()->bone_world_transforms();
     std::vector<kernel::FfdInfluence> kernel_influences;
     kernel_influences.reserve(influences.size());
     for (const auto& influence : influences) {
@@ -386,23 +386,23 @@ std::vector<ViewportFfdSnapCandidate> collect_snap_candidates(
     const std::vector<std::size_t>& selected_vertices) {
     std::vector<ViewportFfdSnapCandidate> candidates;
     const auto* skeleton = state.session.runtime_data();
-    if (state.preview_skeleton == nullptr || skeleton == nullptr ||
-        state.preview_skeleton->slot_states().size() != skeleton->slots().size()) {
+    if (state.preview_skeleton() == nullptr || skeleton == nullptr ||
+        state.preview_skeleton()->slot_states().size() != skeleton->slots().size()) {
         return candidates;
     }
     std::vector<bool> seen_slots(skeleton->slots().size(), false);
-    for (const std::size_t slot_index : state.preview_skeleton->draw_order()) {
+    for (const std::size_t slot_index : state.preview_skeleton()->draw_order()) {
         if (slot_index >= skeleton->slots().size() || seen_slots[slot_index]) {
             continue;
         }
         seen_slots[slot_index] = true;
-        const auto& slot_state = state.preview_skeleton->slot_states()[slot_index];
+        const auto& slot_state = state.preview_skeleton()->slot_states()[slot_index];
         if (!std::isfinite(slot_state.color.a) || slot_state.color.a <= 0.0) {
             continue;
         }
         const auto selection = current_attachment_selection(state, slot_index);
-        const auto* attachment = state.preview_skeleton->current_attachment(slot_index);
-        const auto pose = state.preview_skeleton->evaluate_current_mesh_attachment(
+        const auto* attachment = state.preview_skeleton()->current_attachment(slot_index);
+        const auto pose = state.preview_skeleton()->evaluate_current_mesh_attachment(
             slot_index);
         if (!selection.has_value() || attachment == nullptr ||
             attachment->mesh_geometry == nullptr || !pose.has_value() ||

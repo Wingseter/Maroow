@@ -887,6 +887,7 @@ add_dependencies(marrow_renderer_link_boundary_tests
 add_library(marrow_editor_shell_core STATIC
     src/editor/shell_frame.cpp
     src/editor/shell_core.cpp
+    src/editor/shell_gesture_lifecycle.cpp
     src/editor/shell_file_paths.cpp
     src/editor/shell_preferences.cpp
     src/editor/shell_recent_projects.cpp
@@ -976,6 +977,13 @@ if(BUILD_TESTING)
         MARROW_ENABLE_HEADLESS_SMOKE=1)
     target_link_libraries(marrow_editor_shell_smoke PRIVATE marrow_editor_shell_core)
     list(APPEND MARROW_SHELL_HOST_TARGETS marrow_editor_shell_smoke)
+
+    add_executable(marrow_shell_lifecycle_tests src/tests/shell_lifecycle_tests.cpp)
+    target_link_libraries(marrow_shell_lifecycle_tests PRIVATE marrow_editor_shell_core)
+    add_test(NAME marrow.shell_lifecycle COMMAND marrow_shell_lifecycle_tests)
+    set_tests_properties(marrow.shell_lifecycle PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;unit;noninteractive")
 endif()
 
 foreach(_shell_host IN LISTS MARROW_SHELL_HOST_TARGETS)

@@ -598,13 +598,13 @@ marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
     keyframe.interpolation =
         marrow::editor::curve_preset_interpolation(state.preferences.default_curve);
 
-    if (!state.preview_skeleton || !track.bone_index.has_value() ||
-        *track.bone_index >= state.preview_skeleton->bone_poses().size() ||
+    if (!state.preview_skeleton() || !track.bone_index.has_value() ||
+        *track.bone_index >= state.preview_skeleton()->bone_poses().size() ||
         !track.transform_channel.has_value()) {
         return keyframe;
     }
 
-    const auto& pose = state.preview_skeleton->bone_poses()[*track.bone_index].local_pose;
+    const auto& pose = state.preview_skeleton()->bone_poses()[*track.bone_index].local_pose;
     switch (*track.transform_channel) {
     case marrow::editor::TransformTimelineChannel::Rotate:
         keyframe.angle = static_cast<double>(pose.rotation);
@@ -629,13 +629,13 @@ marrow::editor::TransformKeyframeEdit sample_transform_keyframe(
 marrow::editor::DrawOrderKeyframeEdit sample_draw_order_keyframe(const ShellState& state) {
     marrow::editor::DrawOrderKeyframeEdit keyframe;
     keyframe.time = state.timeline_time_seconds;
-    if (!state.load_result || !state.preview_skeleton) {
+    if (!state.load_result || !state.preview_skeleton()) {
         return keyframe;
     }
 
     keyframe.slot_names = slot_names_from_indices(
         *state.load_result.skeleton_data,
-        state.preview_skeleton->draw_order());
+        state.preview_skeleton()->draw_order());
     return keyframe;
 }
 
@@ -692,7 +692,7 @@ marrow::editor::DeformKeyframeEdit sample_deform_keyframe(
     keyframe.interpolation =
         marrow::editor::curve_preset_interpolation(state.preferences.default_curve);
 
-    if (!state.load_result || !state.preview_skeleton || !track.slot_index.has_value() ||
+    if (!state.load_result || !state.preview_skeleton() || !track.slot_index.has_value() ||
         !track.deform_attachment_name.has_value()) {
         return keyframe;
     }
@@ -704,12 +704,12 @@ marrow::editor::DeformKeyframeEdit sample_deform_keyframe(
     }
 
     keyframe.vertex_offsets.assign(attachment->mesh_geometry->vertices.size(), 0.0);
-    if (*track.slot_index >= state.preview_skeleton->mesh_deform_states().size()) {
+    if (*track.slot_index >= state.preview_skeleton()->mesh_deform_states().size()) {
         return keyframe;
     }
 
     const auto& deform_state =
-        state.preview_skeleton->mesh_deform_states()[*track.slot_index];
+        state.preview_skeleton()->mesh_deform_states()[*track.slot_index];
     if (deform_state.attachment_name == *track.deform_attachment_name &&
         deform_state.vertex_offsets.size() == keyframe.vertex_offsets.size()) {
         keyframe.vertex_offsets = deform_state.vertex_offsets;
@@ -845,7 +845,7 @@ void advance_timeline_playback(ShellState* state, double delta_seconds) {
         return;
     }
 
-    if (!state->animation_state || !state->preview_skeleton || !state->load_result) {
+    if (!state->animation_state() || !state->preview_skeleton() || !state->load_result) {
         state->timeline_playing = false;
         state->session.set_playing(false);
         return;
@@ -1247,17 +1247,17 @@ bool add_timeline_key_at_playhead(
             } else if constexpr (std::is_same_v<Key, marrow::editor::SlotColorKeyframeEdit>) {
                 new_key.interpolation = marrow::editor::curve_preset_interpolation(
                     state->preferences.default_curve);
-                if (track.slot_index.has_value() && state->preview_skeleton &&
-                    *track.slot_index < state->preview_skeleton->slot_states().size()) {
+                if (track.slot_index.has_value() && state->preview_skeleton() &&
+                    *track.slot_index < state->preview_skeleton()->slot_states().size()) {
                     new_key.color =
-                        state->preview_skeleton->slot_states()[*track.slot_index].color;
+                        state->preview_skeleton()->slot_states()[*track.slot_index].color;
                 }
             } else if constexpr (
                 std::is_same_v<Key, marrow::editor::SlotAttachmentKeyframeEdit>) {
-                if (track.slot_index.has_value() && state->preview_skeleton &&
-                    *track.slot_index < state->preview_skeleton->slot_states().size()) {
+                if (track.slot_index.has_value() && state->preview_skeleton() &&
+                    *track.slot_index < state->preview_skeleton()->slot_states().size()) {
                     const std::string& attachment =
-                        state->preview_skeleton->slot_states()[*track.slot_index].attachment_name;
+                        state->preview_skeleton()->slot_states()[*track.slot_index].attachment_name;
                     if (!attachment.empty()) new_key.attachment_name = attachment;
                 }
             } else if constexpr (

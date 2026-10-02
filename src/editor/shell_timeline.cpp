@@ -2518,7 +2518,7 @@ void draw_timeline_window(
     ImGui::Begin(kTimelineWindowTitle);
     widgets::panel_head(state->icons, Icon::NodeAnim, "Timeline");
 
-    if (!state->load_result || !state->preview_skeleton) {
+    if (!state->load_result || !state->preview_skeleton()) {
         ImGui::TextUnformatted("Load a valid project to scrub and inspect keyed animation tracks.");
         ImGui::End();
         return;
@@ -2686,7 +2686,7 @@ void draw_timeline_window(
             state->timeline_playing = !state->timeline_playing;
             if (state->timeline_playing && !was_playing) {
                 refresh_preview_pose(state);
-                state->animation_state->set_listener(
+                state->animation_state()->set_listener(
                     [state](marrow::runtime::AnimationState&,
                             marrow::runtime::AnimationStateEventType type,
                             const std::shared_ptr<marrow::runtime::TrackEntry>&,
@@ -2697,8 +2697,8 @@ void draw_timeline_window(
                         }
                     });
             } else if (!state->timeline_playing && was_playing) {
-                if (state->animation_state) {
-                    state->animation_state->set_listener({});
+                if (state->animation_state()) {
+                    state->animation_state()->set_listener({});
                 }
             }
             state->status_message =

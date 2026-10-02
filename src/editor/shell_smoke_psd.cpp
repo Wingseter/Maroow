@@ -949,27 +949,19 @@ bool validate_mar190_psd_reimport_shell_smoke() {
             return false;
         }
 
-        // F3. A committed reimport reaches `adopt_runtime_sources`, which replaces
-        // the PreviewController and DESTROYS the Skeleton and AnimationState the
-        // shell's raw aliases point at. This modal is drawn from
-        // `draw_project_window` -- the FIRST window in both frame bodies -- so the
-        // timeline, hierarchy, viewport and inspector all still read those aliases
-        // later in the SAME frame, and `load_result` is a reference into the
-        // session, so the viewport would pair the NEW atlas against the freed
-        // skeleton. Asserted on POINTER IDENTITY, not by dereferencing: reading
-        // through a dangling pointer is UB that usually happens to pass, which is
-        // exactly how this shipped. The case above clicks the real button, so this
-        // fails if the handler stops calling `sync_shell_from_editor_session`.
-        if (state.preview_skeleton !=
+        // F3. Reimport replaces preview objects before the remaining windows
+        // render in this frame. Keep the real-button identity contract so those
+        // windows pair the new atlas with the current skeleton. Phase 3 resolves
+        // runtime views on demand; shell working values still synchronize after
+        // adoption, but no raw-pointer rebinding is needed.
+        if (state.preview_skeleton() !=
                 marrow::editor::EditorSessionShellBinding::preview_skeleton(
                     state.session) ||
-            state.animation_state !=
+            state.animation_state() !=
                 marrow::editor::EditorSessionShellBinding::preview_animation_state(
                     state.session)) {
-            std::cerr << "MAR-190 F3: after Confirm the shell's preview aliases still "
-                         "point at the pre-commit PreviewController, which the commit "
-                         "destroyed. The handler must call "
-                         "sync_shell_from_editor_session() before returning.\n";
+            std::cerr << "MAR-190 F3: after Confirm the shell runtime views "
+                         "must resolve the current session preview objects.\n";
             return false;
         }
     }

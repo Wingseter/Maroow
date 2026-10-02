@@ -879,8 +879,20 @@ struct ShellState {
     PointerMediator pointer_mediator{};
     ViewportRenderResources viewport_renderer{};
     DockLayoutState dock_layout{};
-    marrow::runtime::Skeleton* preview_skeleton{nullptr};
-    marrow::runtime::AnimationState* animation_state{nullptr};
+    // Resolve the current session view on demand: never cache these aliases in
+    // ShellState. A returned pointer must not survive a session/runtime mutation.
+    marrow::runtime::Skeleton* preview_skeleton() noexcept {
+        return marrow::editor::EditorSessionShellBinding::preview_skeleton(session);
+    }
+    const marrow::runtime::Skeleton* preview_skeleton() const noexcept {
+        return session.preview_skeleton();
+    }
+    marrow::runtime::AnimationState* animation_state() noexcept {
+        return marrow::editor::EditorSessionShellBinding::preview_animation_state(session);
+    }
+    const marrow::runtime::AnimationState* animation_state() const noexcept {
+        return session.preview_animation_state();
+    }
     marrow::editor::SelectionSet selection;
     std::optional<marrow::editor::SelectionItem> hierarchy_selection_anchor;
     std::optional<std::string> selected_timeline_track_id;
@@ -977,23 +989,9 @@ struct ShellState {
     marrow::editor::AgentControlState agent_control{};
 };
 
-// This member list must stay in step with cancel_authoring_gestures
-// (shell_core.cpp): the predicate gates every begin-gesture path, and the
-// cancel list releases the matching live transactions.
-inline bool authoring_gesture_active(const ShellState& state) noexcept {
-    return state.pending_edit_action.has_value() ||
-        state.animation_duration_gesture.has_value() ||
-        state.inspector_transform_gesture.has_value() ||
-        state.viewport_transform_gesture.has_value() ||
-        state.viewport_ffd_gesture.has_value() ||
-        state.parameter_slider_gesture.has_value() ||
-        state.parameter_geometry_gesture.has_value() ||
-        state.timeline_editor.retime_gesture.has_value() ||
-        state.timeline_editor.scale_gesture.has_value() ||
-        state.timeline_editor.graph_value_gesture.has_value() ||
-        state.timeline_editor.graph_handle_gesture.has_value() ||
-        state.weight_paint_stroke.active;
-}
+// Activity and cancellation share one typed ownership list in
+// shell_gesture_lifecycle.cpp, including each owner's rollback policy.
+bool authoring_gesture_active(const ShellState& state) noexcept;
 
 /** MAR-174: clamped read of the transient preview speed. The single choke
     point, so a corrupted or non-finite field can never reach
@@ -1101,9 +1099,9 @@ bool record_action_from_snapshots(
         marrow::editor::EditImpact::Runtime |
         marrow::editor::EditImpact::Preview);
 void cancel_authoring_gestures(ShellState* state, std::string_view reason);
-/** Re-points the shell's cached preview aliases and shell-side composition at the
- *  session's current runtime data. Every path that replaces that runtime must call it. */
-void sync_shell_preview_aliases_to_runtime(ShellState* state);
+/** Normalizes shell working composition against the current runtime. Runtime
+ *  pointers are on-demand session views and require no refresh call. */
+void normalize_shell_preview_composition_to_runtime(ShellState* state);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);
 bool save_project_file(ShellState* state, bool update_status_message);

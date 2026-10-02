@@ -508,11 +508,11 @@ std::optional<ViewportCamera> camera_for_pose(
 } // namespace
 
 bool initialize_viewport_camera_from_preview_pose(ShellState* state) {
-    if (state == nullptr || state->preview_skeleton == nullptr) {
+    if (state == nullptr || state->preview_skeleton() == nullptr) {
         return false;
     }
 
-    const std::optional<ViewportCamera> camera = camera_for_pose(*state->preview_skeleton);
+    const std::optional<ViewportCamera> camera = camera_for_pose(*state->preview_skeleton());
     if (!camera.has_value()) {
         state->viewport_camera = {};
         return false;
@@ -523,11 +523,11 @@ bool initialize_viewport_camera_from_preview_pose(ShellState* state) {
 }
 
 bool frame_viewport_camera_to_preview_pose(ShellState* state) {
-    if (state == nullptr || state->preview_skeleton == nullptr) {
+    if (state == nullptr || state->preview_skeleton() == nullptr) {
         return false;
     }
 
-    const std::optional<ViewportCamera> camera = camera_for_pose(*state->preview_skeleton);
+    const std::optional<ViewportCamera> camera = camera_for_pose(*state->preview_skeleton());
     if (!camera.has_value()) {
         return false;
     }
@@ -543,13 +543,13 @@ std::optional<ViewportLayout> build_viewport_layout(
     const ShellState& state,
     const ImVec2& canvas_origin,
     const ImVec2& canvas_size) {
-    if (!state.load_result || !state.preview_skeleton ||
+    if (!state.load_result || !state.preview_skeleton() ||
         !state.viewport_camera.initialized) {
         return std::nullopt;
     }
 
     const auto& skeleton = *state.load_result.skeleton_data;
-    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
+    const auto& world_transforms = state.preview_skeleton()->bone_world_transforms();
     if (world_transforms.size() != skeleton.bones().size() || world_transforms.empty()) {
         return std::nullopt;
     }
@@ -585,7 +585,7 @@ std::optional<ViewportLayout> build_viewport_layout(
                 layout,
                 world_transforms[bone_index].world_x,
                 world_transforms[bone_index].world_y),
-            state.preview_skeleton->is_bone_active(bone_index)});
+            state.preview_skeleton()->is_bone_active(bone_index)});
     }
 
     return layout;
@@ -1267,13 +1267,13 @@ DebugOverlayGeometry build_debug_overlay_geometry(
     const ViewportLayout& layout) {
     DebugOverlayGeometry overlay;
     overlay.stats.bones_enabled = state.viewport.debug_overlay.bones;
-    if (!state.load_result || !state.preview_skeleton) {
+    if (!state.load_result || !state.preview_skeleton()) {
         return overlay;
     }
 
     const auto& skeleton = *state.load_result.skeleton_data;
     const ResolvedSelection resolved = resolve_shell_selection(state);
-    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
+    const auto& world_transforms = state.preview_skeleton()->bone_world_transforms();
     if (world_transforms.size() != skeleton.bones().size()) {
         return overlay;
     }
@@ -1332,7 +1332,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
             if (constraint.bone_indices.size() == 1U) {
                 if (const auto tip =
                         bone_tip_world_position(
-                            *state.preview_skeleton,
+                            *state.preview_skeleton(),
                             skeleton,
                             constraint.bone_indices.front())) {
                     const ImVec2 tip_screen = screen_from_world(layout, tip->x, tip->y);
@@ -1348,7 +1348,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
                 first_length = static_cast<double>(std::sqrt(squared_distance(origin, joint)));
                 if (const auto tip =
                         bone_tip_world_position(
-                            *state.preview_skeleton,
+                            *state.preview_skeleton(),
                             skeleton,
                             constraint.bone_indices[1U])) {
                     const ImVec2 tip_screen = screen_from_world(layout, tip->x, tip->y);
@@ -1404,11 +1404,11 @@ DebugOverlayGeometry build_debug_overlay_geometry(
     if (state.viewport.debug_overlay.path_constraints) {
         for (const auto& constraint : skeleton.path_constraints()) {
             if (constraint.slot_index >= skeleton.slots().size() ||
-                constraint.slot_index >= state.preview_skeleton->slot_states().size()) {
+                constraint.slot_index >= state.preview_skeleton()->slot_states().size()) {
                 continue;
             }
 
-            const auto* attachment = state.preview_skeleton->current_attachment(constraint.slot_index);
+            const auto* attachment = state.preview_skeleton()->current_attachment(constraint.slot_index);
             if (attachment == nullptr || !attachment->path_attachment.has_value()) {
                 continue;
             }
@@ -1464,7 +1464,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
                 if (bone_index >= world_transforms.size()) {
                     continue;
                 }
-                const auto tip = bone_tip_world_position(*state.preview_skeleton, skeleton, bone_index);
+                const auto tip = bone_tip_world_position(*state.preview_skeleton(), skeleton, bone_index);
                 if (!tip.has_value()) {
                     continue;
                 }
@@ -1530,13 +1530,13 @@ DebugOverlayGeometry build_debug_overlay_geometry(
 
     if (state.viewport.debug_overlay.mesh_wireframes) {
         std::vector<bool> seen_slots(skeleton.slots().size(), false);
-        for (const std::size_t slot_index : state.preview_skeleton->draw_order()) {
+        for (const std::size_t slot_index : state.preview_skeleton()->draw_order()) {
             if (slot_index >= skeleton.slots().size() || seen_slots[slot_index]) {
                 continue;
             }
             seen_slots[slot_index] = true;
 
-            const auto pose = state.preview_skeleton->evaluate_current_mesh_attachment(slot_index);
+            const auto pose = state.preview_skeleton()->evaluate_current_mesh_attachment(slot_index);
             if (!pose.has_value()) {
                 continue;
             }
@@ -1572,7 +1572,7 @@ DebugOverlayGeometry build_debug_overlay_geometry(
 
     if (state.viewport.debug_overlay.bounding_boxes) {
         marrow::runtime::SkeletonBounds bounds;
-        bounds.update(*state.preview_skeleton, false);
+        bounds.update(*state.preview_skeleton(), false);
         for (const auto& bounding_box : bounds.bounding_boxes()) {
             if (bounding_box.polygon.size() < 2U) {
                 continue;
@@ -2030,7 +2030,7 @@ std::optional<std::string> render_viewport_framebuffer(
     const MeshWeightOverlay* mesh_weight_overlay,
     const marrow::renderer::PreparedScene* prepared_scene,
     ViewportRenderResources* resources) {
-    if (!state.load_result || !state.preview_skeleton || state.load_result.atlas_data.empty()) {
+    if (!state.load_result || !state.preview_skeleton() || state.load_result.atlas_data.empty()) {
         return "Viewport preview scene is unavailable.";
     }
 
@@ -2083,7 +2083,7 @@ std::optional<std::string> render_viewport_framebuffer(
     if (prepared_scene == nullptr) {
         marrow::renderer::PreparedSceneResult scene_result =
             marrow::renderer::prepare_setup_pose_scene(
-                *state.preview_skeleton,
+                *state.preview_skeleton(),
                 *state.load_result.atlas_data.front());
         if (!scene_result) {
             return scene_result.error_message;
@@ -2234,12 +2234,12 @@ ViewportEntityHitGeometry build_viewport_entity_hit_geometry(
     const ViewportLayout& layout,
     const marrow::renderer::PreparedScene* prepared_scene) {
     ViewportEntityHitGeometry geometry;
-    if (!state.load_result || !state.preview_skeleton) {
+    if (!state.load_result || !state.preview_skeleton()) {
         return geometry;
     }
 
     const auto& skeleton = *state.load_result.skeleton_data;
-    const auto& world_transforms = state.preview_skeleton->bone_world_transforms();
+    const auto& world_transforms = state.preview_skeleton()->bone_world_transforms();
     std::size_t constraint_order = 0U;
     constexpr float kConstraintHitRadius = 8.0f;
 
@@ -2271,11 +2271,11 @@ ViewportEntityHitGeometry build_viewport_entity_hit_geometry(
         for (const auto& constraint : skeleton.path_constraints()) {
             const std::size_t stable_order = constraint_order++;
             if (constraint.slot_index >= skeleton.slots().size() ||
-                constraint.slot_index >= state.preview_skeleton->slot_states().size()) {
+                constraint.slot_index >= state.preview_skeleton()->slot_states().size()) {
                 continue;
             }
             const auto* attachment =
-                state.preview_skeleton->current_attachment(constraint.slot_index);
+                state.preview_skeleton()->current_attachment(constraint.slot_index);
             if (attachment == nullptr || !attachment->path_attachment.has_value()) {
                 continue;
             }
@@ -2345,7 +2345,7 @@ ViewportEntityHitGeometry build_viewport_entity_hit_geometry(
                     continue;
                 }
                 const auto tip = bone_tip_world_position(
-                    *state.preview_skeleton, skeleton, bone_index);
+                    *state.preview_skeleton(), skeleton, bone_index);
                 if (!tip.has_value()) {
                     continue;
                 }

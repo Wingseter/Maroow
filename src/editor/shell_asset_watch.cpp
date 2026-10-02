@@ -145,8 +145,8 @@ bool reload_runtime_source_assets(ShellState* state) {
     // `base_skeleton_document`. The session now does all of it into locals and
     // swaps once, so there is no model-layer rollback to keep in sync.
     std::optional<marrow::runtime::AnimationStateSnapshot> playback_snapshot;
-    if (state->animation_state != nullptr) {
-        playback_snapshot = state->animation_state->capture_state();
+    if (state->animation_state() != nullptr) {
+        playback_snapshot = state->animation_state()->capture_state();
     }
 
     const marrow::editor::SessionResult adoption =
@@ -159,11 +159,11 @@ bool reload_runtime_source_assets(ShellState* state) {
         return false;
     }
 
-    // The session replaced its runtime data, so the shell's cached raw preview
-    // pointers must be re-pointed before anything dereferences them.
-    sync_shell_preview_aliases_to_runtime(state);
-    if (playback_snapshot.has_value() && state->animation_state != nullptr) {
-        state->animation_state->restore_state(*playback_snapshot);
+    // Reconcile shell working composition after source adoption. Runtime views
+    // already resolve the newly adopted session objects without rebinding.
+    normalize_shell_preview_composition_to_runtime(state);
+    if (playback_snapshot.has_value() && state->animation_state() != nullptr) {
+        state->animation_state()->restore_state(*playback_snapshot);
     }
     if (!apply_current_animation_state_to_preview(state)) {
         state->status_message = "Runtime asset hot-reload failed";
